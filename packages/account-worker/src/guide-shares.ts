@@ -3,7 +3,7 @@ import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { sharedGuideSchema, type SharedGuideDenied } from '@gitspace/protocol/inspector-contract';
 import type { GuideShareView } from '@gitspace/protocol/rpc-contract';
 import { readInspectorContext, type InspectorCloudContext } from './account-inspector-data.js';
-import { cloudMergeBase, cloudRepositoryDiff, withPinnedCloudCheckout } from './cloud-repository.js';
+import { cloudRepositoryDiff, withPinnedCloudCheckout } from './cloud-repository.js';
 import { base64url, GitHubApiError, githubRequest } from './github-api.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 
@@ -36,18 +36,17 @@ export function guideShareView(projectId: string, record: GuideShareRecord): Gui
   };
 }
 
-/** Pins the workspace's current Change Guide, with the merge base its diffs compare against, behind a new link. Anyone
+/** Pins the workspace's current Change Guide, with the base commit its diffs compare against, behind a new link. Anyone
  * with the link reads a public repository's guide; a private one's readers sign in with GitHub. */
 export async function createGuideShare(env: Env, source: InspectorCloudContext, expiresAt: string | null): Promise<GuideShareView> {
   if (expiresAt !== null && !(Date.parse(expiresAt) > Date.now())) throw new Error('Choose an expiry in the future');
   const guide = await source.context.getChangeGuide(source.identity);
   if (!guide) throw new Error('This workspace has no Change Guide to share');
+  const baseCommit = guide.baseCommit;
+  if (baseCommit === null) throw new Error('This Change Guide predates recorded base commits. Regenerate it to share it.');
   const repository = source.project.repositoryReference === null ? null : githubRepositoryOf(source.project.repositoryReference);
   if (!repository) throw new Error('Only a Change Guide for a GitHub repository can be shared');
-  const [isPublic, baseCommit] = await Promise.all([
-    env.GITHUB_APP.getByName(env.ACCOUNT_ID).repositoryIsPublic(repository),
-    cloudMergeBase(env, source, guide.headCommit, guide.baseRef),
-  ]);
+  const isPublic = await env.GITHUB_APP.getByName(env.ACCOUNT_ID).repositoryIsPublic(repository);
   const record = await source.authority.createGuideShare({
     token: base64url(crypto.getRandomValues(new Uint8Array(32))), workspaceId: source.workspace.id,
     access: isPublic ? 'public' : 'github', guideRevision: guide.revision,

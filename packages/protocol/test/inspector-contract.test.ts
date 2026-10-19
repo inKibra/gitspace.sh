@@ -102,6 +102,7 @@ describe('Inspector contracts', () => {
       revision: 4,
       headCommit: commit,
       baseRef: 'main',
+      baseCommit: commit,
       title: 'The change as a story',
       sections: [{ id: 'placement', title: 'Placement', kind: 'decision', explanation: 'One Inspector.', why: 'Stable context.', exhibits: [{ path: 'src/Inspector.tsx', blobId: commit, note: 'Slow read.', slowRead: true }], requirementIds: [] }],
       reviewerStates: [{ reviewerId: 'reviewer-a', revision: 4, headCommit: commit, readSectionIds: ['placement'], decision: 'approved', note: null, updatedAt: at }],

@@ -1738,6 +1738,10 @@ export const GuideShareViewCodec = wire.object({
   expiresAt: wire.nullable(wire.string),
 });
 export type GuideShareView = InputOf<typeof GuideShareViewCodec>;
+/** One exhibit's diff in the workspace's current Change Guide, between the guide's recorded base and head commits. */
+export const inspectorGuideDiffContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), path: wire.string }))
+  .output(RepositoryDiffViewCodec).errors(inspectorReadErrors).query();
 export const inspectorListGuideSharesContract = gitspaceRpc.procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }) }))
   .output(wire.array(GuideShareViewCodec)).errors(inspectorReadErrors).query();
@@ -2216,6 +2220,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       submit: inspectorSubmitChangeGuideContract,
       markSectionRead: inspectorMarkGuideSectionReadContract,
       setApproval: inspectorSetGuideApprovalContract,
+      diff: inspectorGuideDiffContract,
       shares: { list: inspectorListGuideSharesContract, create: inspectorCreateGuideShareContract, revoke: inspectorRevokeGuideShareContract },
     },
     review: {

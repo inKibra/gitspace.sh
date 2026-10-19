@@ -131,6 +131,7 @@ describe('SpaceContextDO', () => {
       guide: {
         headCommit: head,
         baseRef: 'main',
+        baseCommit: 'b'.repeat(40),
         title: 'The change as a story',
         createdBy: 'narrator-a',
         sections: [{ id: 'portable', title: 'Portable state', kind: 'risk', explanation: 'State moves.', why: 'Processes do not.', exhibits: [], requirementIds: ['portable'] }],

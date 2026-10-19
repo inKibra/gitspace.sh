@@ -231,7 +231,7 @@ describe('Inspector administrative authority', () => {
     expect(await invoke(owner, 'inspector.workflow.waiveGate', waiver)).toMatchObject({ status: 'ok', value: { nodes: [{ waivers: [{ actorId: owner.deviceId, actorKind: 'client' }] }] } });
     const headCommit = 'a'.repeat(40);
     expect(await invoke(owner, 'inspector.guide.put', { ...identity, expectedRevision: 0, guide: {
-      headCommit, baseRef: 'main', title: 'Review', createdBy: 'author',
+      headCommit, baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Review', createdBy: 'author',
       sections: [{ id: 'section', title: 'Change', kind: 'risk', explanation: 'Changed behavior', why: 'Permission boundary', exhibits: [], requirementIds: [] }],
     } })).toMatchObject({ status: 'ok' });
     const review = { ...identity, revision: 1, headCommit, reviewerId: 'forged-browser' };

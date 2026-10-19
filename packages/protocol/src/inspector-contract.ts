@@ -353,6 +353,9 @@ export const changeGuideViewSchema = inspectorIdentitySchema.extend({
   revision: revisionSchema,
   headCommit: gitObjectIdSchema,
   baseRef: z.string().trim().min(1).max(512),
+  /** The merge base of `baseRef` and `headCommit`, which the guide's diffs compare against; null on revisions written
+   * before guides recorded it (regenerate them to show their diffs). */
+  baseCommit: gitObjectIdSchema.nullable(),
   title: shortTextSchema,
   sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
   reviewerStates: z.array(changeGuideReviewerStateSchema),
@@ -385,6 +388,8 @@ export type SharedGuideDenied = z.infer<typeof sharedGuideDeniedSchema>;
 export const changeGuideDraftSchema = z.object({
   headCommit: gitObjectIdSchema,
   baseRef: z.string().trim().min(1).max(512),
+  /** `git merge-base <baseRef> <headCommit>`, computed where the full history is: the guide's diffs compare against it. */
+  baseCommit: gitObjectIdSchema,
   title: shortTextSchema,
   sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
   createdBy: idSchema,
@@ -426,6 +431,7 @@ export const submitChangeGuideNarrationInputSchema = inspectorIdentitySchema.ext
   expectedRevision: z.number().int().nonnegative(),
   headCommit: gitObjectIdSchema,
   baseRef: z.string().trim().min(1).max(512),
+  baseCommit: gitObjectIdSchema,
   title: shortTextSchema,
   sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
   createdBy: idSchema,

@@ -19,6 +19,7 @@ Turn the analyzed diff into the PR as a build-order story, not a file inventory.
 ## Hard rules
 
 - HEAD and base ref must match the worksheet.
+- \`baseCommit\` is \`git merge-base <baseRef> HEAD\` run in the checkout: the guide's diffs compare against it.
 - Reader order is authoritative.
 - Every stale cluster must have one section.
 - Section id and content hash must match its cluster.

@@ -178,7 +178,8 @@ export interface InspectorProps {
   onClose?: () => void;
   onRequestRepositoryFile(path: string, mode: RepositoryMode): void;
   onRequestRepositoryDiff(path: string | null, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): void;
-  onLoadRepositoryDiff(path: string, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): Promise<RepositoryDiffView>;
+  /** One exhibit's diff between the Change Guide's recorded base and head commits. */
+  onLoadGuideDiff(path: string): Promise<RepositoryDiffView>;
   onCreateThread(input: CreateInspectorThread): Promise<ReviewThreadView>;
   onReplyThread(threadId: string, expectedRevision: number, body: string): Promise<void>;
   onResolveThread(threadId: string, expectedRevision: number, resolved: boolean, decision: ReviewThreadView['decision']): Promise<void>;
@@ -782,14 +783,13 @@ export interface GuideReview {
   onSelectRange(selection: ThreadSelection): void;
 }
 
-function GuideFileDiffBlock({ path, anchorKey, root, baseRef, gateOpened, onGateOpen, onLoadDiff, review }: {
+function GuideFileDiffBlock({ path, anchorKey, root, gateOpened, onGateOpen, onLoadDiff, review }: {
   path: string;
   anchorKey: string;
   root: { current: HTMLDivElement | null };
-  baseRef: string;
   gateOpened: boolean;
   onGateOpen(path: string): void;
-  onLoadDiff(path: string, mode: 'base', baseRef: string): Promise<RepositoryDiffView>;
+  onLoadDiff(path: string): Promise<RepositoryDiffView>;
   review: GuideReview | null;
 }) {
   const shape = useShape();
@@ -816,13 +816,13 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, gateOpened, onGate
     setError(null);
     if (!runtimeAvailable || !requested) return;
     let active = true;
-    void onLoadDiff(path, 'base', baseRef).then((loaded) => {
+    void onLoadDiff(path).then((loaded) => {
       if (!active) return;
       if (loaded.path !== path || loaded.mode !== 'base') throw new Error('The diff response does not match this guide exhibit.');
       setDiff(loaded);
     }).catch((cause: unknown) => { if (active) setError(rpcErrorMessage(cause, 'inspector.repository.diff')); });
     return () => { active = false; };
-  }, [requested, path, baseRef, runtimeAvailable]);
+  }, [requested, path, runtimeAvailable]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !near) return;
@@ -845,17 +845,16 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, gateOpened, onGate
   </div>;
 }
 
-export function GuideWalkthroughSection({ section, index, root, baseRef, done, openedGates, onSectionRef, onToggleDone, onGateOpen, onLoadDiff, review }: {
+export function GuideWalkthroughSection({ section, index, root, done, openedGates, onSectionRef, onToggleDone, onGateOpen, onLoadDiff, review }: {
   section: ChangeGuideView['sections'][number];
   index: number;
   root: { current: HTMLDivElement | null };
-  baseRef: string;
   done: boolean;
   openedGates: Set<string>;
   onSectionRef?(index: number, element: HTMLElement | null): void;
   onToggleDone(): void;
   onGateOpen(path: string): void;
-  onLoadDiff(path: string, mode: 'base', baseRef: string): Promise<RepositoryDiffView>;
+  onLoadDiff(path: string): Promise<RepositoryDiffView>;
   review: GuideReview | null;
 }) {
   return <AccordionItem value={section.id} ref={(element) => onSectionRef?.(index, element)} data-guide-anchor={`s${index}`}>
@@ -864,7 +863,7 @@ export function GuideWalkthroughSection({ section, index, root, baseRef, done, o
       <div className="flex flex-col gap-3 pb-2">
         <div className="flex flex-wrap items-center gap-2"><Badge variant="dot" color={done ? 'green' : 'gray'}>{section.kind}</Badge><span className="text-caption text-muted-foreground tabular-nums">{section.exhibits.length} file{section.exhibits.length === 1 ? '' : 's'}</span><Button variant={done ? 'ghost' : 'secondary'} size="compact" type="button" className="ml-auto" disabled={done} onClick={onToggleDone}>{done ? <>{ic(Check, 14)}Complete</> : 'Mark complete'}</Button></div>
         <div className="flex flex-col gap-2"><GitSpaceMarkdown>{section.explanation}</GitSpaceMarkdown>{section.why ? <GitSpaceMarkdown>{`**Why:** ${section.why}`}</GitSpaceMarkdown> : null}</div>
-        <div className="flex flex-col gap-3">{section.exhibits.length ? section.exhibits.map((exhibit) => <div className="flex flex-col gap-1" key={`${baseRef}:${exhibit.path}`}>{exhibit.slowRead ? <p className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">slow read</Badge>{exhibit.note || 'Reviewer attention requested.'}</p> : null}<GuideFileDiffBlock path={exhibit.path} anchorKey={`f${index}:${exhibit.path}`} root={root} baseRef={baseRef} gateOpened={openedGates.has(exhibit.path)} onGateOpen={onGateOpen} onLoadDiff={onLoadDiff} review={review} /></div>) : <Placeholder>No file exhibits in this section.</Placeholder>}</div>
+        <div className="flex flex-col gap-3">{section.exhibits.length ? section.exhibits.map((exhibit) => <div className="flex flex-col gap-1" key={exhibit.path}>{exhibit.slowRead ? <p className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">slow read</Badge>{exhibit.note || 'Reviewer attention requested.'}</p> : null}<GuideFileDiffBlock path={exhibit.path} anchorKey={`f${index}:${exhibit.path}`} root={root} gateOpened={openedGates.has(exhibit.path)} onGateOpen={onGateOpen} onLoadDiff={onLoadDiff} review={review} /></div>) : <Placeholder>No file exhibits in this section.</Placeholder>}</div>
       </div>
     </AccordionContent>
   </AccordionItem>;
@@ -874,7 +873,7 @@ function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMarkRead,
   guide: ChangeGuideView | null;
   reviewerId: string;
   review: GuideReview;
-  onLoadDiff(path: string, mode: 'base', baseRef: string): Promise<RepositoryDiffView>;
+  onLoadDiff(path: string): Promise<RepositoryDiffView>;
   onMarkRead: InspectorProps['onMarkGuideSectionRead'];
   onGenerate?: InspectorProps['onGenerateChangeGuide'];
   shares?: GuideShareHandlers;
@@ -946,7 +945,7 @@ function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMarkRead,
     <ScrollArea ref={(element) => { scrollRef.current = element?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null; }} className="min-h-0 flex-1" viewportClassName="h-full">
       <div className="px-3 pb-6">
         <Accordion type="multiple" value={open} onValueChange={onOpenChange} className="w-full">
-          {guide.sections.map((section, index) => <GuideWalkthroughSection section={section} index={index} root={scrollRef} baseRef={guide.baseRef} done={readIds.has(section.id)} openedGates={openedGates} onSectionRef={(sectionIndex, element) => { sectionRefs.current[sectionIndex] = element; }} onToggleDone={() => { if (!readIds.has(section.id)) settle(onMarkRead(section.id, guide.revision, guide.headCommit)); }} onGateOpen={(path) => setOpenedGates((current) => new Set(current).add(path))} onLoadDiff={onLoadDiff} review={review} key={section.id} />)}
+          {guide.sections.map((section, index) => <GuideWalkthroughSection section={section} index={index} root={scrollRef} done={readIds.has(section.id)} openedGates={openedGates} onSectionRef={(sectionIndex, element) => { sectionRefs.current[sectionIndex] = element; }} onToggleDone={() => { if (!readIds.has(section.id)) settle(onMarkRead(section.id, guide.revision, guide.headCommit)); }} onGateOpen={(path) => setOpenedGates((current) => new Set(current).add(path))} onLoadDiff={onLoadDiff} review={review} key={section.id} />)}
         </Accordion>
       </div>
     </ScrollArea>
@@ -1217,7 +1216,7 @@ export function Inspector(props: InspectorProps) {
           onSelectThread: (thread) => { setActiveThread(thread); setThreadSelection(null); },
           onSelectRange: (selection) => { setThreadSelection(selection); setActiveThread(null); },
         }}
-        onLoadDiff={(path, mode, baseRef) => props.onLoadRepositoryDiff(path, mode, baseRef)}
+        onLoadDiff={props.onLoadGuideDiff}
         onMarkRead={props.onMarkGuideSectionRead}
         onGenerate={runtimeAvailable ? props.onGenerateChangeGuide : undefined}
         shares={props.guideShares}

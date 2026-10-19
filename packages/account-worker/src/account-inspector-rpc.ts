@@ -34,6 +34,7 @@ import {
   inspectorPutChangeGuideContract,
   inspectorMarkGuideSectionReadContract,
   inspectorSetGuideApprovalContract,
+  inspectorGuideDiffContract,
   inspectorListGuideSharesContract,
   inspectorCreateGuideShareContract,
   inspectorRevokeGuideShareContract,
@@ -60,7 +61,7 @@ import { readInspectorTranscriptContent, readInspectorTranscriptPage } from './a
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { createGuideShare, guideShareView } from './guide-shares.js';
-import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, type CloudCheckout } from './cloud-repository.js';
+import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, withPinnedCloudCheckout, type CloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
 import { canonicalDriveResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { InspectorCloudContext } from './account-inspector-data.js';
@@ -524,6 +525,23 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       return err(errors.OperationFailed({ operation: 'revoke artifact share', message: error instanceof Error ? error.message : String(error) }));
     }
   });
+  const guideDiff = server.implement(inspectorGuideDiffContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      const guide = await source.context.getChangeGuide(source.identity);
+      if (!guide) return err(errors.InspectorState({ resource: 'change-guide', message: 'This workspace has no Change Guide' }));
+      if (guide.baseCommit === null) return err(errors.InspectorState({ resource: 'change-guide', message: 'This Change Guide predates recorded base commits. Regenerate it to see its diffs.' }));
+      if (!guide.sections.some(section => section.exhibits.some(exhibit => exhibit.path === input.path))) {
+        return err(errors.InspectorState({ resource: 'change-guide', message: `${input.path} is not an exhibit of this Change Guide` }));
+      }
+      const baseCommit = guide.baseCommit;
+      return ok(await withPinnedCloudCheckout(env, source, baseCommit, guide.headCommit, checkout => cloudRepositoryDiff(env, userId, checkout, 'base', input.path)));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'Change Guide diff', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const listGuideShares = server.implement(inspectorListGuideSharesContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
@@ -665,7 +683,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     rubric: { put: putRubric, appendJudgment },
     journal: { list: journal, startPhase, endPhase, append: appendJournal },
     guide: {
-      put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval,
+      put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval, diff: guideDiff,
       shares: { list: listGuideShares, create: createGuideShareHandler, revoke: revokeGuideShare },
     },
     review: { list: threads, create: createThread, reply: replyThread, resolve: resolveThread },

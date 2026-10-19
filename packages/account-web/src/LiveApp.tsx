@@ -282,10 +282,10 @@ export function LiveInspector({
         if (result.status === 'error') throw result.error;
       },
     }}
-    onLoadRepositoryDiff={async (path, mode, baseRef) => {
-      const result = await rpcClient.inspector.repository.diff({ ...request, path, mode, baseRef: baseRef ?? null });
+    onLoadGuideDiff={async (path) => {
+      const result = await rpcClient.inspector.guide.diff({ ...request, path });
       if (result.status === 'error') throw result.error;
-      if (repositoryScope.current !== readKey || result.value.spaceId !== spaceId || result.value.generation !== generation || result.value.path !== path || result.value.mode !== mode) throw new Error('Guide diff response does not match the requested view.');
+      if (repositoryScope.current !== readKey || result.value.path !== path) throw new Error('Guide diff response does not match the requested view.');
       return result.value;
     }}
     threads={threadsValue ?? []}

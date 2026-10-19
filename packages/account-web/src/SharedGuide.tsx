@@ -64,7 +64,7 @@ export function SharedGuide() {
     </header>
     <Accordion type="multiple" value={open} onValueChange={setOpen} className="w-full">
       {guide.sections.map((section, index) => <GuideWalkthroughSection
-        key={section.id} section={section} index={index} root={VIEWPORT} baseRef={guide.baseRef} done={done.has(section.id)} openedGates={openedGates}
+        key={section.id} section={section} index={index} root={VIEWPORT} done={done.has(section.id)} openedGates={openedGates}
         onToggleDone={() => setDone((current) => new Set(current).add(section.id))}
         onGateOpen={(path) => setOpenedGates((current) => new Set(current).add(path))}
         onLoadDiff={loadDiff}

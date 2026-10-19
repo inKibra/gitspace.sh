@@ -142,6 +142,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'inspector.guide.submit': 'cloud',
   'inspector.guide.markSectionRead': 'cloud',
   'inspector.guide.setApproval': 'cloud',
+  'inspector.guide.diff': 'cloud',
   'inspector.guide.shares.list': 'cloud',
   'inspector.guide.shares.create': 'cloud',
   'inspector.guide.shares.revoke': 'cloud',

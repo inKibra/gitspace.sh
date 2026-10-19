@@ -137,6 +137,7 @@ interface GuideRow extends Record<string, SqlStorageValue> {
   revision: number;
   head_commit: string;
   base_ref: string;
+  base_commit: string | null;
   title: string;
   created_at: string;
   created_by: string;
@@ -511,8 +512,8 @@ export class SpaceContextDO extends DurableObject<Env> {
       const revision = actual + 1;
       const timestamp = new Date().toISOString();
       this.ctx.storage.sql.exec(
-        'INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, title, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)',
-        revision, parsed.guide.headCommit, parsed.guide.baseRef, parsed.guide.title, timestamp, parsed.guide.createdBy,
+        'INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, base_commit, title, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        revision, parsed.guide.headCommit, parsed.guide.baseRef, parsed.guide.baseCommit, parsed.guide.title, timestamp, parsed.guide.createdBy,
       );
       for (const [ordinal, section] of parsed.guide.sections.entries()) {
         this.ctx.storage.sql.exec('INSERT INTO inspector_guide_sections (revision, section_id, ordinal, value_json) VALUES (?, ?, ?, ?)', revision, section.id, ordinal, JSON.stringify(section));
@@ -614,7 +615,15 @@ export class SpaceContextDO extends DurableObject<Env> {
       );
     `);
     const version = this.ctx.storage.sql.exec<{ version: number }>('SELECT COALESCE(MAX(version), 0) AS version FROM _inspector_schema_migrations').one().version;
-    if (version >= 2) return;
+    if (version < 2) this.migrateToSecond(version);
+    // Guides record the merge base their diffs compare against; earlier revisions have none.
+    if (version < 3) this.ctx.storage.transactionSync(() => this.ctx.storage.sql.exec(`
+      ALTER TABLE inspector_guide_revisions ADD COLUMN base_commit TEXT;
+      INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (3, datetime('now'));
+    `));
+  }
+
+  private migrateToSecond(version: number): void {
     if (version < 1) this.ctx.storage.sql.exec(`
       CREATE TABLE inspector_meta (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -911,7 +920,7 @@ export class SpaceContextDO extends DurableObject<Env> {
   }
 
   private latestGuideRow(): GuideRow | undefined {
-    return this.ctx.storage.sql.exec<GuideRow>('SELECT revision, head_commit, base_ref, title, created_at, created_by FROM inspector_guide_revisions ORDER BY revision DESC LIMIT 1').toArray()[0];
+    return this.ctx.storage.sql.exec<GuideRow>('SELECT revision, head_commit, base_ref, base_commit, title, created_at, created_by FROM inspector_guide_revisions ORDER BY revision DESC LIMIT 1').toArray()[0];
   }
 
   private requireGuideVersion(revision: number, headCommit: string): GuideRow {
@@ -943,6 +952,7 @@ export class SpaceContextDO extends DurableObject<Env> {
       revision: guide.revision,
       headCommit: guide.head_commit,
       baseRef: guide.base_ref,
+      baseCommit: guide.base_commit,
       title: guide.title,
       sections,
       reviewerStates,

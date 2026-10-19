@@ -6,6 +6,7 @@ import { credentialProtocolBase64 } from '@gitspace/protocol';
 import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { readInspectorContext } from '../src/account-inspector-data.js';
+import { withCloudCheckout } from '../src/cloud-repository.js';
 import { createGuideShare } from '../src/guide-shares.js';
 import { refreshProjectRemote } from '../src/project-remote.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
@@ -479,18 +480,18 @@ describe('GitHub App', () => {
     const share = async (projectId: string) => {
       const workspaceId = `space-${crypto.randomUUID()}`;
       await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Feature', branch: 'feature', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-      // The workspace repository holds only its own branch; origin's `staging` is in the project repository.
       const base = history.commit([], `workspace-${workspaceId}`, `project-${projectId}`);
       const head = history.commit([base], `workspace-${workspaceId}`);
       snapshot(base, 'a'.repeat(40));
       snapshot(head, 'b'.repeat(40));
+      // The narrator recorded the merge base; origin's `staging` moved on since.
       history.ref(`project-${projectId}`, 'staging', history.commit([base], `project-${projectId}`));
       const source = await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId);
       await source.context.putChangeGuide({ ...source.identity, expectedRevision: 0, guide: {
-        headCommit: head, baseRef: 'origin/staging', title: 'Pantry search', createdBy: 'narrator',
+        headCommit: head, baseRef: 'origin/staging', baseCommit: base, title: 'Pantry search', createdBy: 'narrator',
         sections: [{ id: 'search', title: 'Search', kind: 'behavior', explanation: 'Adds search.', why: '', exhibits: [{ path: 'src/search.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] }],
       } });
-      return { ...await createGuideShare(env, source, null), base, head, workspaceId };
+      return { ...await createGuideShare(env, source, null), base, head, workspaceId, source };
     };
     const read = (url: string, cookie?: string) => SELF.fetch(`${env.ACCOUNT_URL}/v1${url}`, { redirect: 'manual', headers: cookie ? { cookie } : {} });
     const cookieOf = (response: Response, name: string) => response.headers.getSetCookie().find((value) => value.startsWith(`${name}=`))?.split(';')[0] ?? '';
@@ -538,6 +539,18 @@ describe('GitHub App', () => {
 
     expect(await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${pantry.id}`).revokeGuideShare(shared.id, shared.workspaceId)).toBe(true);
     expect((await read(shared.url, member)).status).toBe(404);
+
+    // The Inspector's own base comparison reads origin's `staging` from the project repository: the workspace
+    // repository holds only the branches it pushed.
+    await seedCheckpoint(shared.workspaceId, 'feature', shared.head);
+    expect(await withCloudCheckout(env, env.ACCOUNT_ID, shared.source, 'base', 'origin/staging', async (checkout) => checkout.baseCommit)).toBe(shared.base);
+
+    // A guide written before guides recorded their base commit is not shared: its diffs cannot be pinned.
+    const older = await share(pantry.id).then(async ({ source }) => {
+      await runInDurableObject(source.context, (_instance, state) => { state.storage.sql.exec('UPDATE inspector_guide_revisions SET base_commit = NULL'); });
+      return source;
+    });
+    await expect(createGuideShare(env, older, null)).rejects.toThrow('Regenerate it to share it');
 
     // A private repository the App is not installed on cannot check its readers, so it is not shared.
     await expect(share(uncovered.id)).rejects.toThrow('someone/private is private and the GitHub App is not installed on it');

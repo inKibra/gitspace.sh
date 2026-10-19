@@ -157,12 +157,6 @@ export async function withCloudCheckout<T>(
   return withObjects(env, source, async objects => read(await readCloudCheckout(env, userId, source, mode, baseRef, objects)));
 }
 
-/** The merge base of `head` with `branch` (see `mergeBaseWith`); `head` itself for a project's base workspace. */
-export async function cloudMergeBase(env: Env, source: InspectorCloudContext, head: string, branch: string): Promise<string> {
-  if (source.workspace.kind === 'base') return head;
-  return withObjects(env, source, objects => mergeBaseWith(env, objects, source.project.id, head, branch));
-}
-
 /** Runs `read` against two fixed commits of the workspace's cloud repository: base mode compares `baseCommit` with `headCommit`. */
 export async function withPinnedCloudCheckout<T>(
   env: Env, source: InspectorCloudContext, baseCommit: string, headCommit: string, read: (checkout: CloudCheckout) => Promise<T>,
