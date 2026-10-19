@@ -36,6 +36,9 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const OBSERVATION_SETTLE_MS = 1_000;
 /** How long closing waits for in-flight work, well inside the 120 s a replacement allows a generation to stop. */
 const CLOSE_GRACE_MS = 30_000;
+/** The first wait before retrying a failed sync, and the longest it doubles to. */
+const SYNC_RETRY_FIRST_MS = 5_000;
+const SYNC_RETRY_MAX_MS = 300_000;
 
 /** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, every
  * `assignments` notice) and `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
@@ -177,6 +180,8 @@ export async function createMachineExecutor(options: {
     }
   };
   const reconciling = new Map<string, Promise<void>>();
+  /** Per followed checkout: ends its retry wait once any reconciliation succeeds. */
+  const retryResets = new Map<string, () => void>();
   /** Publishes local changes, then applies a newer cloud version. One reconciliation per checkout runs at a time. */
   const reconcile = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null): Promise<void> => {
     const prior = reconciling.get(local.rootPath) ?? Promise.resolve();
@@ -206,28 +211,45 @@ export async function createMachineExecutor(options: {
       }
     });
     reconciling.set(local.rootPath, run);
+    void run.then(() => retryResets.get(local.rootPath)?.(), () => {});
     return run.finally(() => { if (reconciling.get(local.rootPath) === run) reconciling.delete(local.rootPath); });
   };
-  /** Publishes local edits shortly after the checkout changes. */
+  /** Publishes local edits shortly after the checkout changes. A failed sync is retried after 5 s, doubling to 5 minutes:
+   * a failing cloud sees one attempt per wait, not one per edit, and a checkout nobody edits is still retried. Edits
+   * during a wait are held back and captured once a sync succeeds (a retry first re-sends the snapshot the cloud has not
+   * accepted). A refused oversized file waits for the edit that removes it. */
   const follow = async (local: LocalAttachment) => {
     if (watchers.has(local.rootPath)) return;
     let cancel: (() => void) | undefined;
+    const retry: { failures: number; cancel: (() => void) | null; held: boolean } = { failures: 0, cancel: null, held: false };
+    const attempt = () => {
+      const current = journal.attachment(local.attachment.attachmentId);
+      if (stopping.signal.aborted || current?.attachment.state !== 'ready') return;
+      void reconcile(current).catch(error => {
+        if (artifactsPublicationRejection(error) || stopping.signal.aborted) return;
+        console.error('[runtime-cache]', message(error));
+        retry.failures++;
+        retry.cancel?.();
+        retry.cancel = clock.schedule(Math.min(SYNC_RETRY_FIRST_MS * 2 ** (retry.failures - 1), SYNC_RETRY_MAX_MS), () => { retry.cancel = null; attempt(); });
+      });
+    };
+    const changed = () => {
+      if (stopping.signal.aborted) return;
+      if (retry.cancel) { retry.held = true; return; }
+      cancel?.();
+      cancel = clock.schedule(200, () => { cancel = undefined; attempt(); });
+    };
     const watcher = await watchGitWorktree({
-      root: local.rootPath, clock, events: options.checkpointEvents ?? gitWorktreeEvents,
-      changed: () => {
-        if (stopping.signal.aborted) return;
-        cancel?.();
-        cancel = clock.schedule(200, () => {
-          cancel = undefined;
-          const current = journal.attachment(local.attachment.attachmentId);
-          if (stopping.signal.aborted || current?.attachment.state !== 'ready') return;
-          void reconcile(current).catch(error => { if (!artifactsPublicationRejection(error)) console.error('[runtime-cache]', message(error)); });
-        });
-      },
+      root: local.rootPath, clock, events: options.checkpointEvents ?? gitWorktreeEvents, changed,
       failed: error => console.error('[runtime-cache-watch]', error.message),
     });
     if (stopping.signal.aborted) { watcher.close(); cancel?.(); return; }
-    watchers.set(local.rootPath, { close() { cancel?.(); watcher.close(); } });
+    retryResets.set(local.rootPath, () => {
+      const held = retry.held;
+      retry.failures = 0; retry.cancel?.(); retry.cancel = null; retry.held = false;
+      if (held) changed();
+    });
+    watchers.set(local.rootPath, { close() { cancel?.(); retry.cancel?.(); retryResets.delete(local.rootPath); watcher.close(); } });
   };
   /** Sync runs while the attachment is ready: the watcher sends local edits as they happen, each sync pass captures
    * what the watcher cannot see (such as ignore-rule changes outside the checkout), and `workspace.snapshot` notices

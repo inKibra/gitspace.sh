@@ -323,3 +323,39 @@ it('does not let a source shallow marker conceal required snapshot layers', asyn
   await expect(rejected).rejects.toThrow();
   expect(readFileSync(join(f.root, '.git/shallow'), 'utf8')).toBe(`${checkpoint.worktreeCommit}\n`);
 });
+
+it('sends a push Artifacts refuses with HTTP 500 again as whole objects, and retries no other refusal', async () => {
+  const f = fixture();
+  // Stands in for Artifacts' receive-pack: a pack that may carry deltas fails as it does there; a whole-object pack passes.
+  const bin = join(f.root, 'shim'); mkdirSync(bin);
+  const attempts = join(f.root, 'attempts');
+  const realGit = Bun.which('git')!;
+  writeFileSync(join(bin, 'git'), `#!/bin/sh
+case " $* " in
+  *" push "*) echo "$*" >> '${attempts}'
+    case " $* " in *" pack.window=0 "*) ;; *) echo 'error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500' >&2; echo 'send-pack: unexpected disconnect while reading sideband packet' >&2; exit 1 ;; esac ;;
+esac
+exec '${realGit}' "$@"
+`);
+  chmodSync(join(bin, 'git'), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  try {
+    writeFileSync(join(f.root, 'file'), 'content'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'content');
+    git(f.root, 'update-ref', f.checkpointRef, 'HEAD');
+    await f.publish();
+    expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(git(f.root, 'rev-parse', 'HEAD'));
+    const pushes = readFileSync(attempts, 'utf8').trim().split('\n');
+    expect(pushes).toHaveLength(2);
+    expect(pushes[1]).toContain('--no-thin');
+
+    // The remote refusing the update is not Artifacts failing on deltas: it is reported, not retried.
+    rmSync(attempts);
+    rejectPushes(f.remote);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" push "*) echo "$*" >> '${attempts}' ;; esac\nexec '${realGit}' "$@"\n`);
+    writeFileSync(join(f.root, 'file'), 'changed'); git(f.root, 'commit', '-am', 'changed');
+    git(f.root, 'update-ref', f.checkpointRef, 'HEAD');
+    await expect(f.publish()).rejects.toThrow('pre-receive hook declined');
+    expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(1);
+  } finally { process.env.PATH = path; }
+});

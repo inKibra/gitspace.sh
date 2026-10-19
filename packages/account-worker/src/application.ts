@@ -3380,7 +3380,16 @@ const worker = {
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
         if (body.operation.startsWith('runtime.')) {
-          const value = await runtimeMachineControl(env, body);
+          // A Durable Object that fails or resets answers only "internal error; reference = …"; the operation and
+          // workspace are logged here so the failure can be found.
+          const value = await runtimeMachineControl(env, body).catch((error: unknown) => {
+            const payload = z.object({ workspaceId: z.string() }).partial().safeParse(body.payload).data;
+            console.error(JSON.stringify({
+              event: 'machine_control_failed', operation: body.operation, machineId: body.machineId, workspaceId: payload?.workspaceId ?? null,
+              error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack ?? null : null,
+            }));
+            throw error;
+          });
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
         if (diagnostics) diagnostics.stage = 'processing';

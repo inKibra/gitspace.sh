@@ -19,17 +19,18 @@ export type ExecutorOperationHandler = (dispatch: RuntimeToolDispatch, local: Lo
 export type MachineToolOptions = { journal?: ExecutorJournal; runCommand: RunExecutorCommand; operations?: Record<string, ExecutorOperationHandler> };
 const ProposalSchema = z.object({ changes: z.array(z.object({ path: z.string(), before: z.string(), after: z.string() })) });
 
-export async function checkoutPath(root: string, path: string): Promise<string> {
+/** `path` resolved inside `root`, including through symlinks of the part that exists; `area` names `root` in errors. */
+async function containedPath(root: string, path: string, area: string): Promise<string> {
   const canonicalRoot = await realpath(root);
   const candidate = resolve(canonicalRoot, path);
   const rel = relative(canonicalRoot, candidate);
-  if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new Error('Path leaves authorized checkout');
+  if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new Error(`Path leaves authorized ${area}`);
   let parent = candidate;
   for (;;) {
     try {
       const resolved = await realpath(parent);
       const fromRoot = relative(canonicalRoot, resolved);
-      if (fromRoot === '..' || fromRoot.startsWith('../') || isAbsolute(fromRoot)) throw new Error('Symlink leaves authorized checkout');
+      if (fromRoot === '..' || fromRoot.startsWith('../') || isAbsolute(fromRoot)) throw new Error(`Symlink leaves authorized ${area}`);
       return candidate;
     } catch (error) {
       if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
@@ -38,6 +39,21 @@ export async function checkoutPath(root: string, path: string): Promise<string> 
       parent = next;
     }
   }
+}
+
+export function checkoutPath(root: string, path: string): Promise<string> {
+  return containedPath(root, path, 'checkout');
+}
+
+/** The machine's scratch space, open to file tools as it is to bash: agents keep work there that is not the checkout's. */
+const MACHINE_TMP = '/tmp';
+
+/** A file tool's path: relative to the checkout, or absolute inside the machine's /tmp. */
+export async function machineFilePath(root: string, path: string): Promise<string> {
+  if (!isAbsolute(path)) return checkoutPath(root, path);
+  const inTmp = relative(MACHINE_TMP, resolve(path));
+  if (inTmp === '..' || inTmp.startsWith('../') || isAbsolute(inTmp)) throw new Error(`Absolute paths must be inside ${MACHINE_TMP}; other paths are relative to the checkout`);
+  return containedPath(MACHINE_TMP, inTmp, MACHINE_TMP);
 }
 
 /**
@@ -68,13 +84,13 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   const command = (application: string, args: string[], cwd = local.rootPath, environment?: Record<string, string>) => options.runCommand({ application, args, cwd, project: local.rootPath, attemptId: dispatch.attemptId, sequence: sequence++, deadlineAt: dispatch.deadlineAt, signal, env: environment });
   const text = (value: string): ExecutorContent => [{ type: 'text', text: value }];
   const read = async (path: string) => {
-    const result = await env.readTextFile(await checkoutPath(local.rootPath, path), context);
+    const result = await env.readTextFile(await machineFilePath(local.rootPath, path), context);
     if (!result.ok) throw result.error;
     return result.value;
   };
   const write = async (path: string, content: string) => {
     if (signal.aborted) throw new Error('Execution aborted');
-    const target = await checkoutPath(local.rootPath, path);
+    const target = await machineFilePath(local.rootPath, path);
     await mkdir(dirname(target), { recursive: true });
     const result = await env.writeFile(target, content, context);
     if (!result.ok) throw result.error;
@@ -82,7 +98,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
   switch (dispatch.tool) {
     case 'read': {
       const args = RuntimeReadArgumentsSchema.parse(dispatch.args);
-      const path = await checkoutPath(local.rootPath, args.path);
+      const path = await machineFilePath(local.rootPath, args.path);
       const binary = await env.readBinaryFile(path, context);
       if (!binary.ok) throw binary.error;
       const data = binary.value;
@@ -124,7 +140,7 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
         return operation(dispatch, local, signal);
       }
       const args = RuntimeBashCommandArgumentsSchema.parse(dispatch.args);
-      const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await checkoutPath(local.rootPath, args.cwd) : local.rootPath, await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()));
+      const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await machineFilePath(local.rootPath, args.cwd) : local.rootPath, await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()));
       return text(`Exit code: ${result.exitCode}\n${result.output}`);
     }
     case 'grep': {

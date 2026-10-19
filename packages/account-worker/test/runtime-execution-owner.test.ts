@@ -390,3 +390,22 @@ test('a machine tool with no ready machine attaches the default one and says to 
     });
   });
 });
+
+test('read, write and edit of an absolute /tmp path run on the attached machine; repository paths stay in the cloud copy', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`machine-tmp:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text, identity } = await ownerFixture(ctx);
+    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: `machine ${dispatch.tool}` }] }));
+    try {
+      const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'tmp-cache', machineId: 'tmp-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'], updatedAt: new Date().toISOString(), online: true });
+      ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
+      expect(text(await invoke('write', { path: '/tmp/frames/notes.txt', content: 'scratch' }))).toBe('machine write');
+      expect(text(await invoke('edit', { path: '/tmp/frames/notes.txt', edits: [{ oldText: 'scratch', newText: 'notes' }] }))).toBe('machine edit');
+      expect(text(await invoke('read', { path: '/tmp/frames/notes.txt' }))).toBe('machine read');
+      expect(machine.mock.calls.map(([dispatch]) => [dispatch.tool, dispatch.machineId])).toEqual([['write', 'tmp-machine'], ['edit', 'tmp-machine'], ['read', 'tmp-machine']]);
+      // A repository path, even one named like a temporary directory, is the cloud working copy's.
+      expect(text(await invoke('read', { path: 'hello.txt' }))).toContain('cloud original');
+      expect((await invoke('read', { path: 'tmp/absent.txt' })).status).toBe('failed');
+      expect(machine).toHaveBeenCalledTimes(3);
+    } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});

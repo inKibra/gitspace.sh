@@ -737,15 +737,27 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   async runtimeSnapshotCommit(raw: unknown) {
     const input = RuntimeSnapshotCommitInputSchema.parse(raw);
-    const runtime = await this.getRuntime(input);
-    const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
-    const repository = artifactsWorkspaceRepository(input.workspaceId);
-    const commits = new Set([input.checkpoint.indexCommit, input.checkpoint.trackedWorktreeCommit, input.checkpoint.worktreeCommit]);
-    if (input.checkpoint.headCommit !== null) commits.add(input.checkpoint.headCommit);
-    await Promise.all([...commits].map(async commit => {
-      if (!await code.readCommit(repository, commit)) throw new Error('Checkpoint commit was not published');
-    }));
-    return runtime.snapshotCommit(input);
+    // The failing step is logged with the error: callers see only its message, often the runtime's bare "internal error".
+    let step = 'open runtime';
+    try {
+      const runtime = await this.getRuntime(input);
+      step = 'verify published commits';
+      const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
+      const repository = artifactsWorkspaceRepository(input.workspaceId);
+      const commits = new Set([input.checkpoint.indexCommit, input.checkpoint.trackedWorktreeCommit, input.checkpoint.worktreeCommit]);
+      if (input.checkpoint.headCommit !== null) commits.add(input.checkpoint.headCommit);
+      await Promise.all([...commits].map(async commit => {
+        if (!await code.readCommit(repository, commit)) throw new Error('Checkpoint commit was not published');
+      }));
+      step = 'commit snapshot';
+      return await runtime.snapshotCommit(input);
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'snapshot_commit_failed', step, workspaceId: input.workspaceId, attachmentId: input.attachmentId, worktreeCommit: input.checkpoint.worktreeCommit,
+        error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack ?? null : null,
+      }));
+      throw error;
+    }
   }
 
   private async attachmentController(raw: unknown) {

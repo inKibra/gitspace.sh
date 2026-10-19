@@ -701,6 +701,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (!xml.includes('<rss')) throw new Error('Search service did not return a result feed');
         return completed(input, { query, results });
       }
+      // The attached machine's /tmp is scratch space beside the checkout, never synced: its files live only there.
+      if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args)
+        && typeof input.args.path === 'string' && (input.args.path === '/tmp' || input.args.path.startsWith('/tmp/'))) return executeMachine(input);
       if (input.tool === 'read' || input.tool === 'edit' || input.tool === 'write' || input.tool === 'apply_patch' || input.tool === 'find') {
         const runtime = options.runtime();
         const conversation = await runtime.browserConversation(input.conversationId);

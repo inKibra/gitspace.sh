@@ -28,6 +28,10 @@ async function watcherProof(run: (proof: {
   event(path: string): Promise<void>;
   duringCapture(action: () => Promise<void>): void;
   waitForFinal(): Promise<void>;
+  /** The cloud refuses the next `count` snapshot commits, as it did with "internal error; reference = …". */
+  failCommits(count: number): void;
+  /** The simulated time of each snapshot commit attempt. */
+  commitTimes(): number[];
 }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-watcher-proof-'));
   const checkout = join(root, 'spaces', 'project', 'workspace');
@@ -46,6 +50,8 @@ async function watcherProof(run: (proof: {
     let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     let checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null = null;
     let captureAction: (() => Promise<void>) | undefined;
+    let refusals = 0;
+    const attempts: number[] = [];
     const uploads: string[][] = [], publications: string[][] = [];
     const final = Promise.withResolvers<void>();
     const contents = async (ref: string) => {
@@ -85,6 +91,8 @@ async function watcherProof(run: (proof: {
       gitRemote: new LocalGitRemote({ credentials: unavailable }), prepareAttachment: async () => {},
       lfs: { read: lfs, publish: lfs },
       commitSnapshot: async (_local, candidate, previous) => {
+        attempts.push(clock.now);
+        if (refusals > 0) { refusals--; throw new Error('internal error; reference = proof'); }
         const worktreeCommit = await git(checkout, 'commit-tree', candidate.worktreeTree,
           '-p', candidate.worktreeCommit, ...(previous ? ['-p', previous] : []), '-m', 'Accepted canonical snapshot');
         const accepted = { ...candidate, checkpointRef: `${candidate.checkpointRef}-accepted`, worktreeCommit };
@@ -97,8 +105,8 @@ async function watcherProof(run: (proof: {
       },
     });
     await clock.until(runtime.sync());
-    uploads.length = 0; publications.length = 0;
-    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, waitForFinal: async () => {
+    uploads.length = 0; publications.length = 0; attempts.length = 0;
+    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: count => { refusals = count; }, commitTimes: () => attempts, waitForFinal: async () => {
       await clock.until(final.promise);
     } });
   } finally { await runtime?.close(); await rm(root, { recursive: true, force: true }); }
@@ -296,5 +304,24 @@ test('external global ignore content and config path changes invalidate without 
     await clock.pending(200);
     await clock.until(runtime.sync());
     expect(uploads.at(-1)).toEqual(['external-hidden:external', 'tracked.txt:base']);
+  });
+});
+
+test('a failing sync retries after a doubling wait, and edits made meanwhile ride along instead of each retrying', async () => {
+  await watcherProof(async ({ checkout, clock, event, publications, failCommits, commitTimes, waitForFinal }) => {
+    failCommits(2);
+    await writeFile(join(checkout, 'tracked.txt'), 'first\n');
+    await event('tracked.txt');
+    for (let step = 0; step < 50 && commitTimes().length < 1; step++) await clock.until(Bun.sleep(5));
+    for (const content of ['second\n', 'final\n']) { await writeFile(join(checkout, 'tracked.txt'), content); await event('tracked.txt'); }
+    // Retry waits are 5 s and longer, which the manual clock never advances by itself.
+    for (let step = 0; step < 400 && publications.length < 2; step++) { clock.advance(250); await clock.until(Bun.sleep(2)); }
+    await waitForFinal();
+    // Refused, retried after 5 s and refused, retried after 10 s and accepted; then the held edits, once.
+    const [first, second, third] = commitTimes();
+    expect(commitTimes()).toHaveLength(4);
+    expect(second! - first!).toBeGreaterThanOrEqual(5_000);
+    expect(third! - second!).toBeGreaterThanOrEqual(10_000);
+    expect(publications).toEqual([['tracked.txt:first'], ['tracked.txt:final']]);
   });
 });

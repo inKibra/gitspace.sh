@@ -92,6 +92,20 @@ async function checkCurrentLayers(repositoryPath: string, commit: string, head: 
 
 /** Hooks (including the LFS pre-push hook) never run: LFS content travels separately. */
 const PUSH = ['-c', 'core.hooksPath=/dev/null', 'push'];
+/** A pack of whole objects: no deltas computed or reused, none against objects the remote holds. */
+const WHOLE_OBJECTS = ['-c', 'pack.window=0', '-c', 'pack.depth=0', '-c', 'pack.allowPackReuse=false'];
+
+/**
+ * Artifacts' receive-pack answers HTTP 500 to some packs of deltas and accepts the same objects sent whole (djmc,
+ * 2026-10-19: 164 objects, 146 deltas, refused every time). A push refused that way is sent once more without deltas.
+ */
+async function pushToArtifacts(repositoryPath: string, refspec: string[], environment: Record<string, string>): Promise<void> {
+  try { await git(repositoryPath, [...PUSH, ...refspec], environment); }
+  catch (error) {
+    if (!(error instanceof ArtifactsGitError) || !/\bHTTP 500\b/u.test(error.message)) throw error;
+    await git(repositoryPath, [...WHOLE_OBJECTS, ...PUSH, '--no-thin', ...refspec], environment);
+  }
+}
 
 /** Checks that the current layers of `commit` fit, as a publication would. */
 export async function verifyArtifactsGitUpload(repositoryPath: string, commit: string, headCommit: string | null): Promise<void> {
@@ -121,7 +135,7 @@ export class ArtifactsGitRemote {
     }
     await withShallowBoundary(boundary, async shallow => {
       const auth = await this.auth(input.binding, 'write');
-      await git(input.repositoryPath, [...PUSH, '--force', auth.remote, `${commit}:${input.checkpointRef}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
+      await pushToArtifacts(input.repositoryPath, ['--force', auth.remote, `${commit}:${input.checkpointRef}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
     });
   }
 
@@ -143,7 +157,7 @@ export class ArtifactsGitRemote {
       if (current === input.commit) return;
       if (current !== undefined) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
       const auth = await this.auth(input.binding, 'write');
-      await git(input.repositoryPath, [...PUSH, auth.remote, `${input.commit}:${input.ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
+      await pushToArtifacts(input.repositoryPath, [auth.remote, `${input.commit}:${input.ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
     });
   }
 
