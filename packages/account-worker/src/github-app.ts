@@ -424,15 +424,22 @@ export class GitHubAppDO extends DurableObject<Env> {
     return { token: issued.token, expiresAt: issued.expires_at };
   }
 
-  /** Whether GitHub shows `repository` to everyone; read with the App's token when an installation covers it. */
+  /**
+   * Whether anyone may read `repository`: GitHub serves a public repository's refs without credentials (the request the
+   * cloud already makes for origins; the REST API's anonymous limit is shared across Cloudflare's addresses). A private
+   * repository must be covered by an installation: a reader's user token sees only repositories the App is installed on.
+   */
   async repositoryIsPublic(repository: string): Promise<boolean> {
-    const token = this.coverage(repository) === null ? undefined : (await this.repositoryToken(repository, 'read')).token;
-    try {
-      return !(await githubRequest(`/repos/${repository}`, { token, schema: z.object({ private: z.boolean() }) })).private;
-    } catch (error) {
-      if (error instanceof GitHubApiError && error.status === 404) throw new Error(`GitHub does not show ${repository} to GitSpace. Install the GitHub App on it first.`);
-      throw error;
+    const response = await fetch(`https://github.com/${repository}.git/info/refs?service=git-upload-pack`, {
+      headers: { 'user-agent': 'GitSpace' }, redirect: 'manual', signal: AbortSignal.timeout(10_000),
+    }).catch((error: unknown) => { throw new Error(`GitHub could not be reached: ${error instanceof Error ? error.message : String(error)}`); });
+    await response.body?.cancel();
+    if (response.ok) return true;
+    if (response.status !== 401 && response.status !== 404) throw new Error(`GitHub answered ${response.status} for ${repository}`);
+    if (this.coverage(repository) === null) {
+      throw new Error(`${repository} is private and the GitHub App is not installed on it, so GitSpace cannot check who may read it. Install the App on ${repository} in Settings → GitHub.`);
     }
+    return false;
   }
 
   /** The App's OAuth client id: a shared guide's reader signs in through the App's user authorization. */

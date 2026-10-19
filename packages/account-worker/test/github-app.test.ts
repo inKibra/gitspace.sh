@@ -432,6 +432,7 @@ describe('GitHub App', () => {
     await createApp(key);
     const pantry = await project('Pantry', 'git@github.com:inKibra/Pantry.git');
     const open = await project('Open', 'https://github.com/inKibra/open');
+    const uncovered = await project('Elsewhere', 'https://github.com/someone/private');
     installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
     expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
     const history = artifactsHistory();
@@ -454,12 +455,15 @@ describe('GitHub App', () => {
     const repositoryReads: Array<{ repository: string; token: string }> = [];
     const readers: Record<string, { token: string; login: string }> = { 'code-member': { token: 'user-token-member', login: 'member' }, 'code-outsider': { token: 'user-token-outsider', login: 'outsider' } };
     network.use(
+      // Git serves a public repository's refs to anyone and asks for credentials on a private one.
+      http.get('https://github.com/:owner/:name/info/refs', ({ params }) => `${String(params.owner)}/${String(params.name)}` === 'inKibra/open.git'
+        ? new HttpResponse('001e# service=git-upload-pack\n0000')
+        : new HttpResponse('Authentication required', { status: 401 })),
       http.get(`${API}/repos/:owner/:name`, ({ params, request }) => {
         const repository = `${String(params.owner)}/${String(params.name)}`;
         repositoryReads.push({ repository, token: bearer(request) });
-        if (repository === 'inKibra/open') return HttpResponse.json({ id: 2, private: false });
-        // GitHub shows a private repository only to the installation and to users who can read it.
-        if (bearer(request) === 'installation-token-91' || bearer(request) === 'user-token-member') return HttpResponse.json({ id: 1, private: true });
+        // GitHub shows a private repository only to users who can read it.
+        if (bearer(request) === 'user-token-member') return HttpResponse.json({ id: 1, private: true });
         return HttpResponse.json({ message: 'Not Found' }, { status: 404 });
       }),
       http.post('https://github.com/login/oauth/access_token', async ({ request }) => {
@@ -534,6 +538,9 @@ describe('GitHub App', () => {
 
     expect(await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${pantry.id}`).revokeGuideShare(shared.id, shared.workspaceId)).toBe(true);
     expect((await read(shared.url, member)).status).toBe(404);
+
+    // A private repository the App is not installed on cannot check its readers, so it is not shared.
+    await expect(share(uncovered.id)).rejects.toThrow('someone/private is private and the GitHub App is not installed on it');
 
     // Anyone with the link reads a public repository's guide.
     const opened = await share(open.id);
