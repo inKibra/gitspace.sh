@@ -23,6 +23,12 @@ const SEARCH_WINDOWS = 16;
 const LIVE_STATUSES = ['pending', 'running', 'waiting', 'completing'] as const;
 
 const entryOf = (ordinal: number) => Math.floor(ordinal / ENTRY_ORDINALS);
+/** Machine notices withdrawn from a conversation: its chat and history skip them, and a `gitspace.notices-withdrawn`
+ * entry omits them from the model's context. Entries are immutable, so withdrawal is recorded beside them. */
+export interface WithdrawnNotices {
+  has(entryId: string): boolean;
+  add(entryIds: readonly string[]): void;
+}
 /** Machine notices reach the agent as context but show as notices: they neither open a turn nor read as the user's. */
 const MACHINE_NOTICE = 'gitspace.machine-notice';
 /** A compaction summary is context the model reads as a user message; it shows as the compaction, not as the user's. */
@@ -30,7 +36,8 @@ const COMPACTION = CompactionEntry.kind;
 const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== COMPACTION && entry.model?.[0]?.role === 'user';
 
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
-export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader): TranscriptEvent[] {
+export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices): TranscriptEvent[] {
+  if (withdrawn?.has(String(entry.id))) return [];
   const base = Number(entry.id) * ENTRY_ORDINALS;
   return (entry.model ?? []).map((source, index) => {
     if (entry.kind === MACHINE_NOTICE) {
@@ -87,7 +94,7 @@ async function newestEntry(storage: Storage, conversationId: ConversationId): Pr
 }
 
 /** Streams a bounded ordinal range of transcript events. The high-water entry is fixed before streaming. */
-export async function transcriptResponse(storage: Storage, target: Conversation, format: RuntimeTranscriptFormat = 'json', range: RuntimeTranscriptRange = {}): Promise<Response> {
+export async function transcriptResponse(storage: Storage, target: Conversation, withdrawn: WithdrawnNotices, format: RuntimeTranscriptFormat = 'json', range: RuntimeTranscriptRange = {}): Promise<Response> {
   const sessionId = String(target.id);
   const newest = await newestEntry(storage, target.id);
   const from = range.from ?? 0;
@@ -97,7 +104,7 @@ export async function transcriptResponse(storage: Storage, target: Conversation,
     if (range.newestFirst) {
       for await (const entry of entriesBackward(storage, target.id, Math.min(Number(newest.id), entryOf(before - 1)))) {
         if (Number(entry.id) < entryOf(from)) return;
-        const values = entryEvents(entry);
+        const values = entryEvents(entry, undefined, withdrawn);
         for (let index = values.length - 1; index >= 0; index--) if (values[index]!.ordinal >= from && values[index]!.ordinal < before) yield { ...values[index]!, sessionId };
       }
       return;
@@ -105,7 +112,7 @@ export async function transcriptResponse(storage: Storage, target: Conversation,
     const start = from === 0 ? null : (await storage.scanEntries({ conversationId: target.id }, 1, { after: entryOf(from) }, ctx)).items[0] ?? null;
     for await (const entry of entriesForward(storage, target.id, start, Number(newest.id))) {
       if (Number(entry.id) > entryOf(before - 1)) return;
-      for (const event of entryEvents(entry)) if (event.ordinal >= from && event.ordinal < before) yield { ...event, sessionId };
+      for (const event of entryEvents(entry, undefined, withdrawn)) if (event.ordinal >= from && event.ordinal < before) yield { ...event, sessionId };
     }
   }
   const iterator = events();
@@ -139,7 +146,7 @@ type Window = { entries: EntryRecord[]; hasOlder: boolean; newest: boolean; next
 
 /** Transcript pages are projected per request from a bounded, turn-aligned window of Pi entries.
  * Nothing is persisted: Pi's entries are the only transcript storage. */
-export function createTranscriptReader(storage: Storage, executorResult?: ExecutorResultReader) {
+export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader) {
   async function live(conversationId: ConversationId): Promise<boolean> {
     for (const status of LIVE_STATUSES) {
       const query: TaskQuery = { conversationId, status, background: false };
@@ -202,7 +209,7 @@ export function createTranscriptReader(storage: Storage, executorResult?: Execut
     for (const entry of view.entries) {
       entryId = Number(entry.id);
       written = 0;
-      for (const event of entryEvents(entry, executorResult)) projector.apply({ ...event, sessionId });
+      for (const event of entryEvents(entry, executorResult, withdrawn)) projector.apply({ ...event, sessionId });
       const notice = noticeEvent(entry);
       if (notice) projector.apply({ ...notice, sessionId });
     }

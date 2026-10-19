@@ -377,7 +377,7 @@ test('a listing survives transient Artifacts read failures with at most 16 reads
     const failed = new Set<string>();
     let inFlight = 0, peak = 0;
     const repo: ArtifactsRepo = {
-      ...f.repo, listTokens: unsupported, readFile: unsupported, fork: unsupported,
+      ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, fork: unsupported,
       async readTree(oid: string) {
         inFlight++; peak = Math.max(peak, inFlight);
         try {

@@ -52,6 +52,10 @@ async function baseCheckoutHolds(code: ArtifactsCodeStore, repositories: readonl
   return position.kind === 'holds';
 }
 
+/** A sync failure reaches the conversation only once it has lasted this long. */
+const SYNC_NOTICE_AFTER_MS = 5 * 60_000;
+const SyncFailureRunSchema = z.object({ since: z.number(), noticed: z.boolean() });
+
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: LiveChanges;
   private readonly environment: SpaceEnvironmentStore;
@@ -810,17 +814,31 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     const before = visible(previous);
     const attachment = runtime.attachments.observe(input);
     if (visible(attachment) !== before) runtime.publish();
-    // What the machine reports going wrong reaches the conversation once, when it first appears. Sync is announced when
-    // it starts failing, not each time the failure's text changes: a provider error carries a fresh reference on every
-    // retry, which posted a notice per retry.
+    // What the machine reports going wrong reaches the conversation once, when it first appears.
     const failedSetup = (attachment.cache?.setup ?? []).filter(step => step.state === 'failed' && !previous?.cache?.setup.some(prior => prior.phase === step.phase && prior.state === 'failed' && prior.runId === step.runId));
-    const syncProblem = attachment.cache?.syncProblem && !previous?.cache?.syncProblem ? attachment.cache.syncProblem : null;
+    const syncProblem = await this.lastingSyncProblem(input.attachmentId, input.generation, attachment.cache?.syncProblem ?? null);
     if (failedSetup.length || syncProblem) {
       const label = await this.machineLabel(input.machineId);
       for (const step of failedSetup) await runtime.notice(`Setup on ${label} failed at ${step.phase}${step.error ? `: ${step.error}` : ''}. Commands that need it wait until setup runs again.`);
       if (syncProblem) await runtime.notice(`Sync with ${label} failed: ${syncProblem}`);
     }
     return { attachment };
+  }
+
+  /** The problem to announce, once, when a checkout's sync has been failing for SYNC_NOTICE_AFTER_MS. Most failures are
+   * transient (a provider error, a restart) and clear on the next retry; they stay visible as the sync status only.
+   * The machine reports each retry, so its reports are the clock. */
+  private async lastingSyncProblem(attachmentId: string, generation: number, problem: string | null): Promise<string | null> {
+    const key = `runtime.sync-failing:${attachmentId}:${generation}`;
+    const run = SyncFailureRunSchema.nullable().parse(await this.ctx.storage.get(key) ?? null);
+    if (problem === null) {
+      if (run) await this.ctx.storage.delete(key);
+      return null;
+    }
+    if (!run) { await this.ctx.storage.put(key, { since: Date.now(), noticed: false }); return null; }
+    if (run.noticed || Date.now() - run.since < SYNC_NOTICE_AFTER_MS) return null;
+    await this.ctx.storage.put(key, { ...run, noticed: true });
+    return problem;
   }
 
   async runtimeDetach(raw: unknown) {

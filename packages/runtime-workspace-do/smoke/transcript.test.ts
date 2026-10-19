@@ -4,9 +4,10 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, type AssistantMessage } from '@earendil-works/pi-ai';
 import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
 import type { TranscriptRow } from '@gitspace/blocks';
-import { createTranscriptReader, transcriptResponse } from '../src/transcript.js';
+import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
 
 const context = BACKGROUND_CONTEXT;
+const none: WithdrawnNotices = { has: () => false, add: () => {} };
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 function assistant(content: AssistantMessage['content'], timestamp: number): AssistantMessage {
   return { role: 'assistant', content, api: 'openai-responses', provider: 'openai', model: 'fixture', usage, stopReason: content.some(part => part.type === 'toolCall') ? 'toolUse' : 'stop', timestamp };
@@ -35,15 +36,15 @@ test('transcript streams read bounded ordinal ranges of a fork-aware Pi view wit
     await root.commit(tx => tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'other branch', timestamp: 3 }] }), context);
     const branch = await root.fork(pivot.id, { ownership: { kind: 'ownerless' } }, context);
     const own = await branch.commit(tx => tx.appendEntry(branch.id, { kind: 'pi.user', model: [{ role: 'user', content: 'branch', timestamp: 4 }] }), context);
-    const response = await transcriptResponse(storage, branch);
+    const response = await transcriptResponse(storage, branch, none);
     await branch.commit(tx => tx.appendEntry(branch.id, { kind: 'pi.user', model: [{ role: 'user', content: 'too late', timestamp: 5 }] }), context);
     const events = RuntimeTranscriptSchema.parse(await response.json());
     const ordinal = (entry: number, index: number) => entry * 1024 + index;
     expect(events.map(event => event.ordinal)).toEqual([ordinal(Number(pivot.id), 0), ordinal(Number(pivot.id), 1), ordinal(Number(own.id), 0)]);
     expect(events.every(event => event.sessionId === String(branch.id))).toBe(true);
-    const tail = RuntimeTranscriptSchema.parse(await (await transcriptResponse(storage, branch, 'json', { from: ordinal(Number(pivot.id), 1) })).json());
+    const tail = RuntimeTranscriptSchema.parse(await (await transcriptResponse(storage, branch, none, 'json', { from: ordinal(Number(pivot.id), 1) })).json());
     expect(tail.map(event => event.ordinal)).toEqual([ordinal(Number(pivot.id), 1), ordinal(Number(own.id), 0), ordinal(Number(own.id) + 1, 0)]);
-    const newest = RuntimeTranscriptSchema.parse(await (await transcriptResponse(storage, branch, 'json', { newestFirst: true, before: ordinal(Number(own.id), 0) })).json());
+    const newest = RuntimeTranscriptSchema.parse(await (await transcriptResponse(storage, branch, none, 'json', { newestFirst: true, before: ordinal(Number(own.id), 0) })).json());
     expect(newest.map(event => event.ordinal)).toEqual([ordinal(Number(pivot.id), 1), ordinal(Number(pivot.id), 0)]);
   });
 });
@@ -54,7 +55,7 @@ test('transcript pages project bounded turn-aligned windows that page back lossl
     let scanned = 0;
     const scan = storage.scanEntries.bind(storage);
     storage.scanEntries = async (query, limit, cursor, ctx) => { const page = await scan(query, limit, cursor, ctx); scanned += page.items.length; return page; };
-    const reader = createTranscriptReader(storage);
+    const reader = createTranscriptReader(storage, none);
     const request = { generation: null, before: null, after: null, around: null };
     let page = await reader.page(root.id, request);
     expect(scanned).toBeLessThan(600);
@@ -84,5 +85,22 @@ test('transcript pages project bounded turn-aligned windows that page back lossl
     const after = await reader.page(root.id, { ...request, generation, after: around.rows.at(-1)!.ordinal });
     expect(after.rows[0]!.ordinal).toBeGreaterThan(around.rows.at(-1)!.ordinal);
     expect(rows.findIndex(row => row.id === after.rows[0]!.id)).toBe(rows.findIndex(row => row.id === around.rows.at(-1)!.id) + 1);
+  });
+});
+
+test('withdrawn notices leave the transcript while the other notices stay', async () => {
+  await fixture(async (_harness, storage, root) => {
+    await turn(root, 0, 1);
+    const notice = (text: string) => root.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.machine-notice', data: { source: 'Machine' }, model: [{ role: 'user', content: text, timestamp: 1 }] }), context);
+    const flood = await Promise.all([notice('Sync with Darktop failed: internal error; reference = a'), notice('Sync with Darktop failed: internal error; reference = b')]);
+    await notice('Machine Darktop went offline.');
+    await turn(root, 1, 1);
+    const ids = new Set(flood.map(entry => String(entry.id)));
+    const withdrawn: WithdrawnNotices = { has: id => ids.has(id), add: () => {} };
+    const page = await createTranscriptReader(storage, withdrawn).page(root.id, { generation: null, before: null, after: null, around: null });
+    const text = JSON.stringify(page.rows);
+    expect(text).not.toContain('Sync with Darktop failed');
+    expect(text).toContain('Machine Darktop went offline.');
+    expect(text).toContain('answer 1');
   });
 });

@@ -2,7 +2,7 @@ import type { ConversationRecord, Cursor, Storage } from '@earendil-works/pi-dur
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { pageSessionHistory, sourceHistoryMetadata, type HistorySourceEntry } from '@gitspace/protocol-agent';
 import type { SessionHistoryService } from '@gitspace/runtime-core/session-controls';
-import { createTranscriptReader, type ExecutorResultReader } from './transcript.js';
+import { createTranscriptReader, type ExecutorResultReader, type WithdrawnNotices } from './transcript.js';
 import { readCloudUsage } from './usage.js';
 
 const ctx = BACKGROUND_CONTEXT;
@@ -13,7 +13,7 @@ type ConversationRow = { parent: number | null; at: number | null };
 type EntryRow = { conversation: number; first: string | null };
 
 /** Session history reads Pi's own conversation and entry tables; nothing is mirrored. */
-export function createSessionHistory(durable: DurableObjectStorage, storage: Storage, executorResult?: ExecutorResultReader): SessionHistoryService {
+export function createSessionHistory(durable: DurableObjectStorage, storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader): SessionHistoryService {
   const sql = durable.sql;
   // Reclaim the retired derived copies of Pi history.
   sql.exec('DROP TABLE IF EXISTS runtime_transcript_state');
@@ -27,7 +27,7 @@ export function createSessionHistory(durable: DurableObjectStorage, storage: Sto
   sql.exec('DROP TABLE IF EXISTS runtime_history_branches');
   sql.exec('DROP TABLE IF EXISTS runtime_history_entries');
   sql.exec('DROP TABLE IF EXISTS runtime_history_progress');
-  const transcript = createTranscriptReader(storage, executorResult);
+  const transcript = createTranscriptReader(storage, withdrawn, executorResult);
   let usagePending = Promise.resolve();
 
   function numberId(id: string) {

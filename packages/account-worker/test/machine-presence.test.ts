@@ -254,4 +254,26 @@ describe('machine notices', () => {
     await report();
     expect(await notices(workspace.workspaceId)).toEqual(['Setup on Darktop failed at workspace/materialize: 30-fail.sh exited 3. Commands that need it wait until setup runs again.']);
   });
+
+  it('tells the conversation of a sync failure only once it lasts five minutes', async () => {
+    const workspace = await attachedWorkspace('notice-sync');
+    const [attachment] = await space(workspace.workspaceId).runtimeAttachments(workspace);
+    const report = (syncProblem: string | null) => space(workspace.workspaceId).runtimeHeartbeat({
+      ...workspace, machineId, attachmentId: attachment!.attachmentId, generation: attachment!.generation,
+      executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: null },
+      cache: { state: 'live', platform: 'linux', lastSyncAt: null, unsent: null, syncProblem, setup: [] },
+    });
+    // A failure the next retry clears says nothing, whatever its text.
+    await report('internal error; reference = a');
+    await report('internal error; reference = b');
+    await report(null);
+    expect(await notices(workspace.workspaceId)).toEqual([]);
+    await report('internal error; reference = c');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5 * 60_000 + 1_000);
+    try {
+      await report('internal error; reference = d');
+      await report('internal error; reference = e');
+    } finally { clock.mockRestore(); }
+    expect(await notices(workspace.workspaceId)).toEqual(['Sync with Darktop failed: internal error; reference = d']);
+  });
 });
