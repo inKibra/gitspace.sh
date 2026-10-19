@@ -168,10 +168,11 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         return Response.json({ conversationId: String(root.id), ids: ids.map(String), pivot: String(pivot), branches });
       }
       if (url.pathname === '/sync-notices-seed') {
-        // Notices as the flood left them, in a runtime from before their withdrawal ran.
+        // Notices as the flood left them, in a runtime from before their withdrawal ran: more than a snapshot window of
+        // them after the last other entry.
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);
         await root.commit(async tx => {
-          for (const text of ['Sync with Darktop failed: internal error; reference = a', 'Machine Darktop went offline.', 'Sync with Darktop failed: internal error; reference = b']) {
+          for (const text of ['Machine Darktop went offline.', ...Array.from({ length: 300 }, (_, index) => `Sync with Darktop failed: internal error; reference = ${index}`)]) {
             await tx.appendEntry(root.id, { kind: 'gitspace.machine-notice', data: { source: 'Machine' }, model: [{ role: 'user', content: text, timestamp: Date.now() }] });
           }
         }, BACKGROUND_CONTEXT);

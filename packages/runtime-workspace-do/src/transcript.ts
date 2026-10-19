@@ -28,8 +28,6 @@ const entryOf = (ordinal: number) => Math.floor(ordinal / ENTRY_ORDINALS);
 export interface WithdrawnNotices {
   has(entryId: string): boolean;
   add(entryIds: readonly string[]): void;
-  /** How many entries are withdrawn: a window of visible entries reads this many more. */
-  count(): number;
 }
 /** Machine notices reach the agent as context but show as notices: they neither open a turn nor read as the user's. */
 const MACHINE_NOTICE = 'gitspace.machine-notice';

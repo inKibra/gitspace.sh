@@ -222,8 +222,15 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
     if (!conversation) return undefined;
     // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
-    // Withdrawn notices take no place in the window: it reads past them to the newest 256 visible entries.
-    const entries = [...(await conversation.entries({}, 256 + withdrawn.count(), undefined, BACKGROUND_CONTEXT)).items].reverse().filter(entry => !withdrawn.has(String(entry.id))).slice(-256);
+    // Withdrawn notices take no place in the window: it pages back past them to the newest 256 visible entries.
+    const newest: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await conversation.entries({}, 256, cursor, BACKGROUND_CONTEXT);
+      for (const entry of page.items) if (newest.length < 256 && !withdrawn.has(String(entry.id))) newest.push(entry);
+      cursor = page.next;
+    } while (cursor && newest.length < 256);
+    const entries = newest.reverse();
     const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
     const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
     // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
