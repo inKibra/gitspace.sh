@@ -174,8 +174,9 @@ export async function createAccountGitLfsStore(env: Env, userId: string, project
   const key = await deriveArtifactScopeKey(accountKey, `lfs:${projectId}`);
   return new AccountGitLfsStore(
     env.DATA, userId, projectId, key,
-    object => authority.lfsPin({ publicationId, objects: [object] }),
-    () => authority.lfsReleasePublication(publicationId),
+    // A stub per call: the store lives as long as a workspace runtime, and a stub that saw an error stays broken.
+    object => env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`).lfsPin({ publicationId, objects: [object] }),
+    () => env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`).lfsReleasePublication(publicationId),
   );
 }
 

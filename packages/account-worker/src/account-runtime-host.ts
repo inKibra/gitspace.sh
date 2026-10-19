@@ -66,7 +66,6 @@ export async function createAccountWorkspaceRuntime(
   requestAttachment: (machineId: string) => Promise<{ attachment: RuntimeAttachment }>,
   environment: WorkspaceEnvironment,
 ): Promise<WorkspaceRuntime> {
-  const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   // The workspace's own metadata, read per use: a base branch change moves the branch this runtime reads code from.
   const metadata = () => {
     const current = readWorkspaceMetadata(ctx.storage);
@@ -93,7 +92,6 @@ export async function createAccountWorkspaceRuntime(
   const repository = artifactsWorkspaceRepository(identity.workspaceId);
   const ref = runtimeWorkspaceCodeRef(env, identity, () => metadata().branch);
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
-  const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   let runtime: WorkspaceRuntime | undefined;
   const documentMarkdown = createDocumentMarkdown(ctx.storage, env.AI);
   const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, documentMarkdown, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
@@ -126,6 +124,9 @@ export async function createAccountWorkspaceRuntime(
     code,
     lfs,
     async retainLfs(checkpoint, publicationId) {
+      // Stubs are made per call here: this runtime outlives any one of them, and one that saw an error (the project
+      // object resetting for a release) stays broken, failing every later snapshot commit until the workspace restarts.
+      const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
       await project.lfsRetain({ snapshotId: `runtime:${identity.workspaceId}:${checkpoint.worktreeCommit}`, workspaceId: identity.workspaceId, kind: 'runtime', objects: checkpoint.lfs?.objects ?? [] });
       if (publicationId) await project.lfsReleasePublication(publicationId);
       else await lfs.releasePublication();
@@ -146,8 +147,8 @@ export async function createAccountWorkspaceRuntime(
     schedule,
     qa: createRuntimeQaServices(env, identity),
     attachments: {
-      seal: (secret, scope) => vault.sealRuntimeGrant(secret, scope),
-      open: (ciphertext, scope) => vault.openRuntimeGrant(ciphertext, scope),
+      seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
+      open: (ciphertext, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),
       dispatch: input => dispatchRuntimeAttachment(env, input),
     },
   });

@@ -18,7 +18,8 @@ const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stri
 
 /** Only the Workspace DO calls this factory; no bearer or refresh token enters runtime state. */
 export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>) {
-  const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+  // A stub per call: this outlives any one, and one that saw an error stays broken.
+  const vault = () => env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const scopes = new WeakMap<AbortSignal, { admission: Admission; models: VaultModels }>();
   const collections = new Map<string, Promise<VaultModels>>();
   const pinsFor = (profileId: string, conversationId: string): CredentialPins => ({
@@ -35,9 +36,9 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         delete: async name => { await ctx.storage.delete(key('catalog', name)); },
       });
       pending = createVaultModels({ profileId: profile.id, conversationId, settings: profile.settings, fastMode, ...(admission ? { pinnedModels: [admission.model] } : {}), modelsStore: catalog, pins: pinsFor(profile.id, conversationId), vault: {
-        list: (profileId, provider) => vault.cloudCredentialAccounts(profileId, provider),
-        resolve: input => { input.signal?.throwIfAborted(); return vault.cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
-        recordFailure: input => vault.cloudCredentialFailure(input),
+        list: (profileId, provider) => vault().cloudCredentialAccounts(profileId, provider),
+        resolve: input => { input.signal?.throwIfAborted(); return vault().cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
+        recordFailure: input => vault().cloudCredentialFailure(input),
       } });
       collections.set(id, pending);
       void pending.catch(() => { if (collections.get(id) === pending) collections.delete(id); });
@@ -84,7 +85,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
       if (existing !== undefined) admission = admissionSchema.parse(existing);
       else {
         const inherited = input.parentConversationId ? await active(input.parentConversationId) : null;
-        const resolved = inherited ?? await vault.resolveCloudInference(identity.projectId);
+        const resolved = inherited ?? await vault().resolveCloudInference(identity.projectId);
         const selection = input.selection ?? inherited?.selection ?? { kind: 'default' };
         const models = await collection(resolved.profile, 'catalog');
         // Published catalog refresh is credential-free data, not a provider request.
@@ -123,7 +124,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     },
     session: {
       async catalog() {
-        const resolved = await vault.cloudInferenceCatalog(identity.projectId);
+        const resolved = await vault().cloudInferenceCatalog(identity.projectId);
         if (!resolved) { router.unregister('catalog'); return { models: [], roles: [] }; }
         const currentProfile = resolved.profile;
         const currentAssignment = resolved.assignmentRevision;
@@ -158,7 +159,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
           ...(currentAssignment === null ? {} : { inference: { profileId: currentProfile.id, profileName: currentProfile.name, profileRevision: currentProfile.revision, assignmentRevision: currentAssignment } }) };
       },
       async reload(_kind: 'settings' | 'instructions' | 'inference') {
-        const resolved = await vault.resolveCloudInference(identity.projectId);
+        const resolved = await vault().resolveCloudInference(identity.projectId);
         const models = await collection(resolved.profile, 'catalog');
         const result = await models.refresh({ allowNetwork: true, force: true });
         if (result.errors.size) throw new AggregateError([...result.errors.values()], 'Provider catalog refresh failed');

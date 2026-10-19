@@ -23,10 +23,11 @@ function redacted(value: unknown, secrets: string[]): RuntimeJson {
 
 /** All credentials are resolved inside the account Worker; none enter tool arguments. */
 export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
-  const connections = (env.USER_MCP_CONNECTIONS as DurableObjectNamespace<UserMcpConnectionsDO>).getByName(env.ACCOUNT_ID);
-  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+  // Stubs per call: these outlive any one, and one that saw an error stays broken.
+  const connections = () => (env.USER_MCP_CONNECTIONS as DurableObjectNamespace<UserMcpConnectionsDO>).getByName(env.ACCOUNT_ID);
+  const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   async function admitted(connectionId: string) {
-    const [connection, grant, workspace] = await Promise.all([connections.get(env.ACCOUNT_ID, connectionId), authority.getMcpGrant(connectionId), authority.getWorkspace(identity.workspaceId)]);
+    const [connection, grant, workspace] = await Promise.all([connections().get(env.ACCOUNT_ID, connectionId), authority().getMcpGrant(connectionId), authority().getWorkspace(identity.workspaceId)]);
     if (!workspace) throw new Error('MCP workspace is unavailable');
     const scope = workspace.kind === 'base' ? null : identity.workspaceId;
     if (!connection?.enabled || !grant?.enabled || (scope === null ? !grant.projectSpaceEnabled : !grant.workspacesEnabled)) throw new Error('MCP connection is not granted to this workspace');
@@ -62,12 +63,12 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     const client = new Client({ name: 'gitspace-cloud', version: '1.0.0' }, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
     const transport = type === 'http' ? new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }) : new SSEClientTransport(new URL(url), { requestInit: { headers }, eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }) } });
     const audit = async (outcome: 'started' | 'succeeded' | 'failed' | 'canceled') => {
-      await connections.appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: invocation?.name ?? null, outcome, message: null });
+      await connections().appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: invocation?.name ?? null, outcome, message: null });
     };
     let observedRevision = connection.revision;
     const observe = async (status: 'ready' | 'failed', message: string | null) => {
       try {
-        const updated = await connections.recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision, status, message });
+        const updated = await connections().recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision, status, message });
         observedRevision = updated.revision;
       } catch {
         // A concurrent configuration revision wins over this transport observation.
@@ -104,7 +105,7 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     async discover(args: RuntimeJson, signal?: AbortSignal): Promise<RuntimeJson> {
       const parsed = RuntimeMcpDiscoverArgumentsSchema.parse(args);
       if ('connectionId' in parsed) return execute(parsed, false, signal);
-      const [all, grants, workspace] = await Promise.all([connections.list(env.ACCOUNT_ID), authority.listMcpGrants(), authority.getWorkspace(identity.workspaceId)]);
+      const [all, grants, workspace] = await Promise.all([connections().list(env.ACCOUNT_ID), authority().listMcpGrants(), authority().getWorkspace(identity.workspaceId)]);
       if (!workspace) throw new Error('MCP workspace is unavailable');
       return RuntimeJsonSchema.parse(all.filter(connection => connection.enabled && grants.some(grant => grant.connectionId === connection.id && grant.enabled && (workspace.kind === 'base' ? grant.projectSpaceEnabled : grant.workspacesEnabled))).map(connection => ({ connectionId: connection.id, label: connection.label, transport: connection.transport.type, machineId: connection.target.kind === 'machine' ? connection.target.machineId : null })));
     },

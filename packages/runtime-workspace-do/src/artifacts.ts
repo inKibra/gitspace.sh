@@ -540,7 +540,8 @@ export class ArtifactsCodeStore {
     const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
     if (ref !== 'HEAD' && !isSupportedBranchName(branch)) throw new Error('Unsupported committed source ref');
     const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return (await repo.log(ref === 'HEAD' ? { limit: 1 } : { ref: branch, limit: 1 }))[0]?.hash ?? null; }
+    // Every repository credential request resolves the project's base branch: one Artifacts error must not fail a sync.
+    try { return (await attemptRead('resolveRef', `${repository} ${ref}`, () => repo.log(ref === 'HEAD' ? { limit: 1 } : { ref: branch, limit: 1 })))[0]?.hash ?? null; }
     finally { await disposeArtifactsRepository(repo); }
   }
 

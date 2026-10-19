@@ -89,7 +89,8 @@ export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: s
 /** QA events read per page; the project authority caps every entity page at this size. */
 const QA_EVENT_PAGE = 500;
 export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
-  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+  // A stub per call: one that saw an error, such as the project object resetting for a release, stays broken.
+  const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   // QA items are loaded from the project once per runtime; snapshot rebuilds reuse them instead of calling the
   // project object each time.
   const items = new Map<string, z.infer<typeof RuntimeQaItemSchema>>();
@@ -99,7 +100,7 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
     if (reading) return reading.then(() => [...items.values()]);
     reading = (async () => {
       for (;;) {
-        const events = z.array(projectEventSchema).parse(await authority.listEntityEvents('qa', applied, QA_EVENT_PAGE));
+        const events = z.array(projectEventSchema).parse(await authority().listEntityEvents('qa', applied, QA_EVENT_PAGE));
         for (const event of events) {
           if (event.entity === 'qa') { const item = RuntimeQaItemSchema.parse(event.payload.item); items.set(item.id, item); }
           applied = Math.max(applied, event.offset);
@@ -116,7 +117,7 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
       const item = current.find(candidate => candidate.id === input.itemId);
       if (!item) throw new Error('QA item does not belong to this project');
       if (input.action.kind === 'share') {
-        const reference = input.action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority.getProject())?.repositoryReference;
+        const reference = input.action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority().getProject())?.repositoryReference;
         if (!reference) throw new Error('Project has no canonical repository');
         const repository = new URL(reference.replace(/^git@github\.com:/u, 'https://github.com/').replace(/\.git$/u, ''));
         if (repository.hostname !== 'github.com' || !/^\/[^/]+\/[^/]+\/?$/u.test(repository.pathname)) throw new Error('Issue drafts require a canonical GitHub repository');
@@ -133,7 +134,7 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
         if (!target || target.id === item.id || target.state === 'merged') throw new Error('Duplicate target must be a distinct canonical QA item');
       }
       const next = { ...item, state: input.action.kind === 'dismiss' ? 'dismissed' as const : 'merged' as const, duplicateOf: input.action.kind === 'merge' ? input.action.targetId : null };
-      await authority.appendEvent({ scope: 'workspace', entity: 'qa', entityId: item.id, revision: 1, operation: 'updated', payload: { item: next, workspaceId: identity.workspaceId, actorId: actor.deviceId } });
+      await authority().appendEvent({ scope: 'workspace', entity: 'qa', entityId: item.id, revision: 1, operation: 'updated', payload: { item: next, workspaceId: identity.workspaceId, actorId: actor.deviceId } });
       return {};
     },
   };
@@ -185,7 +186,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const baseWorkspaceId: string = identity.projectId;
   const mcp = createCloudRuntimeMcp(env, identity);
   const codemode = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: options.model });
-  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+  // A stub per call: one that saw an error, such as the project object resetting for a release, stays broken.
+  const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
@@ -199,10 +201,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await options.environment.refreshBrowserOrigins(identity)),
     groupName: async () => {
-      const project = await authority.getProject();
+      const project = await authority().getProject();
       if (!project) throw new Error('Browser workspace project is unavailable');
       if (identity.workspaceId === project.id) return project.name;
-      const workspace = await authority.getWorkspace(identity.workspaceId);
+      const workspace = await authority().getWorkspace(identity.workspaceId);
       if (!workspace) throw new Error('Browser workspace is unavailable');
       return workspace.name;
     },
@@ -223,7 +225,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       return assignment ? (base ? assignment.projectSpaceEnabled : assignment.workspacesEnabled) : skill.scope === 'all' || skill.scope === (base ? 'project' : 'workspaces');
     });
   }
-  // These are request envelopes, not a second lifecycle/job authority. The executor and
+  // These are request envelopes, not a second lifecycle/job authority(). The executor and
   // existing project ledgers remain the owners of effect outcomes and claim tokens.
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_host_dispatch (id TEXT PRIMARY KEY, dispatch TEXT NOT NULL)');
   const selections = createDispatchSelector({ storage: ctx.storage, env, identity, runtime: options.runtime, environment: options.environment });
@@ -430,7 +432,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_sync_backups(ref,commit_id,base_id,source,reason,paths,created_at) VALUES(?,?,?,?,?,?,?)', backup.checkpointRef, backup.commit, backup.base, source, reason, JSON.stringify(paths), now);
     const pruned = ctx.storage.sql.exec<{ ref: string; source: string }>('SELECT ref,source FROM runtime_sync_backups WHERE created_at < ? AND ref NOT IN (SELECT ref FROM runtime_sync_backups ORDER BY created_at DESC LIMIT 20)', now - 30 * 86_400_000).toArray();
     for (const row of pruned) {
-      if (row.source !== 'cloud') await authority.lfsReleasePublication(row.ref);
+      if (row.source !== 'cloud') await authority().lfsReleasePublication(row.ref);
       ctx.storage.sql.exec('DELETE FROM runtime_sync_backups WHERE ref=?', row.ref);
     }
   }
@@ -585,24 +587,24 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const args = RuntimeWorkspaceArgumentsSchema.parse(input.args);
         switch (args.method) {
           case 'get': case 'current': {
-            if (args.workspaceId === undefined || args.workspaceId === identity.workspaceId) return completed(input, identity.workspaceId === baseWorkspaceId ? await authority.getProject() : (await source()).workspace);
+            if (args.workspaceId === undefined || args.workspaceId === identity.workspaceId) return completed(input, identity.workspaceId === baseWorkspaceId ? await authority().getProject() : (await source()).workspace);
             // Another workspace in this project, with the relations an agent needs to change them.
-            const workspace = await authority.getWorkspace(args.workspaceId);
+            const workspace = await authority().getWorkspace(args.workspaceId);
             if (!workspace) throw new Error(`Workspace ${args.workspaceId} is not in this project`);
-            return completed(input, { ...workspace, relations: (await authority.listWorkspaceRelations())[workspace.id] ?? null });
+            return completed(input, { ...workspace, relations: (await authority().listWorkspaceRelations())[workspace.id] ?? null });
           }
-          case 'list': return completed(input, await authority.listWorkspaces());
-          case 'operations': return completed(input, await authority.listOperations());
+          case 'list': return completed(input, await authority().listWorkspaces());
+          case 'operations': return completed(input, await authority().listOperations());
           case 'status': {
             // Stored reports only: no workspace runtime opens and no agent is woken to answer.
-            const listed = (await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting' && (args.workspaceId === undefined || workspace.id === args.workspaceId));
+            const listed = (await authority().listWorkspaces()).filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting' && (args.workspaceId === undefined || workspace.id === args.workspaceId));
             if (args.workspaceId !== undefined && listed.length === 0) throw new Error(`Workspace ${args.workspaceId} is not in this project`);
             const rows = await Promise.all(listed.map(async workspace => ({ id: workspace.id, name: workspace.name, branch: workspace.branch, lifecycle: workspace.lifecycle,
               report: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.id}`).workspaceReport() })));
             const [row] = rows;
             if (args.workspaceId === undefined || !row) return completed(input, rows);
             // One workspace also gets its position against the project base, walked in cloud history.
-            const project = await authority.getProject();
+            const project = await authority().getProject();
             const head = row.report?.code?.headCommit ?? null;
             const tip = project && head ? await readCloudBaseTip(env, env.ACCOUNT_ID, identity.projectId, project.baseBranch) : null;
             if (!project || !head || !tip) return completed(input, { ...row, base: null });
@@ -618,7 +620,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           case 'start': {
             // Only the project agent starts workspaces; workspaces starting each other could loop without a person.
             if (identity.workspaceId !== baseWorkspaceId) throw new Error('Only the project agent (the project\'s base workspace) can start other workspaces');
-            const target = await authority.getWorkspace(args.workspaceId);
+            const target = await authority().getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
             if (target.lifecycle !== 'active') throw new Error(`Workspace ${target.name} is ${target.lifecycle}; only an active workspace can be started`);
             await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).watchFromProject(target.name);
@@ -643,8 +645,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
         switch (args.method) {
           case 'list': return completed(input, await artifacts.list());
-          case 'listScopes': return completed(input, await authority.listArtifactScopes());
-          case 'listPromotions': return completed(input, await authority.listArtifactPromotions());
+          case 'listScopes': return completed(input, await authority().listArtifactScopes());
+          case 'listPromotions': return completed(input, await authority().listArtifactPromotions());
           case 'read': return artifactContent(input, args.url, await artifacts.bytes(args.url), options.documentMarkdown);
           case 'readCode': {
             const request = args;
@@ -672,14 +674,14 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (input.tool === 'history_read') {
           const request = RuntimeHistoryReadArgumentsSchema.parse(args);
           const workspaceId = request.workspaceId ?? identity.workspaceId;
-          if (workspaceId !== identity.workspaceId && workspaceId !== identity.projectId && !await authority.getWorkspace(workspaceId)) throw new Error('History workspace is outside this project');
+          if (workspaceId !== identity.workspaceId && workspaceId !== identity.projectId && !await authority().getWorkspace(workspaceId)) throw new Error('History workspace is outside this project');
           // Ordinals are entryId*1024+n: the runtime reads only the requested entries.
           const range = request.mode === 'content' ? { from: request.ordinal, before: request.ordinal + 1 } : { from: request.offset };
           return completed(input, await readRuntimeHistory(await transcript(workspaceId, request.conversationId, range), request, workspaceId));
         }
         const request = RuntimeHistorySearchArgumentsSchema.parse(args);
         const workspaceIds = request.scope === 'workspace' ? [identity.workspaceId]
-          : [...new Set([identity.projectId, ...(await authority.listWorkspaces()).map(workspace => workspace.id)])];
+          : [...new Set([identity.projectId, ...(await authority().listWorkspaces()).map(workspace => workspace.id)])];
         return completed(input, await searchHistory(request.query, {
           workspaceIds,
           async conversations(workspaceId) {
@@ -779,9 +781,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         }
       },
       async instructions(conversationId) {
-      const project = await authority.getProject();
+      const project = await authority().getProject();
       if (!project) throw new Error('Project is not configured');
-      const workspace = await authority.getWorkspace(identity.workspaceId);
+      const workspace = await authority().getWorkspace(identity.workspaceId);
       if (!workspace && identity.workspaceId !== baseWorkspaceId) throw new Error('Workspace does not belong to this project');
       const main = (await options.runtime().browserConversation(conversationId)).root;
       if (!main) {
