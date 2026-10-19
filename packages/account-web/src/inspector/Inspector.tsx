@@ -820,7 +820,7 @@ function GuideFileDiffBlock({ path, anchorKey, root, gateOpened, onGateOpen, onL
       if (!active) return;
       if (loaded.path !== path || loaded.mode !== 'base') throw new Error('The diff response does not match this guide exhibit.');
       setDiff(loaded);
-    }).catch((cause: unknown) => { if (active) setError(rpcErrorMessage(cause, 'inspector.repository.diff')); });
+    }).catch((cause: unknown) => { if (active) setError(rpcErrorMessage(cause, 'Change Guide diff')); });
     return () => { active = false; };
   }, [requested, path, runtimeAvailable]);
   useEffect(() => {
