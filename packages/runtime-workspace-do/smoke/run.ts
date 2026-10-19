@@ -272,6 +272,14 @@ try {
   worker = new Miniflare(options);
   assert.deepEqual((await session({ type: 'agentSetup' }, seeded.conversationId)).setup, saved);
   console.log('PASS bounded canonical Pi transcript paging, oversized content expansion, cold cursors and cloud usage');
+  const noticed = z.object({ conversationId: z.string() }).parse(await request('/sync-notices-seed'));
+  await worker.dispose(); worker = new Miniflare(options);
+  const noticeTexts = RuntimeSnapshotSchema.parse(await request('/')).conversations.find(conversation => conversation.id === noticed.conversationId)!.messages.flatMap(message => message.content.flatMap(part => part.type === 'text' ? [part.text] : []));
+  assert(!noticeTexts.some(text => text.startsWith('Sync with Darktop failed')), 'Withdrawn sync notices still in the chat');
+  assert(noticeTexts.includes('Machine Darktop went offline.'), 'Withdrawal removed an unrelated notice');
+  const noticePage = JSON.stringify((await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, noticed.conversationId)).transcriptPage!.rows);
+  assert(!noticePage.includes('Sync with Darktop failed') && noticePage.includes('Machine Darktop went offline.'), 'Withdrawn sync notices still in the history');
+  console.log('PASS past sync-failure notices are withdrawn from the chat and history on reopen');
 } finally {
   try { await worker?.dispose(); } finally { await rm(directory, { recursive: true, force: true }); }
 }

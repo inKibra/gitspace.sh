@@ -83,14 +83,15 @@ const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gi
  * in a few hours per workspace, all in the agent's context. They are withdrawn from the chat and the model's context. */
 async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harness, root: Conversation, withdrawn: WithdrawnNotices, sql: SqlStorage): Promise<void> {
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_one_time_steps(name TEXT PRIMARY KEY)');
-  if (sql.exec("SELECT 1 FROM runtime_one_time_steps WHERE name='sync-failure-notices-withdrawn'").toArray().length) return;
+  if (sql.exec("SELECT 1 FROM runtime_one_time_steps WHERE name='withdraw-sync-failure-notices'").toArray().length) return;
   const notices: EntryRecord[] = [];
   let cursor: Cursor | undefined;
   do {
     const page = await storage.scanEntries({ conversationId: root.id }, 128, cursor, BACKGROUND_CONTEXT);
     for (const entry of page.items) {
       const message = entry.kind === 'gitspace.machine-notice' ? entry.model?.[0] : undefined;
-      const text = typeof message?.content === 'string' ? message.content : '';
+      // Stored content is a string or text blocks, depending on the storage.
+      const text = message?.role !== 'user' ? '' : typeof message.content === 'string' ? message.content : message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
       if (/^Sync with .+ failed: /u.test(text)) notices.push(entry);
     }
     cursor = page.next;
@@ -99,7 +100,8 @@ async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harne
     await harness.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.notices-withdrawn', edits: notices.map(entry => ({ target: entry.id, action: 'omit' })) }), BACKGROUND_CONTEXT);
     withdrawn.add(notices.map(entry => String(entry.id)));
   }
-  sql.exec("INSERT INTO runtime_one_time_steps(name) VALUES('sync-failure-notices-withdrawn')");
+  sql.exec("INSERT INTO runtime_one_time_steps(name) VALUES('withdraw-sync-failure-notices')");
+  console.info(JSON.stringify({ event: 'sync_failure_notices_withdrawn', conversationId: String(root.id), count: notices.length }));
 }
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
