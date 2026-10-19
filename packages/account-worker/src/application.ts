@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
 import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
 import { runtimeMachineControl } from './account-runtime-control.js';
@@ -144,6 +143,7 @@ import {
   type WorkerVersion,
   type LaunchResult,
 } from './tenant-releases.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 // Pi's variable-specifier Bedrock import cannot run inside a Worker bundle.
 setBedrockProviderModule(bedrockProviderModule);
@@ -411,7 +411,7 @@ function publicError(code: string, message: string, retryAfterMs?: number): Cred
   return { status: 'error', error: { code, message, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) } };
 }
 
-export class CredentialVaultDO extends DurableObject<Env> {
+export class CredentialVaultDO extends BudgetedDurableObject {
   private inferenceMigration: Promise<InferenceState> | null = null;
   private readonly inferenceChanges: LiveChanges;
   private readonly activeLoginAttempts = new Set<string>();

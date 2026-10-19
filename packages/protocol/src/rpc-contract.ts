@@ -951,6 +951,31 @@ export const getMcpConnectionStatusContract = gitspaceRpc
   .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
+/** A Durable Object whose storage was quarantined (it wrote past its budget, or the platform's watchdog stopped it) or
+ * whose writes passed the platform's alert threshold. */
+export const StorageIncidentCodec = wire.object({
+  objectId: wire.string,
+  className: wire.string,
+  name: wire.nullable(wire.string),
+  kind: wire.enum(['quarantine', 'alert']),
+  reason: wire.string,
+  at: wire.string,
+});
+export type StorageIncidentView = InputOf<typeof StorageIncidentCodec>;
+export const storageIncidentsListContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(wire.array(StorageIncidentCodec))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
+/** Resumes a quarantined object and clears its incident, or dismisses an alert. Requires account administration. */
+export const storageIncidentsResumeContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ objectId: wire.string }))
+  .output(wire.object({ resumed: wire.boolean }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 /** The tenant's GitHub App, its installations and its latest webhook deliveries. */
 export const githubStateContract = gitspaceRpc
   .procedure()
@@ -2146,6 +2171,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     cancelRun: cancelWorkspaceEnvironmentRunContract,
     runLog: getWorkspaceEnvironmentRunLogContract,
   },
+  storageIncidents: { list: storageIncidentsListContract, resume: storageIncidentsResumeContract },
   github: {
     state: githubStateContract,
     app: { start: githubAppStartContract, rotateKey: githubAppRotateKeyContract },

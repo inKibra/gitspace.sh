@@ -1,4 +1,4 @@
-import { DurableObject } from 'cloudflare:workers';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 export type OperatorAccountStatus = 'provisioning' | 'active' | 'quarantined' | 'suspended' | 'failed';
 export interface OperatorAccountRecord {
@@ -58,7 +58,7 @@ function accountFromRow(row: AccountRow): OperatorAccountRecord {
   };
 }
 
-export class AccountRegistryDO extends DurableObject<Env> {
+export class AccountRegistryDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`

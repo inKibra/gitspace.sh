@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import { parseDocument, stringify } from 'yaml';
 import {
   extractInferenceSettings,
@@ -22,6 +21,7 @@ import { subscriptionIdentity, subscriptionActive } from './account-access.js';
 import { LiveChanges } from './live-changes.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const EMPTY_SHA256 = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' as const;
 export class SettingsRevisionConflict extends Error {
@@ -73,7 +73,7 @@ interface InferenceMigrationRow extends Record<string, SqlStorageValue> {
 }
 interface SettingsChangedEvent { type: 'settings.changed'; userRevision: number; runtimeGeneration: number; inferenceRevision?: number }
 
-export class UserSettingsDO extends DurableObject<Env> {
+export class UserSettingsDO extends BudgetedDurableObject {
   private readonly changes: LiveChanges;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

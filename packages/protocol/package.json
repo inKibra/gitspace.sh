@@ -36,7 +36,8 @@
     "./rpc-crypto": "./src/rpc-crypto.ts",
     "./server-clock": "./src/server-clock.ts",
     "./socket-auth": "./src/socket-auth.ts",
-    "./github": "./src/github.ts"
+    "./github": "./src/github.ts",
+    "./storage-breaker": "./src/storage-breaker.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

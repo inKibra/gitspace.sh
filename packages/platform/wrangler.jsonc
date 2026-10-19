@@ -91,7 +91,7 @@
     "USAGE_REPORT_SCRIPTS": "gitspace-rebuild-20260913-tenant-bradleat"
   },
   "triggers": {
-    "crons": ["15 0 * * *"]
+    "crons": ["15 0 * * *", "*/10 * * * *"]
   },
   "observability": {
     "enabled": true,

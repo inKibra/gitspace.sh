@@ -1,5 +1,5 @@
-import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_GITSPACE_SKILLS, skillUpdateSchema, skillViewSchema, type SkillUpdate, type SkillView } from '@gitspace/protocol/skills-contract';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 interface SkillOverrideRow extends Record<string, SqlStorageValue> {
   skill_id: string;
@@ -17,7 +17,7 @@ export class SkillRevisionConflict extends Error {
   }
 }
 
-export class UserSkillsDO extends DurableObject<Env> {
+export class UserSkillsDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`

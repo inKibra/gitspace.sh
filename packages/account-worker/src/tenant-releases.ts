@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import {
   canonicalHeadSchema,
   deploymentStatusSchema,
@@ -29,6 +28,7 @@ import { defaultMachineReleaseSchema } from '@gitspace/protocol/default-release'
 import { tenantPlatformJson } from './tenant-platform.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 
@@ -114,7 +114,7 @@ function migrateReleaseSources(storage: DurableObjectStorage): void {
   if (launch && !launchProgressSchema.safeParse(JSON.parse(launch.record_json)).success) storage.sql.exec('DELETE FROM latest_launch WHERE id = 1');
 }
 
-export class TenantReleasesDO extends DurableObject<Env> {
+export class TenantReleasesDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Keep legacy OMP columns as history; active selection and acknowledgements never read or write them.

@@ -1,6 +1,6 @@
-import { DurableObject } from 'cloudflare:workers';
 import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { TenantComputeProvider, type ComputeTarget } from './compute-provider.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 /** One upload the platform performed for this tenant, in RELEASES bucket terms. */
 export interface TenantDeployRecord {
@@ -84,7 +84,7 @@ function toRecord(row: DeployRow): TenantDeployRecord {
  * ask for a swap, the migration tag Cloudflare currently has for the script,
  * and the upload history the revert paths walk.
  */
-export class TenantDeploymentsDO extends DurableObject<Env> {
+export class TenantDeploymentsDO extends BudgetedDurableObject {
   private computeProvider: TenantComputeProvider | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

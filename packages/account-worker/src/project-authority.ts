@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import { Result } from 'better-result';
 import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type RemoteBranchState } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
@@ -39,6 +38,7 @@ import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
 import { behindOrigin } from './cloud-stack-status.js';
 import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } from './guide-shares.js';
 import { z } from 'zod';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 const RemoteHeadsSchema = z.array(z.object({ branch: z.string().min(1).max(512), head: remoteBranchStateSchema.shape.head })).max(1_000);
@@ -343,7 +343,7 @@ function projectMcpGrant(row: ProjectMcpGrantRow): ProjectMcpGrant {
   };
 }
 
-export class UserProjectIndexDO extends DurableObject<Env> {
+export class UserProjectIndexDO extends BudgetedDurableObject {
   private readonly directory: AccountDirectoryProjection;
   private hydration: Promise<void> | null = null;
   private committing = false;
@@ -760,7 +760,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   }
 }
 
-export class ProjectAuthorityDO extends DurableObject<Env> {
+export class ProjectAuthorityDO extends BudgetedDurableObject {
   private readonly changes: LiveChanges;
   private readonly directory: DirectoryPublisher;
   private readonly lfs: GitLfsRetention;
@@ -1011,11 +1011,13 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
-    // log; the cloud runtime reads none of it. Delete it in bounded batches so no single invocation scans or locks it all.
+    // log; the cloud runtime reads none of it. Delete it in batches of 1,000 every 10 seconds: each event is about two
+    // written rows (with its index), so the purge stays near 720k rows an hour, under the storage breaker (2M per 10
+    // minutes) and the watchdog's alert (1M an hour). At 20,000 a second it wrote 14.2M rows in an hour on 2026-10-15.
     if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length) {
-      const deleted = this.ctx.storage.sql.exec(`DELETE FROM project_events WHERE offset IN (SELECT offset FROM project_events WHERE entity NOT IN (${CURRENT_EVENT_ENTITIES.map(() => '?').join(',')}) LIMIT 20000)`, ...CURRENT_EVENT_ENTITIES).rowsWritten;
+      const deleted = this.ctx.storage.sql.exec(`DELETE FROM project_events WHERE offset IN (SELECT offset FROM project_events WHERE entity NOT IN (${CURRENT_EVENT_ENTITIES.map(() => '?').join(',')}) LIMIT 1000)`, ...CURRENT_EVENT_ENTITIES).rowsWritten;
       if (deleted === 0) this.ctx.storage.sql.exec('CREATE TABLE legacy_events_purged(done INTEGER)');
-      else await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      else await this.ctx.storage.setAlarm(Date.now() + 10_000);
     }
   }
 

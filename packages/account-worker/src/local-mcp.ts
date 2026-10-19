@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import {
   DEFAULT_COMPOSIO_TOOL_POLICY,
   composioToolPolicySchema,
@@ -15,6 +14,7 @@ import {
   type McpConnectionStatus,
 } from '@gitspace/protocol';
 import { z } from 'zod';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 interface ConnectionRow extends Record<string, SqlStorageValue> {
   connection_id: string;
@@ -146,7 +146,7 @@ function safeAuditMessage(value: string | null | undefined): string | null {
     .replace(/\b(?:authorization|proxy-authorization|x-api-key|api[_-]?key|token|secret)\s*[:=]\s*[^\s,;]+/giu, '[credential]=[redacted]')
 }
 
-export class UserMcpConnectionsDO extends DurableObject<Env> {
+export class UserMcpConnectionsDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {

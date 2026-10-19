@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import { SpaceAuthorityRecordSchema, WorkspaceDomainError, type SpaceAuthorityRecord, type SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { LiveChanges } from './live-changes.js';
 import type { LiveNotice } from '@gitspace/protocol/live-notice';
@@ -31,6 +30,7 @@ import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
 import { forwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
@@ -56,7 +56,7 @@ async function baseCheckoutHolds(code: ArtifactsCodeStore, repositories: readonl
 const SYNC_NOTICE_AFTER_MS = 5 * 60_000;
 const SyncFailureRunSchema = z.object({ since: z.number(), noticed: z.boolean() });
 
-export class SpaceAuthorityDO extends DurableObject<Env> {
+export class SpaceAuthorityDO extends BudgetedDurableObject {
   private readonly changes: LiveChanges;
   private readonly environment: SpaceEnvironmentStore;
   private directory: DirectoryPublisher;

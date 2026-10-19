@@ -1,6 +1,6 @@
-import { DurableObject } from 'cloudflare:workers';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import type { AccountSecretMetadata, EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 // This scope cannot be a valid project id, keeping AES-GCM account/project data distinct.
 const ACCOUNT_SECRET_SCOPE = 'account:';
@@ -74,7 +74,7 @@ async function open(row: SecretRow, key: Uint8Array): Promise<string> {
 }
 
 
-export class ProjectSecretsDO extends DurableObject<Env> {
+export class ProjectSecretsDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {

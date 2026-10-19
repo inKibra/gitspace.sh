@@ -1,4 +1,4 @@
-import { DurableObject } from 'cloudflare:workers';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 export type CreditErrorCode =
   | 'ACCOUNT_UNCONFIGURED'
@@ -62,7 +62,7 @@ function validMicros(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-export class CreditLedgerDO extends DurableObject<Env> {
+export class CreditLedgerDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {

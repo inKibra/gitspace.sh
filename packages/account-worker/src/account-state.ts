@@ -1,9 +1,17 @@
-import { DurableObject } from 'cloudflare:workers';
 import { RuntimeBrowserAuthorityCertificateBodySchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody } from '@gitspace/protocol-runtime';
 import { runtimeBrowserKey, runtimeBrowserPublicKey } from './runtime-browser.js';
 import { ServiceAssertionBodySchema, signServiceAssertion, type ServiceAssertionBody } from '@gitspace/protocol/service-access';
 import { z } from 'zod';
 import { tenantPlatformJson } from './tenant-platform.js';
+import { accountLiveKey } from '@gitspace/protocol/live-notice';
+import { notifyBrowsers } from './live-notices.js';
+import { StorageIncidentSchema, type StorageIncident } from './storage-quarantine.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
+
+/** Storage incidents the account keeps, newest last. */
+const STORAGE_INCIDENT_LIMIT = 50;
+/** After an incident is cleared, the object's alerts stay silent this long (a quarantine still shows). */
+const STORAGE_ALERT_SNOOZE_MS = 6 * 60 * 60_000;
 
 // A successful platform observation is authoritative for at most 60 seconds.
 // Refresh on use after 15 seconds; outage retries coalesce and wait 5 seconds.
@@ -35,7 +43,7 @@ export interface AccountRecord {
   tenantProvisionedAt: number | null;
   lastError: string | null;
 }
-export class AccountStateDO extends DurableObject<Env> {
+export class AccountStateDO extends BudgetedDurableObject {
  private authorityCheck: Promise<AccountAuthorization> | null = null;
 
  async authorization(userId: string): Promise<AccountAuthorization> {
@@ -97,5 +105,38 @@ export class AccountStateDO extends DurableObject<Env> {
    const now = Date.now();
    if (body.accountId !== this.env.ACCOUNT_ID || Date.parse(body.issuedAt) > now + 5000 || Date.parse(body.expiresAt) <= now || Date.parse(body.expiresAt) > now + 24 * 60 * 60_000) throw new Error('Invalid workspace browser authority');
    return signRuntimeBrowserAuthorityCertificate(body, (await runtimeBrowserKey(this.ctx.storage)).privateKey);
- }
+  }
+
+  /** Records a storage incident, one per object: a later one replaces it, and a quarantine is not replaced by an alert.
+   * Alerts of an object whose incident was cleared within `STORAGE_ALERT_SNOOZE_MS` are dropped. */
+  async recordStorageIncident(raw: StorageIncident): Promise<void> {
+    const incident = StorageIncidentSchema.parse(raw);
+    const incidents = await this.listStorageIncidents();
+    const previous = incidents.find(item => item.objectId === incident.objectId);
+    if (previous?.kind === 'quarantine' && incident.kind === 'alert') return;
+    if (incident.kind === 'alert' && ((await this.storageAlertSnoozes())[incident.objectId] ?? 0) > Date.now()) return;
+    const next = [...incidents.filter(item => item.objectId !== incident.objectId), { ...incident, name: incident.name ?? previous?.name ?? null }].slice(-STORAGE_INCIDENT_LIMIT);
+    await this.ctx.storage.put('storage-incidents', next);
+    await notifyBrowsers(this.env, [{ ...accountLiveKey('storage-incidents'), version: Date.now() }]);
+  }
+
+  async listStorageIncidents(): Promise<StorageIncident[]> {
+    const parsed = z.array(StorageIncidentSchema).safeParse(await this.ctx.storage.get('storage-incidents'));
+    return parsed.success ? parsed.data : [];
+  }
+
+  async clearStorageIncident(objectId: string): Promise<void> {
+    const now = Date.now();
+    const snoozes = Object.fromEntries(Object.entries(await this.storageAlertSnoozes()).filter(([, until]) => until > now));
+    await this.ctx.storage.put('storage-alert-snoozes', { ...snoozes, [objectId]: now + STORAGE_ALERT_SNOOZE_MS });
+    const incidents = await this.listStorageIncidents();
+    if (!incidents.some(item => item.objectId === objectId)) return;
+    await this.ctx.storage.put('storage-incidents', incidents.filter(item => item.objectId !== objectId));
+    await notifyBrowsers(this.env, [{ ...accountLiveKey('storage-incidents'), version: Date.now() }]);
+  }
+
+  private async storageAlertSnoozes(): Promise<Record<string, number>> {
+    const parsed = z.record(z.string(), z.number()).safeParse(await this.ctx.storage.get('storage-alert-snoozes'));
+    return parsed.success ? parsed.data : {};
+  }
 }

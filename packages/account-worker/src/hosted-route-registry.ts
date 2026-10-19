@@ -1,5 +1,5 @@
-import { DurableObject } from 'cloudflare:workers';
 import { hostedServiceRouteSchema, type HostedServiceRoute } from '@gitspace/protocol';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 interface HostedRouteRow extends Record<string, SqlStorageValue> {
   tenant: string;
@@ -11,7 +11,7 @@ export interface ResolvedHostedRoute extends HostedServiceRoute {
   tenant: string;
 }
 
-export class HostedRouteRegistryDO extends DurableObject<Env> {
+export class HostedRouteRegistryDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {

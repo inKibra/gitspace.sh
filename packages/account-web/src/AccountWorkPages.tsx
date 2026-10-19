@@ -12,6 +12,7 @@ import { navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
 import { ProjectBrowserSettings } from './ProjectBrowserSettings.js';
+import { StorageIncidents } from './StorageIncidents.js';
 
 export interface AccountWorkPagesProps {
   view: 'kanban' | 'projects' | 'inbox';
@@ -170,6 +171,7 @@ function InboxView({ projects, directory, onOpenWorkspace, onOpenProject }: Pick
   const incomplete = scopes.filter((scope) => !scope.summary?.status || summaryFreshness(scope.summary) !== 'fresh');
   return <PageCanvas>
     <PageHeader kicker="Attention" title="Inbox" description="Recorded approvals, waits, failures and sync conflicts across project and workspace agents." actions={<span className="text-caption text-muted-foreground tabular-nums">{attention.length} {attention.length === 1 ? 'space' : 'spaces'} with recorded attention</span>} />
+    <StorageIncidents />
     {attention.length ? <CardGroup orientation="inline" border="outlined" separated>{attention.map((item, index) => <Card key={item.key} index={index} onClick={item.open} label={`Open ${item.name}`}><CardHeader><CardTitle>{item.name}</CardTitle><CardDescription>{item.reasons.join(' · ')}</CardDescription></CardHeader><CardContent><Badge size="compact" color={summaryFreshness(item.summary) === 'fresh' ? 'amber' : 'gray'}>{summaryFreshness(item.summary) === 'fresh' ? 'Recorded attention' : summaryFreshness(item.summary) === 'stale' ? 'Last recorded · stale' : 'Freshness unknown'}</Badge></CardContent></Card>)}</CardGroup>
       : <EmptyState title="No attention recorded" description={incomplete.length || projects.some((project) => !directory[project.id] || directory[project.id]?.error) ? 'Status coverage is incomplete. Unavailable or stale reports cannot establish that nothing needs attention.' : 'The available status summaries contain no recorded waits or errors.'} />}
     {incomplete.length ? <section className="flex flex-col gap-3 pt-8"><h2 className="text-subtitle font-semibold text-foreground">Status coverage</h2><p className="text-body text-muted-foreground">These spaces have unknown or stale reports; their current agents and sync have not been confirmed.</p><CardGroup orientation="inline" border="outlined" separated>{incomplete.map((scope, index) => <Card key={scope.key} index={index} onClick={scope.open} label={`Inspect ${scope.name}`}><CardHeader><CardTitle>{scope.name}</CardTitle><CardDescription>{summaryFreshness(scope.summary) === 'stale' ? 'Stale status · last recorded only' : 'Status unknown'}{scope.summary?.detail ? ` · ${scope.summary.detail}` : ''}</CardDescription></CardHeader></Card>)}</CardGroup></section> : null}

@@ -37,6 +37,7 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
 const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
   'inspector.guide.setApproval', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
+  'storageIncidents.list', 'storageIncidents.resume',
 ].includes(path);
 const agentSessionCommands = [
   'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'messages', 'persist', 'handoff', 'resume', 'stop',

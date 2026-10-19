@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import {
   PROJECT_CRON_OVERDUE_MS,
   PROJECT_CRON_MAX_QUEUE_MS,
@@ -12,6 +11,7 @@ import {
 } from '@gitspace/protocol/cron-contract';
 import { z } from 'zod';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 interface CronRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -201,7 +201,7 @@ function runView(row: RunRow): ProjectCronRunView {
   };
 }
 
-export class ProjectCronsDO extends DurableObject<Env> {
+export class ProjectCronsDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {

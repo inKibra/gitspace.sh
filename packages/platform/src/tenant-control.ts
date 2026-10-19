@@ -1,4 +1,4 @@
-import { DurableObject } from 'cloudflare:workers';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 export type TenantControlStatus = 'active' | 'quarantined' | 'suspended';
 export interface TenantControlState {
@@ -14,7 +14,7 @@ interface TenantControlRow {
   updated_at: string;
 }
 
-export class TenantControlDO extends DurableObject<Env> {
+export class TenantControlDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`

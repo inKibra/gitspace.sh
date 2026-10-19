@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import {
   INSPECTOR_EVIDENCE_HISTORY_LIMIT,
   appendJournalEntryInputSchema,
@@ -63,6 +62,7 @@ import {
   type WorkflowView,
 } from '@gitspace/protocol/inspector-contract';
 import type { z } from 'zod';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 interface MetaRow extends Record<string, SqlStorageValue> {
   project_id: string;
@@ -176,7 +176,7 @@ export class InspectorStateError extends Error {
   readonly name = 'InspectorStateError';
 }
 
-export class SpaceContextDO extends DurableObject<Env> {
+export class SpaceContextDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => this.migrate());

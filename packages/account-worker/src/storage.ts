@@ -1,4 +1,4 @@
-import { DurableObject } from 'cloudflare:workers';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 export type UserStorageState = 'provisioning' | 'ready' | 'failed' | 'deleting';
 
@@ -20,7 +20,7 @@ interface StorageRow extends Record<string, SqlStorageValue> {
   updated_at: string;
 }
 
-export class UserStorageDO extends DurableObject<Env> {
+export class UserStorageDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {

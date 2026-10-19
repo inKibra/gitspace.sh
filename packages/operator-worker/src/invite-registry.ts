@@ -1,4 +1,4 @@
-import { DurableObject } from 'cloudflare:workers';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const INVITE_PREFIX = 'gsi_';
 const RESERVATION_TTL_MS = 10 * 60 * 1000;
@@ -72,7 +72,7 @@ function inviteView(row: InviteRow, now = Date.now()): OperatorInviteView {
   };
 }
 
-export class InviteRegistryDO extends DurableObject<Env> {
+export class InviteRegistryDO extends BudgetedDurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`

@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import { LiveChanges } from './live-changes.js';
 import { notifyBrowsers } from './live-notices.js';
 import { z } from 'zod';
@@ -12,6 +11,7 @@ import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 export type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 
 /** Cloud machines one account may hold at once; provisioning and stopped ones still count. */
@@ -64,7 +64,7 @@ const pendingMachineDiscardSchema = z.object({
   workspaces: z.array(machineDiscardScopeSchema),
 });
 
-export class FleetCatalogDO extends DurableObject<Env> {
+export class FleetCatalogDO extends BudgetedDurableObject {
   private readonly changes: LiveChanges;
   private readonly directory: DirectoryPublisher;
   private readonly imageRuns = new Map<string, { run: Promise<void>; current: boolean }>();

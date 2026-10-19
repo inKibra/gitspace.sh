@@ -189,8 +189,9 @@ export function usageReportScripts(value: string | undefined): string[] {
 }
 
 /** Class names of the script's Durable Object namespaces, or null when the token cannot list them. */
-async function namespaceClasses(accountId: string, script: string, token: string): Promise<Map<string, string> | null> {
-  const classes = new Map<string, string>();
+/** The account's Durable Object namespaces with their script and class, or null when Cloudflare does not answer. */
+export async function durableObjectNamespaces(accountId: string, token: string): Promise<Array<{ id: string; className: string; script: string | null }> | null> {
+  const all: Array<{ id: string; className: string; script: string | null }> = [];
   for (let page = 1; ; page += 1) {
     const response = await fetch(`${CLOUDFLARE_API}/accounts/${encodeURIComponent(accountId)}/workers/durable_objects/namespaces?per_page=1000&page=${page}`, {
       headers: { authorization: `Bearer ${token}` },
@@ -200,15 +201,18 @@ async function namespaceClasses(accountId: string, script: string, token: string
     const body = namespaceListSchema.safeParse(await response.json());
     if (!body.success || !body.data.success) return null;
     const namespaces = body.data.result ?? [];
-    for (const namespace of namespaces) {
-      if (namespace.script === script) classes.set(namespace.id, namespace.class ?? namespace.id);
-    }
-    if (namespaces.length === 0 || page >= (body.data.result_info?.total_pages ?? page)) return classes;
+    for (const namespace of namespaces) all.push({ id: namespace.id, className: namespace.class ?? namespace.id, script: namespace.script ?? null });
+    if (namespaces.length === 0 || page >= (body.data.result_info?.total_pages ?? page)) return all;
   }
 }
 
+async function namespaceClasses(accountId: string, script: string, token: string): Promise<Map<string, string> | null> {
+  const namespaces = await durableObjectNamespaces(accountId, token);
+  return namespaces && new Map(namespaces.filter(namespace => namespace.script === script).map(namespace => [namespace.id, namespace.className]));
+}
+
 /** One account-scoped GraphQL query; GraphQL errors and truncated pages fail the report rather than under-count. */
-async function queryAccount<S extends z.ZodType>(request: UsageReportRequest, query: string, variables: Record<string, unknown>, schema: S): Promise<z.output<S>> {
+export async function queryAccount<S extends z.ZodType>(request: UsageReportRequest, query: string, variables: Record<string, unknown>, schema: S): Promise<z.output<S>> {
   const response = await fetch(`${CLOUDFLARE_API}/graphql`, {
     method: 'POST',
     headers: { authorization: `Bearer ${request.analyticsToken}`, 'content-type': 'application/json' },

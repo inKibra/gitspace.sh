@@ -20,7 +20,8 @@ vi.mock('./browser-relay-client.js', () => ({
   updateProjectBrowserSettings: vi.fn(),
 }));
 const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn() }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh } } } }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh } }, storageIncidents: { list: 'storage-incidents', resume: vi.fn() } } }));
+vi.mock('result-rpc/react', async () => ({ ...await vi.importActual<object>('result-rpc/react'), useResultQuery: () => ({ state: 'success', value: [], refetch: async () => {} }) }));
 
 const stamp = '2026-09-12T00:00:00.000Z';
 const projects: ProjectLifecycleView[] = [

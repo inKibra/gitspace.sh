@@ -1,5 +1,10 @@
 import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
+import { PlatformStorageActionSchema, platformObjectStorage } from './storage-quarantine.js';
+import { runStorageWatchdog } from './storage-watchdog.js';
+
+/** `wrangler.jsonc` cron of the storage watchdog; the other cron is the daily usage report. */
+const STORAGE_WATCHDOG_CRON = '*/10 * * * *';
 import { platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
 import { CloudflareR2PlatformClient } from './storage-provider.js';
 import { CreditLedgerDO, isCreditLedgerRecord, type CreditLedgerRecord } from './credit-ledger.js';
@@ -386,6 +391,23 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   return platformError(404, 'RESOURCE_NOT_FOUND', 'Tenant resource route does not exist');
 }
 
+/**
+ * Inspects, quarantines or resumes one of the platform's own Durable Objects (signed admin request). The admin nonce is
+ * not consumed: it lives in `CreditLedgerDO`, which may be the quarantined object; replaying a resume changes nothing.
+ */
+async function handleStorageAdmin(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const authorization = verifyRelayAuthorization({
+    header: request.headers.get('authorization'), signingPublicKey: env.ADMIN_PUBLIC_KEY,
+    target: `${url.pathname}${url.search}`, maxSkewMs: Number(env.ADMIN_AUTH_MAX_SKEW_MS),
+  });
+  if (authorization.status === 'error') return platformError(401, 'ADMIN_UNAUTHORIZED', authorization.error.message);
+  const input = PlatformStorageActionSchema.safeParse(await request.json().catch(() => null));
+  if (!input.success) return platformError(400, 'INVALID_STORAGE_ACTION', 'Expected { objectId, action, reason? }');
+  const status = await platformObjectStorage(env, input.data);
+  return status ? Response.json(status) : platformError(404, 'OBJECT_NOT_FOUND', 'No platform Durable Object has that id');
+}
+
 /** Stored report for `date`, or null when absent or written by an incompatible version. */
 async function storedUsageReport(env: Env, script: string, date: string): Promise<UsageReport | null> {
   const object = await env.RELEASES.get(usageReportKey(script, date));
@@ -431,6 +453,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/__platform/health') return Response.json({ status: 'ok' });
+    if (url.pathname === '/__platform/admin/storage' && request.method === 'POST') return handleStorageAdmin(request, env);
     const defaultFrontend = await defaultFrontendResponse(request, env.RELEASES);
     if (defaultFrontend) return defaultFrontend;
 
@@ -485,6 +508,7 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    await reportUsage(env, controller.scheduledTime);
+    if (controller.cron === STORAGE_WATCHDOG_CRON) await runStorageWatchdog(env, controller.scheduledTime);
+    else await reportUsage(env, controller.scheduledTime);
   },
 } satisfies ExportedHandler<Env>;

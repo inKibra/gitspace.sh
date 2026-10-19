@@ -5,6 +5,7 @@ import { tenantIdSchema } from '@gitspace/protocol/deployment';
 import { AccountRegistryDO, type OperatorAccountRecord } from './account-registry.js';
 import { InviteRegistryDO } from './invite-registry.js';
 import { operatorIdentity } from './access-auth.js';
+import { OperatorStorageActionSchema, operatorObjectStorage } from './storage-quarantine.js';
 export { AccountRegistryDO } from './account-registry.js';
 export { InviteRegistryDO } from './invite-registry.js';
 const REQUEST_MAX_BYTES = 512 * 1024;
@@ -92,6 +93,13 @@ const operatorWorker = {
       }
       const invites = inviteRegistry(env);
       const accounts = accountRegistry(env);
+      if (url.pathname === '/v1/operator/storage' && request.method === 'POST') {
+        const input = OperatorStorageActionSchema.safeParse(await request.json().catch(() => null));
+        if (!input.success) return Response.json(publicError('INVALID_STORAGE_ACTION', 'Expected { objectId, action, reason? }'), { status: 400, headers: { 'cache-control': 'no-store' } });
+        const status = await operatorObjectStorage(env, input.data);
+        if (!status) return Response.json(publicError('OBJECT_NOT_FOUND', 'No operator Durable Object has that id'), { status: 404, headers: { 'cache-control': 'no-store' } });
+        return Response.json({ status: 'ok', value: status }, { headers: { 'cache-control': 'no-store' } });
+      }
       if (url.pathname === '/v1/operator/session' && request.method === 'GET') {
         return Response.json({ status: 'ok', value: { authenticated: true, email: identity.email } }, { headers: { 'cache-control': 'no-store' } });
       }

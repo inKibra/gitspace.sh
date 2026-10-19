@@ -1,7 +1,6 @@
 import { accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
-import { DurableObject } from 'cloudflare:workers';
 import {
   RELAY_HEARTBEAT_LEASE_MS,
   RELAY_HEARTBEAT_MODE,
@@ -48,6 +47,7 @@ import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCook
 import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
+import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
 export {
   AccountStateDO, CredentialVaultDO, FleetCatalogDO, GitHubAppDO, HostedRouteRegistryDO,
   ProjectAuthorityDO, ProjectCronsDO, ProjectSecretsDO, SpaceAuthorityDO,
@@ -306,7 +306,7 @@ async function handleArtifactRequest(request: Request, env: Env, hash: string): 
   return jsonError(405, 'METHOD_NOT_ALLOWED', 'Artifact route supports PUT, GET, and HEAD');
 }
 
-export class UserRelayDO extends DurableObject<Env> {
+export class UserRelayDO extends BudgetedDurableObject {
   private readonly pendingTunnels = new Map<string, PendingTunnel>();
   private readonly serviceSessions = new ServiceSessions(this.ctx.storage, this.env.ACCOUNT_ID, async (deviceId) => {
     const view = await deviceAuthority(this.env).current();
@@ -970,6 +970,11 @@ export default {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
       const response = await application.fetch(request, env);
       return new Response(response.body, { status: response.status, headers: { ...Object.fromEntries(response.headers), ...cors } });
+    }
+    if (url.pathname === '/__platform/storage') {
+      if (request.headers.get('authorization') !== `Bearer ${env.PLATFORM_TOKEN}`) return jsonError(401, 'PROVIDER_UNAUTHORIZED', 'Provider storage authorization is required');
+      if (request.method !== 'POST') return jsonError(405, 'METHOD_NOT_ALLOWED', 'Storage control requires POST');
+      return platformStorageControl(request, env);
     }
     if (url.pathname.startsWith('/__platform/objects/')) {
       if (request.headers.get('authorization') !== `Bearer ${env.PLATFORM_TOKEN}`) return jsonError(401, 'PROVIDER_UNAUTHORIZED', 'Provider object authorization is required');

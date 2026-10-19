@@ -1,4 +1,3 @@
-import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import {
@@ -10,6 +9,7 @@ import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
+import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const STATE_TTL_MS = 15 * 60_000;
 /** How long an installation GitSpace did not start may stay: its setup callback can still claim it meanwhile. */
@@ -188,7 +188,7 @@ export async function githubRoute(request: Request, env: Env, url: URL): Promise
 
 /** The account's GitHub App: its public record, the installations GitSpace started, and recorded webhook deliveries.
  * Secrets live in the credential vault. */
-export class GitHubAppDO extends DurableObject<Env> {
+export class GitHubAppDO extends BudgetedDurableObject {
   /** A manifest conversion is in flight: a second callback must not create another App meanwhile. */
   private creating = false;
 
