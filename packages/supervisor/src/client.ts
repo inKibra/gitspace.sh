@@ -5,10 +5,19 @@ import { resolve, join } from 'node:path';
 import { BrokerReplySchema, DAEMON_BROKER_WORKER_ARG, SupervisorRequestError, type DaemonRequest, type DaemonResponse } from './protocol.js';
 import { getDaemonRuntimeDir } from './process-identity.js';
 
-/** Requests to the broker whose runtime directory is `runtimeDir` (`getDaemonRuntimeDir(project)`). */
+/** A broker exits after sitting idle, so a socket that existed may be gone by the next request. */
+const brokerGone = (error: unknown) => error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ECONNREFUSED');
+/** Requests to the broker whose runtime directory is `runtimeDir` (`getDaemonRuntimeDir(project)`). With `reacquire`,
+ * a request whose connection fails (it never reached a broker) is sent once more through a newly started broker. */
 export class DaemonBrokerClient {
-  constructor(readonly runtimeDir: string, private readonly unavailable?: () => void) {}
-  request(request: DaemonRequest, signal?: AbortSignal): Promise<DaemonResponse> {
+  constructor(readonly runtimeDir: string, private readonly reacquire?: () => Promise<DaemonBrokerClient>) {}
+  async request(request: DaemonRequest, signal?: AbortSignal): Promise<DaemonResponse> {
+    try { return await this.send(request, signal); } catch (error) {
+      if (!this.reacquire || !brokerGone(error)) throw error;
+      return (await this.reacquire()).send(request, signal);
+    }
+  }
+  private send(request: DaemonRequest, signal?: AbortSignal): Promise<DaemonResponse> {
     const result = Promise.withResolvers<DaemonResponse>();
     if (signal?.aborted) { result.reject(signal.reason); return result.promise; }
     const socket = createConnection(join(this.runtimeDir, 'broker.sock'));
@@ -17,10 +26,7 @@ export class DaemonBrokerClient {
     signal?.addEventListener('abort', abort, { once: true });
     socket.setEncoding('utf8');
     socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
-    socket.on('error', error => {
-      if ('code' in error && (error.code === 'ENOENT' || error.code === 'ECONNREFUSED')) this.unavailable?.();
-      result.reject(error);
-    });
+    socket.on('error', error => result.reject(error));
     socket.on('close', () => { signal?.removeEventListener('abort', abort); result.reject(new Error('Supervisor connection closed before a response')); });
     socket.on('data', (data: string) => {
       buffer += data;
@@ -41,13 +47,14 @@ export function daemonClientForProject(projectDirectory: string): Promise<Daemon
   const existing = clients.get(project);
   if (existing) return existing;
   const connecting: Promise<DaemonBrokerClient> = (async () => {
-    let connected = false;
     const client = new DaemonBrokerClient(getDaemonRuntimeDir(project), () => {
-      // Evict only this dead connection's cache entry. Never replay its request.
-      if (connected && clients.get(project) === connecting) clients.delete(project);
+      // This broker is gone: drop it from the cache so the next acquisition starts one.
+      if (clients.get(project) === connecting) clients.delete(project);
+      return daemonClientForProject(project);
     });
-    try { await client.request({ op: 'list' }); connected = true; return client; } catch (error) {
-      if (!(error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ECONNREFUSED'))) throw error;
+    const probe = new DaemonBrokerClient(client.runtimeDir);
+    try { await probe.request({ op: 'list' }); return client; } catch (error) {
+      if (!brokerGone(error)) throw error;
     }
     const entry = process.env.GITSPACE_SUPERVISOR_WORKER_ENTRY ?? fileURLToPath(new URL('./entry.ts', import.meta.url));
     const child = spawn(process.execPath, [entry, DAEMON_BROKER_WORKER_ARG], { detached: true, stdio: 'ignore', env: { ...process.env, GITSPACE_SUPERVISOR_PROJECT: project } });
@@ -57,8 +64,8 @@ export function daemonClientForProject(projectDirectory: string): Promise<Daemon
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       if (spawnError) throw spawnError;
-      try { await client.request({ op: 'list' }); connected = true; return client; } catch (error) {
-        if (!(error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ECONNREFUSED'))) throw error;
+      try { await probe.request({ op: 'list' }); return client; } catch (error) {
+        if (!brokerGone(error)) throw error;
       }
       await Bun.sleep(25);
     }

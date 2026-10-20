@@ -14,6 +14,8 @@ export class ExecutorJournal {
     this.database = new Database(path, options.readonly ? { readonly: true } : { create: true });
     if (options.readonly) return;
     this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS executor_attachments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS executor_proposals(id TEXT PRIMARY KEY, payload TEXT NOT NULL); DROP TABLE IF EXISTS executor_attempts; CREATE TABLE IF NOT EXISTS executor_results(attempt_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, completed_at INTEGER NOT NULL);');
+    // Results of replay-safe reads (process observations, one per poll) are no longer kept; drop the ones stored before.
+    this.database.exec("DELETE FROM executor_results WHERE attempt_id LIKE 'process-observation:%' OR attempt_id LIKE 'process-stop-observation:%'");
     // Rows from the old attachment lifecycle: lost/draining become detached and an old-shape cache observation is
     // dropped (the next heartbeat sends a new one). A row that still does not parse is removed; the cloud reassigns it.
     const OldRowSchema = z.object({ id: z.string(), payload: z.string() });

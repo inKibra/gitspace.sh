@@ -99,6 +99,7 @@ export async function createAccountWorkspaceRuntime(
     return runtime;
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
+  const qa = createRuntimeQaServices(env, identity);
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
@@ -145,7 +146,8 @@ export async function createAccountWorkspaceRuntime(
     identity,
     waitUntil: promise => ctx.waitUntil(promise),
     schedule,
-    qa: createRuntimeQaServices(env, identity),
+    qa,
+    onReport: error => { ctx.waitUntil(qa.report(error instanceof Error ? error.message : String(error))); },
     attachments: {
       seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),

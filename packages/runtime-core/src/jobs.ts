@@ -95,36 +95,37 @@ export function createJobTask(services: JobServices) {
 }
 
 type ProcessExitInput = { originAttemptId: string; daemonId: string; restartCount: number; args: JsonValue };
-type ProcessExitState = { phase: 'observe'; poll: number; restartCount: number };
+/** `failing`: the current run of failed observations has been reported (once, when it started). */
+type ProcessExitState = { phase: 'observe'; poll: number; restartCount: number; failing?: boolean };
+/** A running process is checked after 5 s, then ever less often, at most a minute apart. */
+const OBSERVE_FIRST_MS = 5_000, OBSERVE_MAX_MS = 60_000;
 export const ProcessWatchesDoc = defineDoc<{ tasks: Record<string, string> }>({ kind: 'gitspace.process-watches', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ tasks: {} }) });
 export function createProcessExitTask(services: JobServices) {
   return defineTask<ProcessExitInput, ProcessExitState, JsonValue>({
     name: 'gitspace.ProcessExit', version: 1, initial: input => ({ phase: 'observe', poll: 0, restartCount: input.restartCount }),
     phases: { async observe(task, runtime, context) {
-      let { poll, restartCount } = task.state.checkpoint;
+      let { poll, restartCount, failing = false } = task.state.checkpoint;
       const args = RuntimeProcArgumentsSchema.parse(task.input.args);
       if (args.op !== 'status') throw new Error('Process watch has no admitted status identity');
-      for (;;) {
+      for (let unchanged = 0; ; unchanged++) {
         try {
+          // An observation is a read: it leaves no receipt in the transcript and no record on the machine.
           const requestId = `process-observation:${runtime.taskId}:${poll}`;
           const result = await services.observeProcess({ originAttemptId: task.input.originAttemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), requestId, attemptId: requestId, args: { ...args, restartCount } });
-          const sha256 = await receiptDigest(result);
-          await runtime.commit(async tx => {
-            await tx.appendEntry(runtime.conversationId, { kind: 'gitspace.executor-results', data: { results: [{ attemptId: result.attemptId, sha256 }] } });
-            return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount } };
-          }, context);
           if (result.status !== 'completed') throw new Error('Process observation unavailable');
           const text = result.content.find(item => item.type === 'text');
           if (!text || text.type !== 'text') throw new Error('Process observation missing');
           const response = DaemonResponseSchema.parse(JSON.parse(text.text));
           if (response.op !== 'describe' || response.daemon.id !== task.input.daemonId || response.daemon.restartCount !== restartCount) throw new Error('Process observation identity changed');
+          failing = false;
           if (response.daemon.state === 'exited' || response.daemon.state === 'failed') {
             await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: `process-exited:${task.input.daemonId}:${restartCount}`, kind: 'process-exited', text: `Process exited:\n${JSON.stringify(response.daemon)}`, payload: response.daemon });
             if (response.daemon.nextRestartCount !== undefined) {
               if (response.daemon.nextRestartCount <= restartCount) throw new Error('Invalid process restart successor');
               restartCount = response.daemon.nextRestartCount;
               poll++;
-              await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount } }), context);
+              unchanged = -1;
+              await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failing } }), context);
               continue;
             }
             await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: response.daemon } }), context);
@@ -132,11 +133,13 @@ export function createProcessExitTask(services: JobServices) {
           }
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          runtime.report(error);
+          // A machine offline for hours would otherwise file one report per poll.
+          if (!failing) runtime.report(error);
+          failing = true;
         }
         poll++;
-        await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount } }), context);
-        const next = runtime.now() + 5000;
+        await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failing } }), context);
+        const next = runtime.now() + Math.min(OBSERVE_FIRST_MS * 2 ** unchanged, OBSERVE_MAX_MS);
         await services.wakeAt(next); await runtime.sleep(next, context);
       }
     } },

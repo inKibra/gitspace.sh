@@ -50,3 +50,23 @@ test('a machine start keeps brokers running processes, ends idle ones, stops tho
     await rm(base, { recursive: true, force: true });
   }
 }, 30_000);
+
+test('a request after its broker exited (idle or reconciled) starts a new broker instead of failing', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'gitspace-broker-gone-'));
+  process.env.GITSPACE_SUPERVISOR_HOME = join(base, 'home');
+  const project = join(base, 'project');
+  await mkdir(project);
+  const client = await daemonClientForProject(project);
+  try {
+    await client.request({ op: 'shutdown' });
+    const socket = join(getDaemonRuntimeDir(project), 'broker.sock');
+    // The broker is a separate OS process: its exit is observed, not driven by a clock.
+    for (let wait = 0; wait < 50 && existsSync(socket); wait += 1) await Bun.sleep(100);
+    expect(existsSync(socket)).toBe(false);
+    expect((await client.request({ op: 'list' })).op).toBe('list');
+    expect(existsSync(socket)).toBe(true);
+  } finally {
+    await (await daemonClientForProject(project)).request({ op: 'shutdown' }).catch(() => null);
+    await rm(base, { recursive: true, force: true });
+  }
+}, 30_000);

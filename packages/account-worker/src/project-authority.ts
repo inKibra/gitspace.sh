@@ -1884,6 +1884,12 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
   }
 
+  /** Several events in one call, each written as `appendEvent` writes it. */
+  appendEvents(inputs: Array<Omit<ProjectEvent, 'offset' | 'createdAt' | 'eventId'> & { eventId?: string }>): number {
+    for (const input of inputs) this.appendEvent(input);
+    return inputs.length;
+  }
+
   /** One page after `afterOffset`; callers continue from the last returned offset. */
   listEvents(afterOffset: number): Response {
     return Response.json(this.readEventRecords(afterOffset, PROJECT_EVENT_PAGE));

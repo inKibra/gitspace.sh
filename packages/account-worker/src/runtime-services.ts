@@ -88,12 +88,16 @@ export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: s
 }
 /** QA events read per page; the project authority caps every entity page at this size. */
 const QA_EVENT_PAGE = 500;
+const QaEventPayloadSchema = z.object({ item: RuntimeQaItemSchema, workspaceId: z.string().optional() });
+/** A workspace's QA inbox: the items its own runtime and agents reported. */
 export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
   // A stub per call: one that saw an error, such as the project object resetting for a release, stays broken.
   const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   // QA items are loaded from the project once per runtime; snapshot rebuilds reuse them instead of calling the
   // project object each time.
   const items = new Map<string, z.infer<typeof RuntimeQaItemSchema>>();
+  /** Automatic reports being written, so two failures at once still file one item. */
+  const reporting = new Set<string>();
   let applied = 0;
   let reading: Promise<void> | undefined;
   function list(): Promise<z.infer<typeof RuntimeQaItemSchema>[]> {
@@ -102,20 +106,45 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
       for (;;) {
         const events = z.array(projectEventSchema).parse(await authority().listEntityEvents('qa', applied, QA_EVENT_PAGE));
         for (const event of events) {
-          if (event.entity === 'qa') { const item = RuntimeQaItemSchema.parse(event.payload.item); items.set(item.id, item); }
           applied = Math.max(applied, event.offset);
+          if (event.entity !== 'qa') continue;
+          const payload = QaEventPayloadSchema.parse(event.payload);
+          if (payload.workspaceId === identity.workspaceId) items.set(payload.item.id, payload.item);
         }
-        if (events.length < QA_EVENT_PAGE) return;
+        if (events.length < QA_EVENT_PAGE) break;
       }
+      // Automatic reports used to file one item per occurrence (a process watch, every 5 s, while its machine was
+      // offline): open copies of an earlier open item are merged into it, once.
+      const canonical = new Map<string, string>();
+      const merged: z.infer<typeof RuntimeQaItemSchema>[] = [];
+      for (const item of items.values()) {
+        if (item.state !== 'open') continue;
+        const key = `${item.historyRef}\n${item.title}`;
+        const first = canonical.get(key);
+        if (first === undefined) canonical.set(key, item.id);
+        else merged.push({ ...item, state: 'merged', duplicateOf: first });
+      }
+      if (!merged.length) return;
+      await authority().appendEvents(merged.map(item => ({ scope: 'workspace', entity: 'qa', entityId: item.id, revision: 1, operation: 'updated', payload: { item, workspaceId: identity.workspaceId } })));
+      for (const item of merged) items.set(item.id, item);
     })().catch(error => { reading = undefined; throw error; });
     return reading.then(() => [...items.values()]);
   }
   return {
     list,
+    /** A runtime failure becomes a QA item unless the same failure is already open. */
+    async report(message: string): Promise<void> {
+      const title = message.split('\n')[0]!.slice(0, 160);
+      const historyRef = `history://${identity.workspaceId}`;
+      if (reporting.has(title) || (await list()).some(item => item.state === 'open' && item.title === title && item.historyRef === historyRef)) return;
+      reporting.add(title);
+      try { const item = await appendRuntimeQa(env, identity, crypto.randomUUID(), { message }); items.set(item.id, item); }
+      finally { reporting.delete(title); }
+    },
     async act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> {
       const current = await list();
       const item = current.find(candidate => candidate.id === input.itemId);
-      if (!item) throw new Error('QA item does not belong to this project');
+      if (!item) throw new Error('QA item does not belong to this workspace');
       if (input.action.kind === 'share') {
         const reference = input.action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority().getProject())?.repositoryReference;
         if (!reference) throw new Error('Project has no canonical repository');
@@ -181,7 +210,7 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
 /** First in every main agent's instructions. Models follow written rules literally, so nothing GitSpace or a repository
  * says may read as a reason to refuse the user; GitSpace's real limits are enforced by its tools, not by prompt text. */
 const USER_PRECEDENCE = 'You work for the user. Their explicit instructions in this conversation come first: they override GitSpace guidance, skills, repository rules and tool descriptions. GitSpace enforces its own limits inside its tools, so no written rule is a reason to refuse the user. When a tool declines something, say which tool and why in one line, then do what the user asked with the other tools you have, for example bash on an attached machine.';
-export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceRuntimeOptions, 'tools' | 'operations' | 'onReport'> & { browser: RuntimeBrowserAuthority['manage'] } {
+export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceRuntimeOptions, 'tools' | 'operations'> & { browser: RuntimeBrowserAuthority['manage'] } {
   const { ctx, env, identity } = options;
   const baseWorkspaceId: string = identity.projectId;
   const mcp = createCloudRuntimeMcp(env, identity);
@@ -228,6 +257,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   // These are request envelopes, not a second lifecycle/job authority(). The executor and
   // existing project ledgers remain the owners of effect outcomes and claim tokens.
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_host_dispatch (id TEXT PRIMARY KEY, dispatch TEXT NOT NULL)');
+  // Process observations are reads and are no longer kept; the ones stored before (one per 5-second poll) go once.
+  ctx.storage.sql.exec("DELETE FROM runtime_host_dispatch WHERE id LIKE 'process-observation:%' OR id LIKE 'process-stop-observation:%'");
   const selections = createDispatchSelector({ storage: ctx.storage, env, identity, runtime: options.runtime, environment: options.environment });
   const savedDispatch = (attemptId: string) => {
     const row = ctx.storage.sql.exec<{ dispatch: string }>('SELECT dispatch FROM runtime_host_dispatch WHERE id=?', attemptId).toArray()[0];
@@ -748,7 +779,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (!selected) throw new Error('Original process machine is unreachable: no READY execution cache');
     if (!admission) {
       admission = RuntimeToolDispatchSchema.parse({ ...origin, attachmentId: selected.attachmentId, generation: selected.generation, parentAttemptId: input.originAttemptId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, replay, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
-      ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(admission));
+      // An observation is a read: nothing replays or reconciles it, so its envelope is not kept.
+      if (replay === 'unsafe') ctx.storage.sql.exec('INSERT INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', input.attemptId, JSON.stringify(admission));
     }
     let dispatch = admission;
     if (admission.attachmentId !== selected.attachmentId || admission.generation !== selected.generation) {
@@ -756,7 +788,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       // attempt while the logical control and exact supervisor instance stay fixed.
       const attemptId = `${input.attemptId}:attachment:${encodeURIComponent(selected.attachmentId)}:${selected.generation}`;
       dispatch = savedDispatch(attemptId) ?? RuntimeToolDispatchSchema.parse({ ...admission, attemptId, attachmentId: selected.attachmentId, generation: selected.generation, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
-      ctx.storage.sql.exec('INSERT OR IGNORE INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', attemptId, JSON.stringify(dispatch));
+      if (replay === 'unsafe') ctx.storage.sql.exec('INSERT OR IGNORE INTO runtime_host_dispatch(id,dispatch) VALUES(?,?)', attemptId, JSON.stringify(dispatch));
     }
     return options.runtime().attachments.execute(dispatch, AbortSignal.timeout(30_000));
   }
@@ -827,6 +859,5 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       },
       wakeAt: options.schedule,
     },
-    onReport(error) { options.ctx.waitUntil(appendRuntimeQa(env, identity, crypto.randomUUID(), { message: message(error) })); },
   };
 }

@@ -39,7 +39,8 @@ export class MachineExecutor {
       try { this.authorize(dispatch); }
       catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
       const done = this.execute(dispatch, request.signal).then(result => {
-        this.options.journal.saveExecutionResult(dispatch.attemptId, fingerprint, result);
+        // A replay-safe read is simply run again; only results a replay must not repeat are kept.
+        if (dispatch.replay === 'unsafe') this.options.journal.saveExecutionResult(dispatch.attemptId, fingerprint, result);
         return result;
       }).finally(() => this.attempts.delete(dispatch.attemptId));
       attempt = { fingerprint, done };

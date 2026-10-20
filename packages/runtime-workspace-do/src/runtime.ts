@@ -25,6 +25,7 @@ import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifac
 import type { GitLfsConfirmedObject, GitLfsStore, WorkspaceReport, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat, type WithdrawnNotices } from './transcript.js';
+import { createRunningMarks } from './running-marks.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
@@ -104,13 +105,25 @@ async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harne
   console.info(JSON.stringify({ event: 'sync_failure_notices_withdrawn', conversationId: String(root.id), count: notices.length }));
 }
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
+  const marks = createRunningMarks(options.storage.sql);
+  if (marks.leftover.length) console.error(JSON.stringify({ event: 'runtime_reset_during', workspaceId: options.identity.workspaceId, running: marks.leftover }));
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
-  const runtime = await createRuntimeHarness({ ...options, storage });
+  const runtime = await createRuntimeHarness({ ...options, storage, models: marks.models(options.models) });
   const { harness } = runtime;
   const withdrawn = createWithdrawnNotices(options.storage.sql);
   await withdrawSyncFailureNotices(storage, harness, runtime.root, withdrawn, options.storage.sql);
   const attachments = new AttachmentStore(options.storage, options.attachments);
-  const cloudFiles = new CloudFileStore(options.storage, attachments, options.code, options.identity.workspaceId, codeChanged, options.lfs, async (checkpoint, publicationId) => {
+  // Sync merges and cloud writes build snapshots in memory: each is marked while it runs.
+  const code: Pick<WorkspaceRuntimeOptions['code'], 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'> = {
+    readFile: (...args) => options.code.readFile(...args),
+    writeSnapshot: input => marks.run('cloud write', `${input.mutations.length} files, ${input.mutations.reduce((sum, mutation) => sum + (mutation.content?.byteLength ?? 0), 0)} bytes`, () => options.code.writeSnapshot(input)),
+    mergeSnapshot: input => {
+      const kind = input.forcePublication ? 'first publication' : input.base.worktreeCommit === input.previous.worktreeCommit && input.base.headCommit === input.previous.headCommit && input.base.branch === input.previous.branch ? 'fast-forward' : 'three-way merge';
+      return marks.run('sync merge', `${kind} of machine snapshot ${input.machine.worktreeCommit.slice(0, 12)}`, () => options.code.mergeSnapshot(input));
+    },
+    listSnapshotPaths: (repository, tree) => marks.run('path list', `tree ${tree.slice(0, 12)}`, () => options.code.listSnapshotPaths(repository, tree)),
+  };
+  const cloudFiles = new CloudFileStore(options.storage, attachments, code, options.identity.workspaceId, codeChanged, options.lfs, async (checkpoint, publicationId) => {
     try { await options.retainLfs(checkpoint, publicationId); }
     catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
   }, options.initialCheckpoint, options.documentMarkdown);
