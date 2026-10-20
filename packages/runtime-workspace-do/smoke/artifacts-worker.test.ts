@@ -46,6 +46,7 @@ export class CloudMutationProof extends DurableObject {
       writeSnapshot: input => writeArtifactsSnapshot(repo, input),
       mergeSnapshot: unsupported,
       listSnapshotPaths: async (_repository, oid) => (await (await object('tree', oid)).json()).map(entry => entry.name),
+      changedSnapshotPaths: unsupported,
     };
     const store = new CloudFileStore(this.ctx.storage, { list: () => [] }, code, 'worker-proof', () => {}, { has: unsupported, get: unsupported, put: unsupported }, async () => {}, async () => initial);
     const result = await store.execute(input);

@@ -49,8 +49,13 @@ export class CloudFilesProof extends DurableObject {
       if (retentionUnavailable) throw new Error('Retention unavailable');
       retained.set(value.worktreeCommit, value);
     };
+    // Full tree walks and tree diffs of the path list; the changes a machine publication brings, as a diff reports them.
+    let pathWalks = 0;
+    const pathDiffs: Array<[string, string]> = [];
+    let machineChanges: Array<{ path: string; present: boolean }> = [];
     const code = {
-      listSnapshotPaths: async () => [...files.keys()].sort(),
+      listSnapshotPaths: async () => { pathWalks++; return [...files.keys()].sort(); },
+      changedSnapshotPaths: async (_repository: string, before: string, after: string) => { pathDiffs.push([before, after]); return machineChanges; },
       mergeSnapshot: async (input: { machine: typeof checkpoint; base: typeof checkpoint; previous: typeof checkpoint }) => {
         observedMergeBase = input.base;
         if (failPush) return Result.err(new ArtifactsSnapshotError({ operation: 'mergeSnapshot', message: 'lost merge response', certainty: 'unknown' }));
@@ -330,6 +335,9 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual((await invoke('find', { path: '.', pattern: '**/deep.txt' })).content, [{ type: 'text', text: 'indexed/deep.txt' }]);
     assert.equal((await invoke('apply_patch', { patch: '*** Begin Patch\n*** Delete File: indexed/deep.txt\n*** End Patch' })).status, 'completed');
     assert.deepEqual((await invoke('find', { path: 'indexed', pattern: '*' })).content, [{ type: 'text', text: '' }]);
+    // One walk built the list; writes moved it by their own mutations, without walking or diffing the tree.
+    assert.equal(pathWalks, 1);
+    assert.deepEqual(pathDiffs, []);
     assert.equal((await invoke('apply_patch', { patch: '*** Begin Patch\n*** Update File: asset.dat\n@@\n-version https://git-lfs.github.com/spec/v1\n+changed\n*** End Patch' })).status, 'failed');
     const beforeMergeRecovery = await store.snapshot(); assert(beforeMergeRecovery);
     const uploaded = { ...beforeMergeRecovery, worktreeCommit: 'd'.repeat(40) };
@@ -341,6 +349,13 @@ export class CloudFilesProof extends DurableObject {
     // The machine retrying the same publication finishes it; durable acceptance needs no second authorization.
     assert.deepEqual(await store.commitMachine(uploaded, beforeMergeRecovery.worktreeCommit, 'machine', () => { throw new Error('Revoked after durable acceptance'); }), uploaded);
     assert.equal((await store.snapshot())?.worktreeCommit, uploaded.worktreeCommit);
+    // A machine publication leaves the list behind; the next reader moves it by one diff, not a walk.
+    machineChanges = [{ path: 'from-machine.txt', present: true }, { path: 'after-origin-transition.txt', present: false }];
+    assert.deepEqual((await invoke('find', { path: '.', pattern: 'from-machine.txt' })).content, [{ type: 'text', text: 'from-machine.txt' }]);
+    assert.deepEqual((await invoke('find', { path: '.', pattern: 'after-origin-transition.txt' })).content, [{ type: 'text', text: '' }]);
+    assert.equal(pathWalks, 1);
+    assert.deepEqual(pathDiffs, [[beforeMergeRecovery.worktreeTree, uploaded.worktreeTree]]);
+    machineChanges = [];
     const noncanonical = { ...uploaded, worktreeCommit: 'e'.repeat(40), indexTree: '8'.repeat(40), indexCommit: '9'.repeat(40) };
     mergedCheckpoint = { ...uploaded, worktreeCommit: 'f'.repeat(40) };
     assert.deepEqual(await store.commitMachine(noncanonical, uploaded.worktreeCommit, 'machine'), mergedCheckpoint);

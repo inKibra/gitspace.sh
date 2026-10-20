@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
 import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, readShallowCommits, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
-import { planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
+import { changedSnapshotEntries, planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
 
@@ -143,6 +143,14 @@ export class ArtifactsCodeStore {
   async listSnapshotPaths(repository: string, tree: string): Promise<string[]> {
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try { return [...(await snapshotEntries(pacedRepository(repo), tree)).keys()].sort(); }
+    finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** The file paths that differ between two trees, `present` when the second holds them; reads only the directories
+   * whose hashes differ. */
+  async changedSnapshotPaths(repository: string, before: string, after: string): Promise<Array<{ path: string; present: boolean }>> {
+    const repo = await this.binding.get(repositorySchema.parse(repository));
+    try { return (await changedSnapshotEntries(pacedRepository(repo), before, after)).map(change => ({ path: change.path, present: change.after !== undefined })); }
     finally { await disposeArtifactsRepository(repo); }
   }
 

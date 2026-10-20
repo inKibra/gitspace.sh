@@ -75,7 +75,7 @@ export class CloudFileStore {
     this.admission = result.then(() => {}, () => {});
     return result;
   }
-  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>, private readonly documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>) {
+  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>, private readonly documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>) {
     storage.sql.exec('DROP TABLE IF EXISTS runtime_cloud_writer');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_cloud_files_pending ON runtime_cloud_files(id) WHERE pending IS NOT NULL');
@@ -85,7 +85,11 @@ export class CloudFileStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
     if (storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications DROP COLUMN abandoned');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_machine_publications_pending ON runtime_machine_publications(id) WHERE pending IS NOT NULL');
-    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_paths(commit_id TEXT PRIMARY KEY, paths TEXT NOT NULL)');
+    // One full path list per published commit (about 0.5 MB each for 7,000 files), written on every sync and never read
+    // past the current one: replaced by one row per path of the commit `runtime_snapshot_files_at` names.
+    storage.sql.exec('DROP TABLE IF EXISTS runtime_snapshot_paths');
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_files(path TEXT PRIMARY KEY) WITHOUT ROWID');
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_files_at(singleton INTEGER PRIMARY KEY CHECK(singleton=1), commit_id TEXT NOT NULL, tree TEXT NOT NULL)');
   }
   snapshot(): Promise<Checkpoint | null> { return readCurrentCheckpoint(this.storage); }
   /** Snapshots published from `ancestor` to `descendant` along recorded predecessors; null past `limit` or across an
@@ -228,9 +232,6 @@ export class CloudFileStore {
       throw merged.error.certainty === 'not-published' ? new MachinePublicationRejected({ attemptId: `machine:${id}`, message }) : new CloudPublicationUncertain({ attemptId: `machine:${id}`, message });
     }
     const accepted = merged.value;
-    const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), accepted.worktreeTree).catch((error: unknown) => {
-      throw new Error(`listSnapshotPaths: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-    });
     this.storage.transactionSync(() => {
       if (current && !this.storage.sql.exec('SELECT commit_id FROM runtime_code_commits WHERE commit_id=?', current.worktreeCommit).toArray().length) this.recordCommit(current, null);
       if (accepted.worktreeCommit !== current?.worktreeCommit) this.recordCommit(accepted, current?.worktreeCommit ?? previous);
@@ -238,7 +239,7 @@ export class CloudFileStore {
       this.enqueueRetention(accepted, current);
       this.enqueueRetention(checkpoint, current, `${machineId}:${checkpoint.checkpointRef}`);
       this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(accepted));
-      this.storage.sql.exec('INSERT INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?) ON CONFLICT(commit_id) DO UPDATE SET paths=excluded.paths WHERE paths IS NOT excluded.paths', accepted.worktreeCommit, JSON.stringify(paths));
+      // The path list is not moved here: the next reader catches it up from its own commit by a tree diff.
       this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=? WHERE id=?', JSON.stringify(accepted), id);
     });
     // The publishing machine installs the accepted snapshot from this answer.
@@ -400,8 +401,6 @@ export class CloudFileStore {
       return failed;
     }
     const completed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool === 'write' ? 'Wrote' : input.tool === 'apply_patch' ? 'Patched' : 'Edited'} ${pending.mutations.map(mutation => mutation.path).join(', ')}` }] };
-    const paths = new Set(await this.paths(previous));
-    for (const mutation of pending.mutations) { if (mutation.content === null) paths.delete(mutation.path); else paths.add(mutation.path); }
     this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
       const current = row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;
@@ -412,16 +411,35 @@ export class CloudFileStore {
       this.enqueueRetention(accepted, current);
       this.complete(input, completed);
       this.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(accepted));
-      this.storage.sql.exec('INSERT INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?) ON CONFLICT(commit_id) DO UPDATE SET paths=excluded.paths WHERE paths IS NOT excluded.paths', accepted.worktreeCommit, JSON.stringify([...paths].sort()));
+      // A write from the commit the path list names moves the list with its own mutations.
+      if (this.storage.sql.exec<{ commit_id: string }>('SELECT commit_id FROM runtime_snapshot_files_at WHERE singleton=1').toArray()[0]?.commit_id === previous.worktreeCommit) {
+        for (const mutation of pending.mutations) this.storage.sql.exec(mutation.content === null ? 'DELETE FROM runtime_snapshot_files WHERE path=?' : 'INSERT OR IGNORE INTO runtime_snapshot_files(path) VALUES(?)', mutation.path);
+        this.storage.sql.exec('UPDATE runtime_snapshot_files_at SET commit_id=?,tree=? WHERE singleton=1', accepted.worktreeCommit, accepted.worktreeTree);
+      }
     });
     await this.storage.sync(); await this.flushRetention(); this.publish(); return completed;
   }
+  /** The file paths of `checkpoint`'s worktree. The stored list names its commit; one of another commit is moved by a
+   * tree diff, and the whole tree is walked only when there is no list. */
   private async paths(checkpoint: Checkpoint): Promise<string[]> {
-    const saved = this.storage.sql.exec<{ paths: string }>('SELECT paths FROM runtime_snapshot_paths WHERE commit_id=?', checkpoint.worktreeCommit).toArray()[0];
-    if (saved) return z.array(z.string()).parse(JSON.parse(saved.paths));
-    const paths = await this.code.listSnapshotPaths(artifactsWorkspaceRepository(this.workspaceId), checkpoint.worktreeTree);
-    this.storage.sql.exec('INSERT OR IGNORE INTO runtime_snapshot_paths(commit_id,paths) VALUES(?,?)', checkpoint.worktreeCommit, JSON.stringify(paths));
-    return paths;
+    const repository = artifactsWorkspaceRepository(this.workspaceId);
+    // A write or another reader can move the list while a diff is read; each pass starts from the list as it then is.
+    for (let pass = 0; pass < 3; pass++) {
+      const at = this.storage.sql.exec<{ commit_id: string; tree: string }>('SELECT commit_id,tree FROM runtime_snapshot_files_at WHERE singleton=1').toArray()[0];
+      if (at?.commit_id === checkpoint.worktreeCommit) return this.storage.sql.exec<{ path: string }>('SELECT path FROM runtime_snapshot_files ORDER BY path').toArray().map(row => row.path);
+      const changes = at ? await this.code.changedSnapshotPaths(repository, at.tree, checkpoint.worktreeTree) : null;
+      const full = changes ? null : await this.code.listSnapshotPaths(repository, checkpoint.worktreeTree);
+      this.storage.transactionSync(() => {
+        const now = this.storage.sql.exec<{ commit_id: string }>('SELECT commit_id FROM runtime_snapshot_files_at WHERE singleton=1').toArray()[0];
+        if (now?.commit_id !== at?.commit_id) return;
+        if (full) {
+          this.storage.sql.exec('DELETE FROM runtime_snapshot_files');
+          for (const path of full) this.storage.sql.exec('INSERT INTO runtime_snapshot_files(path) VALUES(?)', path);
+        } else for (const change of changes ?? []) this.storage.sql.exec(change.present ? 'INSERT OR IGNORE INTO runtime_snapshot_files(path) VALUES(?)' : 'DELETE FROM runtime_snapshot_files WHERE path=?', change.path);
+        this.storage.sql.exec('INSERT OR REPLACE INTO runtime_snapshot_files_at(singleton,commit_id,tree) VALUES(1,?,?)', checkpoint.worktreeCommit, checkpoint.worktreeTree);
+      });
+    }
+    throw new Error('The workspace path list kept moving while it was read');
   }
   private async hasLfsPointer(checkpoint: Checkpoint, path: string): Promise<boolean> {
     const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), checkpoint.worktreeCommit, path);

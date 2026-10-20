@@ -739,6 +739,33 @@ test('a machine fast-forward over an unchanged cloud publishes the machine trees
   } finally { await f.close(); }
 });
 
+test('a merge over a cloud that also moved reads only the directories either side changed', async () => {
+  const f = await fixture();
+  try {
+    const blob = (value: string) => git.writeBlob({ fs, dir: f.dir, blob: text.encode(value) });
+    const untouched = await git.writeTree({ fs, dir: f.dir, tree: await Promise.all(Array.from({ length: 200 }, async (_, index) => ({ path: `file-${index}`, mode: '100644', type: 'blob' as const, oid: await blob(`untouched ${index}\n`) }))) });
+    const snapshot = async (cloudFile: string, machineFile: string): Promise<RuntimeGitCheckpoint> => {
+      const cloudDir = await git.writeTree({ fs, dir: f.dir, tree: [{ path: 'notes', mode: '100644', type: 'blob', oid: await blob(cloudFile) }] });
+      const machineDir = await git.writeTree({ fs, dir: f.dir, tree: [{ path: 'notes', mode: '100644', type: 'blob', oid: await blob(machineFile) }] });
+      const tree = await git.writeTree({ fs, dir: f.dir, tree: [{ path: 'stable', mode: '040000', type: 'tree', oid: untouched }, { path: 'cloud', mode: '040000', type: 'tree', oid: cloudDir }, { path: 'machine', mode: '040000', type: 'tree', oid: machineDir }] });
+      const commit = await git.writeCommit({ fs, dir: f.dir, commit: { tree, parent: [f.previous.worktreeCommit], author, committer: author, message: 'snapshot\n' } });
+      return { ...f.previous, worktreeCommit: commit, trackedWorktreeCommit: commit, indexCommit: commit, worktreeTree: tree, indexTree: tree, conflicts: [] };
+    };
+    // HEAD is the base snapshot, as in a checkout: the machine's uncommitted files are only its edit.
+    const initial = await snapshot('before\n', 'before\n');
+    const atBase = (checkpoint: RuntimeGitCheckpoint) => ({ ...checkpoint, headCommit: initial.worktreeCommit });
+    const base = atBase(initial), cloud = atBase(await snapshot('cloud edit\n', 'before\n')), machine = atBase(await snapshot('before\n', 'machine edit\n'));
+    await git.writeRef({ fs, dir: f.dir, ref: cloud.checkpointRef, value: cloud.worktreeCommit, force: true });
+    f.fetched.length = 0;
+    const plan = await planSnapshotMerge(f.repo, base, cloud, machine);
+    expect(f.fetched).not.toContain(untouched);
+    const merged = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: cloud, ...plan }, f.request);
+    if (merged.isErr()) throw merged.error;
+    const read = async (path: string) => new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: merged.value.worktreeCommit, filepath: path })).blob);
+    expect([await read('cloud/notes'), await read('machine/notes'), await read('stable/file-7')]).toEqual(['cloud edit\n', 'machine edit\n', 'untouched 7\n']);
+  } finally { await f.close(); }
+});
+
 for (const publication of ['cloud', 'cache', 'initial', 'recovery'] as const) test(`${publication} marker scanning ignores non-text marker-like objects`, async () => {
   const f = await fixture();
   try {

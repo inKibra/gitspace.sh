@@ -69,6 +69,21 @@ export async function changedSnapshotEntries(repo: Pick<Reader, 'readTree'>, bef
   });
   return changes;
 }
+/** Whether `path` names a file or directory in `tree`, reading only the directories along it. */
+async function pathExists(repo: Pick<Reader, 'readTree'>, tree: string, path: string): Promise<boolean> {
+  const parts = path.split('/');
+  let oid = tree;
+  for (const [index, name] of parts.entries()) {
+    const children = await repo.readTree(oid);
+    if (!children) throw new Error(`Missing snapshot tree ${oid}`);
+    const entry = children.find(child => child.name === name);
+    if (!entry) return false;
+    if (index === parts.length - 1) return true;
+    if (entry.type !== 'tree') return false;
+    oid = entry.hash;
+  }
+  return false;
+}
 
 type Hunk = { start: number; end: number; lines: string[] };
 function changes(base: string[], next: string[]): Hunk[] | null {
@@ -187,18 +202,43 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     if (marked) introduced.add(path);
     else if (conflicts.has(path)) resolved.add(path);
   };
+  /** What a layer merge reads: full inventories when every path is rescanned (a forced publication), otherwise only the
+   * paths that changed from the base on either side, each with its entry on all three sides. */
+  const sides = async (baseTree: string, cloudTree: string, machineTree: string) => {
+    if (options.forcePublication) {
+      const [original, current, incoming] = await Promise.all([inventory(baseTree), inventory(cloudTree), inventory(machineTree)]);
+      const paths = new Set([...original.keys(), ...current.keys(), ...incoming.keys()]);
+      // Cloud paths that can collide with a path above or below them: changed in the cloud, or still on the machine.
+      const occupied = new Set([...current.keys()].filter(other => !(same(original.get(other), current.get(other)) && !incoming.has(other))));
+      return { original, current, incoming, paths, occupied, taken: async (path: string) => paths.has(path) };
+    }
+    const [cloudChanges, machineChanges] = await Promise.all([changedSnapshotEntries(repo, baseTree, cloudTree), changedSnapshotEntries(repo, baseTree, machineTree)]);
+    const original = new Map<string, Entry>(), current = new Map<string, Entry>(), incoming = new Map<string, Entry>();
+    for (const change of [...cloudChanges, ...machineChanges]) if (change.before) original.set(change.path, change.before);
+    for (const change of cloudChanges) if (change.after) current.set(change.path, change.after);
+    for (const change of machineChanges) if (change.after) incoming.set(change.path, change.after);
+    const cloudPaths = new Set(cloudChanges.map(change => change.path)), machinePaths = new Set(machineChanges.map(change => change.path));
+    // A side that left a path alone still holds the base entry there.
+    for (const [path, entry] of original) {
+      if (!cloudPaths.has(path)) current.set(path, entry);
+      if (!machinePaths.has(path)) incoming.set(path, entry);
+    }
+    const paths = new Set([...cloudPaths, ...machinePaths]);
+    // Only a path the cloud changed and still holds can collide: one the cloud left alone is the machine's own tree's,
+    // which cannot hold a file and a directory at one path.
+    const occupied = new Set(cloudChanges.flatMap(change => change.after ? [change.path] : []));
+    const roots = [baseTree, cloudTree, machineTree];
+    return { original, current, incoming, paths, occupied, taken: async (path: string) => paths.has(path) || (await Promise.all(roots.map(tree => pathExists(repo, tree, path)))).some(Boolean) };
+  };
   const layer = async (baseTree: string, cloudTree: string, machineTree: string, worktree = false): Promise<SnapshotMutation[]> => {
-    const [original, current, incoming] = await Promise.all([inventory(baseTree), inventory(cloudTree), inventory(machineTree)]);
+    const { original, current, incoming, paths, occupied, taken } = await sides(baseTree, cloudTree, machineTree);
     const mutations: SnapshotMutation[] = [];
-    const paths = new Set([...original.keys(), ...current.keys(), ...incoming.keys()]);
-    // Cloud paths that can collide with a path above or below them: changed in the cloud, or still on the machine.
-    const occupied = new Set([...current.keys()].filter(other => !(same(original.get(other), current.get(other)) && !incoming.has(other))));
     const occupiedDirectories = new Set<string>();
     for (const other of occupied) for (let slash = other.indexOf('/'); slash !== -1; slash = other.indexOf('/', slash + 1)) occupiedDirectories.add(other.slice(0, slash));
     const structuralAt = (path: string) => occupiedDirectories.has(path) || path.split('/').slice(0, -1).some((_, index, parts) => occupied.has(parts.slice(0, index + 1).join('/')));
-    const reserve = (path: string, entry: Entry) => {
+    const reserve = async (path: string, entry: Entry) => {
       let target = `${path}.gitspace-machine-${machine.worktreeCommit.slice(0, 12)}`;
-      while (paths.has(target)) target += '-copy';
+      while (await taken(target)) target += '-copy';
       paths.add(target); mutations.push({ path: target, content: null, ...entry });
     };
     for (const path of [...paths].sort()) {
@@ -219,7 +259,7 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
       } else {
         introduced.add(path);
         // Keep cloud at its path; preserve the incoming object under a collision-free sibling.
-        if (c) reserve(path.split('/').slice(0, structural ? 1 : undefined).join('/'), c);
+        if (c) await reserve(path.split('/').slice(0, structural ? 1 : undefined).join('/'), c);
         else if (b && before !== null && ours !== null) mutations.push({ path, content: new TextEncoder().encode(mergeSnapshotText(before, ours, '').text), mode: b.mode });
       }
     }

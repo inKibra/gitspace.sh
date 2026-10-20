@@ -43,7 +43,7 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
       stream: () => { throw new Error('Inference forbidden in checkpoint proof'); },
       streamSimple: () => { throw new Error('Inference forbidden in checkpoint proof'); },
     });
-    const code = { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: async (input: { machine: typeof checkpoint }) => Result.ok(input.machine), listSnapshotPaths: async () => [], reader: () => ({ readTree: async () => [], readBlob: unsupported, close: async () => {} }) };
+    const code = { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: async (input: { machine: typeof checkpoint }) => Result.ok(input.machine), listSnapshotPaths: async () => [], changedSnapshotPaths: unsupported, reader: () => ({ readTree: async () => [], readBlob: unsupported, close: async () => {} }) };
     const runtime = await createWorkspaceRuntime({
       storage: this.ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
       code,
