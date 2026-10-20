@@ -17,7 +17,7 @@ import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { ConversationLifecycleDoc, createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
 import { bindCronGeneration } from './cron.js';
 import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
-import type { ModelRoleSelector } from '@gitspace/protocol/inference';
+import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/inference';
 /** `role` is the profile role the model came from, when it came from one. */
 export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string };
 export type RuntimeHarnessOptions = {
@@ -139,12 +139,34 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const selected = child ? modelTools(model).filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : modelTools(model);
     await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
-  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });
+  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });
   lifecycleReady.resolve(lifecycle);
   await harness.commit(async tx => {
     const workspace = await tx.doc(WorkspaceDoc);
     if (options.workspacePhase !== undefined) workspace.phase = options.workspacePhase;
     await tx.doc(QuestionsDoc);
+    // Subagents spawned before roles were validated stored a role label ("Deep") where admission needs its id
+    // ("deep"); every resume of such a conversation failed. Rewrites only those values. Remove once every workspace has opened.
+    const roleIds: Record<string, string> = Object.fromEntries(Object.entries(MODEL_ROLE_LABELS).map(([id, label]) => [label, id]));
+    const relabel = (selection: ModelSelectionIntent) => {
+      if (selection.kind !== 'role') return;
+      selection.role = roleIds[selection.role] ?? selection.role;
+      if (selection.fallback?.some(role => roleIds[role])) selection.fallback = selection.fallback.map(role => roleIds[role] ?? role);
+    };
+    let cursor: Cursor | undefined;
+    do {
+      const page = await tx.scanConversations({}, 128, cursor);
+      for (const record of page.items) {
+        const controls = await tx.doc(SessionControlsDoc, record.id);
+        relabel(controls.selection);
+        if (controls.role !== null && roleIds[controls.role]) controls.role = roleIds[controls.role]!;
+        const { child } = await tx.doc(AgentDefinitionContextDoc, record.id);
+        if (!child) continue;
+        relabel(child.selection);
+        if (child.role !== null && roleIds[child.role]) child.role = roleIds[child.role]!;
+      }
+      cursor = page.next;
+    } while (cursor);
   }, BACKGROUND_CONTEXT);
   return { harness, root, registry, configureModel, lifecycle, backgroundAgentTask };
 }

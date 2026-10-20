@@ -52,7 +52,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
     return { provider: selected.model.provider, modelId: selected.model.id, thinking: selected.thinking, ...(selected.role ? { role: selected.role } : {}) };
   };
   const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: { provider: selected.provider, modelId: selected.modelId }, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
-  const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
+  const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
   const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog, refreshDefinitions: target => controls.loadDefinitions(target) });
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };

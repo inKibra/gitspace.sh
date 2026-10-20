@@ -20,7 +20,7 @@ test('before its first message a conversation shows the model and effort its rol
       { id: 'default', label: 'Default', provider: 'test', model: 'astra', thinking: 'medium', current: true },
       { id: 'deep', label: 'Deep', provider: 'test', model: 'astra', thinking: 'high', current: false },
     ];
-    const lifecycle = createConversationLifecycle({ harness, storage, admitInference: unexpected, configureModel: unexpected, wake: async () => {} });
+    const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference: unexpected, configureModel: unexpected, wake: async () => {} });
     const controls = createSessionControls({
       harness, root, lifecycle, admitInference: unexpected, configureModel: unexpected, reload: async () => {},
       catalog: async () => ({ models: [{ provider: 'test', id: 'astra', name: 'Astra', contextWindow: 100000 }], roles }),

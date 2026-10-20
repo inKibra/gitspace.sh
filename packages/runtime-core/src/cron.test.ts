@@ -256,7 +256,7 @@ test('confirmed cancellation stops the workspace lifecycle while unconfirmed run
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
-    const options = { harness, storage, admitInference: async () => reference, async configureModel(id: typeof root.id, model: typeof reference) { const target = await harness.conversation(id, context); if (!target) throw new Error('Missing target'); await target.configure({ model }, context); }, async wake() { harness.resume(); } };
+    const options = { report: (error: unknown) => { throw error; }, harness, storage, admitInference: async () => reference, async configureModel(id: typeof root.id, model: typeof reference) { const target = await harness.conversation(id, context); if (!target) throw new Error('Missing target'); await target.configure({ model }, context); }, async wake() { harness.resume(); } };
     const lifecycle = createConversationLifecycle(options);
     const cron = createCronRuntime({ ...options, stop: lifecycle.stop });
     await cron.submit({ requestId: 'stop-cron', text: 'Cron work', readScopes: [], writeScopes: [] });

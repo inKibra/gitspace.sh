@@ -32,6 +32,7 @@ export type ConversationLifecycleOptions = {
   harness: Harness; storage: Storage; admitInference: RuntimeHarnessOptions['admitInference'];
   configureModel(id: ConversationId, model: ModelRef): Promise<void>;
   wake(): Promise<void>;
+  report(error: unknown): void;
 };
 export function createConversationLifecycle(options: ConversationLifecycleOptions): ConversationLifecycle {
   const { harness, storage } = options;
@@ -126,7 +127,16 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
         return operation();
       });
     },
-    async recover() { await serialized(async () => { for (const record of await conversations()) await flush(String(record.id)); }); },
+    // One conversation that cannot resume (its admission fails) must not keep the others, and the runs after recovery,
+    // from resuming: its failure is reported and recovery moves on.
+    async recover() {
+      await serialized(async () => {
+        for (const record of await conversations()) {
+          try { await flush(String(record.id)); }
+          catch (error) { options.report(new Error(`Conversation ${String(record.id)} could not resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
+        }
+      });
+    },
     async deliver(event) {
       await serialized(async () => {
         const conversation = await resolve(event.conversationId);

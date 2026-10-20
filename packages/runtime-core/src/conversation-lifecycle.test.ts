@@ -4,6 +4,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, createAssistantMessageEventStream, type Models, type Model, type Api, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createConversationLifecycle, ConversationLifecycleDoc, type ConversationEvent } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
+import { SessionControlsDoc } from './session-controls.js';
 import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -41,8 +42,14 @@ async function fixture(storage: Storage = new MemoryStorage(), blocked = false, 
   const harness = await Harness.open(storage, { registry, models, settings: { compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: model.id } } });
   if (blocked) await root.commit(tx => tx.createTask(background, null, { ownership: { kind: 'conversation' }, conversationId: root.id, background: true }), context);
-  const lifecycle = createConversationLifecycle({ harness, storage, admitInference: async () => ({ provider: 'test', modelId: model.id }), async configureModel(id, selected) { const conversation = await harness.conversation(id, context); if (!conversation) throw new Error('Missing fixture conversation'); await conversation.configure({ model: selected }, context); }, async wake() { wakeCount++; } });
-  return { harness, root, lifecycle, storage, seen, aborted: () => aborted, backgroundAborted: () => backgroundAborted, wakeCount: () => wakeCount, threeStarted: threeStarted.promise };
+  const reports: unknown[] = [];
+  // Admission fails for a selection the profile does not define, as a role label stored before validation does.
+  const admitInference = async (input: { selection?: { kind: string; role?: string } }) => {
+    if (input.selection?.kind === 'role' && input.selection.role === 'Deep') throw new Error('Inference role Deep is not defined in this profile');
+    return { provider: 'test', modelId: model.id };
+  };
+  const lifecycle = createConversationLifecycle({ harness, storage, admitInference, report: error => { reports.push(error); }, async configureModel(id, selected) { const conversation = await harness.conversation(id, context); if (!conversation) throw new Error('Missing fixture conversation'); await conversation.configure({ model: selected }, context); }, async wake() { wakeCount++; } });
+  return { harness, root, lifecycle, storage, seen, reports, aborted: () => aborted, backgroundAborted: () => backgroundAborted, wakeCount: () => wakeCount, threeStarted: threeStarted.promise };
 }
 
 test('idle event delivery wakes inference with visible durable sender labels and does not duplicate retries', async () => {
@@ -74,6 +81,28 @@ test('events delivered during a run that ends without an answer reach the agent 
     await until(() => f.seen.length === 2);
     expect(f.seen[1]).toContain('Background command job:2 completed');
     await f.root.abort(context);
+  } finally { await f.harness.close(context); }
+}, 5000);
+
+test('a conversation whose admission fails does not keep recovery from delivering to the others', async () => {
+  const f = await fixture();
+  try {
+    const broken = await f.harness.createConversation({ ownership: { kind: 'ownerless' }, agent: { model: { provider: 'test', modelId: model.id } } }, context);
+    // As a spawn stored it before roles were validated: the label in both the child record and its session controls.
+    await broken.commit(async tx => {
+      (await tx.doc(AgentDefinitionContextDoc, broken.id)).child = { parentId: String(f.root.id), name: 'Broken', attemptId: 'broken', definition: null, selection: { kind: 'role', role: 'Deep' }, role: 'Deep', thinking: null, tools: [], model: null };
+      const controls = await tx.doc(SessionControlsDoc, broken.id);
+      controls.selection = { kind: 'role', role: 'Deep' };
+      controls.role = 'Deep';
+    }, context);
+    await expect(f.lifecycle.deliver({ conversationId: String(broken.id), requestId: 'to-broken', kind: 'agent-message', text: 'Unadmittable' })).rejects.toThrow('role Deep');
+    // Pending for the root since before a reset: only recovery delivers it.
+    const pending: ConversationEvent = { conversationId: String(f.root.id), requestId: 'to-root', kind: 'command-completed', text: 'Background command job:9 completed' };
+    await f.root.commit(async tx => { (await tx.doc(ConversationLifecycleDoc, f.root.id)).events.push({ event: pending, delivered: false, consumed: false }); }, context);
+    await f.lifecycle.recover();
+    await f.root.waitForIdle(context);
+    expect(f.seen.some(messages => messages.includes('Background command job:9 completed'))).toBe(true);
+    expect(f.reports.map(String)).toEqual([`Error: Conversation ${String(broken.id)} could not resume: Inference role Deep is not defined in this profile`]);
   } finally { await f.harness.close(context); }
 }, 5000);
 
