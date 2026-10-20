@@ -325,3 +325,19 @@ test('a failing sync retries after a doubling wait, and edits made meanwhile rid
     expect(publications).toEqual([['tracked.txt:first'], ['tracked.txt:final']]);
   });
 });
+
+test('a failed sync pass is retried without waiting for an edit, so an idle checkout does not keep the failure', async () => {
+  await watcherProof(async ({ checkout, runtime, clock, failCommits, commitTimes, publications, waitForFinal }) => {
+    failCommits(1);
+    // A change no watcher event reports: only a sync pass captures it, as when a checkout becomes ready.
+    await writeFile(join(checkout, 'tracked.txt'), 'final\n');
+    await clock.until(runtime.sync().catch(() => undefined));
+    expect(commitTimes()).toHaveLength(1);
+    // Nothing is edited from here on; only the clock moves.
+    for (let step = 0; step < 100 && publications.length < 1; step++) { clock.advance(250); await clock.until(Bun.sleep(2)); }
+    await waitForFinal();
+    const [refused, retried] = commitTimes();
+    expect(retried! - refused!).toBeGreaterThanOrEqual(5_000);
+    expect(publications).toEqual([['tracked.txt:final']]);
+  });
+});

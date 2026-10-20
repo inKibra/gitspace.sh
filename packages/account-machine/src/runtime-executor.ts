@@ -182,6 +182,8 @@ export async function createMachineExecutor(options: {
   const reconciling = new Map<string, Promise<void>>();
   /** Per followed checkout: ends its retry wait once any reconciliation succeeds. */
   const retryResets = new Map<string, () => void>();
+  /** Schedules a checkout's next sync attempt after a failure, on the same backoff as a failed edit sync. */
+  const retryAfterFailure = new Map<string, () => void>();
   /** Publishes local changes, then applies a newer cloud version. One reconciliation per checkout runs at a time. */
   const reconcile = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null): Promise<void> => {
     const prior = reconciling.get(local.rootPath) ?? Promise.resolve();
@@ -228,10 +230,13 @@ export async function createMachineExecutor(options: {
       void reconcile(current).catch(error => {
         if (artifactsPublicationRejection(error) || stopping.signal.aborted) return;
         console.error('[runtime-cache]', message(error));
-        retry.failures++;
-        retry.cancel?.();
-        retry.cancel = clock.schedule(Math.min(SYNC_RETRY_FIRST_MS * 2 ** (retry.failures - 1), SYNC_RETRY_MAX_MS), () => { retry.cancel = null; attempt(); });
+        failed();
       });
+    };
+    const failed = () => {
+      retry.failures++;
+      retry.cancel?.();
+      retry.cancel = clock.schedule(Math.min(SYNC_RETRY_FIRST_MS * 2 ** (retry.failures - 1), SYNC_RETRY_MAX_MS), () => { retry.cancel = null; attempt(); });
     };
     const changed = () => {
       if (stopping.signal.aborted) return;
@@ -244,12 +249,13 @@ export async function createMachineExecutor(options: {
       failed: error => console.error('[runtime-cache-watch]', error.message),
     });
     if (stopping.signal.aborted) { watcher.close(); cancel?.(); return; }
+    retryAfterFailure.set(local.rootPath, failed);
     retryResets.set(local.rootPath, () => {
       const held = retry.held;
       retry.failures = 0; retry.cancel?.(); retry.cancel = null; retry.held = false;
       if (held) changed();
     });
-    watchers.set(local.rootPath, { close() { cancel?.(); retry.cancel?.(); retryResets.delete(local.rootPath); watcher.close(); } });
+    watchers.set(local.rootPath, { close() { cancel?.(); retry.cancel?.(); retryResets.delete(local.rootPath); retryAfterFailure.delete(local.rootPath); watcher.close(); } });
   };
   /** Sync runs while the attachment is ready: the watcher sends local edits as they happen, each sync pass captures
    * what the watcher cannot see (such as ignore-rule changes outside the checkout), and `workspace.snapshot` notices
@@ -257,7 +263,13 @@ export async function createMachineExecutor(options: {
   const keepSyncing = async (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null) => {
     await follow(local);
     const applied = committedOf(keyOf(local.attachment));
-    await reconcile(local, incoming && applied && applied.worktreeCommit !== incoming.worktreeCommit ? incoming : undefined);
+    try {
+      await reconcile(local, incoming && applied && applied.worktreeCommit !== incoming.worktreeCommit ? incoming : undefined);
+    } catch (error) {
+      // Retried like a failed edit sync, so a checkout nobody edits does not keep a failure until its next edit.
+      if (!artifactsPublicationRejection(error) && !stopping.signal.aborted) retryAfterFailure.get(local.rootPath)?.();
+      throw error;
+    }
   };
   /** One read per workspace in flight; a notice during it costs one more read. */
   const snapshotReads = new Map<string, () => Promise<void>>();
