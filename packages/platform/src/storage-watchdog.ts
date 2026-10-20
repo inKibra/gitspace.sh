@@ -29,7 +29,7 @@ const OBJECT_LIMIT = 100;
 const STATE_KEY = 'storage-watchdog/state.json';
 
 /** Workers Paid list prices of Durable Objects, without the monthly allowances: the estimate errs high. */
-const DURABLE_OBJECT_USD = {
+export const DURABLE_OBJECT_USD = {
   perRowWritten: 1 / 1_000_000,
   perRowRead: 0.001 / 1_000_000,
   perRequest: 0.15 / 1_000_000,

@@ -90,7 +90,9 @@
     "PUBLIC_ASSETS_SERVICE": "gitspace-auth-rebuild-20260913",
     "USAGE_REPORT_SCRIPTS": "gitspace-rebuild-20260913-tenant-bradleat",
     "WATCHDOG_EMAIL_FROM": "watchdog@alerts.gitspace.sh",
-    "WATCHDOG_EMAIL_TO": "bradleat@inkibra.com"
+    "WATCHDOG_EMAIL_TO": "bradleat@inkibra.com",
+    "SPEND_DIGEST_TIMEZONE": "America/Los_Angeles",
+    "SPEND_DIGEST_HOURS": "8,13,18"
   },
   "send_email": [{ "name": "WATCHDOG_EMAIL" }],
   "triggers": {

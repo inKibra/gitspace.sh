@@ -20,6 +20,8 @@ interface Env {
   WATCHDOG_EMAIL: SendEmail;
   WATCHDOG_EMAIL_FROM: string;
   WATCHDOG_EMAIL_TO: string;
+  SPEND_DIGEST_TIMEZONE: string;
+  SPEND_DIGEST_HOURS: string;
   R2_API_TOKEN: string;
   R2_PARENT_ACCESS_KEY_ID: string;
   PLATFORM_BOOTSTRAP_TOKEN: string;

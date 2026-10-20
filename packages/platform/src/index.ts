@@ -2,8 +2,9 @@ import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { PlatformStorageActionSchema, platformObjectStorage } from './storage-quarantine.js';
 import { runStorageWatchdog } from './storage-watchdog.js';
+import { sendSpendDigestIfDue } from './spend-digest.js';
 
-/** `wrangler.jsonc` cron of the storage watchdog; the other cron is the daily usage report. */
+/** `wrangler.jsonc` cron of the storage watchdog and the spend digest; the other cron is the daily usage report. */
 const STORAGE_WATCHDOG_CRON = '*/10 * * * *';
 import { platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
 import { CloudflareR2PlatformClient } from './storage-provider.js';
@@ -508,7 +509,10 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    if (controller.cron === STORAGE_WATCHDOG_CRON) await runStorageWatchdog(env, controller.scheduledTime);
+    if (controller.cron === STORAGE_WATCHDOG_CRON) {
+      await runStorageWatchdog(env, controller.scheduledTime);
+      await sendSpendDigestIfDue(env, controller.scheduledTime);
+    }
     else await reportUsage(env, controller.scheduledTime);
   },
 } satisfies ExportedHandler<Env>;
