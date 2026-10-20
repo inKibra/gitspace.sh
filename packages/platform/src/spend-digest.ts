@@ -33,7 +33,9 @@ export async function sendSpendDigestIfDue(env: Env, scheduledTime: number): Pro
   const due = env.SPEND_DIGEST_HOURS.split(',').map(Number).includes(local.hour) && local.minute * 60_000 < RUN_MS;
   if (!due || !env.CF_ANALYTICS_TOKEN) return;
   try {
-    await env.WATCHDOG_EMAIL.send({ from: { email: env.WATCHDOG_EMAIL_FROM, name: 'GitSpace watchdog' }, to: env.WATCHDOG_EMAIL_TO, ...await spendDigest(env, local.midnight, scheduledTime) });
+    const digest = await spendDigest(env, local.midnight, scheduledTime);
+    const sent = await env.WATCHDOG_EMAIL.send({ from: { email: env.WATCHDOG_EMAIL_FROM, name: 'GitSpace watchdog' }, to: env.WATCHDOG_EMAIL_TO, ...digest });
+    console.log(JSON.stringify({ event: 'spend-digest-sent', subject: digest.subject, messageId: sent.messageId }));
   } catch (error) {
     console.error(JSON.stringify({ event: 'spend-digest-failed', message: error instanceof Error ? error.message : String(error) }));
   }
