@@ -410,7 +410,7 @@ export class IncrementalGitSnapshots {
         });
         if (stable !== await readGitCheckpointInputStamp(this.options.repositoryPath)) {
           // Never journal, upload, or admit a candidate captured across a write.
-          await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit]);
+          await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit], { allowMissingRef: true });
           await lfs?.releasePublication?.();
           continue;
         }
@@ -420,7 +420,10 @@ export class IncrementalGitSnapshots {
       }
     }
     if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree && JSON.stringify(committed.lfs) === JSON.stringify(checkpoint.lfs)) {
-      if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit]);
+      // A stored snapshot can match what was committed after it (a restore, an applied cloud version) and its ref may
+      // be gone already: it is dropped, not replayed, or every later capture would fail on it.
+      if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit], { allowMissingRef: true });
+      if (!fresh) { this.unpublished = undefined; await this.options.clearPending(); }
       await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
       return committed;
     }

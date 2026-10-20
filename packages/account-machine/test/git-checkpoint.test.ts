@@ -84,6 +84,25 @@ describe('Git intermediate checkpoint', () => {
     expect(git(source, 'show', `${checkpoint.worktreeCommit}:staged.txt`)).toBe('staged');
   });
 
+  it('drops a stored snapshot that matches what was committed after it, even when its ref is gone', async () => {
+    const { source } = fixture();
+    const committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'replay', revision: 1 });
+    const checkpointRef = 'refs/gitspace/spaces/cache-replay/snapshot';
+    const stored = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'replay', captureId: 'cache-replay', revision: 2, checkpointRef });
+    git(source, 'update-ref', '-d', checkpointRef);
+    let pending: PendingGitSnapshot | null = { checkpoint: stored, base: committed.worktreeCommit };
+    const publications: GitIntermediateCheckpoint[] = [];
+    const snapshots = new IncrementalGitSnapshots({
+      repositoryPath: source, spaceId: 'replay', captureId: 'cache-replay', allocateRevision: async () => 3,
+      loadPending: async () => pending, loadCommitted: async () => committed,
+      savePending: async next => { pending = next; }, clearPending: async () => { pending = null; },
+      publish: async checkpoint => { publications.push(checkpoint); }, commit: async checkpoint => checkpoint,
+    });
+    expect(await snapshots.capture()).toEqual(committed);
+    expect(pending).toBeNull();
+    expect(publications).toEqual([]);
+  });
+
   it('does not publish the private checkout branch but preserves an explicit human branch switch', async () => {
     const { source } = fixture();
     let committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'branch', revision: 1 });
