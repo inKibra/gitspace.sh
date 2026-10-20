@@ -5,12 +5,13 @@ import { resolve, join } from 'node:path';
 import { BrokerReplySchema, DAEMON_BROKER_WORKER_ARG, SupervisorRequestError, type DaemonRequest, type DaemonResponse } from './protocol.js';
 import { getDaemonRuntimeDir } from './process-identity.js';
 
+/** Requests to the broker whose runtime directory is `runtimeDir` (`getDaemonRuntimeDir(project)`). */
 export class DaemonBrokerClient {
-  constructor(readonly projectDir: string, private readonly unavailable?: () => void) {}
+  constructor(readonly runtimeDir: string, private readonly unavailable?: () => void) {}
   request(request: DaemonRequest, signal?: AbortSignal): Promise<DaemonResponse> {
     const result = Promise.withResolvers<DaemonResponse>();
     if (signal?.aborted) { result.reject(signal.reason); return result.promise; }
-    const socket = createConnection(join(getDaemonRuntimeDir(this.projectDir), 'broker.sock'));
+    const socket = createConnection(join(this.runtimeDir, 'broker.sock'));
     let buffer = '';
     const abort = () => socket.destroy(new Error('Supervisor request aborted', { cause: signal?.reason }));
     signal?.addEventListener('abort', abort, { once: true });
@@ -41,7 +42,7 @@ export function daemonClientForProject(projectDirectory: string): Promise<Daemon
   if (existing) return existing;
   const connecting: Promise<DaemonBrokerClient> = (async () => {
     let connected = false;
-    const client = new DaemonBrokerClient(project, () => {
+    const client = new DaemonBrokerClient(getDaemonRuntimeDir(project), () => {
       // Evict only this dead connection's cache entry. Never replay its request.
       if (connected && clients.get(project) === connecting) clients.delete(project);
     });

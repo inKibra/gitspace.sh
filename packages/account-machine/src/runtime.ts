@@ -73,7 +73,7 @@ export async function startMachineRuntime() {
   if (brokers.length) {
     console.info(JSON.stringify({
       event: 'supervisor_reconciled',
-      captured: brokers.filter(broker => broker.outcome === 'captured').map(broker => ({ project: broker.project, live: broker.live })),
+      captured: brokers.filter(broker => broker.outcome === 'captured').map(broker => ({ project: broker.project ?? broker.directory, live: broker.live })),
       stopped: brokers.filter(broker => broker.outcome === 'stopped').map(broker => broker.project),
       shutDown: brokers.filter(broker => broker.outcome === 'shut-down').length,
       pruned: brokers.filter(broker => broker.outcome === 'pruned').length,

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DaemonBrokerClient } from '../../supervisor/src/client.js';
 import { DAEMON_BROKER_WORKER_ARG } from '../../supervisor/src/protocol.js';
+import { getDaemonRuntimeDir } from '../../supervisor/src/process-identity.js';
 import { validateExecutableArtifact } from '../../deployment/src/executable-manifest.js';
 import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
 
@@ -16,7 +17,7 @@ if (!native.gitLfs) throw new Error('Container machine image lacks bundled Git L
 
 const home = await mkdtemp(join(tmpdir(), 'gitspace-image-probe-'));
 process.env.GITSPACE_SUPERVISOR_HOME = join(home, 'supervisor');
-const rpc = new DaemonBrokerClient(home);
+const rpc = new DaemonBrokerClient(getDaemonRuntimeDir(home));
 const child = Bun.spawn([process.execPath, join(machinePath, 'machine-worker.js'), DAEMON_BROKER_WORKER_ARG], {
   cwd: home,
   env: { HOME: home, XDG_CONFIG_HOME: home, TMPDIR: home, PATH: '/usr/local/bin:/usr/bin:/bin', GITSPACE_SUPERVISOR_PROJECT: home, GITSPACE_SUPERVISOR_HOME: process.env.GITSPACE_SUPERVISOR_HOME },

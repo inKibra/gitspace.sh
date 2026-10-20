@@ -12,7 +12,10 @@ const BrokerRecordSchema = z.object({ project: z.string() });
 const FINISHED = ['exited', 'failed'];
 
 export interface BrokerReconciliation {
-  project: string;
+  /** The broker's runtime directory. */
+  directory: string;
+  /** Null for a broker from before `broker.json`: it is kept or shut down, never stopped or pruned. */
+  project: string | null;
   /**
    * `captured`: it still runs processes, which carry on under it. `shut-down`: it ran nothing and exited; the next
    * caller starts one on current code. `stopped`: its project is gone, so its processes were stopped and it exited.
@@ -47,7 +50,7 @@ async function recordsLive(directory: string): Promise<boolean> {
  * Brokers outlive the machine process that started them, running the code of the release that started them. A machine
  * calls this when it starts: brokers still running processes are kept, the rest exit so the next caller starts one on
  * current code, brokers of deleted projects stop their processes, and directories nothing uses any more are removed.
- * Directories from before `broker.json` existed are left alone.
+ * A broker from before `broker.json` existed is kept while it runs something and shut down once it does not.
  */
 export async function reconcileBrokers(home = supervisorHome()): Promise<BrokerReconciliation[]> {
   if (!existsSync(home)) return [];
@@ -55,27 +58,26 @@ export async function reconcileBrokers(home = supervisorHome()): Promise<BrokerR
   for (const name of await readdir(home)) {
     const directory = join(home, name);
     const record = BrokerRecordSchema.safeParse(await readJson(join(directory, BROKER_RECORD)).catch(() => null));
-    if (!record.success) continue;
-    const { project } = record.data;
-    const projectExists = existsSync(project);
+    const project = record.success ? record.data.project : null;
+    const projectGone = project !== null && !existsSync(project);
     if (!await identityAlive(await readJson(join(directory, 'broker.lock', 'owner.json')).catch(() => null))) {
-      if (!projectExists && !await recordsLive(directory)) {
+      if (projectGone && !await recordsLive(directory)) {
         await rm(directory, { recursive: true, force: true });
-        results.push({ project, outcome: 'pruned', live: [] });
+        results.push({ directory, project, outcome: 'pruned', live: [] });
       }
       continue;
     }
-    const client = new DaemonBrokerClient(project);
+    const client = new DaemonBrokerClient(directory);
     const listed = await client.request({ op: 'list' }).catch(() => null);
     if (listed?.op !== 'list') continue;
     const live = listed.daemons.filter(daemon => !FINISHED.includes(daemon.state)).map(daemon => daemon.name);
-    if (projectExists && live.length > 0) {
-      results.push({ project, outcome: 'captured', live });
+    if (!projectGone && live.length > 0) {
+      results.push({ directory, project, outcome: 'captured', live });
       continue;
     }
-    if (!projectExists) for (const daemon of live) await client.request({ op: 'stop', name: daemon }).catch(() => null);
+    if (projectGone) for (const daemon of live) await client.request({ op: 'stop', name: daemon }).catch(() => null);
     await client.request({ op: 'shutdown' }).catch(() => null);
-    results.push({ project, outcome: projectExists ? 'shut-down' : 'stopped', live });
+    results.push({ directory, project, outcome: projectGone ? 'stopped' : 'shut-down', live });
   }
   return results;
 }
