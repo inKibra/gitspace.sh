@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { DaemonRequestSchema, ProcessIdentitySchema, SupervisorRequestError } from './protocol.js';
 import { getDaemonRuntimeDir, processIdentity, sameProcess } from './process-identity.js';
 import { ProcessSupervisor } from './supervisor.js';
+import { BROKER_RECORD } from './reconcile.js';
 
 /** A broker with nothing to supervise and no requests for this long exits; the next caller starts one again. */
 const IDLE_EXIT_MS = 10 * 60_000;
@@ -27,6 +28,8 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   const identity = await processIdentity(process.pid);
   if (!identity) throw new Error('Cannot establish supervisor process identity');
   await writeFile(join(lock, 'owner.json'), JSON.stringify(identity), { mode: 0o600 });
+  // Names this directory's project for `reconcileBrokers`; it outlives the broker.
+  await writeFile(join(root, BROKER_RECORD), JSON.stringify({ project: resolve(project) }), { mode: 0o600 });
   const socketPath = join(root, 'broker.sock');
   await rm(socketPath, { force: true });
   const supervisor = new ProcessSupervisor(root);

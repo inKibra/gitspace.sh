@@ -36,6 +36,7 @@ import { machineOperationalTools } from './runtime-operations.js';
 import { createGitHubCredentialHelper } from './github-credential-helper.js';
 import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
+import { reconcileBrokers } from '@gitspace/supervisor';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -67,6 +68,17 @@ export async function startMachineRuntime() {
   // Hosts already start this process with the tool directory; this also covers source runs and older hosts
   // for children spawned from process.env (OMP sessions, terminals, lifecycle scripts).
   Object.assign(process.env, machineToolEnvironment(process.env, native));
+  // Process brokers outlive machine processes: keep those running something, end the rest before any is used.
+  const brokers = await reconcileBrokers();
+  if (brokers.length) {
+    console.info(JSON.stringify({
+      event: 'supervisor_reconciled',
+      captured: brokers.filter(broker => broker.outcome === 'captured').map(broker => ({ project: broker.project, live: broker.live })),
+      stopped: brokers.filter(broker => broker.outcome === 'stopped').map(broker => broker.project),
+      shutDown: brokers.filter(broker => broker.outcome === 'shut-down').length,
+      pruned: brokers.filter(broker => broker.outcome === 'pruned').length,
+    }));
+  }
   const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
   const machineId = requiredEnvironment('GITSPACE_MACHINE_ID');
   const encryptionKey = artifactKey();

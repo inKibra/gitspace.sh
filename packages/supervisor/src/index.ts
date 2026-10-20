@@ -1,5 +1,6 @@
 export { daemonClientForProject, closeDaemonClients, DaemonBrokerClient } from './client.js';
-export { getDaemonRuntimeDir, processIdentity, sameProcess } from './process-identity.js';
+export { getDaemonRuntimeDir, processIdentity, sameProcess, supervisorHome } from './process-identity.js';
+export { reconcileBrokers, type BrokerReconciliation } from './reconcile.js';
 export { ProcessSupervisor } from './supervisor.js';
 export { DAEMON_BROKER_WORKER_ARG, TERMINAL_OUTPUT_WORKER_ARG, ProcessIdentitySchema, DaemonSpecSchema, DaemonStartSpecSchema, DaemonSnapshotSchema, DaemonStateSchema, DaemonRequestSchema, DaemonResponseSchema, SupervisorRequestError } from './protocol.js';
 export type { DaemonSpec, DaemonStartSpec, DaemonSnapshot, DaemonState, DaemonRequest, DaemonResponse } from './protocol.js';

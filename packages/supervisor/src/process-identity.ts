@@ -6,8 +6,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ProcessIdentity } from './protocol.js';
 const exec = promisify(execFile);
+/** Where every broker's runtime directory lives. */
+export function supervisorHome(): string {
+  return process.env.GITSPACE_SUPERVISOR_HOME ?? join(homedir(), '.gitspace', 'supervisor');
+}
 export function getDaemonRuntimeDir(projectDir: string): string {
-  return join(process.env.GITSPACE_SUPERVISOR_HOME ?? join(homedir(), '.gitspace', 'supervisor'), createHash('sha256').update(resolve(projectDir)).digest('hex').slice(0, 24));
+  return join(supervisorHome(), createHash('sha256').update(resolve(projectDir)).digest('hex').slice(0, 24));
 }
 /** Boot evidence is independent of whether a launch committed its child PID. */
 export async function bootIdentity(): Promise<string | null> {
