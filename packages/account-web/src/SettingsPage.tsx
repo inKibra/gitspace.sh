@@ -261,8 +261,8 @@ function ContextLimitSlider({ label, modelWindow, value, disabled, onCommit }: {
   const pending = useRef<number | undefined>(undefined);
   useEffect(() => { setCurrent(saved); }, [saved]);
   useEffect(() => () => { window.clearTimeout(pending.current); }, []);
-  return <span className="flex w-64 flex-col gap-1">
-    <Slider label={`Context limit for ${label}`} steps={steps} value={current} disabled={disabled} showValue formatValue={(tokens) => tokens === modelWindow ? `${formatTokens(tokens)} (model)` : formatTokens(tokens)}
+  return <span className="flex w-48 flex-col">
+    <Slider size="compact" showSteps={false} label="Context limit" aria-label={`Context limit for ${label}`} valuePosition="top" steps={steps} value={current} disabled={disabled} showValue formatValue={(tokens) => tokens === modelWindow ? `${formatTokens(tokens)} (model)` : formatTokens(tokens)}
       onChange={(next) => {
         const tokens = typeof next === 'number' ? next : next[1];
         setCurrent(tokens);
