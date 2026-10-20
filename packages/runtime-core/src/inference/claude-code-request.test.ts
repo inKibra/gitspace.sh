@@ -54,6 +54,24 @@ it('names the prefixed tools in mid-conversation tool changes, so every referenc
   expect(parsed.messages.at(-1).content.every((block: { tool: { name: string } }) => declared.includes(block.tool.name))).toBe(true);
 });
 
+it('attests in the billing header even when the conversation quotes the placeholder', async () => {
+  const quoting = JSON.stringify({ ...JSON.parse(body), messages: [...JSON.parse(body).messages, { role: 'user', content: [{ type: 'text', text: 'the header ends in cch=00000;' }] }] });
+  const sent = String((await claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: quoting, headers: oauth }, identity))?.body);
+  const parsed = JSON.parse(sent);
+  expect(parsed.messages.at(-1).content[0].text).toBe('the header ends in cch=00000;');
+  const cch = /cch=([0-9a-f]{5});$/.exec(parsed.system[0].text)![1]!;
+  expect(cch).not.toBe('00000');
+  const hashed = sent.replace(`cc_entrypoint=cli; cch=${cch};`, 'cc_entrypoint=cli; cch=00000;');
+  expect((xxHash64(new TextEncoder().encode(hashed), 0x4d659218e32a3268n) & 0xfffffn).toString(16).padStart(5, '0')).toBe(cch);
+});
+
+it('refuses to send a subscription request it cannot shape like Claude Code, since Anthropic would bill it as a third-party app', async () => {
+  const odd = JSON.stringify({ ...JSON.parse(body), messages: [{ role: 'user', content: [{ type: 'text', text: 7 }] }] });
+  await expect(claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: odd, headers: oauth }, identity)).rejects.toThrow(/unexpected shape \(messages\.0\.content/);
+  const plain = JSON.stringify({ ...JSON.parse(body), system: [{ type: 'text', text: 'Some other agent' }] });
+  await expect(claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: plain, headers: oauth }, identity)).rejects.toThrow(/Claude Code's system block/);
+});
+
 it('leaves API-key and other providers untouched', async () => {
   expect(await claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body, headers: { 'x-api-key': 'sk-ant-api03-x', 'user-agent': 'claude-cli/2.1.280' } }, identity)).toBeUndefined();
   expect(await claudeCodeRequest('https://api.openai.com/v1/responses', { method: 'POST', body, headers: oauth }, identity)).toBeUndefined();

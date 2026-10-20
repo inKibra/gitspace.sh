@@ -113,9 +113,13 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
   if (!url.startsWith('https://api.anthropic.com/v1/messages')) return undefined;
   const headers = new Headers(init?.headers);
   if (!headers.get('authorization')?.startsWith('Bearer sk-ant-oat')) return undefined;
+  // Sent as it is, a subscription request is billed as a third-party app's (extra usage), so one that can't take Claude
+  // Code's shape is not sent.
   const version = /^claude-cli\/([^\s(]+)/.exec(headers.get('user-agent') ?? '')?.[1];
+  if (!version) throw new Error('Claude subscription request has no claude-cli user agent; not sent as a third-party request');
   const parsed = BodySchema.safeParse(JSON.parse(raw));
-  if (!version || !parsed.success || parsed.data.system[0]?.text !== CLAUDE_CODE_INSTRUCTION) return undefined;
+  if (!parsed.success) throw new Error(`Claude subscription request has an unexpected shape (${parsed.error.issues.slice(0, 3).map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}); not sent as a third-party request`);
+  if (parsed.data.system[0]?.text !== CLAUDE_CODE_INSTRUCTION) throw new Error("Claude subscription request does not start with Claude Code's system block; not sent as a third-party request");
   const body = parsed.data;
 
   for (const tool of body.tools ?? []) tool.name = prefixed(tool.name);
@@ -130,10 +134,11 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
   const text = typeof firstUser === 'string' ? firstUser : firstUser?.find(block => block.type === 'text')?.text ?? '';
   const fingerprint = (await sha256Hex(`${FINGERPRINT_SALT}${[4, 7, 20].map(index => text[index] ?? '0').join('')}${version}`)).slice(0, 3);
   body.system = [{ type: 'text', text: `x-anthropic-billing-header: cc_version=${version}.${fingerprint}; cc_entrypoint=cli; ${CCH_PLACEHOLDER};` }, ...body.system];
-  // The attestation hashes the final body with the placeholder in place, then replaces it.
+  // The attestation hashes the final body with the placeholder in place, then replaces it in the billing header (message
+  // text serializes first and may contain the same placeholder).
   const placeholderBody = JSON.stringify(body);
   const cch = (xxHash64(new TextEncoder().encode(placeholderBody), CCH_SEED) & 0xfffffn).toString(16).padStart(5, '0');
-  const at = placeholderBody.indexOf(CCH_PLACEHOLDER);
+  const at = placeholderBody.indexOf(CCH_PLACEHOLDER, placeholderBody.indexOf('"system":[{"type":"text","text":"x-anthropic-billing-header:'));
 
   const betas = (headers.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
   headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(body.output_config === undefined ? [] : [EFFORT_BETA]), ...betas])].join(','));
