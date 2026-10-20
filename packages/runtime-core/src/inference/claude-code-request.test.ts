@@ -70,6 +70,13 @@ it('refuses to send a subscription request it cannot shape like Claude Code, sin
   await expect(claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: odd, headers: oauth }, identity)).rejects.toThrow(/unexpected shape \(messages\.0\.content/);
   const plain = JSON.stringify({ ...JSON.parse(body), system: [{ type: 'text', text: 'Some other agent' }] });
   await expect(claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: plain, headers: oauth }, identity)).rejects.toThrow(/Claude Code's system block/);
+  // Through fetch: nothing goes out, and the reason comes back as Anthropic's 400 shape rather than a retried connection error.
+  const network = vi.fn(async () => new Response('{}'));
+  globalThis.fetch = network;
+  const refused = await (await claudeCodeFetch('profile'))('https://api.anthropic.com/v1/messages', { method: 'POST', body: plain, headers: oauth });
+  expect(network).not.toHaveBeenCalled();
+  expect(refused.status).toBe(400);
+  expect((await refused.json()).error.message).toMatch(/Claude Code's system block/);
 });
 
 it('leaves API-key and other providers untouched', async () => {

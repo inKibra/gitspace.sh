@@ -152,7 +152,11 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
 export async function claudeCodeFetch(profileId: string): Promise<typeof fetch> {
   const identity = { deviceId: await sha256Hex(`gitspace-claude-device-v1:${profileId}`), sessionId: crypto.randomUUID() };
   return async (input, init) => {
-    const rewritten = await claudeCodeRequest(input, init, identity);
+    let rewritten: RequestInit | undefined;
+    // A refused request answers as Anthropic's own 400 would: the SDK reports a throw from fetch as a retried
+    // "Connection error." and drops the reason.
+    try { rewritten = await claudeCodeRequest(input, init, identity); }
+    catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
     const response = await fetch(input, { ...(rewritten ?? init), redirect: 'manual' });
     return rewritten ? unprefixToolUse(response) : response;
   };
