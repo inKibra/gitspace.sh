@@ -17,8 +17,9 @@ class Repository {
   readonly treeReads: string[] = [];
   readonly blobReads: string[] = [];
   failTrees = false;
-  /** Tree reads that never answer, as a wedged repository call would. */
+  /** Tree reads that never answer, as a wedged repository call would; `hung` settles once one starts. */
   hangTrees = false;
+  hung = Promise.withResolvers<void>();
   readonly failBlobs = new Set<string>();
   /** Per-read delay, standing in for the repository service's round trip. */
   latencyMs = 0;
@@ -27,7 +28,7 @@ class Repository {
       readTree: async oid => {
         if (this.latencyMs) await new Promise(resolve => setTimeout(resolve, this.latencyMs));
         if (this.failTrees) throw new Error('Artifacts is unavailable');
-        if (this.hangTrees) return new Promise<never>(() => {});
+        if (this.hangTrees) { this.hung.resolve(); return new Promise<never>(() => {}); }
         this.treeReads.push(oid);
         return this.trees.get(oid) ?? null;
       },
@@ -98,12 +99,18 @@ function proofFiles(): Map<string, string> {
     ['chunks/long.txt', `${Array.from({ length: 40 }, (_, n) => `line ${n} ${n === 33 ? 'needle deep' : 'filler'}`).join('\n')}\nstart\nend\n`],
     // One line longer than a chunk: the index skips it and says so.
     ['big/line.txt', `${'x'.repeat(200)} needle\n`],
+    // Skipped by path and never read: an image silently (binary), a lockfile as a skipped file.
+    ['assets/logo.png', 'needle in an image\n'],
+    ['package-lock.json', '{ "needle": "lock" }\n'],
   ]);
   for (let n = 0; n < 120; n++) files.set(`other/file${String(n).padStart(3, '0')}.txt`, `ordinary line ${n}\n${n % 40 === 0 ? 'needle outside\n' : ''}`);
   return files;
 }
 
 export class CodeSearchProof extends DurableObject {
+  /** The clock indexing backoff reads; tests move it instead of waiting. */
+  private clock = 1_000_000;
+  private readonly scheduled: number[] = [];
   async fetch(request: Request): Promise<Response> {
     await this.ctx.storage.deleteAll();
     const url = new URL(request.url);
@@ -122,7 +129,8 @@ export class CodeSearchProof extends DurableObject {
           return from < 0 || to < from ? null : to - from;
         },
       },
-      schedule: async () => {}, report: error => { if (!options.reports) throw error; options.reports.push(error); }, log: event => { options.events?.push(event); }, limits: options.limits,
+      schedule: async timestamp => { this.scheduled.push(timestamp - this.clock); }, now: () => this.clock,
+      report: error => { if (!options.reports) throw error; options.reports.push(error); }, log: event => { options.events?.push(event); }, limits: options.limits,
     });
   }
 
@@ -144,11 +152,13 @@ export class CodeSearchProof extends DurableObject {
     await assert.rejects(index.search({ pattern: 'needle', path: '.' }), /building the first index: 5 of \d+ files indexed; retry shortly/u);
     for (; step; step = await index.step()) steps++;
     assert.ok(steps > 10, `Bounded steps build the index (${steps})`);
-    assert.equal(repository.blobReads.length, new Set(files.values()).size, 'Each distinct blob is read once; identical files share it');
+    const unread = ['assets/logo.png', 'package-lock.json'], skippedPaths = ['big/line.txt', ...unread];
+    assert.equal(repository.blobReads.length, new Set([...files].filter(([path]) => !unread.includes(path)).map(([, content]) => content)).size, 'Each distinct blob is read once; identical files share it');
+    for (const path of unread) assert.ok(!repository.blobReads.includes(await repository.blobId(files.get(path) ?? '')), `${path} is never read`);
     assert.equal(sql.exec<{ refs: number }>('SELECT refs FROM code_search_blob WHERE oid=?', await repository.blobId(files.get('src/a.ts') ?? '')).one().refs, 2);
 
-    // The index answers exactly what the JS reference finds in the same files; the over-long line is skipped.
-    const reference = (source: ReadonlyMap<string, string>) => [...source].filter(([path]) => path !== 'big/line.txt').map(([path, content]) => ({ path, content }));
+    // The index answers exactly what the JS reference finds in the same files; the over-long line and skipped paths are not searched.
+    const reference = (source: ReadonlyMap<string, string>) => [...source].filter(([path]) => !skippedPaths.includes(path)).map(([path, content]) => ({ path, content }));
     const cases: SearchArguments[] = [
       { pattern: 'needle', path: '.' },
       { pattern: 'needle', path: '.', caseSensitive: false },
@@ -178,7 +188,7 @@ export class CodeSearchProof extends DurableObject {
     };
     await parity(files);
     const skipped = await index.search({ pattern: 'needle', path: '.' });
-    assert.equal(skipped.skippedFiles, 1);
+    assert.equal(skipped.skippedFiles, 2, 'The over-long line and the lockfile; the image is binary');
     assert.match(skipped.notes.join(' '), /not indexed/u);
     assert.match((await index.search({ pattern: 'kelvin', path: '.', caseSensitive: false })).matches.join('\n'), /docs\/kelvin\.md:1/u, 'SQLite folds the Kelvin sign like Rust (?i)');
     assert.match((await index.search({ pattern: 'MISSION', path: '.', caseSensitive: false })).matches.join('\n'), /docs\/longs\.md:1/u, 'SQLite folds long s like Rust (?i)');
@@ -252,15 +262,24 @@ export class CodeSearchProof extends DurableObject {
     files.set('src/a.ts', 'export const replaced = 1;\n');
     snapshot.current = await repository.commit(files);
     repository.failTrees = true;
+    this.scheduled.length = 0;
     await retried.drive();
     await retried.drive();
+    assert.deepEqual(this.scheduled, [30_000, 30_000], 'A drive inside the backoff reads nothing and keeps the retry time');
+    this.clock += 30_000;
+    await retried.drive();
+    assert.equal(this.scheduled.at(-1), 60_000, 'Consecutive failures double the wait');
     assert.equal(reports.length, 1);
     assert.deepEqual(events.filter(event => event.event === 'code_search_step_failed').map(event => event.message), ['Artifacts is unavailable', 'Artifacts is unavailable']);
+    assert.deepEqual(events.filter(event => event.event === 'code_search_step_failed').map(event => event.retryInMs), [30_000, 60_000]);
     const failing = await retried.search({ pattern: 'needle', path: 'src' });
     assert.equal(failing.indexedCommit, second.worktreeCommit);
     assert.match(failing.notes.join(' '), /1 snapshot\(s\) behind.*last indexing step failed and is retried: Artifacts is unavailable/u);
     repository.failTrees = false;
     events.length = 0;
+    await retried.drive();
+    assert.equal(events.length, 0, 'Recovery waits out the backoff');
+    this.clock += 60_000;
     await retried.drive();
     assert.ok(events.length > 0 && events.every(event => event.event === 'code_search_progress' && typeof event.stepMs === 'number' && event.failure === null), JSON.stringify(events));
     assert.deepEqual(events.map(event => event.phase).filter((phase, n, all) => phase !== all[n - 1]), ['trees', 'blobs', 'publish', 'collect'], 'The failed drive had begun this build; recovery resumes it');
@@ -276,6 +295,7 @@ export class CodeSearchProof extends DurableObject {
     await wedged.drive();
     assert.match(String(events.at(-1)?.message), /did not answer within 0.02 s/u);
     repository.hangTrees = false;
+    this.clock += 30_000;
 
     // Two drives racing over one build index each blob and reference once; an object the repository cannot serve is
     // skipped after its attempts instead of blocking the build.
@@ -285,7 +305,8 @@ export class CodeSearchProof extends DurableObject {
     repository.failBlobs.add(await repository.blobId(files.get('race/file3.ts') ?? ''));
     events.length = 0;
     const racers = [this.open(repository, snapshot, { limits: { ...limits, stepWindowMs: 60_000 }, reports, events }), this.open(repository, snapshot, { limits: { ...limits, stepWindowMs: 60_000 }, reports, events })];
-    for (let round = 0; round < 4; round++) await Promise.all(racers.map(racer => racer.drive()));
+    // A step whose only blob fails throws: later rounds wait out its backoff.
+    for (let round = 0; round < 4; round++) { await Promise.all(racers.map(racer => racer.drive())); this.clock += 30 * 60_000; }
     assert.equal(events.filter(event => event.event === 'code_search_blob_skipped').length, 1, JSON.stringify(events.filter(event => event.event !== 'code_search_progress')));
     const raced = await racers[0]!.search({ pattern: 'race', path: 'race' });
     assert.equal(raced.indexedCommit, snapshot.current.worktreeCommit);
@@ -299,6 +320,26 @@ export class CodeSearchProof extends DurableObject {
     snapshot.current = await repository.commit(files);
     await racers[0]!.drive();
     await parity(files);
+
+    // An isolate reset during a build step (out of memory, a deploy) leaves the build marked running: the next isolate's
+    // first drive counts it as a failed attempt and backs off instead of repeating the step that reset it.
+    files.set('src/reset.ts', 'reset\n');
+    snapshot.current = await repository.commit(files);
+    repository.hangTrees = true;
+    repository.hung = Promise.withResolvers<void>();
+    void this.open(repository, snapshot, { limits: { ...limits, readTimeoutMs: 3_600_000 } }).drive();
+    await repository.hung.promise;
+    repository.hangTrees = false;
+    repository.treeReads.length = 0; events.length = 0; this.scheduled.length = 0;
+    const restarted = this.open(repository, snapshot, { limits, reports, events });
+    await restarted.drive();
+    await restarted.drive();
+    assert.deepEqual(repository.treeReads, [], 'Nothing is read inside the backoff');
+    assert.match(String(events[0]?.message), /never finished: the workspace was reset during it/u);
+    assert.deepEqual(this.scheduled, [30_000, 30_000]);
+    this.clock += 30_000;
+    await restarted.drive();
+    assert.deepEqual((await restarted.search({ pattern: 'reset', path: 'src' })).matches, ['src/reset.ts:1:reset']);
     return { passed: true, steps };
   }
 

@@ -24,7 +24,9 @@ export type CodeSearchLimits = {
   readTimeoutMs: number;
   /** Line-aligned chunk size; a chunk row stays well under the 2 MB Durable Object value limit. */
   chunkBytes: number;
-  /** Larger blobs are not indexed and are reported as skipped. */
+  /** Larger blobs are not indexed and are reported as skipped. Hand-written source sits far below the default: in
+   * inkibra core the 99th percentile file is 112 KB and the largest source file 168 KB; what is larger is bundles,
+   * data, media and changelogs. */
   blobBytes: number;
   /** More candidate chunks than this falls back to the budgeted path-ordered scan. */
   candidateChunks: number;
@@ -33,9 +35,11 @@ export type CodeSearchLimits = {
   /** Wall time one alarm spends on steps before rescheduling. */
   stepWindowMs: number;
 };
+/** Bounded so indexing stays far below the 128 MB isolate it shares with agent sessions (and possibly other workspaces):
+ * at most `readConcurrency` blobs of `blobBytes` in flight, `stepBytes` held per step, `verifyBytes` per search. */
 export const CODE_SEARCH_LIMITS: CodeSearchLimits = {
-  stepBlobs: 200, stepBytes: 16 * 1024 * 1024, txnBlobs: 25, txnBytes: 4 * 1024 * 1024, stepTrees: 64, readConcurrency: 8, readTimeoutMs: 60_000,
-  chunkBytes: 1024 * 1024, blobBytes: 8 * 1024 * 1024, candidateChunks: 50_000, verifyFiles: 2_000, verifyBytes: 32 * 1024 * 1024, stepWindowMs: 20_000,
+  stepBlobs: 200, stepBytes: 4 * 1024 * 1024, txnBlobs: 25, txnBytes: 1024 * 1024, stepTrees: 64, readConcurrency: 4, readTimeoutMs: 60_000,
+  chunkBytes: 1024 * 1024, blobBytes: 256 * 1024, candidateChunks: 50_000, verifyFiles: 2_000, verifyBytes: 8 * 1024 * 1024, stepWindowMs: 20_000,
 };
 /** One structured line per indexing step or failure, for Workers observability. */
 export type CodeSearchEvent = { event: 'code_search_progress' | 'code_search_step_failed' | 'code_search_blob_skipped' } & Record<string, string | number | null>;
@@ -56,17 +60,23 @@ export type CodeSearchResult = {
   skippedFiles: number;
   notes: string[];
 };
-type SearchState = { generation: number; served_commit: string | null; served_tree: string | null; target_commit: string | null; target_tree: string | null; build_queued: number; build_indexed: number; failure: string | null };
+type SearchState = { generation: number; served_commit: string | null; served_tree: string | null; target_commit: string | null; target_tree: string | null; build_queued: number; build_indexed: number; failure: string | null; failures: number; retry_at: number | null; running_since: number | null };
 type ScopeRow = { path: string; blob_id: number; state: number; chunks: number };
 type IndexedBlob = { id: number; state: number; chunks: { firstLine: number; content: string }[]; skipped?: { oid: string; message: string } };
 
-// Blob states.
-const PENDING = 0, TEXT = 1, BINARY = 2, TOO_LARGE = 3, UNREADABLE = 4;
+// Blob states. GENERATED blobs are skipped by path and never read.
+const PENDING = 0, TEXT = 1, BINARY = 2, TOO_LARGE = 3, UNREADABLE = 4, GENERATED = 5;
 /** FTS rowid = blob id × CHUNKS_PER_BLOB + chunk ordinal. */
 const CHUNKS_PER_BLOB = 4096;
 const GARBAGE_ROWS = 256, SCOPE_PAGE = 256, BEHIND_LIMIT = 100;
 /** A blob whose read fails this often is skipped (reported as unreadable) instead of blocking the build. */
 const BLOB_ATTEMPTS = 3;
+/** A failed build attempt waits this long, doubling per consecutive failure up to `RETRY_MAX_MS`. */
+const RETRY_FIRST_MS = 30_000, RETRY_MAX_MS = 30 * 60_000;
+/** Media, fonts, archives and compiled objects: binary, so never read. */
+const BINARY_PATH = /\.(png|jpe?g|gif|webp|avif|bmp|ico|icns|tiff?|heic|psd|mp3|wav|flac|ogg|m4a|aac|mp4|mov|webm|mkv|avi|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|jar|pdf|exe|dll|so|dylib|wasm|class|pyc|sqlite3?)$/iu;
+/** Generated text no one searches by hand: never read, and reported as skipped. */
+const GENERATED_PATH = /(^|\/)node_modules\/|\.min\.(js|css)$|\.map$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|poetry\.lock|composer\.lock|go\.sum)$/u;
 
 /** Settles with `operation`, or rejects once `ms` pass: a read that never answers must not wedge indexing. */
 function bounded<T>(operation: Promise<T>, ms: number, what: string): Promise<T> {
@@ -116,21 +126,24 @@ export class CodeSearchIndex {
   private readonly unavailable: string | null = null;
   /** A drive in flight holds this lease; one whose reads wedged loses it, and a later alarm drives instead. */
   private leaseUntil = 0;
+  /** The first drive of an isolate checks whether the previous isolate was reset in the middle of a build step. */
+  private checkedReset = false;
   private ignores: { generation: number; rules: SearchIgnoreRules } | undefined;
-  /** Whether the current run of failures has been reported: each failure carries a fresh provider reference, so a
-   * report per distinct message became one every 30 seconds. */
-  private reported = false;
   private readonly blobFailures = new Map<number, number>();
+  private readonly now: () => number;
 
-  constructor(private readonly options: { storage: CodeSearchStorage; source: CodeSearchSource; repository: string; snapshots: CodeSearchSnapshots; schedule(timestamp: number): Promise<void>; report(error: unknown): void; log?(event: CodeSearchEvent): void; limits?: Partial<CodeSearchLimits> }) {
+  constructor(private readonly options: { storage: CodeSearchStorage; source: CodeSearchSource; repository: string; snapshots: CodeSearchSnapshots; schedule(timestamp: number): Promise<void>; report(error: unknown): void; log?(event: CodeSearchEvent): void; limits?: Partial<CodeSearchLimits>; now?: () => number }) {
     const sql = options.storage.sql;
     this.limits = { ...CODE_SEARCH_LIMITS, ...options.limits };
+    this.now = options.now ?? Date.now;
     // The hand-rolled index stored one row per (trigram, path); FTS5 replaces it.
     for (const table of ['runtime_search_trigrams', 'runtime_search_chunks', 'runtime_search_files', 'runtime_search_state']) sql.exec(`DROP TABLE IF EXISTS ${table}`);
-    sql.exec('CREATE TABLE IF NOT EXISTS code_search_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation INTEGER NOT NULL, served_commit TEXT, served_tree TEXT, target_commit TEXT, target_tree TEXT, build_queued INTEGER NOT NULL DEFAULT 0, build_indexed INTEGER NOT NULL DEFAULT 0, failure TEXT)');
-    // Progress columns arrived after the first release of this table.
+    sql.exec('CREATE TABLE IF NOT EXISTS code_search_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation INTEGER NOT NULL, served_commit TEXT, served_tree TEXT, target_commit TEXT, target_tree TEXT, build_queued INTEGER NOT NULL DEFAULT 0, build_indexed INTEGER NOT NULL DEFAULT 0, failure TEXT, failures INTEGER NOT NULL DEFAULT 0, retry_at INTEGER, running_since INTEGER)');
+    // Progress columns arrived after the first release of this table; the retry columns arrived with the 256 KiB and
+    // generated-path limits, so an index that lacks them still holds blobs built under the old limits.
     const columns = new Set(sql.exec<{ name: string }>('PRAGMA table_info(code_search_state)').toArray().map(column => column.name));
-    for (const column of ['build_queued INTEGER NOT NULL DEFAULT 0', 'build_indexed INTEGER NOT NULL DEFAULT 0', 'failure TEXT']) if (!columns.has(column.split(' ')[0]!)) sql.exec(`ALTER TABLE code_search_state ADD COLUMN ${column}`);
+    const oldLimits = !columns.has('running_since');
+    for (const column of ['build_queued INTEGER NOT NULL DEFAULT 0', 'build_indexed INTEGER NOT NULL DEFAULT 0', 'failure TEXT', 'failures INTEGER NOT NULL DEFAULT 0', 'retry_at INTEGER', 'running_since INTEGER']) if (!columns.has(column.split(' ')[0]!)) sql.exec(`ALTER TABLE code_search_state ADD COLUMN ${column}`);
     sql.exec('INSERT OR IGNORE INTO code_search_state(singleton,generation) VALUES(1,0)');
     sql.exec('CREATE TABLE IF NOT EXISTS code_search_blob(id INTEGER PRIMARY KEY, oid TEXT NOT NULL UNIQUE, state INTEGER NOT NULL, chunks INTEGER NOT NULL, refs INTEGER NOT NULL)');
     sql.exec(`CREATE INDEX IF NOT EXISTS code_search_blob_pending ON code_search_blob(id) WHERE state=${PENDING}`);
@@ -147,6 +160,24 @@ export class CodeSearchIndex {
       this.unavailable = error instanceof Error ? error.message : String(error);
       options.report(error);
     }
+    if (oldLimits && !this.unavailable) this.dropOverLimitBlobs();
+  }
+
+  /** Once: blobs indexed before the size and path limits leave the index, as a build under the limits would skip them. */
+  private dropOverLimitBlobs(): void {
+    const { storage } = this.options;
+    const oversized = storage.sql.exec<{ id: number }>(`SELECT blob_id AS id FROM code_search_chunk GROUP BY blob_id HAVING SUM(length(CAST(content AS BLOB)))>?`, this.limits.blobBytes).toArray().map(row => ({ id: row.id, state: TOO_LARGE }));
+    const generated = storage.sql.exec<{ id: number; path: string }>(`SELECT b.id, f.path FROM code_search_file f JOIN code_search_blob b ON b.id=f.blob_id WHERE b.state=${TEXT}`).toArray()
+      .flatMap(row => BINARY_PATH.test(row.path) ? [{ id: row.id, state: BINARY }] : GENERATED_PATH.test(row.path) ? [{ id: row.id, state: GENERATED }] : []);
+    if (!oversized.length && !generated.length) return;
+    storage.transactionSync(() => {
+      for (const blob of [...oversized, ...generated]) {
+        const row = storage.sql.exec<{ chunks: number }>(`UPDATE code_search_blob SET state=?, chunks=0 WHERE id=? AND state=${TEXT} RETURNING (SELECT COUNT(*) FROM code_search_chunk WHERE blob_id=?) AS chunks`, blob.state, blob.id, blob.id).toArray()[0];
+        if (!row) continue;
+        for (let ordinal = 0; ordinal < row.chunks; ordinal++) storage.sql.exec('DELETE FROM code_search_fts WHERE rowid=?', blob.id * CHUNKS_PER_BLOB + ordinal);
+        storage.sql.exec('DELETE FROM code_search_chunk WHERE blob_id=?', blob.id);
+      }
+    });
   }
 
   /** A snapshot was published: index it from an alarm, never inside the publishing request. */
@@ -155,35 +186,53 @@ export class CodeSearchIndex {
   }
 
   /** Advance indexing for one alarm's window, rescheduling while work remains. Steps are safe to run concurrently;
-   * the lease only keeps two drives from duplicating reads, and never makes a caller wait on another's promise. */
+   * the lease only keeps two drives from duplicating reads, and never makes a caller wait on another's promise.
+   * A failed attempt (a thrown step, or a reset during one) waits out a doubling backoff before the next. */
   async drive(): Promise<void> {
     if (this.unavailable) return;
     if (Date.now() < this.leaseUntil) return;
+    const state = this.state();
+    if (!this.checkedReset) {
+      this.checkedReset = true;
+      // Set while a build step runs and cleared when its drive ends: still set in a new isolate, the old one was
+      // reset during the step (out of memory, or a deploy). Retrying at once would repeat what reset it.
+      if (state.running_since !== null) { await this.failed(new Error(`The indexing run started ${new Date(state.running_since).toISOString()} never finished: the workspace was reset during it`), 0); return; }
+    }
+    if (state.retry_at !== null && this.now() < state.retry_at) { await this.options.schedule(state.retry_at); return; }
     const lease = this.leaseUntil = Date.now() + this.limits.stepWindowMs + 2 * this.limits.readTimeoutMs;
-    try { await this.advance(); } finally { if (this.leaseUntil === lease) this.leaseUntil = 0; }
+    try { await this.advance(); } finally {
+      if (this.leaseUntil === lease) this.leaseUntil = 0;
+      this.options.storage.sql.exec('UPDATE code_search_state SET running_since=NULL WHERE singleton=1 AND running_since IS NOT NULL');
+    }
   }
 
   private async advance(): Promise<void> {
     const deadline = Date.now() + this.limits.stepWindowMs;
+    const sql = this.options.storage.sql;
     for (;;) {
       const started = Date.now();
+      // Only build steps read the repository; marking them alone keeps idle drives free of writes.
+      if (this.state().target_tree !== null) sql.exec('UPDATE code_search_state SET running_since=? WHERE singleton=1 AND running_since IS NULL', this.now());
       let step: CodeSearchStep | null;
       try { step = await this.step(); }
-      catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.options.storage.sql.exec('UPDATE code_search_state SET failure=? WHERE singleton=1', message);
-        this.log({ event: 'code_search_step_failed', repository: this.options.repository, message, stepMs: Date.now() - started, ...this.progress() });
-        // The workspace QA record gets a run of failures once, when it starts; the log line is written every time.
-        if (!this.reported) { this.reported = true; this.options.report(error); }
-        await this.options.schedule(Date.now() + 30_000);
-        return;
-      }
-      this.reported = false;
+      catch (error) { await this.failed(error, Date.now() - started); return; }
       if (!step) return;
-      this.options.storage.sql.exec('UPDATE code_search_state SET failure=NULL WHERE singleton=1 AND failure IS NOT NULL');
+      sql.exec('UPDATE code_search_state SET failure=NULL, failures=0, retry_at=NULL WHERE singleton=1 AND (failure IS NOT NULL OR failures>0)');
       this.log({ event: 'code_search_progress', repository: this.options.repository, phase: step.phase, items: step.items, stepMs: Date.now() - started, ...this.progress() });
       if (Date.now() >= deadline) { await this.options.schedule(Date.now()); return; }
     }
+  }
+
+  /** Records a failed attempt and when the next may run. The log line is written every time; the workspace QA record
+   * gets a run of failures once, when it starts. */
+  private async failed(error: unknown, stepMs: number): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    const failures = this.state().failures + 1;
+    const retryAt = this.now() + Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+    this.options.storage.sql.exec('UPDATE code_search_state SET failure=?, failures=?, retry_at=?, running_since=NULL WHERE singleton=1', message, failures, retryAt);
+    this.log({ event: 'code_search_step_failed', repository: this.options.repository, message, stepMs, failures, retryInMs: retryAt - this.now(), ...this.progress() });
+    if (failures === 1) this.options.report(error);
+    await this.options.schedule(retryAt);
   }
 
   /** One bounded unit of work. */
@@ -269,14 +318,14 @@ export class CodeSearchIndex {
       const behind = stale ? this.options.snapshots.distance(commit, current.worktreeCommit, BEHIND_LIMIT) : 0;
       const notes: string[] = [];
       if (stoppedAt !== null) notes.push(`Verified ${verifiedFiles} files in path order and stopped before ${stoppedAt}${query === null ? ': the pattern has no 3-character literal to look up in the index' : candidates === null ? ': too many files contain the pattern\'s literals' : ''}. Narrow path, glob or pattern, or use grep on an attached machine for an exhaustive search.`);
-      if (skippedFiles) notes.push(`${skippedFiles} files in scope are not indexed (over ${this.limits.blobBytes / 1024 / 1024} MiB, a line over ${this.limits.chunkBytes / 1024 / 1024} MiB, or unreadable); grep on an attached machine searches them.`);
+      if (skippedFiles) notes.push(`${skippedFiles} files in scope are not indexed (over ${this.limits.blobBytes / 1024} KiB, a line over ${this.limits.chunkBytes / 1024} KiB, generated (minified, a source map or a lockfile), or unreadable); grep on an attached machine searches them.`);
       if (stale) notes.push(`The index is at ${commit}, ${behind === null ? 'an unknown number of' : behind} snapshot(s) behind the working copy; newer changes are being indexed${state.target_commit === null ? '' : ` (${state.build_indexed} of ${state.build_queued} changed files done)`}${state.failure ? `; the last indexing step failed and is retried: ${state.failure}` : ''}.`);
       return { matches, truncated, partial: stoppedAt !== null, indexedCommit: commit, behind, verifiedFiles, skippedFiles, notes };
     } finally { regex.free(); }
   }
 
   private state(): SearchState {
-    return this.options.storage.sql.exec<SearchState>('SELECT generation, served_commit, served_tree, target_commit, target_tree, build_queued, build_indexed, failure FROM code_search_state WHERE singleton=1').one();
+    return this.options.storage.sql.exec<SearchState>('SELECT generation, served_commit, served_tree, target_commit, target_tree, build_queued, build_indexed, failure, failures, retry_at, running_since FROM code_search_state WHERE singleton=1').one();
   }
 
   private begin(current: Pick<RuntimeGitCheckpoint, 'worktreeCommit' | 'worktreeTree'>): void {
@@ -341,10 +390,13 @@ export class CodeSearchIndex {
     else if (wasFile) sql.exec('UPDATE code_search_file SET until=? WHERE path=? AND until IS NULL', next, path);
     if (after?.type === 'tree') sql.exec('INSERT INTO code_search_tree(prefix,old_tree,new_tree) VALUES(?,?,?)', `${path}/`, null, after.hash);
     else if (isFile) {
-      const blob = sql.exec<{ id: number; refs: number }>(`INSERT INTO code_search_blob(oid,state,chunks,refs) VALUES(?,${PENDING},0,1) ON CONFLICT(oid) DO UPDATE SET refs=refs+1 RETURNING id, refs`, after.hash).one();
+      // Binary and generated paths are settled here and never read; content they share with another path keeps the
+      // state its first reference gave it.
+      const state = BINARY_PATH.test(path) ? BINARY : GENERATED_PATH.test(path) ? GENERATED : PENDING;
+      const blob = sql.exec<{ id: number; refs: number; state: number }>('INSERT INTO code_search_blob(oid,state,chunks,refs) VALUES(?,?,0,1) ON CONFLICT(oid) DO UPDATE SET refs=refs+1 RETURNING id, refs, state', after.hash, state).one();
       sql.exec('INSERT INTO code_search_file(path,since,until,blob_id,ignore_rules) VALUES(?,?,NULL,?,?)', path, next, blob.id, /(^|\/)\.(git)?ignore$/u.test(path) ? 1 : 0);
-      // Blobs are collected as their last reference goes, so a first reference is a blob this build must index.
-      return blob.refs === 1;
+      // Blobs are collected as their last reference goes, so a first pending reference is a blob this build must index.
+      return blob.refs === 1 && blob.state === PENDING;
     }
     return false;
   }
