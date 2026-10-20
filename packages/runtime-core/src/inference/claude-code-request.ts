@@ -28,7 +28,11 @@ const CLAUDE_CODE_HEADERS: Record<string, string> = {
   'x-stainless-timeout': '600',
 };
 const NamedSchema = z.object({ name: z.string() }).loose();
-const BlockSchema = z.object({ type: z.string(), name: z.string().optional(), text: z.string().optional(), tool: NamedSchema.optional() }).loose();
+// Only what the rewrite reads or renames is checked, on the block types it touches; other blocks pass as they are.
+const BlockSchema = z.object({ type: z.string() }).loose();
+const ToolChangeSchema = z.object({ type: z.enum(['tool_addition', 'tool_removal']), tool: NamedSchema }).loose();
+const ToolUseSchema = z.object({ type: z.literal('tool_use'), name: z.string() }).loose();
+const TextSchema = z.object({ type: z.literal('text'), text: z.string() }).loose();
 const MessageSchema = z.object({ role: z.string(), content: z.union([z.string(), z.array(BlockSchema)]) }).loose();
 const BodySchema = z.object({
   messages: z.array(MessageSchema),
@@ -125,13 +129,16 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
   for (const tool of body.tools ?? []) tool.name = prefixed(tool.name);
   if (body.tool_choice?.name) body.tool_choice.name = prefixed(body.tool_choice.name);
   // Tool changes reference tools by name (`tool_addition`/`tool_removal`), so they name the prefixed declarations too.
+  // Renamed in place: every other byte stays as earlier requests sent it, so the prompt cache still matches.
   for (const message of body.messages) if (Array.isArray(message.content)) for (const block of message.content) {
-    if (block.type === 'tool_use' && block.name) block.name = prefixed(block.name);
-    if ((block.type === 'tool_addition' || block.type === 'tool_removal') && block.tool) block.tool.name = prefixed(block.tool.name);
+    const use = ToolUseSchema.safeParse(block);
+    if (use.success) Object.assign(block, { name: prefixed(use.data.name) });
+    const change = ToolChangeSchema.safeParse(block);
+    if (change.success) Object.assign(block, { tool: { ...change.data.tool, name: prefixed(change.data.tool.name) } });
   }
   body.metadata = { user_id: JSON.stringify({ device_id: identity.deviceId, session_id: identity.sessionId }) };
   const firstUser = body.messages.find(message => message.role === 'user')?.content;
-  const text = typeof firstUser === 'string' ? firstUser : firstUser?.find(block => block.type === 'text')?.text ?? '';
+  const text = typeof firstUser === 'string' ? firstUser : firstUser?.flatMap(block => { const parsed = TextSchema.safeParse(block); return parsed.success ? [parsed.data.text] : []; })[0] ?? '';
   const fingerprint = (await sha256Hex(`${FINGERPRINT_SALT}${[4, 7, 20].map(index => text[index] ?? '0').join('')}${version}`)).slice(0, 3);
   body.system = [{ type: 'text', text: `x-anthropic-billing-header: cc_version=${version}.${fingerprint}; cc_entrypoint=cli; ${CCH_PLACEHOLDER};` }, ...body.system];
   // The attestation hashes the final body with the placeholder in place, then replaces it in the billing header (message

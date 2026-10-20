@@ -66,7 +66,7 @@ it('attests in the billing header even when the conversation quotes the placehol
 });
 
 it('refuses to send a subscription request it cannot shape like Claude Code, since Anthropic would bill it as a third-party app', async () => {
-  const odd = JSON.stringify({ ...JSON.parse(body), messages: [{ role: 'user', content: [{ type: 'text', text: 7 }] }] });
+  const odd = JSON.stringify({ ...JSON.parse(body), messages: [{ role: 'user', content: [{ text: 'a block without a type' }] }] });
   await expect(claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: odd, headers: oauth }, identity)).rejects.toThrow(/unexpected shape \(messages\.0\.content/);
   const plain = JSON.stringify({ ...JSON.parse(body), system: [{ type: 'text', text: 'Some other agent' }] });
   await expect(claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: plain, headers: oauth }, identity)).rejects.toThrow(/Claude Code's system block/);
@@ -77,6 +77,15 @@ it('refuses to send a subscription request it cannot shape like Claude Code, sin
   expect(network).not.toHaveBeenCalled();
   expect(refused.status).toBe(400);
   expect((await refused.json()).error.message).toMatch(/Claude Code's system block/);
+});
+
+it('shapes requests holding blocks it does not touch, whatever their fields, and renames in place', async () => {
+  const other = { type: 'server_block', name: 3, text: { nested: true }, tool: 'not a reference' };
+  const mixed = JSON.stringify({ ...JSON.parse(body), messages: [...JSON.parse(body).messages, { role: 'assistant', content: [other] }] });
+  const sent = String((await claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: mixed, headers: oauth }, identity))?.body);
+  expect(JSON.parse(sent).messages.at(-1).content).toEqual([other]);
+  // Key order kept, so the cached prompt prefix still matches earlier requests.
+  expect(sent).toContain('{"type":"tool_use","id":"t1","name":"_read","input":{"path":"a"}}');
 });
 
 it('leaves API-key and other providers untouched', async () => {
