@@ -155,6 +155,25 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
   return { ...init, headers, body: `${placeholderBody.slice(0, at)}cch=${cch}${placeholderBody.slice(at + CCH_PLACEHOLDER.length)}` };
 }
 
+const CLAUDE_CODE_BLOCKS: Record<string, true> = { text: true, image: true, document: true, tool_use: true, tool_result: true, thinking: true, redacted_thinking: true, tool_addition: true, tool_removal: true };
+/** The shape of a request Anthropic refused as a third-party app's: sizes, block counts and unusual blocks, no content. */
+function requestShape(body: string): JsonShape {
+  const parsed = BodySchema.safeParse(JSON.parse(body));
+  if (!parsed.success) return { bytes: body.length, parsed: false };
+  const counts: Record<string, number> = {};
+  const unusual: JsonShape[] = [];
+  parsed.data.messages.forEach((message, index) => {
+    if (!Array.isArray(message.content)) return;
+    for (const block of message.content) {
+      counts[`${message.role}:${block.type}`] = (counts[`${message.role}:${block.type}`] ?? 0) + 1;
+      const fields = Object.entries(block);
+      if (CLAUDE_CODE_BLOCKS[block.type] && fields.every(([key, value]) => (key !== 'name' && key !== 'text') || typeof value === 'string')) continue;
+      if (unusual.length < 12) unusual.push({ index, role: message.role, type: block.type, fields: fields.map(([key, value]) => `${key}:${Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value}`).join(',') });
+    }
+  });
+  return { bytes: body.length, messages: parsed.data.messages.length, tools: parsed.data.tools?.length ?? 0, systemBlocks: parsed.data.system.length, counts, unusual };
+}
+type JsonShape = { [key: string]: string | number | boolean | Record<string, number> | JsonShape[] };
 /** Fetch for admitted credentials: never follows redirects; Claude subscription requests go out as Claude Code. */
 export async function claudeCodeFetch(profileId: string): Promise<typeof fetch> {
   const identity = { deviceId: await sha256Hex(`gitspace-claude-device-v1:${profileId}`), sessionId: crypto.randomUUID() };
@@ -165,6 +184,10 @@ export async function claudeCodeFetch(profileId: string): Promise<typeof fetch> 
     try { rewritten = await claudeCodeRequest(input, init, identity); }
     catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
     const response = await fetch(input, { ...(rewritten ?? init), redirect: 'manual' });
+    if (rewritten && response.status >= 400 && typeof rewritten.body === 'string') {
+      const text = await response.clone().text();
+      if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: new Headers(rewritten.headers).get('anthropic-beta'), shape: requestShape(rewritten.body) }));
+    }
     return rewritten ? unprefixToolUse(response) : response;
   };
 }
