@@ -656,6 +656,28 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(notices.mock.calls.at(-1)?.[1]).toBe("Base branch main already holds origin's 2222222.");
   });
 
+  it('moves the base checkout while a machine is attached to it; the machine follows like any cloud change', async () => {
+    const { userId, client, project, artifacts } = await cloudProject('Attached base', 'https://github.com/acme/app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    await space.runtimeRepositoryCheckpoint(identity);
+    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'base-cache', machineId: 'darktop', generation: 1, role: 'cache', state: 'ready',
+      checkout: { kind: 'shared', branch: 'main' }, capabilities: [], updatedAt: new Date().toISOString(), online: true });
+    await runInDurableObject(space, (_instance, state) => {
+      state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
+    });
+    cloudHistory({ [commit('1')]: [], [commit('2')]: [commit('1')] });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockImplementation(async (projectId, _url, branch) => {
+      artifacts.refs.set(`project-${projectId} refs/gitspace/origin/heads/${branch}`, commit('2'));
+      return commit('2');
+    });
+    const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), worktreeCommit: commit('2') });
+    expect(notices.mock.calls.map(call => call[1])).toEqual(['Base branch main updated to 2222222 from origin.']);
+    expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'base-cache', state: 'ready' }]);
+  });
+
   it('refuses to move a project copy holding commits the origin lacks', async () => {
     const { userId, client, project, artifacts, authority } = await cloudProject('Diverged base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });

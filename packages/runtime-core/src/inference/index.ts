@@ -88,7 +88,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     for (const provider of list) models.setProvider({ ...provider, auth: { apiKey: { name: 'Public catalog', resolve: async () => ({ auth: { apiKey: 'catalog-only' }, source: 'Public catalog' }) } } });
     return models;
   };
-  // Every chat model carries the window its roles' context limits and the cloud limit allow; pinned admissions too.
+  // Every chat model carries the window its roles' context limits allow; pinned admissions too.
   const limit = contextWindowLimits(options.settings ?? {}, catalog(listed));
   const providers = listed.map(provider => limitContextWindows(provider, limit));
   const registry = catalog(providers);

@@ -9,8 +9,6 @@ export type InferenceSettingSection = 'Models' | 'Providers';
 /** Roles every profile offers; a profile may add its own. An unset role resolves to Default. */
 export const BUILT_IN_MODEL_ROLES = ['default', 'deep', 'fast', 'taste'] as const;
 export const MODEL_ROLE_LABELS: Readonly<Record<string, string>> = { default: 'Default', deep: 'Deep', fast: 'Fast', taste: 'Taste' };
-/** A cloud workspace builds each model request in a 128 MB Durable Object: no model's window is used past this. */
-export const CLOUD_CONTEXT_LIMIT = 400_000;
 /** Below this a role's context limit leaves too little room for a working conversation. */
 export const MIN_CONTEXT_LIMIT = 32_000;
 /** Per-role context limits: the window a role's model is used with; compaction keeps conversations below it. */
@@ -134,7 +132,7 @@ export function applyInferenceSettings(config: Record<string, unknown>, settings
 /** Profile editor metadata is independent of any machine-installed runtime schema. */
 export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'modelRoles', tab: 'Models', label: 'Model roles', kind: 'record', value: {}, defaultJson: '{}', credential: false },
-  { path: 'contextLimits', tab: 'Models', label: 'Context limits', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: `Tokens per role; compaction keeps conversations below it. Cloud workspaces never exceed ${CLOUD_CONTEXT_LIMIT.toLocaleString('en-US')}.` },
+  { path: 'contextLimits', tab: 'Models', label: 'Context limits', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Tokens per role, below its model\'s own window; compaction keeps conversations below it.' },
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
   { path: 'visionFallback', tab: 'Models', label: 'Vision fallback', kind: 'string', value: '', defaultJson: '""', credential: false, description: 'Describes images for a model that cannot read them. Not offered as a role.' },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },

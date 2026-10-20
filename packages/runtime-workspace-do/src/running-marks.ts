@@ -9,6 +9,7 @@ export type RunningMark = { step: string; detail: string; startedAt: string };
  */
 export function createRunningMarks(sql: SqlStorage) {
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_running(id TEXT PRIMARY KEY, step TEXT NOT NULL, detail TEXT NOT NULL, started_at INTEGER NOT NULL)');
+  sql.exec('CREATE TABLE IF NOT EXISTS runtime_unfinished(key TEXT PRIMARY KEY, started_at INTEGER NOT NULL)');
   const leftover = sql.exec<{ step: string; detail: string; started_at: number }>('SELECT step, detail, started_at FROM runtime_running ORDER BY started_at').toArray()
     .map((row): RunningMark => ({ step: row.step, detail: row.detail, startedAt: new Date(row.started_at).toISOString() }));
   if (leftover.length) sql.exec('DELETE FROM runtime_running');
@@ -25,6 +26,15 @@ export function createRunningMarks(sql: SqlStorage) {
     /** What the previous instance was running when it was reset. */
     leftover,
     run,
+    /** One record per key (a conversation's turn, its compaction): still present at `begin`, the previous one never finished. */
+    unfinished: {
+      begin(key: string): boolean {
+        const previous = sql.exec('SELECT key FROM runtime_unfinished WHERE key=?', key).toArray().length > 0;
+        sql.exec('INSERT OR REPLACE INTO runtime_unfinished(key,started_at) VALUES(?,?)', key, Date.now());
+        return previous;
+      },
+      end(key: string): void { sql.exec('DELETE FROM runtime_unfinished WHERE key=?', key); },
+    },
     /** Model requests are marked from the call until the response stream ends, however the caller consumes it. */
     models(models: Models): Models {
       const describe = (model: { provider: string; id: string }, context: Context) => {

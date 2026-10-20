@@ -372,7 +372,6 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const runtime = await this.loadRuntime(identity);
     const snapshot = await runtime.snapshot();
     if (snapshot.conversations.some(conversation => conversation.status === 'running' || conversation.status === 'waiting')) throw new Error(`Stop the base workspace agent before ${action}`);
-    if (runtime.attachments.list().some(attachment => attachment.state !== 'detached')) throw new Error(`Detach base workspace caches before ${action}`);
     await ensureProjectCodeRepository(this.env, code, project);
     const reference = project.repositoryReference;
     const head = await code.resolveRef(source, `refs/heads/${branch}`)

@@ -16,7 +16,6 @@ import {
 import { createVaultModels, type VaultModelsOptions } from './index';
 import type { CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
 import { describeCloudProviders, listCloudModels } from './admission';
-import { CLOUD_CONTEXT_LIMIT } from '@gitspace/protocol/inference';
 
 const providerId = 'vault-test-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -172,14 +171,14 @@ describe('vault-bound provider dispatch', () => {
     expect(listCloudModels(settings, ['openai-codex'])).toEqual([]);
   });
 
-  it('uses each chat model with its roles\' lowest context limit and never past the cloud limit, and requests still pass', async () => {
+  it('uses each chat model with its roles\' lowest context limit, keeps unlimited models at their own window, and requests still pass', async () => {
     const large = { ...chat, contextWindow: 1_000_000 };
     const test = await fixture({
       chats: [chat, { ...large, id: 'deep' }, { ...large, id: 'wide' }],
       settings: { modelRoles: { default: `${providerId}/wide`, deep: `${providerId}/deep`, taste: `${providerId}/deep` }, contextLimits: { deep: 200_000, taste: 120_000 } },
     });
-    // Two roles on one model share the lower limit; a model no role limits stops at the cloud limit; a small one keeps its own.
-    expect([chat.id, 'deep', 'wide'].map(id => test.models.getModel(providerId, id)?.contextWindow)).toEqual([8192, 120_000, CLOUD_CONTEXT_LIMIT]);
+    // Two roles on one model share the lower limit; a model no role limits keeps its own window.
+    expect([chat.id, 'deep', 'wide'].map(id => test.models.getModel(providerId, id)?.contextWindow)).toEqual([8192, 120_000, 1_000_000]);
     const deep = test.models.getModel(providerId, 'deep');
     if (!deep) throw new Error('Limited model missing');
     expect((await test.models.completeSimple(deep, context)).stopReason).toBe('stop');

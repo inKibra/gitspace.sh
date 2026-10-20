@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { BUILT_IN_MODEL_ROLES, CLOUD_CONTEXT_LIMIT, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -41,6 +41,7 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
+  Slider,
   Switch,
   TabsSubtle,
   TabsSubtleItem,
@@ -243,23 +244,31 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
     </Select>
   </span>;
 }
-/** A role's context limit in tokens, saved when the field loses focus; empty means the cloud limit. */
-function ContextLimitField({ label, value, disabled, onCommit }: { label: string; value: number | undefined; disabled: boolean; onCommit(next: number | null): Promise<void> }) {
-  const saved = value === undefined ? '' : String(value);
-  const [text, setText] = useState(saved);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => { setText(saved); setError(null); }, [saved]);
-  return <span className="flex flex-col gap-1">
-    <TextField label={`Context limit for ${label}`} type="number" placeholder={`${CLOUD_CONTEXT_LIMIT.toLocaleString('en-US')} tokens`} value={text} disabled={disabled}
-      onChange={(next) => { setText(next); setError(null); }}
-      onBlur={() => {
-        const trimmed = text.trim();
-        if (trimmed === saved) return;
-        const next = trimmed === '' ? null : Number(trimmed);
-        if (next !== null && (!Number.isInteger(next) || next < MIN_CONTEXT_LIMIT)) { setError(`Use a whole number of tokens, at least ${MIN_CONTEXT_LIMIT.toLocaleString('en-US')}.`); return; }
-        settle(onCommit(next));
+/** Tokens shown as e.g. `800k` or `1M`. */
+function formatTokens(tokens: number): string {
+  return tokens >= 1_000_000 && tokens % 100_000 === 0 ? `${tokens / 1_000_000}M` : `${Math.round(tokens / 1_000)}k`;
+}
+/** How long a slider rests before its value is saved: dragging across steps saves once. */
+const LIMIT_SAVE_DELAY_MS = 600;
+/**
+ * A role's context limit, from its model's own window down in tenths (never below `MIN_CONTEXT_LIMIT`). The model's
+ * window means no limit and is saved as none.
+ */
+function ContextLimitSlider({ label, modelWindow, value, disabled, onCommit }: { label: string; modelWindow: number; value: number | undefined; disabled: boolean; onCommit(next: number | null): Promise<void> }) {
+  const steps = [...new Set([...Array.from({ length: 9 }, (_, tenth) => Math.round(modelWindow * (tenth + 1) / 10)).filter((tokens) => tokens >= MIN_CONTEXT_LIMIT), modelWindow])];
+  const saved = Math.min(value ?? modelWindow, modelWindow);
+  const [current, setCurrent] = useState(saved);
+  const pending = useRef<number | undefined>(undefined);
+  useEffect(() => { setCurrent(saved); }, [saved]);
+  useEffect(() => () => { window.clearTimeout(pending.current); }, []);
+  return <span className="flex w-64 flex-col gap-1">
+    <Slider label={`Context limit for ${label}`} steps={steps} value={current} disabled={disabled} showValue formatValue={(tokens) => tokens === modelWindow ? `${formatTokens(tokens)} (model)` : formatTokens(tokens)}
+      onChange={(next) => {
+        const tokens = typeof next === 'number' ? next : next[1];
+        setCurrent(tokens);
+        window.clearTimeout(pending.current);
+        pending.current = window.setTimeout(() => { if (tokens !== saved) settle(onCommit(tokens === modelWindow ? null : tokens)); }, LIMIT_SAVE_DELAY_MS);
       }} />
-    {error ? <span role="alert" className="max-w-64 text-caption text-destructive">{error}</span> : null}
   </span>;
 }
 export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
@@ -267,6 +276,16 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
   const limitsItem = runtimeSettings.find((item) => item.path === 'contextLimits');
   const limits = limitsItem ? contextLimitsSchema.catch({}).parse(parseValue(limitsItem)) : {};
+  // The window of the model a role resolves to: its own selector, an `@role` alias, or Default's when unset.
+  const windowOf = (role: string): number | null => {
+    let selector = roles[role] ?? roles.default ?? '';
+    for (let hops = 0; hops < 8 && /^(@|pi\/)/u.test(selector); hops++) {
+      const alias = parseModelRoleSelector(selector).selector.replace(/^(@|pi\/)/u, '');
+      selector = roles[alias] ?? (alias === 'default' ? '' : roles.default ?? '');
+    }
+    const { modelKey } = parseRoleModel(selector, models);
+    return models.find((model) => `${model.provider}/${model.id}` === modelKey)?.contextWindow ?? null;
+  };
   const visionItem = runtimeSettings.find((item) => item.path === 'visionFallback');
   const vision = visionItem ? String(parseValue(visionItem) ?? '') : '';
   // A role added here shows once named and is stored when a model is chosen for it.
@@ -297,10 +316,13 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   let content: ReactNode;
   if (tab === 'Models') {
     content = <Group title={<>Model roles · <span className="tabular-nums">generation {runtimeGeneration}</span></>}>
-      <SettingRows>{roleIds.map((role) => <SettingRow key={role} title={MODEL_ROLE_LABELS[role] ?? role} description={role}>
-        <RoleModelPicker role={role} label={MODEL_ROLE_LABELS[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
-        {limitsItem ? <ContextLimitField label={MODEL_ROLE_LABELS[role] ?? role} value={limits[role]} disabled={saving} onCommit={(limit) => setLimit(role, limit)} /> : null}
-      </SettingRow>)}
+      <SettingRows>{roleIds.map((role) => {
+        const modelWindow = windowOf(role);
+        return <SettingRow key={role} title={MODEL_ROLE_LABELS[role] ?? role} description={role}>
+          <RoleModelPicker role={role} label={MODEL_ROLE_LABELS[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
+          {limitsItem && modelWindow !== null ? <ContextLimitSlider label={MODEL_ROLE_LABELS[role] ?? role} modelWindow={modelWindow} value={limits[role]} disabled={saving} onCommit={(limit) => setLimit(role, limit)} /> : null}
+        </SettingRow>;
+      })}
         <SettingRow title="Add role" description={newRoleError ?? 'Agents and the agents tool can name any role. An unset role uses Default.'}>
           <TextField label="New role name" value={newRole} placeholder="role name" disabled={saving || !rolesItem} onChange={setNewRole} />
           <Button variant="secondary" size="compact" disabled={saving || !rolesItem || !newRoleName || newRoleError !== null} onClick={() => { setAddedRoles((current) => [...current, newRoleName]); setNewRole(''); }}>Add role</Button>

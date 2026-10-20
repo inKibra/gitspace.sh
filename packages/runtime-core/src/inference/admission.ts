@@ -1,6 +1,6 @@
 import { createProvider, isModelType, type Api, type AnyModel, type Model, type Models, type Provider, type ProviderStreams } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
-import { BUILT_IN_MODEL_ROLES, CLOUD_CONTEXT_LIMIT, applyInferenceSettings, contextLimitsSchema, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, applyInferenceSettings, contextLimitsSchema, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { z } from 'zod';
 import { applyProviderCatalog } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
@@ -215,9 +215,9 @@ export function resolveProfileModel(settings: InferenceProfile['settings'], mode
 }
 
 /**
- * The window each chat model of a profile is used with: its own, at most `CLOUD_CONTEXT_LIMIT`, and at most the lowest
- * context limit set on a role that resolves to it (an unset role resolves through Default, as admission does). Every
- * conversation on a model shares its window, so two roles on one model share the lower limit.
+ * The window each chat model of a profile is used with: its own, lowered to the lowest context limit set on a role that
+ * resolves to it (an unset role resolves through Default, as admission does). Every conversation on a model shares its
+ * window, so two roles on one model share the lower limit.
  */
 export function contextWindowLimits(settings: InferenceProfile['settings'], models: Models): (model: Model<Api>) => number {
   const effective = z.object({ contextLimits: contextLimitsSchema.optional() }).parse(applyInferenceSettings({}, inferenceSettingsSchema.parse(settings)));
@@ -233,7 +233,7 @@ export function contextWindowLimits(settings: InferenceProfile['settings'], mode
     const key = `${model.provider}/${model.id}`;
     byModel.set(key, Math.min(byModel.get(key) ?? limit, limit));
   }
-  return model => Math.min(model.contextWindow, CLOUD_CONTEXT_LIMIT, byModel.get(`${model.provider}/${model.id}`) ?? CLOUD_CONTEXT_LIMIT);
+  return model => Math.min(model.contextWindow, byModel.get(`${model.provider}/${model.id}`) ?? model.contextWindow);
 }
 
 /** The profile's Vision fallback, used only to describe images for a model that cannot read them; never a role. */
