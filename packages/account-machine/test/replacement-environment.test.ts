@@ -650,4 +650,38 @@ describe('replacement environment host routes', () => {
       writer.close();
     }
   });
+
+  it('starts the active generation again when it crashes, instead of proxying into nothing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-generation-crash-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'test-generation-crash', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const candidate = join(root, 'candidates', 'machine-crashes');
+    await mkdir(candidate, { recursive: true });
+    await writeFile(join(candidate, 'machine.js'), `
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => {
+        if (new URL(request.url).pathname === '/crash') setTimeout(() => process.exit(1), 10);
+        return Response.json({ pid: process.pid });
+      } });
+      console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+    `);
+    await nativeFixture(candidate);
+    const hash = await hashArtifactPath(candidate);
+    await environment.deploy({ artifacts: [{ entrypoint: 'machine-daemon', path: candidate, hash, dependsOn: [] }], releaseSha: 'crash-1', revision: 'crash-1', dirty: false });
+    const rpc = `http://127.0.0.1:${environment.options.rpcPort}`;
+    const first: { pid: number } = await (await fetch(`${rpc}/pid`)).json();
+    await fetch(`${rpc}/crash`);
+
+    let served: { pid: number } | null = null;
+    for (let attempt = 0; attempt < 100 && !served; attempt += 1) {
+      await Bun.sleep(100);
+      const response = await fetch(`${rpc}/pid`).catch(() => null);
+      if (response?.ok) served = await response.json();
+    }
+    expect(served?.pid).toBeNumber();
+    expect(served?.pid).not.toBe(first.pid);
+  });
 });

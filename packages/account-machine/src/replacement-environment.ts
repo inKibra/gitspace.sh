@@ -448,6 +448,38 @@ class MachineHost implements MachineReplacementHost {
     await this.proxy.stop(true);
   }
 
+  /**
+   * A generation that exits without being stopped (a crash) is removed; while it is the active one the proxy answers
+   * 503 instead of failing to connect, and it is started again, waiting 1 s, then twice as long after each failed
+   * start, up to 60 s. On 2026-10-20 an unhandled rejection ended the active generation and the host proxied into
+   * nothing for two hours. During a replacement (admissions stopped) the replacement owns the outcome.
+   */
+  private async generationExited(generation: RunningGeneration, exitCode: number | null): Promise<void> {
+    if (generation.stopping || this.running.get(generation.pointer.socketPath) !== generation) return;
+    this.running.delete(generation.pointer.socketPath);
+    // A replacement stops admissions before it retires the generation, which may then exit on its own.
+    const active = this.accepting && this.current?.socketPath === generation.pointer.socketPath;
+    console.error(JSON.stringify({
+      event: 'machine_generation_exited', machineId: this.options.machineId, generation: generation.pointer.hash, exitCode, active,
+    }));
+    if (!active) return;
+    this.activeUrl = null;
+    for (let delayMs = 1_000; this.current?.socketPath === generation.pointer.socketPath && !this.running.has(generation.pointer.socketPath); delayMs = Math.min(delayMs * 2, 60_000)) {
+      await Bun.sleep(delayMs);
+      if (!this.accepting || this.current?.socketPath !== generation.pointer.socketPath) return;
+      try {
+        const restarted = await this.ensureGeneration(generation.pointer);
+        if (this.current?.socketPath === generation.pointer.socketPath) this.activeUrl = restarted.url;
+        console.info(JSON.stringify({ event: 'machine_generation_restarted', machineId: this.options.machineId, generation: generation.pointer.hash }));
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: 'machine_generation_restart_failed', machineId: this.options.machineId, generation: generation.pointer.hash, retryInMs: Math.min(delayMs * 2, 60_000),
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    }
+  }
+
   private async ensureGeneration(pointer: MachineGenerationPointer): Promise<RunningGeneration> {
     const existing = this.running.get(pointer.socketPath);
     if (existing) return existing;
@@ -487,8 +519,9 @@ class MachineHost implements MachineReplacementHost {
     });
     void forwardStream(process.stderr as ReadableStream<Uint8Array>, `[machine ${pointer.hash.slice(7, 15)}] `);
     try {
-      const generation = { pointer, process, url: await waitForReady(process, pointer.hash) };
+      const generation: RunningGeneration = { pointer, process, url: await waitForReady(process, pointer.hash) };
       this.running.set(pointer.socketPath, generation);
+      void process.exited.then(exitCode => this.generationExited(generation, exitCode));
       await atomicJson(join(this.options.root, 'host-machine.json'), {
         pid: process.pid, hostPid: globalThis.process.pid, url: generation.url, hash: pointer.hash,
       });

@@ -1,4 +1,4 @@
-import { test, expect } from 'bun:test';
+import { test, expect, jest } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -47,3 +47,30 @@ test('proc ready.port becomes a private signed route and stop releases its lease
     await manager.dispose(); await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+test('a failed route renewal is retried on the next tick instead of ending the machine', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'route-lease-'));
+  const renewals: string[] = [];
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine', root, 'gssh.dev', 'test', {
+    leaseHostedRoute: async (_projectId, route) => {
+      renewals.push(route.hostname);
+      if (renewals.length === 2) throw new Error('Connection closed: this Durable Object instance is no longer active.');
+      return { ...route, updatedAt: new Date().toISOString() };
+    },
+    releaseHostedRoute: async () => true,
+  });
+  jest.useFakeTimers();
+  try {
+    await manager.registerProcessRoute({ projectId: 'project', workspaceId: 'workspace', generation: 1, name: 'storybook', portName: 'http', port: 6421 });
+    await manager.rehydrate();
+    for (const _tick of [1, 2]) {
+      jest.advanceTimersByTime(60_000);
+      for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    }
+    expect(renewals).toEqual(Array(3).fill('storybook--workspace-machine--test-srv.gssh.dev'));
+  } finally {
+    jest.useRealTimers();
+    await manager.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});

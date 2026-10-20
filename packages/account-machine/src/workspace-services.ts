@@ -174,8 +174,13 @@ export class WorkspaceServiceManager {
   async rehydrate(): Promise<void> {
     for (const spaceId of this.checkouts.list()) await this.list(spaceId).catch(() => undefined);
     if (!this.leaseTimer && this.routeAuthority) {
+      // A failed renewal is retried on the next tick (the lease outlives two ticks); it must not end the process.
       this.leaseTimer = setInterval(() => {
-        void Promise.all([...this.routes.values()].map((route) => this.leaseRoute(route)));
+        for (const route of this.routes.values()) {
+          this.leaseRoute(route).catch((error: unknown) => console.error(JSON.stringify({
+            event: 'route_lease_failed', hostname: route.hostname, message: error instanceof Error ? error.message : String(error),
+          })));
+        }
       }, 60_000);
     }
   }
