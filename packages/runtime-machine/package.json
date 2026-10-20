@@ -7,8 +7,8 @@
   "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun ../../scripts/test-isolated.ts src", "test:browser:headless": "bun src/browser-smoke.ts" },
   "dependencies": {
     "@puppeteer/browsers": "3.0.6",
-    "@earendil-works/pi-durable": "1.0.0",
-    "@earendil-works/chord": "1.0.0",
+    "@earendil-works/pi-durable": "1.3.0",
+    "@earendil-works/chord": "1.3.0",
     "@gitspace/protocol": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",
     "@gitspace/protocol-environment": "workspace:*",

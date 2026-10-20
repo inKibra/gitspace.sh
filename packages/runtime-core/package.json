@@ -22,9 +22,9 @@
     "@gitspace/protocol-agent": "workspace:*",
     "@gitspace/catalog": "workspace:*",
     "@gitspace/provider-auth": "workspace:*",
-    "@earendil-works/pi-durable": "1.0.0",
-    "@earendil-works/pi-ai": "1.0.0",
-    "@earendil-works/chord": "1.0.0",
+    "@earendil-works/pi-durable": "1.3.0",
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/chord": "1.3.0",
     "typebox": "1.3.27",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"

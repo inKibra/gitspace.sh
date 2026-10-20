@@ -3,10 +3,10 @@ import { z } from 'zod';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { isModelType } from '@earendil-works/pi-ai';
 import type { ProviderResponse } from '@earendil-works/pi-ai';
-import { applyProviderCatalog } from './catalog.js';
+import { applyProviderCatalog, limitContextWindows } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
 import { classifyAuthFailure, orderedAccounts, type VaultAccess, type CredentialPins, type ResolvedCredential } from './selection.js';
-import { admitProfileProviders } from './admission.js';
+import { admitProfileProviders, contextWindowLimits } from './admission.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
@@ -73,7 +73,7 @@ function requestAuth(resolved: ResolvedCredential): AuthResult {
 export async function createVaultModels(options: VaultModelsOptions): Promise<VaultModels> {
   const cloudFetch = await claudeCodeFetch(options.profileId);
   const source = options.providers ?? [...builtinProviders().map(provider => withPublishedCatalog(provider)), ...createLegacyCloudProviders()];
-  const providers = admitProfileProviders(options.settings ?? {}, source.map(applyProviderCatalog)).map(provider => {
+  const listed = admitProfileProviders(options.settings ?? {}, source.map(applyProviderCatalog)).map(provider => {
     const pinned = options.pinnedModels?.filter(model => model.provider === provider.id);
     if (!pinned?.length) return provider;
     const all = () => {
@@ -83,8 +83,15 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     };
     return { ...provider, getAllModels: all, getModels: () => all().filter(model => isModelType(model, 'chat')) };
   });
-  const registry = createModels({ authContext: noAmbient, modelsStore: options.modelsStore });
-  for (const provider of providers) registry.setProvider({ ...provider, auth: { apiKey: { name: 'Public catalog', resolve: async () => ({ auth: { apiKey: 'catalog-only' }, source: 'Public catalog' }) } } });
+  const catalog = (list: readonly Provider[]) => {
+    const models = createModels({ authContext: noAmbient, modelsStore: options.modelsStore });
+    for (const provider of list) models.setProvider({ ...provider, auth: { apiKey: { name: 'Public catalog', resolve: async () => ({ auth: { apiKey: 'catalog-only' }, source: 'Public catalog' }) } } });
+    return models;
+  };
+  // Every chat model carries the window its roles' context limits and the cloud limit allow; pinned admissions too.
+  const limit = contextWindowLimits(options.settings ?? {}, catalog(listed));
+  const providers = listed.map(provider => limitContextWindows(provider, limit));
+  const registry = catalog(providers);
   const providerById = new Map(providers.map(provider => [provider.id, provider]));
   function canonical(model: AnyModel): void {
     const known = registry.getAllModels(model.provider).find(candidate => candidate.id === model.id && (candidate.type ?? 'chat') === (model.type ?? 'chat'));

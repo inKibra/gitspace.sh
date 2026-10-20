@@ -311,7 +311,12 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     if (!this.runtime) {
       const runtime = this.openRuntime(identity);
       this.runtime = runtime;
-      runtime.catch(() => { this.runtime = undefined; });
+      // A storage error ends the session for good: forget it so the next call opens a fresh one from what was committed.
+      runtime.then(opened => opened.harness.closed.then(end => {
+        if (end.reason !== 'failed' || this.runtime !== runtime) return;
+        this.runtime = undefined;
+        console.error(JSON.stringify({ event: 'runtime_session_failed', workspaceId: identity.workspaceId, error: end.error instanceof Error ? end.error.message : String(end.error) }));
+      }), () => { if (this.runtime === runtime) this.runtime = undefined; });
     }
     return this.runtime;
   }

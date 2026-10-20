@@ -60,8 +60,8 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
   } };
   const effect = defineTool({ name: mode === 'patch' ? 'apply_patch' : mode === 'write' ? 'write' : mode === 'spawn' ? 'spawn' : 'effect', description: 'Record an effect', parameters: Type.Object({ command: Type.Optional(Type.String()), patch: Type.Optional(Type.String()), path: Type.Optional(Type.String()), content: Type.Optional(Type.String()) }), async execute(_args, api) {
     effects++;
-    if (mode === 'spawn') return createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog: async () => ({ models: [], roles: [{ id: 'sub', label: 'sub', provider: model.provider, model: model.id, thinking: null, current: false }] }) })({ tool: 'agents', args: { op: 'spawn', role: 'sub', task: 'Child task' }, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: 'spawn-request', attemptId: 'spawn-attempt', replay: 'unsafe', signal: AbortSignal.timeout(30_000) }).then(result => ({ content: result.status === 'completed' ? result.content : [{ type: 'text' as const, text: 'Spawn failed' }] }));
-    return { content: [{ type: 'text', text: 'executed' }] };
+    if (mode === 'spawn') return createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog: async () => ({ models: [], roles: [{ id: 'sub', label: 'sub', provider: model.provider, model: model.id, thinking: null, current: false }] }) })({ tool: 'agents', args: { op: 'spawn', role: 'sub', task: 'Child task' }, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: 'spawn-request', attemptId: 'spawn-attempt', replay: 'unsafe', signal: AbortSignal.timeout(30_000) }).then(result => ({ output: result.status === 'completed' ? result.content : [{ type: 'text' as const, text: 'Spawn failed' }] }));
+    return { output: [{ type: 'text', text: 'executed' }] };
   } });
   const open = async () => {
     const registry = createRegistry();

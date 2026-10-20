@@ -249,7 +249,7 @@ for (const mode of ['settled', 'timeout', 'cancelled'] as const) test(`bash wait
         await expect(pending).rejects.toThrow('Cancelled bounded command wait');
       } else expect(RuntimeJobObservationSchema.parse(await pending).status).toBe(mode === 'settled' ? 'not-started' : 'accepted');
       if (mode === 'settled') expect((await api.snapshot(ConversationLifecycleDoc, api.conversationId, context))?.events).toMatchObject([{ consumed: true, delivered: false }]);
-      return { content: [{ type: 'text', text: mode }] };
+      return { output: [{ type: 'text', text: mode }] };
     },
   });
   const { harness, root } = await registered([[call('wait-probe', {})]], completed, operations, [probe]);
@@ -298,7 +298,7 @@ test('bash logs exposes executor failures as tool errors rather than successful 
         (await tx.doc(DurableJobsDoc, api.conversationId)).records.command = { acceptance, observation: acceptance, args: { command: 'true', background: true }, fingerprint: 'accepted', spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 10000).toISOString(), attemptId: 'log-command', cancelRequested: false, delivered: false };
       }, context);
       logs.arguments = { op: 'logs', job: acceptance.job };
-      return { content: [{ type: 'text', text: 'Accepted.' }] };
+      return { output: [{ type: 'text', text: 'Accepted.' }] };
     },
   });
   const { harness, root } = await registered([[call('accept-command', {})], [logs]], completed, {

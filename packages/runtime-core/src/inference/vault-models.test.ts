@@ -16,6 +16,7 @@ import {
 import { createVaultModels, type VaultModelsOptions } from './index';
 import type { CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
 import { describeCloudProviders, listCloudModels } from './admission';
+import { CLOUD_CONTEXT_LIMIT } from '@gitspace/protocol/inference';
 
 const providerId = 'vault-test-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -51,6 +52,8 @@ function pinned(accountId: string): CredentialPins {
 async function fixture(options: {
   reply?: (request: RequestEffect) => Promise<ProviderReply>;
   conversationForSignal?: VaultModelsOptions['conversationForSignal'];
+  settings?: VaultModelsOptions['settings'];
+  chats?: readonly Model<Api>[];
 } = {}) {
   const effects: RequestEffect[] = [];
   const resolutions: { accountId: string; refresh: boolean }[] = [];
@@ -116,8 +119,8 @@ async function fixture(options: {
     auth: { apiKey: { name: 'Explicit test credential', async resolve({ credential }) {
       return credential?.key ? { auth: { apiKey: credential.key } } : undefined;
     } } },
-    getModels: () => [chat],
-    getAllModels: () => [chat, image, classifier],
+    getModels: () => [...options.chats ?? [chat]],
+    getAllModels: () => [...options.chats ?? [chat], image, classifier],
     stream: transport,
     streamSimple: transport,
     async generateImages(model, _context, request) {
@@ -142,6 +145,7 @@ async function fixture(options: {
     profileId: 'profile', conversationId: 'conversation', vault, pins,
     modelsStore: new InMemoryModelsStore(), providers: [provider],
     ...(options.conversationForSignal ? { conversationForSignal: options.conversationForSignal } : {}),
+    ...(options.settings ? { settings: options.settings } : {}),
   });
   const chatModel = models.getModel(providerId, chat.id);
   const imageModel = models.getModelOfType('image', providerId, image.id);
@@ -166,6 +170,19 @@ describe('vault-bound provider dispatch', () => {
     expect(providers.find(provider => provider.id === 'openai-codex')).toBeUndefined();
     expect(providers.find(provider => provider.id === 'openai')).toMatchObject({ supportsOAuth: true, supportsApiKey: true });
     expect(listCloudModels(settings, ['openai-codex'])).toEqual([]);
+  });
+
+  it('uses each chat model with its roles\' lowest context limit and never past the cloud limit, and requests still pass', async () => {
+    const large = { ...chat, contextWindow: 1_000_000 };
+    const test = await fixture({
+      chats: [chat, { ...large, id: 'deep' }, { ...large, id: 'wide' }],
+      settings: { modelRoles: { default: `${providerId}/wide`, deep: `${providerId}/deep`, taste: `${providerId}/deep` }, contextLimits: { deep: 200_000, taste: 120_000 } },
+    });
+    // Two roles on one model share the lower limit; a model no role limits stops at the cloud limit; a small one keeps its own.
+    expect([chat.id, 'deep', 'wide'].map(id => test.models.getModel(providerId, id)?.contextWindow)).toEqual([8192, 120_000, CLOUD_CONTEXT_LIMIT]);
+    const deep = test.models.getModel(providerId, 'deep');
+    if (!deep) throw new Error('Limited model missing');
+    expect((await test.models.completeSimple(deep, context)).stopReason).toBe('stop');
   });
 
   it('isolates concurrent conversation accounts when every usage observation is unavailable', async () => {

@@ -9,6 +9,12 @@ export type InferenceSettingSection = 'Models' | 'Providers';
 /** Roles every profile offers; a profile may add its own. An unset role resolves to Default. */
 export const BUILT_IN_MODEL_ROLES = ['default', 'deep', 'fast', 'taste'] as const;
 export const MODEL_ROLE_LABELS: Readonly<Record<string, string>> = { default: 'Default', deep: 'Deep', fast: 'Fast', taste: 'Taste' };
+/** A cloud workspace builds each model request in a 128 MB Durable Object: no model's window is used past this. */
+export const CLOUD_CONTEXT_LIMIT = 400_000;
+/** Below this a role's context limit leaves too little room for a working conversation. */
+export const MIN_CONTEXT_LIMIT = 32_000;
+/** Per-role context limits: the window a role's model is used with; compaction keeps conversations below it. */
+export const contextLimitsSchema = z.record(z.string(), z.number().int().min(MIN_CONTEXT_LIMIT));
 export const modelRoleThinkingSchema = RuntimeSubagentRecordSchema.shape.thinking;
 export type ModelRoleSelector = { selector: string; thinking: z.infer<typeof modelRoleThinkingSchema> };
 /** Only a recognized terminal effort is syntax; provider model IDs may contain literal colons. */
@@ -28,11 +34,11 @@ const credentialFields: Record<string, true> = {
   oauth: true, auth: true, cookie: true, authheaders: true,
 };
 const namedEntryMaps: Record<string, true> = {
-  modelRoles: true, 'providers.models': true, 'providers.maxInFlightRequests': true,
+  modelRoles: true, contextLimits: true, 'providers.models': true, 'providers.maxInFlightRequests': true,
 };
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
-  modelRoles: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
+  modelRoles: 'Models', contextLimits: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
 };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
@@ -128,6 +134,7 @@ export function applyInferenceSettings(config: Record<string, unknown>, settings
 /** Profile editor metadata is independent of any machine-installed runtime schema. */
 export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'modelRoles', tab: 'Models', label: 'Model roles', kind: 'record', value: {}, defaultJson: '{}', credential: false },
+  { path: 'contextLimits', tab: 'Models', label: 'Context limits', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: `Tokens per role; compaction keeps conversations below it. Cloud workspaces never exceed ${CLOUD_CONTEXT_LIMIT.toLocaleString('en-US')}.` },
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
   { path: 'visionFallback', tab: 'Models', label: 'Vision fallback', kind: 'string', value: '', defaultJson: '""', credential: false, description: 'Describes images for a model that cannot read them. Not offered as a role.' },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
@@ -141,6 +148,8 @@ export const inferenceSettingsSchema = z.record(z.string(), runtimeSettingValueS
     if (isInferenceCredentialField(path) || inferenceCredentialPaths(value, path).length > 0) {
       context.addIssue({ code: 'custom', path: [path], message: 'Connect credentials through the profile credential vault, not configuration' });
     }
+    const limits = path === 'contextLimits' ? value : path.startsWith('contextLimits.') ? { [path.slice('contextLimits.'.length)]: value } : undefined;
+    if (limits !== undefined && !contextLimitsSchema.safeParse(limits).success) context.addIssue({ code: 'custom', path: [path], message: `A context limit is a whole number of tokens, at least ${MIN_CONTEXT_LIMIT.toLocaleString('en-US')}` });
   }
 });
 export const inferenceProfileSchema = z.strictObject({

@@ -50,6 +50,12 @@ function patchChat(model: Model<Api>, patch: CatalogModelOverride | undefined): 
   };
 }
 
+/** Chat models whose window `limit` lowers carry the lowered window, so thresholds, meters and the canonical model agree. */
+export function limitContextWindows(provider: Provider, limit: (model: Model<Api>) => number): Provider {
+  const lower = <T extends AnyModel>(models: readonly T[]): T[] => models.map(model => isModelType(model, 'chat') && limit(model) < model.contextWindow ? { ...model, contextWindow: limit(model) } : model);
+  return { ...provider, getModels: () => lower(provider.getModels()), ...(provider.getAllModels ? { getAllModels: () => lower(provider.getAllModels!()) } : {}) };
+}
+
 /** Apply trusted metadata without allowing a catalog row to redirect credentials. */
 export function applyProviderCatalog(provider: Provider): Provider {
   const patches = GITSPACE_MODEL_OVERRIDES[provider.id] ?? {};

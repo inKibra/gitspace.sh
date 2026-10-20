@@ -60,7 +60,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
   }
   // Events wait here, not in the harness follow-up queue: a run that ends without a final boundary (abort, model
   // error, deploy) leaves that queue unread. The alarm drive flushes the next event once the conversation is idle, and
-  // resumes input such a run left queued: an idle write applies the final boundary, which starts the next queued item.
+  // resumes input such a run left queued: a queued write places the items queued before it, which starts the next run.
   async function flush(id: string) {
     const conversation = await resolve(id);
     const state = await harness.snapshot(ConversationLifecycleDoc, conversation.id, context);
@@ -75,7 +75,8 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     const queued = (await harness.snapshot(InboxDoc, conversation.id, context))?.items.find(item => item.mode !== 'write');
     if (queued && (await harness.snapshot(LiveDoc, conversation.id, context))?.run === undefined) {
       await admit(`queue-resume:${queued.id}`);
-      await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) } } }, context);
+      // `edits` (even empty) makes this a queued write; a write of only kind and data is display-only and places nothing.
+      await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) }, edits: [] } }, context);
       await options.wake();
     }
     // An event reaches the conversation once: as input here, or through a wait that returned it (consumed), never both.

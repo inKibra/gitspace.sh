@@ -24,7 +24,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const registry = createRegistry();
   const ready = Promise.withResolvers<ConversationLifecycle>();
   const backgroundAgentTask = createBackgroundAgentTask(async event => (await ready.promise).deliver(event));
-  const tools = ['read', 'write', 'agents'].map(name => defineTool({ name, description: name, parameters: Type.Object({}), async execute() { return { content: [{ type: 'text' as const, text: name }] }; } }));
+  const tools = ['read', 'write', 'agents'].map(name => defineTool({ name, description: name, parameters: Type.Object({}), async execute() { return { output: [{ type: 'text' as const, text: name }] }; } }));
   registry.install(defineExtension({ name: 'proof.agents', tasks: [Owner, backgroundAgentTask], tools }));
   registry.install(sessionControlsExtension);
   registry.install(createSubagentReplyExtension(async event => (await ready.promise).deliver(event)));

@@ -20,15 +20,15 @@
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-workspace": "workspace:*",
     "@noble/hashes": "^2.2.0",
-    "@earendil-works/pi-durable": "1.0.0",
-    "@earendil-works/chord": "1.0.0",
+    "@earendil-works/pi-durable": "1.3.0",
+    "@earendil-works/chord": "1.3.0",
     "better-result": "^3.0.1",
     "isomorphic-git": "1.43.0",
     "memfs": "4.80.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-ai": "1.3.0",
     "miniflare": "4.20260302.0"
   }
 }

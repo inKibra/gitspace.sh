@@ -50,7 +50,7 @@ test('cron scopes stay on their own generation across tool rounds and retries', 
     const scopes = await cronToolScopes(api, ctx);
     const allowed = scopes.every(scope => scope.writeScopes.includes('outside.txt'));
     observed.push({ turn: prompts.length, allowed });
-    return { isError: !allowed, content: [{ type: 'text', text: allowed ? 'written' : 'scope denied' }] };
+    return { isError: !allowed, output: [{ type: 'text', text: allowed ? 'written' : 'scope denied' }] };
   } });
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'cron-test', tools: [effects], hooks: [hook(GenerationTask, { async beforeRequest(_input, api, ctx) { await bindCronGeneration(harness, api, ctx); } })] }));
@@ -103,7 +103,7 @@ test('queued steering and distinct cron scopes cannot merge into one turn', asyn
   const effect = defineTool({ name: 'effect', description: 'Check two write destinations', parameters: Type.Object({}), async execute(_args, api, ctx) {
     const scopes = await cronToolScopes(api, ctx);
     permissions.push(['a.txt', 'b.txt'].map(path => scopes.every(scope => scope.writeScopes.includes(path))));
-    return { content: [{ type: 'text', text: 'Checked permissions' }] };
+    return { output: [{ type: 'text', text: 'Checked permissions' }] };
   } });
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'cron-isolation', tools: [effect], hooks: [hook(GenerationTask, { async beforeRequest(_input, api, ctx) { await bindCronGeneration(harness, api, ctx); } })] }));

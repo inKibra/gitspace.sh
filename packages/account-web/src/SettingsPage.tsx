@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, CLOUD_CONTEXT_LIMIT, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -243,9 +243,30 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
     </Select>
   </span>;
 }
+/** A role's context limit in tokens, saved when the field loses focus; empty means the cloud limit. */
+function ContextLimitField({ label, value, disabled, onCommit }: { label: string; value: number | undefined; disabled: boolean; onCommit(next: number | null): Promise<void> }) {
+  const saved = value === undefined ? '' : String(value);
+  const [text, setText] = useState(saved);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { setText(saved); setError(null); }, [saved]);
+  return <span className="flex flex-col gap-1">
+    <TextField label={`Context limit for ${label}`} type="number" placeholder={`${CLOUD_CONTEXT_LIMIT.toLocaleString('en-US')} tokens`} value={text} disabled={disabled}
+      onChange={(next) => { setText(next); setError(null); }}
+      onBlur={() => {
+        const trimmed = text.trim();
+        if (trimmed === saved) return;
+        const next = trimmed === '' ? null : Number(trimmed);
+        if (next !== null && (!Number.isInteger(next) || next < MIN_CONTEXT_LIMIT)) { setError(`Use a whole number of tokens, at least ${MIN_CONTEXT_LIMIT.toLocaleString('en-US')}.`); return; }
+        settle(onCommit(next));
+      }} />
+    {error ? <span role="alert" className="max-w-64 text-caption text-destructive">{error}</span> : null}
+  </span>;
+}
 export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], modelsReady = false, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
   const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
+  const limitsItem = runtimeSettings.find((item) => item.path === 'contextLimits');
+  const limits = limitsItem ? contextLimitsSchema.catch({}).parse(parseValue(limitsItem)) : {};
   const visionItem = runtimeSettings.find((item) => item.path === 'visionFallback');
   const vision = visionItem ? String(parseValue(visionItem) ?? '') : '';
   // A role added here shows once named and is stored when a model is chosen for it.
@@ -267,11 +288,18 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
     await onSetRuntimeSetting(rolesItem.path, model ? { ...others, [role]: model } : others);
     if (!model) setAddedRoles((current) => current.filter((candidate) => candidate !== role));
   };
+  // An empty limit removes the role's entry: its model is used up to the cloud limit.
+  const setLimit = async (role: string, limit: number | null): Promise<void> => {
+    if (!limitsItem) return;
+    const { [role]: _previous, ...others } = limits;
+    await onSetRuntimeSetting(limitsItem.path, limit === null ? others : { ...others, [role]: limit });
+  };
   let content: ReactNode;
   if (tab === 'Models') {
     content = <Group title={<>Model roles · <span className="tabular-nums">generation {runtimeGeneration}</span></>}>
       <SettingRows>{roleIds.map((role) => <SettingRow key={role} title={MODEL_ROLE_LABELS[role] ?? role} description={role}>
         <RoleModelPicker role={role} label={MODEL_ROLE_LABELS[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
+        {limitsItem ? <ContextLimitField label={MODEL_ROLE_LABELS[role] ?? role} value={limits[role]} disabled={saving} onCommit={(limit) => setLimit(role, limit)} /> : null}
       </SettingRow>)}
         <SettingRow title="Add role" description={newRoleError ?? 'Agents and the agents tool can name any role. An unset role uses Default.'}>
           <TextField label="New role name" value={newRole} placeholder="role name" disabled={saving || !rolesItem} onChange={setNewRole} />
@@ -281,7 +309,7 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
       {visionItem ? <SettingRows><SettingRow title="Vision fallback" description="Describes images for a model that cannot read them. Not offered as a role.">
         <RoleModelPicker role="vision" label="Vision fallback" value={vision} models={models.filter((model) => model.images)} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(visionItem.path, value))} />
       </SettingRow></SettingRows> : null}
-      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'visionFallback' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
+      <SettingRowsEditor items={runtimeSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'contextLimits' && item.path !== 'visionFallback' && !item.credential)} saving={saving} onSetRuntimeSetting={onSetRuntimeSetting} />
     </Group>;
   } else if (tab === 'Providers') {
     content = <>

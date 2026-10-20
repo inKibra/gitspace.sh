@@ -187,7 +187,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         if (name === 'bash' && args && typeof args === 'object' && !Array.isArray(args) && (args.background === true || typeof args.op === 'string')) {
           const value = await jobs(args, api, context);
           const result = RuntimeToolResultSchema.safeParse(value);
-          return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], ...(result.success ? { isError: result.data.status !== 'completed', details: { executorStatus: result.data.status, executorResultReference: { attemptId: result.data.attemptId, sha256: await receiptDigest(result.data) } } } : {}) };
+          return { output: [{ type: 'text' as const, text: JSON.stringify(value) }], ...(result.success ? { isError: result.data.status !== 'completed', details: { executorStatus: result.data.status, executorResultReference: { attemptId: result.data.attemptId, sha256: await receiptDigest(result.data) } } } : {}) };
         }
         const codemodeTools = async (input: CodemodeToolCall): Promise<CodemodeToolOutcome> => {
           let admitted = false;
@@ -205,7 +205,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
             // Nested tool calls remain durable evidence, not a second assistant
             // turn between the parent's model call and its eventual result.
             await tx.appendEntry(api.conversationId, { kind: 'gitspace.codemode-context', edits: [{ target: assistant.id, action: 'omit' }] });
-            return tx.createTask(ToolTask, { assistant: assistant.id, callId: input.callId }, { conversationId: api.conversationId, ownership: { kind: 'task', taskId: api.taskId } });
+            return tx.createTask(ToolTask, { kind: 'model', assistant: assistant.id, callId: input.callId }, { conversationId: api.conversationId, ownership: { kind: 'task', taskId: api.taskId } });
           }, context);
           const abort = () => { void abortTask(taskId, BACKGROUND_CONTEXT); };
           input.signal.addEventListener('abort', abort, { once: true });
@@ -213,9 +213,12 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
           const settled = await api.waitForTask(taskId, withAbortSignal(input.signal, context)).finally(() => input.signal.removeEventListener('abort', abort));
           const outcome = settled.state.outcome;
           if (outcome.status !== 'completed') return { status: 'interrupted', error: `Codemode child ${input.tool} ${outcome.status}; reconcile its durable attempt` };
+          // A version 1 result (a task that completed across the upgrade) has no `kind`; it is a model-issued call's.
+          const entryId = 'entryId' in outcome.result ? outcome.result.entryId : null;
+          if (entryId === null) return { status: 'interrupted', error: 'Codemode child result is unavailable' };
           const entry = await api.commit(async tx => {
-            const entry = await tx.entry(ToolResultEntry, outcome.result.entryId);
-            await tx.appendEntry(api.conversationId, { kind: 'gitspace.codemode-context', edits: [{ target: outcome.result.entryId, action: 'omit' }] });
+            const entry = await tx.entry(ToolResultEntry, entryId);
+            await tx.appendEntry(api.conversationId, { kind: 'gitspace.codemode-context', edits: [{ target: entryId, action: 'omit' }] });
             return entry;
           }, context);
           const result = entry?.model?.[0];
@@ -232,12 +235,12 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         const result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools } : {}) });
         if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
         const content = result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }];
-        return { content, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
+        return { output: content, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
       return safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run);
     },
   }));
-  tools.push(defineTool({ name: 'todo', description: 'Replace the durable work checklist.', parameters: Type.Object({ items: Type.Array(Type.Object({ id: Type.String(), text: Type.String(), status: Type.Union([Type.Literal('pending'), Type.Literal('active'), Type.Literal('completed')]) })) }), replay: 'safe', async execute(input, api, context) { return serialized(String(api.conversationId), async () => { await api.commit(async tx => { const doc = await tx.doc(TodosDoc, api.conversationId); doc.items = input.items; }, context); return { content: [{ type: 'text', text: 'Checklist updated.' }] }; }); } }));
+  tools.push(defineTool({ name: 'todo', description: 'Replace the durable work checklist.', parameters: Type.Object({ items: Type.Array(Type.Object({ id: Type.String(), text: Type.String(), status: Type.Union([Type.Literal('pending'), Type.Literal('active'), Type.Literal('completed')]) })) }), replay: 'safe', async execute(input, api, context) { return serialized(String(api.conversationId), async () => { await api.commit(async tx => { const doc = await tx.doc(TodosDoc, api.conversationId); doc.items = input.items; }, context); return { output: [{ type: 'text', text: 'Checklist updated.' }] }; }); } }));
   for (const kind of ['ask', 'approval'] as const) tools.push(defineTool({ name: kind === 'ask' ? 'ask' : 'propose_plan', description: kind === 'ask' ? 'Ask the user and durably wait for their answer.' : 'Propose an implementation plan; wait for explicit human approval. Never required for conversational replies.', parameters: Type.Object({ prompt: Type.String(), choices: Type.Array(Type.String()) }), replay: 'safe', async execute(input, api, context) {
     const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
     await api.commit(async tx => {
@@ -246,7 +249,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       if (kind === 'approval') { const plan = await tx.doc(PlanDoc, api.conversationId); plan.text = input.prompt; plan.status = 'proposed'; plan.questionId = id; }
     }, context);
     const answer = await services.question(id, api, context);
-    return { content: [{ type: 'text', text: JSON.stringify(answer) }] };
+    return { output: [{ type: 'text', text: JSON.stringify(answer) }] };
   } }));
   return tools;
 }

@@ -1,6 +1,6 @@
 import { createProvider, isModelType, type Api, type AnyModel, type Model, type Models, type Provider, type ProviderStreams } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
-import { BUILT_IN_MODEL_ROLES, applyInferenceSettings, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, CLOUD_CONTEXT_LIMIT, applyInferenceSettings, contextLimitsSchema, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { z } from 'zod';
 import { applyProviderCatalog } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
@@ -212,6 +212,28 @@ export function resolveProfileModel(settings: InferenceProfile['settings'], mode
   const selected = configured ? resolve(configured) : candidates[0] ? { model: candidates[0], thinking: null } : undefined;
   if (!selected) throw new Error(`Inference profile has no admitted model for role ${role}`);
   return selected;
+}
+
+/**
+ * The window each chat model of a profile is used with: its own, at most `CLOUD_CONTEXT_LIMIT`, and at most the lowest
+ * context limit set on a role that resolves to it (an unset role resolves through Default, as admission does). Every
+ * conversation on a model shares its window, so two roles on one model share the lower limit.
+ */
+export function contextWindowLimits(settings: InferenceProfile['settings'], models: Models): (model: Model<Api>) => number {
+  const effective = z.object({ contextLimits: contextLimitsSchema.optional() }).parse(applyInferenceSettings({}, inferenceSettingsSchema.parse(settings)));
+  const byModel = new Map<string, number>();
+  for (const [role, limit] of Object.entries(effective.contextLimits ?? {})) {
+    let model: Model<Api>;
+    try { model = resolveProfileModel(settings, models, role).model; }
+    catch (error) {
+      // A role with no model limits nothing; any other resolution error is a profile error and surfaces.
+      if (error instanceof Error && error.message === `Inference profile has no admitted model for role ${role}`) continue;
+      throw error;
+    }
+    const key = `${model.provider}/${model.id}`;
+    byModel.set(key, Math.min(byModel.get(key) ?? limit, limit));
+  }
+  return model => Math.min(model.contextWindow, CLOUD_CONTEXT_LIMIT, byModel.get(`${model.provider}/${model.id}`) ?? CLOUD_CONTEXT_LIMIT);
 }
 
 /** The profile's Vision fallback, used only to describe images for a model that cannot read them; never a role. */
