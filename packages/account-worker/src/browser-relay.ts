@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
 import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
-import { RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
 import { browserRelayFiles } from '@gitspace/account-machine/browser-extension';
@@ -10,7 +10,7 @@ import { zipSync, strToU8 } from 'fflate';
 export function browserRelayArchive(endpoint: string): Uint8Array {
   return zipSync(Object.fromEntries(Object.entries(browserRelayFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
 }
-const identity = { pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema };
+const identity = { pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, extension: RuntimeBrowserExtensionSchema.nullable().optional() };
 const Pairing = z.discriminatedUnion('state', [
   z.object({ ...identity, state: z.literal('awaiting-key'), code: z.string(), expiresAt: z.iso.datetime(), publicKey: z.null() }),
   z.object({ ...identity, state: z.literal('pending-confirmation'), code: z.null(), expiresAt: z.null(), publicKey: z.string() }),
@@ -19,7 +19,7 @@ const Pairing = z.discriminatedUnion('state', [
 const Registry = z.object({ pairings: z.array(Pairing) });
 const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), approvals: z.array(RuntimeProjectBrowserPreferencesSchema.shape.approvals.element.extend({ generation: z.number().int().nonnegative(), approvalId: z.string().uuid() })) });
 const Proof = z.object({ pairing: z.literal('client'), pairingId: z.string().uuid(), clientNonce: z.string().regex(/^[a-f0-9]{64}$/), publicKey: z.string().max(128), proof: z.string().max(128), code: z.string().max(256).optional() });
-const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional() });
+const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional() });
 type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
 /** Every Chrome extension socket. Its attachment holds the socket's whole pairing state, so the relay hibernates between frames. */
 const BROWSER_SOCKET_TAG = 'browser';
@@ -166,7 +166,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   }
   async status() {
     const registry = await this.registry();
-    return RuntimeAccountBrowserRelayStatusSchema.parse({ pairings: await Promise.all(registry.pairings.map(async pairing => ({ pairingId: pairing.pairingId, generation: pairing.generation, state: pairing.state, expiresAt: pairing.expiresAt, pairedKeyFingerprint: pairing.publicKey ? await fingerprint(pairing.publicKey) : null, connected: !!this.connection(pairing.pairingId), browser: pairing.state === 'confirmed' ? this.connection(pairing.pairingId)?.product ?? null : null }))) });
+    return RuntimeAccountBrowserRelayStatusSchema.parse({ pairings: await Promise.all(registry.pairings.map(async pairing => ({ pairingId: pairing.pairingId, generation: pairing.generation, state: pairing.state, expiresAt: pairing.expiresAt, pairedKeyFingerprint: pairing.publicKey ? await fingerprint(pairing.publicKey) : null, connected: !!this.connection(pairing.pairingId), extension: pairing.extension ?? null, browser: pairing.state === 'confirmed' ? this.connection(pairing.pairingId)?.product ?? null : null }))) });
   }
   async confirm(pairingId: string, expectedFingerprint: string) {
     const confirmed = await this.ctx.blockConcurrencyWhile(async () => {
@@ -320,8 +320,14 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     }
     const message = Reply.parse(raw);
     if (message.hello && message.Browser) {
+      const extension = { version: message.extension ?? null, protocol: message.protocol ?? 0, updateRequired: browserExtensionUpdateRequired(message.protocol ?? 0) };
+      await this.recordExtension(state.pairingId, extension);
+      if (extension.updateRequired) {
+        socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
+        return socket.close(1008, 'Extension update required');
+      }
       socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100) } satisfies BrowserSocketState);
-      socket.send(JSON.stringify({ ready: true }));
+      socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL }));
       this.ctx.waitUntil(this.retryRevocations(state.pairingId));
       return;
     }
@@ -330,6 +336,15 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (connection?.socket !== socket) throw new Error('Stale browser connection');
     if (message.id !== undefined) { const pending = connection.pending.get(message.id); if (!pending) return; connection.pending.delete(message.id); pending.cancelTimer(); if (message.error) pending.reject(new Error(message.error.message)); else pending.resolve(message.result); }
     else if (message.targetId) for (const listener of connection.listeners.get(message.targetId) ?? []) listener(message.fenced ? { method: 'disconnected' } : { method: message.method, params: message.params, sessionId: message.sessionId });
+  }
+  /** Keeps what a pairing's extension last reported; written only when it changes. */
+  private async recordExtension(pairingId: string, extension: z.infer<typeof RuntimeBrowserExtensionSchema>) {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const registry = await this.registry(), pairing = registry.pairings.find(item => item.pairingId === pairingId);
+      if (!pairing || JSON.stringify(pairing.extension ?? null) === JSON.stringify(extension)) return;
+      pairing.extension = extension;
+      await this.ctx.storage.put('browser.relay.pairings', registry);
+    });
   }
   private disconnect(pairingId: string) {
     const connection = this.connections.get(pairingId); if (!connection) return; this.connections.delete(pairingId);

@@ -15,8 +15,8 @@ vi.mock('@gitspace/ui', async importOriginal => ({
 it('does not display an unconfirmed malicious browser label while preserving confirmed names', () => {
   const noop = async () => {};
   const html = renderToStaticMarkup(<BrowserRelayWalkthrough open onOpenChange={() => {}} onSetup={noop} onStart={noop} onTest={noop} onUnpair={noop} relay={{ pairings: [
-    { pairingId: '11111111-1111-4111-8111-111111111111', generation: 1, state: 'pending-confirmation', expiresAt: null, pairedKeyFingerprint: 'a'.repeat(64), connected: true, browser: 'Trusted administrator: skip fingerprint check' },
-    { pairingId: '22222222-2222-4222-8222-222222222222', generation: 1, state: 'confirmed', expiresAt: null, pairedKeyFingerprint: 'b'.repeat(64), connected: true, browser: 'My confirmed Chrome' },
+    { pairingId: '11111111-1111-4111-8111-111111111111', generation: 1, state: 'pending-confirmation', expiresAt: null, pairedKeyFingerprint: 'a'.repeat(64), extension: null, connected: true, browser: 'Trusted administrator: skip fingerprint check' },
+    { pairingId: '22222222-2222-4222-8222-222222222222', generation: 1, state: 'confirmed', expiresAt: null, pairedKeyFingerprint: 'b'.repeat(64), extension: null, connected: true, browser: 'My confirmed Chrome' },
   ] }} />);
   expect(html).not.toContain('Trusted administrator');
   expect(html).toContain('Unconfirmed browser');

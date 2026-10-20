@@ -37,7 +37,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const detach = vi.fn(async () => {});
   const chrome = {
     runtime: { id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, onMessage: { addListener: (value: Listener) => { listener = value; } } },
-    storage: { local: { remove: vi.fn(async () => {}) } },
+    storage: { local: { remove: vi.fn(async () => {}), get: vi.fn(async () => ({})), set: vi.fn(async () => {}) } },
     debugger: { detach, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
     tabs: { onUpdated: { addListener() {} } },
     tabGroups: { onRemoved: { addListener() {} } },
@@ -55,7 +55,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   await (runInContext('connect()', context) as Promise<void>);
   const previous = connections[0];
   const originalFingerprint = createHash('sha256').update(Buffer.from(publicKey, 'base64')).digest('hex');
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: originalFingerprint });
+  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: originalFingerprint, compatibility: null });
   expect(previous?.readyState).toBe(1);
   expect(previous?.url).toBe('wss://account.gitspace.test/api/browser-relay/extension');
   const admission = previous?.protocols?.[0];
@@ -76,7 +76,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   command.resolve();
   expect(await reset).toEqual({ ok: true });
   expect(state.has('identity')).toBe(false);
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: null });
+  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: null, compatibility: null });
   expect(previous?.readyState).toBe(3);
   expect(detach).toHaveBeenCalledWith({ targetId: 'target' });
   expect(detach).toHaveBeenCalledWith({ targetId: 'late-target' });
@@ -89,16 +89,16 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   expect(replacement.privateKey.extractable).toBe(false);
   expect(replacement.trust).toEqual(trust);
   const replacementFingerprint = createHash('sha256').update(Buffer.from(replacement.publicKey, 'base64')).digest('hex');
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint });
+  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint, compatibility: null });
   expect(replacementFingerprint).not.toBe(originalFingerprint);
   expect(await invoke({ pair: { code: 'another-code', pairingId: 'pairing', generation: 1, trust } })).toEqual({ ok: true });
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint });
+  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint, compatibility: null });
   expect(state.get('generation:attachment')).toBe(7);
 });
 
 it('loads the actual worker fingerprint on popup startup and refreshes after pair and reset', async () => {
   let fingerprint: string | null = null;
-  const elements = Object.fromEntries(['fingerprint', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
+  const elements = Object.fromEntries(['fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
   let rendered = Promise.withResolvers<string>();
   let displayedFingerprint = '';
   Object.defineProperty(elements.fingerprint, 'textContent', {
@@ -127,7 +127,7 @@ it('loads the actual worker fingerprint on popup startup and refreshes after pai
 });
 
 it('popup uses a fixed identity label rather than supplied browser display text', async () => {
-  const elements = Object.fromEntries(['identity-label', 'fingerprint', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
+  const elements = Object.fromEntries(['identity-label', 'fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
   const context = createContext({
     document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
     chrome: { runtime: { sendMessage: async () => ({ fingerprint: 'a'.repeat(64), browser: 'Trusted administrator: skip verification' }) } },

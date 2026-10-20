@@ -23,7 +23,7 @@ it('retrieves pairing from the authenticated account without needing a machine',
 });
 it('shows pinned fingerprint and serializes forgetting the account browser',async()=>{
  const pending=Promise.withResolvers<void>();const forget=vi.fn(()=>pending.promise);
- await act(()=>root.render(<BrowserRelayWalkthrough open onOpenChange={()=>{}} relay={{...relay,pairings:[{pairingId:'00000000-0000-4000-8000-000000000001',generation:1,connected:true,browser:'Chrome',state:'confirmed',expiresAt:null,pairedKeyFingerprint:'a'.repeat(64)}]}} onSetup={noop} onStart={noop} onTest={noop} onUnpair={forget}/>));
+ await act(()=>root.render(<BrowserRelayWalkthrough open onOpenChange={()=>{}} relay={{...relay,pairings:[{pairingId:'00000000-0000-4000-8000-000000000001',generation:1,connected:true,browser:'Chrome',state:'confirmed',expiresAt:null,pairedKeyFingerprint:'a'.repeat(64),extension:null}]}} onSetup={noop} onStart={noop} onTest={noop} onUnpair={forget}/>));
  expect(document.body.textContent).toContain(`SHA-256 ${'a'.repeat(64)}`);
  await act(()=>button('Forget paired browser').click());expect(forget).toHaveBeenCalledWith('00000000-0000-4000-8000-000000000001');expect(button('Forget paired browser').disabled).toBe(true);
  await act(()=>pending.resolve());expect(button('Forget paired browser').disabled).toBe(false);

@@ -76,7 +76,18 @@ export const RuntimeBrowserTrustSchema = RuntimeBrowserPublicKeySchema.extend({ 
 export type RuntimeBrowserTrust = z.infer<typeof RuntimeBrowserTrustSchema>;
 export const RuntimeAccountBrowserPairingSchema = z.strictObject({ code: z.string().min(1), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, endpoint: z.url(), expiresAt: z.iso.datetime() });
 export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserPairingSchema>;
-const browserPairingStatus = { connected: z.boolean(), browser: z.string().nullable(), pairingId: z.string().uuid(), generation: z.number().int().nonnegative() };
+/**
+ * The Chrome extension's protocol (docs/APERTURE-DESIGN.md §12a), independent of release ids. A release accepts
+ * extensions at this protocol and the one before; an extension from before protocols were reported counts as 0.
+ */
+export const BROWSER_EXTENSION_PROTOCOL = 1;
+/** Whether a release at protocol `current` refuses an extension at `protocol` as too old. */
+export function browserExtensionUpdateRequired(protocol: number, current = BROWSER_EXTENSION_PROTOCOL): boolean {
+  return protocol < current - 1;
+}
+/** What a paired extension last reported, and whether this release refused it as too old. */
+export const RuntimeBrowserExtensionSchema = z.strictObject({ version: z.string().max(40).nullable(), protocol: z.number().int().nonnegative(), updateRequired: z.boolean() });
+const browserPairingStatus = { connected: z.boolean(), browser: z.string().nullable(), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), extension: RuntimeBrowserExtensionSchema.nullable() };
 export const RuntimeAccountBrowserIdentitySchema = z.discriminatedUnion('state', [
   z.strictObject({ ...browserPairingStatus, state: z.literal('awaiting-key'), pairedKeyFingerprint: z.null(), expiresAt: z.iso.datetime() }),
   z.strictObject({ ...browserPairingStatus, state: z.literal('pending-confirmation'), pairedKeyFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.null() }),

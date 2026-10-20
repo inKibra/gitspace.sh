@@ -1,6 +1,7 @@
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { verifyRelayAuthorization } from './browser-relay-authorization.js';
+import { BROWSER_EXTENSION_PROTOCOL } from '@gitspace/protocol-runtime';
 
 
 /** Serialized into the installed extension as well as enforced by the supervisor. */
@@ -13,7 +14,7 @@ export function relayCommandAllowed(grant: { origins: string[] }, targetId: stri
 }
 
 export function browserRelayPopup(): string {
-  return `async function refreshIdentity() { const result = await chrome.runtime.sendMessage({ identityStatus: true }); if (result?.error) throw new Error(result.error); document.getElementById('fingerprint').textContent = result.fingerprint || 'No identity. Pair to generate a key.'; }
+  return `async function refreshIdentity() { const result = await chrome.runtime.sendMessage({ identityStatus: true }); if (result?.error) throw new Error(result.error); document.getElementById('fingerprint').textContent = result.fingerprint || 'No identity. Pair to generate a key.'; document.getElementById('compatibility').textContent = result.compatibility || ''; }
 async function action(message, success) { const buttons = document.querySelectorAll('button'); buttons.forEach(button => button.disabled = true); try { const result = await chrome.runtime.sendMessage(message()); if (result?.error) throw new Error(result.error); await refreshIdentity(); document.getElementById('code').value = ''; document.getElementById('status').textContent = success; } catch(error) { document.getElementById('status').textContent = error.message; } finally { buttons.forEach(button => button.disabled = false); } }
 void refreshIdentity().catch(error => { document.getElementById('status').textContent = error.message; });
 document.getElementById('pair').addEventListener('submit', event => { event.preventDefault(); void action(() => { const pairing = JSON.parse(document.getElementById('code').value); if (!pairing.code || !pairing.pairingId || !Number.isSafeInteger(pairing.generation) || pairing.trust?.algorithm !== 'Ed25519' || !pairing.trust.accountId || !pairing.trust.publicKey || Date.parse(pairing.expiresAt) <= Date.now()) throw new Error('Copy fresh pairing data from authenticated GitSpace Settings'); return { pair: pairing }; }, 'Compare the fingerprint above with GitSpace Settings, then confirm there before agents can use this Chrome.'); });
@@ -65,6 +66,9 @@ async function authorize(authorization) {
   authorizations.set(id, { body, used: new Set() });
   return {};
 }
+const EXTENSION_PROTOCOL = ${BROWSER_EXTENSION_PROTOCOL};
+/** Set when the account refuses this extension, or this extension refuses the account, as incompatible. */
+let incompatible = false;
 let socket;
 const channels = new Map();
 const queues = new Map();
@@ -405,12 +409,26 @@ async function connect() {
           }
           if (message.pairing !== 'server' || !serverNonce) throw new Error('Invalid relay acknowledgement');
           pairingCode = undefined; authenticated = true; clearTimeout(handshakeTimeout);
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\\/[\\d.]+/)?.[0] || 'Chrome' }));
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\\/[\\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version }));
           return;
         } finally { authenticating = false; }
       }
       if (message.pairing) throw new Error('Repeated pairing handshake');
-      if (message.ready === true) return;
+      if (message.updateRequired) {
+        incompatible = 'Update required: this extension speaks protocol ' + EXTENSION_PROTOCOL + '; your GitSpace account needs ' + message.updateRequired.minimum + ' or later. Download the extension again from GitSpace Settings and reload it.';
+        await chrome.storage.local.set({ compatibility: incompatible });
+        return;
+      }
+      if (message.ready === true) {
+        // A release accepts its protocol and the one before; so does the extension. Older relays report none (0).
+        const account = typeof message.protocol === 'number' ? message.protocol : 0;
+        if (account < EXTENSION_PROTOCOL - 1) {
+          incompatible = 'This GitSpace account runs an older release (protocol ' + account + ') than this extension supports (' + EXTENSION_PROTOCOL + '). Download the extension that this account offers in Settings.';
+          await chrome.storage.local.set({ compatibility: incompatible });
+          connection.close();
+        } else await chrome.storage.local.remove('compatibility');
+        return;
+      }
     } catch { connection.close(); return; }
     if (message.operation === 'revoke') for (const channel of channels.values()) if (channel.grant.groupId === message.groupId) channel.cancelNavigation?.();
     const key = 'commands';
@@ -425,7 +443,8 @@ async function connect() {
     socket = undefined; identityGeneration++; managingIdentity = true;
     identityOperations = identityOperations.catch(() => {}).then(async () => {
       try { await Promise.allSettled([...queues.values()]); await reset(); }
-      finally { managingIdentity = false; setTimeout(connect, 1000); }
+      // An incompatible extension stays disconnected until it is reloaded or re-paired, instead of retrying every second.
+      finally { managingIdentity = false; if (!incompatible) setTimeout(connect, 1000); }
     });
   };
   connection.onerror = () => connection.close();
@@ -434,7 +453,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!messa
   if (message.identityStatus === true) {
     const identity = await stored('identity');
     const digest = identity ? await crypto.subtle.digest('SHA-256', Uint8Array.from(atob(identity.publicKey), c => c.charCodeAt(0))) : undefined;
-    respond({ fingerprint: digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : null }); return;
+    respond({ fingerprint: digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : null, compatibility: (await chrome.storage.local.get('compatibility')).compatibility ?? null }); return;
   }
   managingIdentity = true;
   identityGeneration++;
@@ -471,7 +490,7 @@ export function browserRelayFiles(endpoint: string): Record<string, string> {
   return {
     'background.js': browserRelayExtension(endpoint),
     'popup.js': browserRelayPopup(),
-    'popup.html': '<!doctype html><html><body><p>Browser identity — compare this fingerprint in GitSpace Settings</p><p>Extension public key fingerprint (SHA-256)</p><code id="fingerprint"></code><form id="pair"><label>Account pairing details <input id="code" autocomplete="off" required></label><button>Pair</button></form><button id="reset" type="button">Reset identity</button><p id="status" role="status"></p><script src="popup.js"></script></body></html>',
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.0.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(endpoint).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html' } }),
+    'popup.html': '<!doctype html><html><body><p>Browser identity — compare this fingerprint in GitSpace Settings</p><p>Extension public key fingerprint (SHA-256)</p><code id="fingerprint"></code><p id="compatibility" role="alert"></p><form id="pair"><label>Account pairing details <input id="code" autocomplete="off" required></label><button>Pair</button></form><button id="reset" type="button">Reset identity</button><p id="status" role="status"></p><script src="popup.js"></script></body></html>',
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.1.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(endpoint).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html' } }),
   };
 }
