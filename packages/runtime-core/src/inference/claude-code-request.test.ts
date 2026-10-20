@@ -45,6 +45,15 @@ it('sends a Claude subscription request in Claude Code shape', async () => {
   expect(parsed.messages[1].content[0].name).toBe('_read');
 });
 
+it('names the prefixed tools in mid-conversation tool changes, so every reference matches a declared tool', async () => {
+  const changed = JSON.stringify({ ...JSON.parse(body), tools: [{ name: 'read', input_schema: { type: 'object' } }, { name: 'apply_patch', input_schema: { type: 'object' }, defer_loading: true }],
+    messages: [...JSON.parse(body).messages, { role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'apply_patch' } }, { type: 'tool_addition', tool: { type: 'tool_reference', name: 'read' } }] }] });
+  const parsed = JSON.parse(String((await claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body: changed, headers: oauth }, identity))?.body));
+  const declared = parsed.tools.map((tool: { name: string }) => tool.name);
+  expect(parsed.messages.at(-1).content.map((block: { type: string; tool: { name: string } }) => [block.type, block.tool.name])).toEqual([['tool_removal', '_apply_patch'], ['tool_addition', '_read']]);
+  expect(parsed.messages.at(-1).content.every((block: { tool: { name: string } }) => declared.includes(block.tool.name))).toBe(true);
+});
+
 it('leaves API-key and other providers untouched', async () => {
   expect(await claudeCodeRequest('https://api.anthropic.com/v1/messages', { method: 'POST', body, headers: { 'x-api-key': 'sk-ant-api03-x', 'user-agent': 'claude-cli/2.1.280' } }, identity)).toBeUndefined();
   expect(await claudeCodeRequest('https://api.openai.com/v1/responses', { method: 'POST', body, headers: oauth }, identity)).toBeUndefined();

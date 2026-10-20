@@ -28,7 +28,7 @@ const CLAUDE_CODE_HEADERS: Record<string, string> = {
   'x-stainless-timeout': '600',
 };
 const NamedSchema = z.object({ name: z.string() }).loose();
-const BlockSchema = z.object({ type: z.string(), name: z.string().optional(), text: z.string().optional() }).loose();
+const BlockSchema = z.object({ type: z.string(), name: z.string().optional(), text: z.string().optional(), tool: NamedSchema.optional() }).loose();
 const MessageSchema = z.object({ role: z.string(), content: z.union([z.string(), z.array(BlockSchema)]) }).loose();
 const BodySchema = z.object({
   messages: z.array(MessageSchema),
@@ -120,7 +120,11 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
 
   for (const tool of body.tools ?? []) tool.name = prefixed(tool.name);
   if (body.tool_choice?.name) body.tool_choice.name = prefixed(body.tool_choice.name);
-  for (const message of body.messages) if (Array.isArray(message.content)) for (const block of message.content) if (block.type === 'tool_use' && block.name) block.name = prefixed(block.name);
+  // Tool changes reference tools by name (`tool_addition`/`tool_removal`), so they name the prefixed declarations too.
+  for (const message of body.messages) if (Array.isArray(message.content)) for (const block of message.content) {
+    if (block.type === 'tool_use' && block.name) block.name = prefixed(block.name);
+    if ((block.type === 'tool_addition' || block.type === 'tool_removal') && block.tool) block.tool.name = prefixed(block.tool.name);
+  }
   body.metadata = { user_id: JSON.stringify({ device_id: identity.deviceId, session_id: identity.sessionId }) };
   const firstUser = body.messages.find(message => message.role === 'user')?.content;
   const text = typeof firstUser === 'string' ? firstUser : firstUser?.find(block => block.type === 'text')?.text ?? '';
