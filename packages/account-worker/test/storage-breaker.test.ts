@@ -80,3 +80,28 @@ test('the platform quarantines and resumes an object by id, and a resume silence
   expect(await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).not.toContainEqual(expect.objectContaining({ objectId: id }));
   expect((await control({ action: 'status', objectId: 'f'.repeat(64) })).status).toBe(404);
 });
+
+test('a resume sets again the alarm the quarantine cancelled', async () => {
+  let stub = env.USER_SETTINGS.getByName(crypto.randomUUID());
+  const due = Date.now() + 60 * 60_000;
+  await runInDurableObject(stub, async (_instance, state) => {
+    await state.storage.setAlarm(due);
+    state.storage.sql.exec('CREATE TABLE runaway(i INTEGER)');
+    state.storage.sql.exec(RUNAWAY);
+  });
+  stub = await restart(stub);
+  await runInDurableObject(stub, async (instance, state) => {
+    expect(instance.storageBreakerStatus().quarantined).toBe(true);
+    instance.resumeStorage();
+    await expect.poll(() => state.storage.getAlarm()).toBe(due);
+  });
+});
+
+test('an object that never trips stores nothing for the breaker', async () => {
+  const stub = env.USER_SETTINGS.getByName(crypto.randomUUID());
+  await runInDurableObject(stub, (_instance, state) => {
+    state.storage.sql.exec('CREATE TABLE ordinary(i INTEGER)');
+    state.storage.sql.exec('INSERT INTO ordinary VALUES (1)');
+    expect(state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name LIKE '\\_storage%' ESCAPE '\\'").toArray()).toEqual([]);
+  });
+});

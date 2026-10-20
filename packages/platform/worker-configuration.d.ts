@@ -17,6 +17,9 @@ interface Env {
   CF_API_TOKEN: string;
   CF_ANALYTICS_TOKEN: string;
   USAGE_REPORT_SCRIPTS: string;
+  WATCHDOG_EMAIL: SendEmail;
+  WATCHDOG_EMAIL_FROM: string;
+  WATCHDOG_EMAIL_TO: string;
   R2_API_TOKEN: string;
   R2_PARENT_ACCESS_KEY_ID: string;
   PLATFORM_BOOTSTRAP_TOKEN: string;

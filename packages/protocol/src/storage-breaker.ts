@@ -9,7 +9,7 @@
 export const STORAGE_BREAKER_ROWS = 2_000_000;
 export const STORAGE_BREAKER_WINDOW_MS = 10 * 60_000;
 const MINUTE_MS = 60_000;
-const FLAG_TABLE = '_storage_breaker';
+const FLAG_TABLE = '_storage_quarantine';
 
 export class StorageQuarantinedError extends Error {
   constructor(readonly reason: string, readonly since: string) {
@@ -43,6 +43,8 @@ interface BreakerSql { exec(query: string, ...bindings: unknown[]): BreakerCurso
 /** The parts of `DurableObjectStorage` the breaker counts and blocks. */
 export interface BreakerStorage {
   readonly sql: BreakerSql;
+  getAlarm(): Promise<number | null>;
+  setAlarm(scheduledTime: number): Promise<void>;
   deleteAlarm(): Promise<void>;
 }
 
@@ -77,13 +79,26 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
   let sql: BreakerSql | null;
   try { sql = storage.sql; } catch { sql = null; }
   const rawExec = sql ? sql.exec.bind(sql) : null;
-  // One row: the quarantine (`reason`, `since`) while held, and when the last one was lifted.
-  if (rawExec) rawExec(`CREATE TABLE IF NOT EXISTS ${FLAG_TABLE}(singleton INTEGER PRIMARY KEY CHECK(singleton=1), reason TEXT, since TEXT, resumed_at TEXT)`);
-  const flag: unknown = rawExec?.(`SELECT reason, since, resumed_at FROM ${FLAG_TABLE}`).toArray()[0];
+  // The breaker's own calls bypass it and are not counted.
+  const rawGetAlarm = storage.getAlarm.bind(storage);
+  const rawSetAlarm = storage.setAlarm.bind(storage);
+  const rawDeleteAlarm = storage.deleteAlarm.bind(storage);
+  // One row, written only by a quarantine or a resume, so an object that never trips stores nothing: the quarantine
+  // (`reason`, `since`) while held, the alarm it cancelled (`alarm_at`), and when the last one was lifted.
+  const tables = rawExec?.(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('${FLAG_TABLE}', '_storage_breaker')`).toArray() ?? [];
+  const named = (name: string) => tables.some(row => typeof row === 'object' && row !== null && 'name' in row && row.name === name);
+  // One-time: the first release's flag table, created empty in every object, held no quarantine.
+  if (named('_storage_breaker')) rawExec?.('DROP TABLE _storage_breaker');
+  const flag: unknown = named(FLAG_TABLE) ? rawExec?.(`SELECT reason, since, resumed_at, alarm_at FROM ${FLAG_TABLE}`).toArray()[0] : undefined;
   const stored = typeof flag === 'object' && flag !== null ? flag : {};
   let held: { reason: string; since: string } | null = 'reason' in stored && 'since' in stored && typeof stored.reason === 'string' && typeof stored.since === 'string'
     ? { reason: stored.reason, since: stored.since } : null;
   let resumedAt = 'resumed_at' in stored && typeof stored.resumed_at === 'string' ? stored.resumed_at : null;
+  let cancelledAlarm = 'alarm_at' in stored && typeof stored.alarm_at === 'number' ? stored.alarm_at : null;
+  const writeFlag = () => {
+    rawExec?.(`CREATE TABLE IF NOT EXISTS ${FLAG_TABLE}(singleton INTEGER PRIMARY KEY CHECK(singleton=1), reason TEXT, since TEXT, resumed_at TEXT, alarm_at INTEGER)`);
+    rawExec?.(`INSERT OR REPLACE INTO ${FLAG_TABLE} VALUES(1, ?, ?, ?, ?)`, held?.reason ?? null, held?.since ?? null, resumedAt, cancelledAlarm);
+  };
   // Rows written per minute, newest last.
   let minutes: { minute: number; rows: number }[] = [];
   const windowRows = () => {
@@ -95,13 +110,19 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
   const enter = (reason: string) => {
     held = { reason, since: new Date(now()).toISOString() };
     const entered = held;
-    // Written after the call that tripped returns: inside a transaction that call's failure would roll it back.
+    // Written after the call that tripped returns: inside a transaction that call's failure would roll it back. The
+    // alarm is cancelled so it cannot wake the object; a resume sets it again.
     setTimeout(() => {
-      if (held !== entered) return;
-      rawExec?.(`INSERT OR REPLACE INTO ${FLAG_TABLE} VALUES(1, ?, ?, ?)`, entered.reason, entered.since, resumedAt);
-      void rawDeleteAlarm().catch(() => {});
+      void (async () => {
+        const alarm = await rawGetAlarm().catch(() => null);
+        if (held !== entered) return;
+        cancelledAlarm = alarm ?? cancelledAlarm;
+        writeFlag();
+        await rawDeleteAlarm().catch(() => {});
+      })();
     }, 0);
   };
+  // A write statement has run in full when `exec` returns, so its cursor's `rowsWritten` is final.
   const guard = () => { if (held && !options.exempt?.()) throw new StorageQuarantinedError(held.reason, held.since); };
   const count = (rows: number) => {
     if (rows <= 0) return;
@@ -109,7 +130,7 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
     const last = minutes.at(-1);
     if (last?.minute === minute) last.rows += rows; else minutes.push({ minute, rows });
     const written = windowRows();
-    if (written <= limit) return;
+    if (held || written <= limit) return;
     enter(`wrote ${written.toLocaleString('en-US')} rows within ${windowMs / MINUTE_MS} minutes (limit ${limit.toLocaleString('en-US')})`);
     options.onTrip?.(status());
   };
@@ -142,8 +163,6 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
       Object.defineProperty(target, name, { configurable: true, writable: true, value: (...args: unknown[]) => { guard(); return call(method, target, args); } });
     }
   };
-  // The breaker lifts its own alarm with the unpatched method.
-  const rawDeleteAlarm = storage.deleteAlarm.bind(storage);
   patchKeyValue(storage);
   const transaction: unknown = Reflect.get(storage, 'transaction');
   if (typeof transaction === 'function') {
@@ -166,10 +185,13 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
       return status();
     },
     resume() {
+      const alarm = cancelledAlarm;
       held = null;
       minutes = [];
+      cancelledAlarm = null;
       resumedAt = new Date(now()).toISOString();
-      rawExec?.(`INSERT OR REPLACE INTO ${FLAG_TABLE} VALUES(1, NULL, NULL, ?)`, resumedAt);
+      writeFlag();
+      if (alarm !== null) void rawSetAlarm(Math.max(alarm, now())).catch(() => {});
       return status();
     },
   };

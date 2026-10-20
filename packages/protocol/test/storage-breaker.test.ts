@@ -5,6 +5,8 @@ import { installStorageBreaker, StorageQuarantinedError } from '../src/storage-b
 function storage(rows: () => number) {
   return {
     sql: { exec: (query: string) => ({ rowsWritten: query.startsWith('INSERT') ? rows() : 0, toArray: () => [] }) },
+    getAlarm: async () => null,
+    setAlarm: async () => {},
     deleteAlarm: async () => {},
   };
 }

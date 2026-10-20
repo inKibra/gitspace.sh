@@ -189,9 +189,12 @@ export function usageReportScripts(value: string | undefined): string[] {
 }
 
 /** Class names of the script's Durable Object namespaces, or null when the token cannot list them. */
-/** The account's Durable Object namespaces with their script and class, or null when Cloudflare does not answer. */
-export async function durableObjectNamespaces(accountId: string, token: string): Promise<Array<{ id: string; className: string; script: string | null }> | null> {
-  const all: Array<{ id: string; className: string; script: string | null }> = [];
+/** One of the account's Durable Object namespaces: the script and class that own it. */
+export interface DurableObjectNamespaceEntry { id: string; className: string; script: string | null }
+
+/** The account's Durable Object namespaces, or null when Cloudflare does not answer. */
+export async function durableObjectNamespaces(accountId: string, token: string): Promise<DurableObjectNamespaceEntry[] | null> {
+  const all: DurableObjectNamespaceEntry[] = [];
   for (let page = 1; ; page += 1) {
     const response = await fetch(`${CLOUDFLARE_API}/accounts/${encodeURIComponent(accountId)}/workers/durable_objects/namespaces?per_page=1000&page=${page}`, {
       headers: { authorization: `Bearer ${token}` },

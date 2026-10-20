@@ -88,8 +88,11 @@
     "PLATFORM_URL": "https://platform.gssh.dev",
     "PLATFORM_SERVICE_NAME": "gitspace-platform-rebuild-20260913",
     "PUBLIC_ASSETS_SERVICE": "gitspace-auth-rebuild-20260913",
-    "USAGE_REPORT_SCRIPTS": "gitspace-rebuild-20260913-tenant-bradleat"
+    "USAGE_REPORT_SCRIPTS": "gitspace-rebuild-20260913-tenant-bradleat",
+    "WATCHDOG_EMAIL_FROM": "watchdog@alerts.gitspace.sh",
+    "WATCHDOG_EMAIL_TO": "bradleat@inkibra.com"
   },
+  "send_email": [{ "name": "WATCHDOG_EMAIL" }],
   "triggers": {
     "crons": ["15 0 * * *", "*/10 * * * *"]
   },
