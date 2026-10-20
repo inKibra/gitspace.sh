@@ -230,6 +230,16 @@ Browsers and machines reach workspace services through the one account relay.
 
 The relay keeps its rules: sockets hibernate where Cloudflare allows; heartbeats are WebSocket auto-responses; frames are chunked at 32 KiB with backpressure; every endpoint is signed and rechecked on revocation.
 
+## 12a. The extension boundary and updates
+
+The extension updates on a different cycle from the rest of GitSpace, so it is kept thin and talks a versioned protocol. Today each account builds the extension from its own release; later one Web Store package serves every account (deferred, below).
+
+- **What the extension holds:** the outbound relay transport, its key and pairing, the verifier for signed authority (`browser-relay-authorization.ts`), the workspace tab-group boundary, the CDP command allowlist, and the screencast and input plumbing B1 needs. Everything else (semantic tools, snapshots, Playwright translation, recording logic, comments) runs server-side and ships with ordinary releases. Manifest V3 forbids remotely hosted code, so whatever the extension holds is frozen per version.
+- **Protocol version:** the extension reports `protocol` (an integer, independent of release ids) and its package version in its hello. Every GitSpace release accepts protocols N and N−1. A breaking change is two steps: the server learns N+1, then the extension moves to N+1; N−1 is dropped only after every paired extension reports N+1 (the relay records each pairing's last protocol). An extension below N−1 is refused at hello with "Update required", shown in the popup and in Settings → Chrome with the version needed.
+- **Version in view:** Settings → Chrome shows each paired browser's extension version and protocol; the release's minimum protocol is part of its release record.
+- **Distribution now:** the account-built unpacked package (Settings → Download extension), rebuilt with each release. A release launched from a workspace offers its own build, loaded into a separate Chrome profile, so extension changes are tested before any account moves to them.
+- **Deferred: Chrome Web Store.** Once the boundary has held through B0–B1, one package for every account: host permissions for `https://*.gitspace.sh/*` and its WebSocket origin, the account address taken from pairing, a trusted-tester Beta listing and a public listing, published from `develop` by a Publish extension action. Needs an Inkibra developer account, a privacy policy and permission justifications (`debugger`, `tabs`, `tabGroups`).
+
 ## 13. Borrowed from Playwriter
 
 [Playwriter](https://github.com/remorses/playwriter) (MIT) is the closest prior art. Taken:
@@ -250,7 +260,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
-| **B0** | Grants, groups, Playwright, mesh fixes | Stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.observe`/`act` with `aria-ref` snapshots and freshness; `browser.run` with session state; per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
+| **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.observe`/`act` with `aria-ref` snapshots and freshness; `browser.run` with session state; per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
 | **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view/control/comment, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
 | **B2** | Comments | Comment mode, threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
 | **B3** | Skill recording | Recorder, timeline and frames; agent writes `SKILL.md` plus replay script and replays it successfully; recordings in `drive://`. |
@@ -264,7 +274,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 | Active streams keep the relay object awake | Streams are wakeful by nature; bound them to viewers and close on idle; usage report flags spikes. |
 | Cloud Chrome blocked or challenged by sites | Offer your Chrome with takeover; state limits at cookie-copy approval. |
 | A share link leaks | Fragment secret, required expiry, tab-scoped capabilities, revocation, no credentials or CDP for shares. |
-| Extension updates are disruptive | Batch protocol changes per milestone; the extension reports its version and GitSpace says when an update is required. |
+| Extension updates are disruptive | A thin extension and a versioned protocol (§12a): releases accept protocols N and N−1, changes are batched per milestone, and GitSpace says when an update is required. |
 | Copied cookies are a copy of your identity | Per-site approval each time, expiry, vault sealing, audit; never whole-browser. |
 
 ## 16. Open questions
