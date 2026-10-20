@@ -2,7 +2,8 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 
-export type CheckoutSource = { remote: string; ref: string; commit: string };
+/** `layers`: other commits the checkout needs objects for (a checkpoint's head, index and tracked-worktree commits). */
+export type CheckoutSource = { remote: string; ref: string; commit: string; layers?: readonly string[] };
 /** Kept in `.git` from the start of a Git acquisition until the checkout is prepared (on its branch, at its workspace's
  * cloud version): a directory still carrying it never became a checkout, holds nothing of anyone's, and is acquired again. */
 export const CHECKOUT_ACQUIRING_MARKER = 'gitspace-acquiring';
@@ -47,7 +48,7 @@ export async function acquireCheckout(input: {
 }): Promise<{ mode: 'artifactfs' | 'git'; directory: string; commit: string }> {
   const command = (binary: string, args: string[], env: Record<string, string>, cwd?: string) => execute(binary, args, env, cwd, input.signal);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(input.name)) throw new Error('Invalid checkout identity');
-  if (!/^[0-9a-f]{40}$/u.test(input.source.commit)) throw new Error('Checkout requires a full source commit');
+  if (!/^[0-9a-f]{40}$/u.test(input.source.commit) || input.source.layers?.some(layer => !/^[0-9a-f]{40}$/u.test(layer))) throw new Error('Checkout requires full source commits');
   if (!/^[0-9a-f]{40}$/u.test(input.source.ref) && (!/^refs\/[A-Za-z0-9._/-]+$/u.test(input.source.ref) || input.source.ref.includes('..'))) throw new Error('Checkout requires a canonical source ref or full commit');
   const remote = new URL(input.source.remote);
   if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new Error('Checkout requires a credential-free HTTPS remote');
@@ -59,7 +60,9 @@ export async function acquireCheckout(input: {
     await writeFile(join(input.directory, '.git', CHECKOUT_ACQUIRING_MARKER), '');
     await command('git', ['config', 'remote.origin.url', input.source.remote], env, input.directory);
     await command('git', ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], env, input.directory);
-    await command('git', ['fetch', '--update-shallow', '--no-tags', input.source.remote, input.source.ref], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
+    // Artifacts holds recent history only, and a boundary it never recorded makes a full fetch ask for objects it was
+    // never sent (HTTP 500, 2026-10-20). Fetch exactly what the checkout uses, each commit without its history.
+    await command('git', ['fetch', '--depth', '1', '--update-shallow', '--no-tags', input.source.remote, input.source.ref, ...input.source.layers ?? []], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
     const acquired = await command('git', ['rev-parse', 'FETCH_HEAD^{commit}'], env, input.directory);
     if (acquired !== input.source.commit) throw new Error('Acquired source differs from assigned commit');
     const branch = input.source.ref.startsWith('refs/heads/') ? input.source.ref.slice('refs/heads/'.length) : input.source.ref;

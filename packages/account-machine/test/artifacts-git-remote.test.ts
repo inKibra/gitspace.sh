@@ -19,6 +19,8 @@ function fixture() {
   git(root, 'init', '-b', 'main');
   const remote = join(root, 'remote.git'); git(root, 'init', '--bare', remote);
   git(remote, 'config', 'receive.shallowUpdate', 'true');
+  // Artifacts serves any reachable object by id.
+  git(remote, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
   git(root, 'config', `url.${remote}.insteadOf`, 'https://artifacts.invalid/repository');
   const scopes: string[] = [];
   const publication = new ArtifactsGitRemote({ credentials: async (_binding, scope) => {
@@ -248,7 +250,7 @@ it('materializes and restores a shallow checkpoint, preserves full caches, and c
   await f.publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'test', repository: 'test' }, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: null });
   const cache = join(f.root, 'cold-cache');
   await acquireCheckout({
-    name: 'cold-cache', directory: cache, source: { remote: 'https://artifacts.invalid/repository', ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit },
+    name: 'cold-cache', directory: cache, source: { remote: 'https://artifacts.invalid/repository', ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, layers: [checkpoint.headCommit!, checkpoint.indexCommit, checkpoint.trackedWorktreeCommit] },
     fixed: true, requiresFiltersOrSubmodules: false, signal: new AbortController().signal, hydrateLfs: async () => {},
     host: { root: f.root, ensureDaemon: async () => { throw new Error('Git acquisition must not start a daemon'); }, gitEnvironment: async () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${f.remote}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://artifacts.invalid/repository' }) },
   });
@@ -300,6 +302,28 @@ it('publishes and restores a genuinely unborn snapshot with no shallow boundary'
   expect(Bun.spawnSync(['git', 'rev-parse', '--verify', 'HEAD'], { cwd: cache }).exitCode).not.toBe(0);
   expect(git(cache, 'show', ':staged')).toBe('index');
   expect(readFileSync(join(cache, 'staged'), 'utf8')).toBe('worktree');
+});
+
+it('materializes a checkpoint whose repository lost older history without recording a shallow boundary', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'tracked'), 'older bytes'); git(f.root, 'add', 'tracked'); git(f.root, 'commit', '-m', 'older');
+  const older = git(f.root, 'rev-parse', 'HEAD');
+  writeFileSync(join(f.root, 'tracked'), 'HEAD bytes'); git(f.root, 'commit', '-am', 'current');
+  writeFileSync(join(f.root, 'tracked'), 'worktree bytes');
+  const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: f.root, spaceId: 'gap', revision: 1, portableUntrackedPaths: [] });
+  git(f.root, 'push', f.remote, `${checkpoint.worktreeCommit}:${checkpoint.checkpointRef}`);
+  // As in Artifacts on 2026-10-20: the commit before HEAD is gone and nothing records the repository as shallow.
+  rmSync(join(f.remote, 'objects', older.slice(0, 2), older.slice(2)));
+  expect(existsSync(join(f.remote, 'shallow'))).toBe(false);
+  const cache = join(f.root, 'gap-cache');
+  await acquireCheckout({
+    name: 'gap-cache', directory: cache, source: { remote: 'https://artifacts.invalid/repository', ref: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, layers: [checkpoint.headCommit!, checkpoint.indexCommit, checkpoint.trackedWorktreeCommit] },
+    fixed: true, requiresFiltersOrSubmodules: false, signal: new AbortController().signal, hydrateLfs: async () => {}, submoduleEnvironment: async () => ({}),
+    host: { root: f.root, ensureDaemon: async () => { throw new Error('Git acquisition must not start a daemon'); }, gitEnvironment: async () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${f.remote}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://artifacts.invalid/repository' }) },
+  });
+  await restoreGitIntermediateCheckpoint({ repositoryPath: cache, checkpoint, branch: 'main' });
+  expect(git(cache, 'rev-parse', 'HEAD')).toBe(checkpoint.headCommit!);
+  expect(readFileSync(join(cache, 'tracked'), 'utf8')).toBe('worktree bytes');
 });
 
 it('rejects an oversized unborn index hidden by a worktree deletion before credentials', async () => {

@@ -537,7 +537,12 @@ export async function createMachineExecutor(options: {
     const local = await prepareMachineAttachment(journal, {
       enrolled: assignment.grant, canonicalPath, deadlineAt, signal,
       source: source?.remote ? {
-        repository: { ...source, remote: source.remote }, requiresFiltersOrSubmodules: source.requiresFiltersOrSubmodules,
+        repository: {
+          ...source, remote: source.remote,
+          // The checkpoint restored below needs its layers' objects, not their history.
+          layers: sourceCheckpoint ? [sourceCheckpoint.headCommit, sourceCheckpoint.indexCommit, sourceCheckpoint.trackedWorktreeCommit].filter(layer => layer !== null) : [],
+        },
+        requiresFiltersOrSubmodules: source.requiresFiltersOrSubmodules,
         host: {
           binary: options.artifactFsBinary, root: canonicalPath, gitEnvironment: async () => env,
           ensureDaemon: async (spec: { binary: string; args: string[]; env: Record<string, string> }) => {
