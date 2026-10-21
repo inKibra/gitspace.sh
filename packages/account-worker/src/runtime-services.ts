@@ -6,13 +6,13 @@ import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
-import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
-import { parseResourceUri, selectResourceText } from '@gitspace/protocol/resource-uri';
+import { parseResourceUri, resourceMediaType, selectResourceText } from '@gitspace/protocol/resource-uri';
 import { searchHistory, type RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-reader.js';
 import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
@@ -685,6 +685,23 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             if (!blob) throw new Error('File is absent at the requested commit');
             return completed(input, { ...request, content: await blob.text() });
           }
+          // The attached machine moves the file itself; the cloud only names it, and records what the machine stored.
+          case 'toMachine':
+          case 'fromMachine': {
+            if (!conversation.root) throw new Error('Only the main workspace conversation moves files between the drive and a machine');
+            const on = args.on === undefined ? {} : { on: args.on };
+            if (args.method === 'toMachine') {
+              const { scopeId, blobHash, size } = await artifacts.locate(args.url);
+              return executeMachine({ ...input, tool: 'drive_transfer', args: RuntimeJsonSchema.parse({ direction: 'toMachine', path: args.path, scopeId, blobHash, size, ...on }) });
+            }
+            const target = await artifacts.machineTarget(args.url);
+            const result = await executeMachine({ ...input, tool: 'drive_transfer', args: RuntimeJsonSchema.parse({ direction: 'fromMachine', path: args.path, scopeId: target.scopeId, ...on }) });
+            if (result.status !== 'completed') return result;
+            const text = result.content.find(item => item.type === 'text');
+            if (text?.type !== 'text') throw new Error('The machine did not report the file it stored');
+            const sealed = RuntimeDriveTransferStoredSchema.parse(JSON.parse(text.text));
+            return completed(input, await artifacts.write(args.url, { sealed, mediaType: resourceMediaType(target.path) }));
+          }
           default: throw new Error('Artifact sharing requires an explicit human action');
         }
       }
@@ -804,6 +821,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         } else if (input.tool === 'environment') {
           const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
           if (args.method === 'runChecks' || args.method === 'runPhase') await requireMachine(input, args);
+        } else if (input.tool === 'space_artifacts') {
+          const args = RuntimeSpaceArtifactsArgumentsSchema.parse(input.args);
+          if (args.method === 'toMachine' || args.method === 'fromMachine') await requireMachine(input, args);
         } else if (input.tool === 'sync') {
           const args = RuntimeSyncArgumentsSchema.parse(input.args);
           if (args.method !== 'backups' && args.method !== 'resolve') await selections.cache(args);

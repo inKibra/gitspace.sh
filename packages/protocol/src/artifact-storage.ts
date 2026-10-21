@@ -44,6 +44,14 @@ export interface ArtifactShareRecord {
   revokedAt: string | null;
 }
 
+/** Where a sealed artifact object lives under its account's storage prefix (`users/<account>/`): one flat
+ * content-addressed namespace, keyed by the hash of the sealed bytes. The worker and machines both read and write it. */
+export function artifactObjectKey(accountId: string, hash: string): string {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(hash)) throw new Error('Artifact hash is invalid');
+  const account = btoa(String.fromCharCode(...new TextEncoder().encode(accountId))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  return `accounts/${account}/artifacts/sha256/${hash.slice(7)}`;
+}
+
 export async function deriveArtifactScopeKey(projectKey: Uint8Array, scopeId: string): Promise<Uint8Array> {
   const material = await crypto.subtle.importKey('raw', new Uint8Array(projectKey).buffer, 'HKDF', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits({

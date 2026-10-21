@@ -33,6 +33,7 @@ import { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { z } from 'zod';
 import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
+import { driveTransferOperation } from './drive-transfer.js';
 import { createGitHubCredentialHelper } from './github-credential-helper.js';
 import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
@@ -353,7 +354,10 @@ export async function startMachineRuntime() {
       await environments.prepareAttachment(local, signal, progress);
     },
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
-    operations: machineOperationalTools({ environments, services: serviceManager, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
+    operations: {
+      ...machineOperationalTools({ environments, services: serviceManager, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
+      drive_transfer: driveTransferOperation({ blobs: checkpointBlobs, artifactKey: encryptionKey, accountId: controlOptions.userId }),
+    },
     originEnvironment: checkout => gitIdentity.originEnvironment(checkout),
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({

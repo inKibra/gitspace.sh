@@ -1,13 +1,13 @@
 import { createDecipheriv, createHash, type DecipherGCM } from 'node:crypto';
-import { ARTIFACT_ENCRYPTION_VERSION, ARTIFACT_NONCE_BYTES, decryptArtifactBytes } from '@gitspace/protocol';
+import { ARTIFACT_ENCRYPTION_VERSION, ARTIFACT_NONCE_BYTES, artifactObjectKey, decryptArtifactBytes } from '@gitspace/protocol';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, chunkedCheckpointManifestSchema } from '@gitspace/protocol-workspace';
 
 const ENCRYPTION_OVERHEAD = 29;
 
 /** Artifacts use one flat content-addressed namespace, including encrypted parts. */
 async function openSealedArtifact(env: Env, userId: string, hash: string): Promise<R2ObjectBody> {
-  if (userId !== env.ACCOUNT_ID || !/^sha256:[a-f0-9]{64}$/u.test(hash)) throw new Error('Artifact object identity is invalid');
-  const object = await env.DATA.get(`users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${hash.slice(7)}`);
+  if (userId !== env.ACCOUNT_ID) throw new Error('Artifact object identity is invalid');
+  const object = await env.DATA.get(`users/${userId}/${artifactObjectKey(userId, hash)}`);
   if (!object) throw new Error('Artifact object is unavailable');
   return object;
 }

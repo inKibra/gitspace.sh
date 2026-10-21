@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { posix } from 'node:path';
 import {
-  artifactManifestSchema, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes,
+  artifactManifestSchema, artifactObjectKey, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes,
   type ArtifactCopyRecord, type ArtifactManifest, type ArtifactShareRecord, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
   type InspectorView, type InspectorIdentity,
 } from '@gitspace/protocol';
@@ -16,7 +16,7 @@ import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/
 import { applyTextEdits, RuntimeSnapshotSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
 import { readArtifactObject, readArtifactManifestObject } from './artifact-object-reader.js';
-import { ARTIFACT_UPLOAD_CHUNK_BYTES } from '@gitspace/protocol/rpc-contract';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES } from '@gitspace/protocol/rpc-contract';
 
 export class InspectorWorkspaceMissing extends Error {
   constructor(readonly spaceId: string) { super(`Workspace ${spaceId} does not exist`); }
@@ -25,7 +25,9 @@ export class InspectorGenerationConflict extends Error {
   constructor(readonly spaceId: string, readonly expected: number, readonly actual: number) { super('Space generation changed'); }
 }
 
-type ArtifactChange = { bytes: Uint8Array; mediaType?: string | null } | { edits: readonly { oldText: string; newText: string }[] };
+type ArtifactChange = { bytes: Uint8Array; mediaType?: string | null } | { edits: readonly { oldText: string; newText: string }[] }
+  /** An object a machine already sealed under the scope's key and stored. */
+  | { sealed: { blobHash: string; size: number }; mediaType: string | null };
 const artifactUploadStateSchema = z.object({
   spaceId: z.string(), generation: z.number().int(), path: z.string(), size: z.number().int().positive(), mediaType: z.string().nullable(),
   received: z.number().int().nonnegative(), last: z.object({ offset: z.number().int().nonnegative(), sha256: z.string() }).nullable(),
@@ -104,11 +106,6 @@ export class InspectorCloudArtifacts {
     return this.keyRequest;
   }
 
-  private objectKey(hash: string): string {
-    if (!/^sha256:[a-f0-9]{64}$/u.test(hash)) throw new Error('Artifact hash is invalid');
-    return `accounts/${Buffer.from(this.userId).toString('base64url')}/artifacts/sha256/${hash.slice(7)}`;
-  }
-
   private async entries(scope: CanonicalArtifactScope): Promise<ArtifactManifest['entries']> {
     if (scope.manifestHash === null) {
       if (scope.generation !== 0) throw new Error('Committed artifact scope is missing its manifest hash');
@@ -160,7 +157,7 @@ export class InspectorCloudArtifacts {
   private async seal(bytes: Uint8Array, scopeKey: Uint8Array): Promise<`sha256:${string}`> {
     const sealed = await encryptArtifactBytes(bytes, scopeKey);
     const hash = await digest(sealed);
-    await this.env.DATA.put(`users/${this.userId}/${this.objectKey(hash)}`, sealed);
+    await this.env.DATA.put(`users/${this.userId}/${artifactObjectKey(this.userId, hash)}`, sealed);
     return hash;
   }
 
@@ -198,6 +195,16 @@ export class InspectorCloudArtifacts {
     if (!entry) throw new Error('Artifact does not exist');
     const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, resolved.scope.id), entry.size, 16 * 1024 * 1024);
     return { bytes, mediaType: entry.mediaType ?? resourceMediaType(resource.path) };
+  }
+
+  /** The stored object a drive URL names and the scope whose key opens it, for a machine to fetch itself. */
+  async locate(url: string): Promise<{ scopeId: string; blobHash: string; size: number }> {
+    const resource = parseResourceUri(url);
+    if (resource?.kind !== 'drive' || !resource.mount) throw new Error('Name the file as drive://workspace/<path> or drive://base/<path>');
+    const resolved = await this.resolve(resource.url);
+    const entry = (await this.entries(resolved.scope)).find((candidate) => candidate.path === resolved.path);
+    if (!entry) throw new Error('Artifact does not exist');
+    return { scopeId: resolved.scope.id, blobHash: entry.blobHash, size: entry.size };
   }
 
   async catalog() {
@@ -267,6 +274,17 @@ export class InspectorCloudArtifacts {
    * `edits` apply the repository edit tool's semantics to the current text of the same generation.
    */
   async write(url: string, change: ArtifactChange) {
+    return this.put(this.writablePath(url), change);
+  }
+
+  /** Where a machine seals a file it publishes to `url`: the path, and the writable scope whose key encrypts it. */
+  async machineTarget(url: string): Promise<{ scopeId: string; path: string }> {
+    const path = this.writablePath(url);
+    return { scopeId: this.scopeOf(await this.source.authority.listArtifactScopes(), this.writable().spaceId).id, path };
+  }
+
+  /** The path a drive URL names in this session's writable scope; any other mount is refused. */
+  private writablePath(url: string): string {
     const writable = this.writable();
     const resource = parseResourceUri(url);
     if (resource?.kind !== 'drive') throw new Error('Unsupported or unsafe resource URI');
@@ -275,7 +293,7 @@ export class InspectorCloudArtifacts {
         ? 'This workspace can write drive://workspace/<path>; drive://base/ is written from the project session'
         : 'The project session can write drive://base/<path>; drive://workspace/ is written from that workspace’s session');
     }
-    return this.put(this.target(resource.url).path, change);
+    return this.target(resource.url).path;
   }
 
   private async put(path: string, change: ArtifactChange): Promise<InspectorView['artifacts'][number]> {
@@ -286,22 +304,35 @@ export class InspectorCloudArtifacts {
     const conflict = [...entries.keys()].find((other) => other.startsWith(`${path}/`) || path.startsWith(`${other}/`));
     if (conflict) throw new Error(`${path} conflicts with artifact ${conflict}`);
     const current = entries.get(path);
-    let bytes: Uint8Array;
-    let mediaType = current?.mediaType ?? null;
-    if ('bytes' in change) {
-      bytes = change.bytes;
-      if (change.mediaType !== undefined) mediaType = change.mediaType;
+    let entry: ArtifactManifest['entries'][number];
+    if ('sealed' in change) {
+      if (change.sealed.size > ARTIFACT_UPLOAD_MAX_BYTES) throw new Error(`Drive files are limited to ${ARTIFACT_UPLOAD_MAX_BYTES / 1024 / 1024} MiB`);
+      // Sealed elsewhere: the manifest names it only once it opens under this scope's key at its stated size.
+      for await (const _part of await readArtifactObject(this.env, this.userId, change.sealed.blobHash, scopeKey, change.sealed.size)) {
+        // Exhaust the authenticated stream without retaining file contents.
+      }
+      entry = { path, blobHash: change.sealed.blobHash, size: change.sealed.size, mediaType: change.mediaType };
     } else {
-      if (!current) throw new Error('Artifact does not exist');
-      const original = new TextDecoder('utf-8', { fatal: true }).decode(await boundedArtifactBytes(this.env, this.userId, current.blobHash, scopeKey, current.size, 16 * 1024 * 1024));
-      bytes = new TextEncoder().encode(applyTextEdits(original, change.edits));
+      let bytes: Uint8Array;
+      let mediaType = current?.mediaType ?? null;
+      if ('bytes' in change) {
+        bytes = change.bytes;
+        if (change.mediaType !== undefined) mediaType = change.mediaType;
+      } else {
+        if (!current) throw new Error('Artifact does not exist');
+        const original = new TextDecoder('utf-8', { fatal: true }).decode(await boundedArtifactBytes(this.env, this.userId, current.blobHash, scopeKey, current.size, 16 * 1024 * 1024));
+        bytes = new TextEncoder().encode(applyTextEdits(original, change.edits));
+      }
+      entry = { path, blobHash: await this.seal(bytes, scopeKey), size: bytes.byteLength, mediaType };
     }
-    const entry = { path, blobHash: await this.seal(bytes, scopeKey), size: bytes.byteLength, mediaType };
+    const view = { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType: entry.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
+    // A replayed publication of the same object is already committed.
+    if (current?.blobHash === entry.blobHash && current.mediaType === entry.mediaType) return view;
     entries.set(path, entry);
     const generation = scope.generation + 1;
     const manifestHash = await this.sealManifest(scope, generation, entries.values(), scopeKey);
     await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
-    return { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
+    return view;
   }
 
   /** Staged upload objects live under the account prefix until commit or abort removes them. */

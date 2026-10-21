@@ -12,6 +12,7 @@ import { tenantRootPrivateKey } from './setup.js';
 import { createCipheriv, createHash } from 'node:crypto';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION } from '@gitspace/protocol-workspace';
 import { readArtifactObject } from '../src/artifact-object-reader.js';
+import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
 
 async function fixture() {
   const userId = env.ACCOUNT_ID;
@@ -105,7 +106,8 @@ async function fixture() {
     return worker.fetch(new Request(input, init), env);
   }) as typeof fetch;
   const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: createSignedRpcFetch({ deviceId: binding.deviceId, userId, signingPrivateKey: deviceKey, fetch: fetcher }) }) });
-  return { client, authority, projectId, workspaceId, publish, publishChunked, publishLegacy, origin };
+  const seal = async (scopeId: string, bytes: Uint8Array) => store(await encryptArtifactBytes(bytes, await deriveArtifactScopeKey(key, scopeId)));
+  return { client, authority, projectId, workspaceId, publish, publishChunked, publishLegacy, origin, seal };
 }
 
 async function readBytes(stream: AsyncIterable<{ status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown }>): Promise<Buffer> {
@@ -220,6 +222,25 @@ describe('user artifact flows', () => {
     const entries = await publish(workspaceId, 1, [{ path: 'capture.wav', content, mediaType: 'audio/wav' }]);
     const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/capture.wav', hash: entries[0]!.blobHash }));
     expect(bytes).toEqual(Buffer.from(content));
+  });
+
+  it('names a file a machine sealed only when it opens under the workspace scope key', async () => {
+    const { client, workspaceId, projectId, seal } = await fixture();
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const zip = Uint8Array.from({ length: 70_000 }, (_, index) => (index * 7) % 256);
+    const target = await artifacts.machineTarget('drive://workspace/uploads/font.zip');
+    expect(target).toEqual({ scopeId: `space:${workspaceId}`, path: 'uploads/font.zip' });
+    // Sealed under the project's scope key, the object is refused and nothing is named.
+    const foreign = await seal(`space:${projectId}`, zip);
+    await expect(artifacts.write('drive://workspace/uploads/font.zip', { sealed: { blobHash: foreign, size: zip.byteLength }, mediaType: 'application/zip' })).rejects.toThrow();
+    const sealed = { blobHash: await seal(target.scopeId, zip), size: zip.byteLength };
+    await expect(artifacts.write('drive://workspace/uploads/font.zip', { sealed: { ...sealed, size: zip.byteLength + 1 }, mediaType: 'application/zip' })).rejects.toThrow();
+    expect((await artifacts.list()).map(entry => entry.path)).toEqual([]);
+    const written = await artifacts.write('drive://workspace/uploads/font.zip', { sealed, mediaType: 'application/zip' });
+    expect(written).toMatchObject({ url: 'drive://workspace/uploads/font.zip', hash: sealed.blobHash, size: zip.byteLength, mediaType: 'application/zip' });
+    expect(await artifacts.locate('drive://workspace/uploads/font.zip')).toEqual({ scopeId: target.scopeId, ...sealed });
+    const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/uploads/font.zip', hash: null }));
+    expect(bytes).toEqual(Buffer.from(zip));
   });
 
   it('rejects a conflicting batch atomically and keeps re-encrypted project copies independent of later workspace edits', async () => {
