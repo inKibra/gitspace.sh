@@ -70,6 +70,17 @@ function requestAuth(resolved: ResolvedCredential): AuthResult {
 }
 
 /** Each dispatch gets its own Models/auth object; concurrent accounts never share a credential slot. */
+/**
+ * A Claude subscription request declares its whole current tool set up front instead of announcing mid-conversation
+ * changes (`tool_addition`/`tool_removal` blocks, which pi-ai sends for models that support them). Every request
+ * Anthropic refused as a third-party app's (billed to extra usage) carried 40 or more of those blocks, whatever its
+ * size; Claude Code's own requests are not known to send them. A tool-set change then restarts the prompt cache.
+ */
+function subscriptionModel<T extends Api>(model: Model<T>): Model<T> {
+  if (model.api !== 'anthropic-messages' || !model.compat || !('supportsMidConvoToolChanges' in model.compat) || !model.compat.supportsMidConvoToolChanges) return model;
+  return { ...model, compat: { ...model.compat, supportsMidConvoToolChanges: false } };
+}
+
 export async function createVaultModels(options: VaultModelsOptions): Promise<VaultModels> {
   const claude = await claudeCode(options.profileId);
   const cloudFetch = claude.fetch;
@@ -122,7 +133,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     if (!result.length) throw new Error(`Inference profile has no usable account for ${provider}`);
     return result;
   }
-  async function* streamAttempts(model: AnyModel, invoke: (models: Models, observe: (status: number) => void) => AssistantMessageEventStream, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
+  async function* streamAttempts(model: AnyModel, invoke: (models: Models, observe: (status: number) => void, subscription: boolean) => AssistantMessageEventStream, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
     canonical(model);
     const scope = options.conversationForSignal?.(signal) ?? options;
     const candidates = await accounts(model.provider, scope);
@@ -140,7 +151,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
         let published = false;
         let failure: Extract<AssistantMessageEvent, { type: 'error' }> | undefined;
         const deferred: AssistantMessageEvent[] = [];
-        for await (const event of invoke(models, value => { status = value; })) {
+        for await (const event of invoke(models, value => { status = value; }, candidate.type === 'oauth')) {
           if (event.type === 'error') { failure = event; break; }
           if (event.type === 'start') { deferred.push(event); continue; }
           if (!published) { for (const start of deferred) yield start; deferred.length = 0; published = true; }
@@ -214,14 +225,14 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     stream<T extends Api>(model: Model<T>, context: Context, request?: ModelsApiStreamOptions<T>) {
       return lazyStream(model, async () => {
         rejectOverrides(request);
-        return streamAttempts(model, (models, observe) => models.stream<T>(model, context, Object.assign({}, request, {
+        return streamAttempts(model, (models, observe, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, context, Object.assign({}, request, {
           fetch: cloudFetch, onPayload: claude.onPayload,
           onResponse: async (response: ProviderResponse, selected: Model<Api>) => { observe(response.status); await request?.onResponse?.(response, selected); },
         })), request?.signal);
       });
     },
     complete: (model, context, request) => facade.stream(model, context, request).result(),
-    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, (models, observe) => models.streamSimple(model, context, { ...request, fetch: cloudFetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
+    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, (models, observe, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, context, { ...request, fetch: cloudFetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
     completeSimple: (model, context, request) => facade.streamSimple(model, context, request).result(),
     streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await options.pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
     fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),

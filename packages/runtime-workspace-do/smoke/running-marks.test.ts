@@ -43,27 +43,32 @@ test('a model request a reset cut off is described by what it sent, images and t
   // The stream never ends: the next instance finds the request still marked, as after a reset.
   const [mark] = createRunningMarks(storage(database)).leftover;
   expect(mark?.step).toBe('model request');
-  expect(mark?.detail).toBe('anthropic/opus: 3 messages, 0.7 MB (2 images, 0.6 MB)');
+  expect(mark?.detail).toBe('anthropic/opus: 3 messages, 0.7 MB (2 images, 0.6 MB), system 0 KB, 0 tools 0 KB');
 });
 
-test('a reply a reset cut off is described by how much of it had arrived, by kind', async () => {
+test('a reply a reset cut off is described by when the provider answered and how much had arrived, by kind', async () => {
   const database = new Database(':memory:');
   const pending = createAssistantMessageEventStream();
-  const models = createRunningMarks(storage(database)).models({ ...createModels(), streamSimple: () => pending });
+  const answered = Promise.withResolvers<(status: number) => Promise<void>>();
+  const models = createRunningMarks(storage(database)).models({ ...createModels(), streamSimple: (selected, _context, options) => { answered.resolve(async status => { await options?.onResponse?.({ status, headers: {} }, selected); }); return pending; } });
   const model: Model<Api> = { id: 'opus', name: 'Opus', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
   const partial = { role: 'assistant' as const, content: [], api: 'anthropic-messages' as const, provider: 'anthropic', model: 'opus', stopReason: 'stop' as const, timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
   const marked = () => database.query('SELECT detail FROM runtime_running').all();
   // The clock is set, not waited on.
   setSystemTime(new Date('2026-10-21T22:00:00Z'));
   try {
-    void models.streamSimple(model, { messages: [{ role: 'user', content: 'Write it', timestamp: 1 }] });
+    void models.streamSimple(model, { systemPrompt: 's'.repeat(3_000), messages: [{ role: 'user', content: 'Write it', timestamp: 1 }], tools: [{ name: 'write', description: 'd'.repeat(2_000), parameters: { type: 'object', properties: {} } }] });
+    // The provider answers after two seconds; nothing has streamed yet.
+    setSystemTime(new Date('2026-10-21T22:00:02Z'));
+    await (await answered.promise)(200);
+    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB, system 3 KB, 1 tools 2 KB; answered 200 after 2 s' }]);
     pending.push({ type: 'thinking_delta', contentIndex: 0, delta: 'a'.repeat(40_000), partial });
     await Bun.sleep(0);
     // Under five seconds: the mark still holds only the request.
-    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB' }]);
+    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB, system 3 KB, 1 tools 2 KB; answered 200 after 2 s' }]);
     setSystemTime(new Date('2026-10-21T22:00:06Z'));
     pending.push({ type: 'toolcall_delta', contentIndex: 1, delta: 'x'.repeat(120_000), partial });
     await Bun.sleep(0);
-    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB; reply after 6 s: 2 events, thinking 40 KB, text 0 KB, tool-call arguments 120 KB' }]);
+    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB, system 3 KB, 1 tools 2 KB; answered 200 after 2 s; reply after 6 s: 2 events, thinking 40 KB, text 0 KB, tool-call arguments 120 KB' }]);
   } finally { setSystemTime(); }
 });

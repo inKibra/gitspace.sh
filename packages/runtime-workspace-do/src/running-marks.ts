@@ -4,6 +4,8 @@ export type RunningMark = { step: string; detail: string; startedAt: string };
 
 /** How often a streaming model request's mark records how much reply has arrived. */
 const REPLY_NOTE_MS = 5_000;
+/** Mark sizes: characters as kilobytes. */
+const kilobytes = (count: number) => `${Math.round(count / 1000)} KB`;
 
 /** Characters of every string in a value (a tool call's arguments: a written file, a command), without serializing it. */
 function textLength(value: unknown): number {
@@ -57,9 +59,9 @@ export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => 
       end(key: string): void { sql.exec('DELETE FROM runtime_unfinished WHERE key=?', key); },
     },
     /**
-     * Model requests are marked from the call until the response stream ends, however the caller consumes it. While the
-     * reply streams, the mark records every `REPLY_NOTE_MS` how much of it has arrived, so a reset during a reply shows
-     * whether the reply itself was large.
+     * Model requests are marked from the call until the response stream ends, however the caller consumes it. The mark
+     * records what was sent (messages, system prompt, tool definitions), when the provider answered, and every
+     * `REPLY_NOTE_MS` how much reply has arrived, so a reset shows which stage of the request it hit and what had grown.
      */
     models(models: Models): Models {
       const describe = (model: { provider: string; id: string }, context: Context) => {
@@ -74,7 +76,7 @@ export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => 
           }
         }
         const megabytes = (count: number) => `${(count / 1_000_000).toFixed(1)} MB`;
-        return `${model.provider}/${model.id}: ${context.messages.length} messages, ${megabytes(characters + imageCharacters)}${images ? ` (${images} images, ${megabytes(imageCharacters)})` : ''}`;
+        return `${model.provider}/${model.id}: ${context.messages.length} messages, ${megabytes(characters + imageCharacters)}${images ? ` (${images} images, ${megabytes(imageCharacters)})` : ''}, system ${kilobytes(context.systemPrompt?.length ?? 0)}, ${context.tools?.length ?? 0} tools ${kilobytes(textLength(context.tools))}`;
       };
       return new Proxy(models, {
         get: (target, key, receiver) => {
@@ -83,9 +85,17 @@ export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => 
           return (model: Parameters<Models['streamSimple']>[0], context: Context, options?: Parameters<Models['streamSimple']>[2]) => {
             const request = describe(model, context);
             const mark = start('model request', request);
-            const inner = target.streamSimple(model, context, options);
-            const outer = createAssistantMessageEventStream();
             const startedAt = Date.now();
+            let answered = '';
+            const inner = target.streamSimple(model, context, {
+              ...options,
+              onResponse: async (response, selected) => {
+                answered = `; answered ${response.status} after ${Math.round((Date.now() - startedAt) / 1000)} s`;
+                mark.update(`${request}${answered}`);
+                await options?.onResponse?.(response, selected);
+              },
+            });
+            const outer = createAssistantMessageEventStream();
             let noted = startedAt, events = 0, thinking = 0, text = 0, toolArguments = 0;
             void (async () => {
               try {
@@ -98,8 +108,7 @@ export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => 
                   const now = Date.now();
                   if (now - noted < REPLY_NOTE_MS) continue;
                   noted = now;
-                  const kilobytes = (count: number) => `${Math.round(count / 1000)} KB`;
-                  mark.update(`${request}; reply after ${Math.round((now - startedAt) / 1000)} s: ${events} events, thinking ${kilobytes(thinking)}, text ${kilobytes(text)}, tool-call arguments ${kilobytes(toolArguments)}`);
+                  mark.update(`${request}${answered}; reply after ${Math.round((now - startedAt) / 1000)} s: ${events} events, thinking ${kilobytes(thinking)}, text ${kilobytes(text)}, tool-call arguments ${kilobytes(toolArguments)}`);
                 }
               }
               finally { mark.end(); outer.end(); }
