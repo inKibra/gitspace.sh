@@ -53,16 +53,41 @@ const stream: StreamFunction = (_model, context, options) => {
   return result;
 };
 
+/** The object's storage with every SQL cursor recorded while `counting`, so a step's rows read are workerd's own count. */
+function countedStorage(storage: DurableObjectStorage) {
+  const cursors: Array<{ readonly rowsRead: number }> = [];
+  const state = { counting: false };
+  const sql = new Proxy(storage.sql, { get(target, key) {
+    if (key === 'exec') return (query: string, ...bindings: SqlStorageValue[]) => { const cursor = target.exec(query, ...bindings); if (state.counting) cursors.push(cursor); return cursor; };
+    const value: unknown = Reflect.get(target, key);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  const counted = new Proxy(storage, { get(target, key) {
+    if (key === 'sql') return sql;
+    const value: unknown = Reflect.get(target, key);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  return {
+    storage: counted,
+    async rowsReadDuring(step: () => Promise<void>): Promise<number> {
+      cursors.length = 0; state.counting = true;
+      try { await step(); } finally { state.counting = false; }
+      return cursors.reduce((total, cursor) => total + cursor.rowsRead, 0);
+    },
+  };
+}
 export class RuntimeSmoke extends DurableObject<unknown> {
   protected readonly runtime;
   private readonly operations: OperationalServices;
+  private readonly counted;
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
+    this.counted = countedStorage(ctx.storage);
     const models = createModels();
     models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [model], stream, streamSimple: stream });
     this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
     this.runtime = createWorkspaceRuntime({
-      storage: ctx.storage, identity, models, model: modelRef,
+      storage: this.counted.storage, identity, models, model: modelRef,
       code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], changedSnapshotPaths: unsupported, reader: () => ({ readTree: async oid => definitionTrees.get(oid) ?? null, readBlob: async oid => oid === 'c'.repeat(40) ? new Blob([repositoryDefinition]) : null, close: async () => {} }) },
       initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
@@ -87,6 +112,12 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       const runtime = await this.runtime;
       const url = new URL(request.url);
       if (url.pathname === '/fail-binding') { await this.ctx.storage.put('fail-binding', url.searchParams.get('on') !== 'false'); return Response.json({ armed: url.searchParams.get('on') !== 'false' }); }
+      // An alarm's work, as the platform would run it, with its rows read and the alarm it leaves behind.
+      if (url.pathname === '/idle-wake') {
+        await this.ctx.storage.deleteAlarm();
+        const rowsRead = await this.counted.rowsReadDuring(() => runtime.wake());
+        return Response.json({ alarm: await this.ctx.storage.getAlarm(), rowsRead });
+      }
       if (url.pathname === '/enable-definitions') { await this.ctx.storage.put('definitions-enabled', true); return Response.json({ enabled: true }); }
       if (url.pathname === '/draft') return Response.json(await runtime.saveDraft(WorkspaceDraftSaveSchema.parse(await request.json()), request.headers.get('x-fixture-device') ?? 'fixture-browser'));
       if (url.pathname === '/events') {

@@ -15,7 +15,7 @@ function textLength(value: unknown): number {
  * is recorded before it starts and removed when it settles, so rows still present when the object next opens are what
  * the previous instance was running when it was reset (out of memory, or a deploy); a reset leaves no other trace.
  */
-export function createRunningMarks(sql: SqlStorage) {
+export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => {}) {
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_running(id TEXT PRIMARY KEY, step TEXT NOT NULL, detail TEXT NOT NULL, started_at INTEGER NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_unfinished(key TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 1)');
   // One-time: marks recorded before attempts were counted read as one attempt.
@@ -28,6 +28,7 @@ export function createRunningMarks(sql: SqlStorage) {
   const start = (step: string, detail: string) => {
     const id = crypto.randomUUID();
     sql.exec('INSERT INTO runtime_running(id,step,detail,started_at) VALUES(?,?,?,?)', id, step, detail, Date.now());
+    onStart();
     return () => { sql.exec('DELETE FROM runtime_running WHERE id=?', id); };
   };
   const run = async <T>(step: string, detail: string, operation: () => Promise<T>): Promise<T> => {
@@ -38,6 +39,8 @@ export function createRunningMarks(sql: SqlStorage) {
     /** What the previous instance was running when it was reset. */
     leftover,
     run,
+    /** Whether a marked step is running now. */
+    active(): boolean { return sql.exec('SELECT 1 FROM runtime_running LIMIT 1').toArray().length > 0; },
     /** One record per key (a conversation's turn, its compaction) counting attempts that have not finished. */
     unfinished: {
       begin(key: string): number {

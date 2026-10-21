@@ -428,6 +428,34 @@ describe('GitHub App', () => {
     expect(authorizations).toHaveLength(1);
   });
 
+  it('reuses an installation token per repository and access until shortly before it expires, and mints afresh after a delivery', async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
+    expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
+    const minted: string[] = [];
+    let expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    network.use(http.post(`${API}/app/installations/91/access_tokens`, async ({ request }) => {
+      const body: unknown = await request.json();
+      minted.push(JSON.stringify(body));
+      return HttpResponse.json({ token: `token-${minted.length}`, expires_at: expiresAt }, { status: 201 });
+    }));
+    expect((await github().repositoryToken('inKibra/pantry', 'read')).token).toBe('token-1');
+    expect((await github().repositoryToken('inKibra/Pantry', 'read')).token).toBe('token-1');
+    expect((await github().repositoryToken('inKibra/pantry', 'write')).token).toBe('token-2');
+    expect(minted).toHaveLength(2);
+    // A delivery can change coverage: the next request mints again.
+    const body = JSON.stringify({ action: 'added', installation: { id: 91 }, repositories_added: [] });
+    expect((await deliver('installation_repositories', 'coverage-changed', body, await signature(body))).status).toBe(202);
+    expect((await github().repositoryToken('inKibra/pantry', 'read')).token).toBe('token-3');
+    // A token with less than five minutes left is not reused.
+    expiresAt = new Date(Date.now() + 60_000).toISOString();
+    await deliver('installation_repositories', 'coverage-changed-again', body, await signature(body));
+    expect((await github().repositoryToken('inKibra/pantry', 'read')).token).toBe('token-4');
+    expect((await github().repositoryToken('inKibra/pantry', 'read')).token).toBe('token-5');
+  });
+
   it('shares a private repository’s guide only with GitHub readers who can read the repository', async () => {
     const key = await rsaKey('pkcs1');
     await createApp(key);

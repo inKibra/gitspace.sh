@@ -66,6 +66,10 @@ export class AttachmentStore {
     storage.sql.exec('INSERT OR IGNORE INTO runtime_attachments_revision(singleton,token) VALUES(1,random() >> 11)');
     for (const event of ['INSERT', 'UPDATE', 'DELETE']) storage.sql.exec(`CREATE TRIGGER IF NOT EXISTS runtime_attachments_revision_${event.toLowerCase()} AFTER ${event} ON runtime_attachments BEGIN UPDATE runtime_attachments_revision SET token=random() >> 11 WHERE singleton=1; END`);
   }
+  /** Whether a dispatched machine command is awaiting its result now. */
+  dispatching(): boolean {
+    return this.running.size > 0;
+  }
   runningMachine(attemptId: string): RuntimeAttachment['machineId'] | null {
     return this.running.get(attemptId) ?? null;
   }

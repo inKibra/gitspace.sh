@@ -5,13 +5,13 @@ import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRec
 import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, recordProcessExit, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
+import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
@@ -55,6 +55,8 @@ export type WorkspaceRuntime = {
   /** The one status summary of this workspace. */
   status(): Promise<RuntimeWorkspaceStatus>;
   cacheReady(attachmentId: string, generation: number): Promise<void>;
+  /** A machine's report that one of the workspace's processes exited; its watch delivers the notice. */
+  processExited(daemon: RuntimeProcessExitedInput['daemon']): Promise<void>;
   /** An agent asked for this attachment: once the machine reports it ready, the conversation is told so it can retry. */
   noticeWhenReady(input: { attachmentId: string; generation: number; conversationId: string; label: string }): void;
   /** A line in the main conversation about the workspace's machines, read by the agent on its next turn; it does not
@@ -104,15 +106,22 @@ async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harne
   sql.exec("INSERT INTO runtime_one_time_steps(name) VALUES('withdraw-sync-failure-notices')");
   console.info(JSON.stringify({ event: 'sync_failure_notices_withdrawn', conversationId: String(root.id), count: notices.length }));
 }
+/**
+ * How long work in progress (a model request, a merge, a machine command) may go without an event to the object. Pending
+ * fetches, RPCs and timers keep a Durable Object in memory for up to 15 minutes each; this alarm covers longer ones,
+ * and is set only while such work runs, so an idle workspace holds no alarm and is not billed.
+ */
+const HEARTBEAT_MS = 30_000;
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
-  const marks = createRunningMarks(options.storage.sql);
+  const heartbeat = () => { options.schedule(Date.now() + HEARTBEAT_MS).catch(options.onReport); };
+  const marks = createRunningMarks(options.storage.sql, heartbeat);
   if (marks.leftover.length) console.error(JSON.stringify({ event: 'runtime_reset_during', workspaceId: options.identity.workspaceId, running: marks.leftover }));
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
   const runtime = await createRuntimeHarness({ ...options, storage, models: marks.models(options.models), unfinished: marks.unfinished });
   const { harness } = runtime;
   const withdrawn = createWithdrawnNotices(options.storage.sql);
   await withdrawSyncFailureNotices(storage, harness, runtime.root, withdrawn, options.storage.sql);
-  const attachments = new AttachmentStore(options.storage, options.attachments);
+  const attachments = new AttachmentStore(options.storage, { ...options.attachments, dispatch: input => { heartbeat(); return options.attachments.dispatch(input); } });
   // Sync merges and cloud writes build snapshots in memory: each is marked while it runs.
   const code: Pick<WorkspaceRuntimeOptions['code'], 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> = {
     readFile: (...args) => options.code.readFile(...args),
@@ -480,9 +489,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       const clearsDraft = deviceId !== undefined && command.type === 'prompt' && command.draftRevision !== undefined && (conversationId === undefined || conversationId === String(runtime.root.id));
       const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume'].includes(command.type);
       const result = await controls.execute(conversationId, command, canApprove);
-      if (wakesTasks) await options.schedule(Date.now() + 1000);
       if (clearsDraft && command.type === 'prompt' && command.draftRevision !== undefined) { await drafts.clear(command.draftRevision, deviceId, command.draftText); publish(); await line; }
-      if (wakesTasks) { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); }
+      if (wakesTasks) harness.resume();
       return result;
     },
     notice,
@@ -509,6 +517,10 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       }, BACKGROUND_CONTEXT);
       publish(); await line;
     },
+    async processExited(daemon) {
+      await harness.commit(async tx => { recordProcessExit(await tx.doc(ProcessExitsDoc), daemon, Date.now()); }, BACKGROUND_CONTEXT);
+      harness.resume();
+    },
     async status() { return workspaceStatus(await cloudFiles.snapshot() ?? null); },
     async snapshot() { await line; return snapshot; },
     async saveDraft(input, deviceId) {
@@ -520,7 +532,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       const target = await conversation(input.conversationId);
       if ((await harness.snapshot(AgentDefinitionContextDoc, target.id, BACKGROUND_CONTEXT))?.child) throw new Error('User messages must target the workspace main conversation');
       await controls.loadDefinitions(target);
-      await options.schedule(Date.now() + 1000);
       await runtime.lifecycle.userInput(String(target.id), async () => {
         const selection = (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
         const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
@@ -528,13 +539,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
       });
       if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId, input.draftText); publish(); }
-      options.waitUntil(target.waitForIdle(BACKGROUND_CONTEXT));
       await line;
       return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id) };
     },
     async cancel(input: RuntimeCancelInput) { await runtime.lifecycle.stop(String((await conversation(input.conversationId)).id)); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
     async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }) {
-      await options.schedule(Date.now() + 1000);
       await harness.commit(async tx => {
         const questions = await tx.doc(QuestionsDoc);
         const question = questions.items.find(item => item.id === input.questionId);
@@ -557,7 +566,6 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         }
       }, BACKGROUND_CONTEXT);
       harness.resume();
-      options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT));
       await line; return { accepted: true as const, cursor: snapshot.cursor };
     },
     async events(after: number | null): Promise<RuntimeWatchEvent[]> {
@@ -567,7 +575,9 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     async wake() {
       // Indexing runs beside recovery: a failing recovery step must not keep code_search from being built.
       const indexing = codeSearch.drive();
-      try { await flushCloudRetention(); await runtime.lifecycle.recover(); harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); const inspection = await harness.inspect(BACKGROUND_CONTEXT); if (inspection.tasks.length > 0) await options.schedule(Date.now() + 1000); }
+      // Tasks keep the object in memory only through their own pending I/O and timers; an alarm is re-armed only while
+      // marked work or a machine command is still running (a step outliving those 15 minutes).
+      try { await flushCloudRetention(); await runtime.lifecycle.recover(); harness.resume(); if (marks.active() || attachments.dispatching()) heartbeat(); }
       finally { await indexing; }
     },
     publish,

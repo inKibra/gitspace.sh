@@ -27,6 +27,7 @@ function mockCloudflare() {
     const account = (data: object) => Response.json({ data: { viewer: { accounts: [data] } } });
     if (body.query.includes('StorageWatchdogHour')) return account({ objects: [] });
     if (body.query.includes('StorageWatchdogDay')) return account({ periodic: [], invocations: [], top: [] });
+    if (body.query.includes('StorageWatchdogAwake')) return account({ awake: [], reading: [] });
     windows.push(body.variables.start);
     const usage = { [spaces]: { activeTime: 2 * HOUR_MICROS, rowsRead: 0, rowsWritten: 1_000_000 }, [cells]: { activeTime: 0, rowsRead: 1_000_000_000, rowsWritten: 0 } };
     if (body.query.includes('periodic:')) return account({ periodic: Object.entries(usage).map(([namespaceId, sum]) => ({ dimensions: { namespaceId }, sum })) });

@@ -3,7 +3,7 @@ import { RuntimeContentSchema, RuntimeIdentitySchema, RuntimeJsonSchema, Runtime
 import { RuntimeJobHandleSchema } from './execution-contracts.js';
 import { RuntimeDispatchSelectionSchema, RuntimeMachineNeedsSchema } from './scheduling.js';
 import { LifecycleRunRequestSchema, LifecycleMutationSchema } from '@gitspace/protocol-environment';
-import { DaemonStartSpecSchema } from '@gitspace/supervisor/protocol';
+import { DaemonSnapshotSchema, DaemonStartSpecSchema } from '@gitspace/supervisor/protocol';
 
 const path = z.string().min(1);
 export const RuntimeReadArgumentsSchema = z.object({ path, offset: z.number().int().positive().optional(), limit: z.number().int().positive().optional() });
@@ -185,4 +185,7 @@ export const RuntimeEnvironmentArgumentsSchema = z.discriminatedUnion('method', 
 export const RuntimeImportRefArgumentsSchema = z.object({
   ref: z.string().max(512).regex(/^refs\/(?:(?:heads|tags)\/[^\0\s]+|pull\/[1-9][0-9]*\/head)$/u),
 }).strict();
+/** A machine's report that a workspace process it supervises exited, sent when its supervisor sees the exit. */
+export const RuntimeProcessExitedInputSchema = RuntimeIdentitySchema.extend({ daemon: DaemonSnapshotSchema.extend({ state: z.enum(['exited', 'failed']) }) }).strict();
+export type RuntimeProcessExitedInput = z.infer<typeof RuntimeProcessExitedInputSchema>;
 export const RuntimeImportRefResultSchema = z.object({ ref: z.string(), commit: z.string().regex(/^[0-9a-f]{40}$/u) }).strict();

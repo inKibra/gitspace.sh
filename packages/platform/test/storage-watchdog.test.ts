@@ -13,8 +13,9 @@ const scheduledTime = Date.parse('2026-10-14T02:20:00Z');
 const HOUR = 3_600_000;
 const object = (letter: string) => letter.repeat(64);
 
-/** Cloudflare's API: the account's namespaces, the last hour's writes per object (descending) and today's totals. */
-function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: number }) {
+/** Cloudflare's API: the account's namespaces, the last hour's writes per object (descending), today's totals, and the
+ * last 24 hours of each object's waking and reading. */
+function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: number }, lastDay: Record<string, { activeHours: number; rowsRead: number }> = {}) {
   globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     if (new URL(request.url).pathname.endsWith('/workers/durable_objects/namespaces')) {
@@ -23,6 +24,13 @@ function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: numb
     const body: { query: string } = await request.json();
     const groups = Object.entries(hour).map(([objectId, rowsWritten]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { rowsWritten } }));
     if (body.query.includes('StorageWatchdogHour')) return Response.json({ data: { viewer: { accounts: [{ objects: groups }] } } });
+    if (body.query.includes('StorageWatchdogAwake')) {
+      const objects = Object.entries(lastDay).map(([objectId, usage]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { activeTime: usage.activeHours * HOUR * 1000, rowsRead: usage.rowsRead } }));
+      return Response.json({ data: { viewer: { accounts: [{
+        awake: objects.toSorted((a, b) => b.sum.activeTime - a.sum.activeTime),
+        reading: objects.toSorted((a, b) => b.sum.rowsRead - a.sum.rowsRead),
+      }] } } });
+    }
     return Response.json({ data: { viewer: { accounts: [{
       periodic: [{ sum: { activeTime: 0, rowsRead: 0, rowsWritten: today.rowsWritten } }],
       invocations: [{ sum: { requests: 0 } }],
@@ -103,6 +111,23 @@ test('the watchdog reports the day\'s top writer once Durable Objects cost $20 t
   await quiet.run();
   expect(quiet.emails).toEqual([]);
   expect(quiet.asked).toEqual([]);
+});
+
+test('the watchdog reports an object awake 20 of the last 24 hours, or reading 20M rows in them, to its tenant once', async () => {
+  mockCloudflare({}, { rowsWritten: 0 }, {
+    [object('6')]: { activeHours: 22.9, rowsRead: 25_000_000 },
+    [object('7')]: { activeHours: 1.3, rowsRead: 21_000_000 },
+    [object('8')]: { activeHours: 19.9, rowsRead: 19_000_000 },
+  });
+  const { asked, emails, run } = platform();
+  await run();
+  expect(asked).toEqual([
+    { objectId: object('6'), className: 'SpaceAuthorityDO', action: 'alert', reason: expect.stringContaining('awake 22.9 of the last 24 hours and read 25,000,000 rows') },
+    { objectId: object('7'), className: 'SpaceAuthorityDO', action: 'alert', reason: expect.stringContaining('awake 1.3 of the last 24 hours and read 21,000,000 rows') },
+  ]);
+  expect(emails).toEqual([expect.objectContaining({ subject: 'GitSpace watchdog: 2 Durable Object alerts' })]);
+  await run(scheduledTime + 10 * 60_000);
+  expect(emails).toHaveLength(1);
 });
 
 test('the watchdog reports that it is blind after three runs without analytics', async () => {

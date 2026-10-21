@@ -11,6 +11,8 @@ import { WorkspaceDraftSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/
 import { searchWasmModule } from './search-wasm.js';
 
 const identity = { projectId: 'smoke-project', workspaceId: 'smoke-workspace' };
+/** Rows an alarm may read in a workspace with nothing to do: recovery and resume read live state, never history. */
+const IDLE_WAKE_ROWS = 200;
 const directory = await mkdtemp(join(tmpdir(), 'gitspace-runtime-smoke-'));
 let worker: Miniflare | undefined;
 try {
@@ -121,6 +123,20 @@ try {
     else await request('/answer', { ...identity, questionId: question.id, answer: 'green' });
     await until(snapshot => assistantReplies(snapshot) > before && snapshot.questions.find(item => item.id === question.id)?.answer !== null);
     assert.equal((await session({ type: 'control' })).control.pendingAsk, null);
+  }
+
+  // An idle workspace holds no alarm: waiting for the user is not work, so a wake re-arms nothing and reads little.
+  {
+    const before = assistantReplies(RuntimeSnapshotSchema.parse(await request('/')));
+    await request('/submit?text=ask%20for%20a%20color&requestId=idle-wake');
+    const pending = await until(snapshot => snapshot.questions.some(question => question.kind === 'ask' && question.answer === null));
+    const question = pending.questions.find(item => item.kind === 'ask' && item.answer === null)!;
+    const wake = z.object({ alarm: z.number().nullable(), rowsRead: z.number() }).parse(await request('/idle-wake'));
+    assert.equal(wake.alarm, null, `A wake while the workspace waits for the user left an alarm for ${wake.alarm === null ? '' : new Date(wake.alarm).toISOString()}`);
+    assert(wake.rowsRead <= IDLE_WAKE_ROWS, `An idle wake read ${wake.rowsRead} rows (budget ${IDLE_WAKE_ROWS})`);
+    await request('/answer', { ...identity, questionId: question.id, answer: 'blue' });
+    await until(snapshot => assistantReplies(snapshot) > before && snapshot.questions.find(item => item.id === question.id)?.answer !== null);
+    console.log(`PASS an idle wake leaves no alarm and reads ${wake.rowsRead} rows (budget ${IDLE_WAKE_ROWS})`);
   }
 
   for (const answer of [false, true]) {

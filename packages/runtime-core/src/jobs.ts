@@ -3,7 +3,7 @@ import type { Context, JsonValue } from '@earendil-works/chord';
 import { awaitWithContext } from '@earendil-works/chord/context';
 import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
-import { DaemonResponseSchema } from '@gitspace/supervisor/protocol';
+import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
 import { ConversationLifecycleDoc } from './conversation-lifecycle.js';
 
@@ -97,8 +97,40 @@ export function createJobTask(services: JobServices) {
 type ProcessExitInput = { originAttemptId: string; daemonId: string; restartCount: number; args: JsonValue };
 /** `failing`: the current run of failed observations has been reported (once, when it started). */
 type ProcessExitState = { phase: 'observe'; poll: number; restartCount: number; failing?: boolean };
-/** A running process is checked after 5 s, then ever less often, at most a minute apart. */
-const OBSERVE_FIRST_MS = 5_000, OBSERVE_MAX_MS = 60_000;
+/**
+ * How often a watched process is checked on its machine when no exit report has arrived (the machine was offline when it
+ * exited). Its machine reports the exit itself; this alarm only re-runs the watch after the workspace object slept.
+ */
+const SAFETY_CHECK_MS = 15 * 60_000;
+/** Exits machines report for the workspace's processes, by `<daemon id>:<restart count>`; each watch takes its own. */
+export const ProcessExitsDoc = defineDoc<{ exits: Record<string, { daemon: JsonValue; reportedAt: number }> }>({ kind: 'gitspace.process-exits', version: 1, scope: 'session', initial: () => ({ exits: {} }) });
+/** Reports no watch takes (a process started outside a watch) are dropped beyond this many, oldest first. */
+const MAX_PROCESS_EXIT_REPORTS = 100;
+export const processExitKey = (daemon: Pick<DaemonSnapshot, 'id' | 'restartCount'>) => `${daemon.id}:${daemon.restartCount}`;
+/** Records a machine's report that a process exited. */
+export function recordProcessExit(exits: { exits: Record<string, { daemon: JsonValue; reportedAt: number }> }, daemon: DaemonSnapshot, now: number): void {
+  if (daemon.state !== 'exited' && daemon.state !== 'failed') throw new Error('Only an exited or failed process is reported');
+  // Documents hold strict JSON; a snapshot's absent optional fields are `undefined`.
+  exits.exits[processExitKey(daemon)] = { daemon: JSON.parse(JSON.stringify(daemon)), reportedAt: now };
+  const keys = Object.entries(exits.exits).sort((left, right) => left[1].reportedAt - right[1].reportedAt).map(([key]) => key);
+  for (const key of keys.slice(0, Math.max(0, keys.length - MAX_PROCESS_EXIT_REPORTS))) delete exits.exits[key];
+}
+/** Waits, without a timer, until the exit under `key` is reported: a pending timer would keep the workspace object in
+ * memory for as long as the process runs. */
+async function reportedExit(runtime: TaskRuntime<ProcessExitInput, ProcessExitState, JsonValue, object>, key: string, context: Context): Promise<void> {
+  const watch = await runtime.watchDoc(ProcessExitsDoc, context);
+  if (!watch) throw new Error('Process exit reports missing');
+  const arrived = Promise.withResolvers<void>();
+  // A Stop aborts the task, not the context: the wait ends on either, as pi's own sleep does.
+  const aborted = () => arrived.reject(runtime.signal.reason);
+  runtime.signal.addEventListener('abort', aborted, { once: true });
+  try {
+    runtime.signal.throwIfAborted();
+    if (watch.value?.exits[key]) return;
+    watch.start(async value => { if (value?.exits[key]) arrived.resolve(); });
+    await awaitWithContext(Promise.race([arrived.promise, watch.closed.then(end => { if (end.reason === 'listener_error') throw end.error; if (end.reason !== 'stopped') throw new Error(`Process exit reports ${end.reason}`); })]), context);
+  } finally { runtime.signal.removeEventListener('abort', aborted); await watch.stop(); }
+}
 export const ProcessWatchesDoc = defineDoc<{ tasks: Record<string, string> }>({ kind: 'gitspace.process-watches', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ tasks: {} }) });
 export function createProcessExitTask(services: JobServices) {
   return defineTask<ProcessExitInput, ProcessExitState, JsonValue>({
@@ -107,40 +139,54 @@ export function createProcessExitTask(services: JobServices) {
       let { poll, restartCount, failing = false } = task.state.checkpoint;
       const args = RuntimeProcArgumentsSchema.parse(task.input.args);
       if (args.op !== 'status') throw new Error('Process watch has no admitted status identity');
-      for (let unchanged = 0; ; unchanged++) {
-        try {
-          // An observation is a read: it leaves no receipt in the transcript and no record on the machine.
-          const requestId = `process-observation:${runtime.taskId}:${poll}`;
-          const result = await services.observeProcess({ originAttemptId: task.input.originAttemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), requestId, attemptId: requestId, args: { ...args, restartCount } });
-          if (result.status !== 'completed') throw new Error('Process observation unavailable');
-          const text = result.content.find(item => item.type === 'text');
-          if (!text || text.type !== 'text') throw new Error('Process observation missing');
-          const response = DaemonResponseSchema.parse(JSON.parse(text.text));
-          if (response.op !== 'describe' || response.daemon.id !== task.input.daemonId || response.daemon.restartCount !== restartCount) throw new Error('Process observation identity changed');
-          failing = false;
-          if (response.daemon.state === 'exited' || response.daemon.state === 'failed') {
-            await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: `process-exited:${task.input.daemonId}:${restartCount}`, kind: 'process-exited', text: `Process exited:\n${JSON.stringify(response.daemon)}`, payload: response.daemon });
-            if (response.daemon.nextRestartCount !== undefined) {
-              if (response.daemon.nextRestartCount <= restartCount) throw new Error('Invalid process restart successor');
-              restartCount = response.daemon.nextRestartCount;
-              poll++;
-              unchanged = -1;
-              await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failing } }), context);
-              continue;
-            }
-            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: response.daemon } }), context);
-            return;
+      // Each run of this phase checks the machine once: when the watch starts, and when a wake re-runs it after the
+      // workspace object slept. Between runs, the machine's own report ends the wait.
+      let check = true;
+      for (;;) {
+        const key = processExitKey({ id: task.input.daemonId, restartCount });
+        const report = (await runtime.snapshot(ProcessExitsDoc, context))?.exits[key];
+        let exited: DaemonSnapshot | null = report ? DaemonSnapshotSchema.parse(report.daemon) : null;
+        if (!exited && check) {
+          check = false;
+          try {
+            // An observation is a read: it leaves no receipt in the transcript and no record on the machine.
+            const requestId = `process-observation:${runtime.taskId}:${poll}`;
+            const result = await services.observeProcess({ originAttemptId: task.input.originAttemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), requestId, attemptId: requestId, args: { ...args, restartCount } });
+            if (result.status !== 'completed') throw new Error('Process observation unavailable');
+            const text = result.content.find(item => item.type === 'text');
+            if (!text || text.type !== 'text') throw new Error('Process observation missing');
+            const response = DaemonResponseSchema.parse(JSON.parse(text.text));
+            if (response.op !== 'describe' || response.daemon.id !== task.input.daemonId || response.daemon.restartCount !== restartCount) throw new Error('Process observation identity changed');
+            failing = false;
+            if (response.daemon.state === 'exited' || response.daemon.state === 'failed') exited = response.daemon;
+          } catch (error) {
+            if (runtime.signal.aborted) throw error;
+            // A machine offline for hours would otherwise file one report per check.
+            if (!failing) runtime.report(error);
+            failing = true;
           }
-        } catch (error) {
-          if (runtime.signal.aborted) throw error;
-          // A machine offline for hours would otherwise file one report per poll.
-          if (!failing) runtime.report(error);
-          failing = true;
+          poll++;
+          // Creates the reports document the wait below watches (a watch needs it to exist).
+          await runtime.commit(async tx => { await tx.doc(ProcessExitsDoc); return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failing } }; }, context);
         }
-        poll++;
-        await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failing } }), context);
-        const next = runtime.now() + Math.min(OBSERVE_FIRST_MS * 2 ** unchanged, OBSERVE_MAX_MS);
-        await services.wakeAt(next); await runtime.sleep(next, context);
+        if (exited) {
+          if (exited.id !== task.input.daemonId || exited.restartCount !== restartCount) throw new Error('Process exit identity changed');
+          await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: `process-exited:${task.input.daemonId}:${restartCount}`, kind: 'process-exited', text: `Process exited:\n${JSON.stringify(exited)}`, payload: exited });
+          const successor = exited.nextRestartCount;
+          if (successor !== undefined && successor <= restartCount) throw new Error('Invalid process restart successor');
+          if (successor !== undefined) {
+            restartCount = successor;
+            poll++;
+            check = true;
+            await runtime.commit(async tx => { delete (await tx.doc(ProcessExitsDoc)).exits[key]; return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failing } }; }, context);
+            continue;
+          }
+          const result = exited;
+          await runtime.commit(async tx => { delete (await tx.doc(ProcessExitsDoc)).exits[key]; return { status: 'terminal', outcome: { status: 'completed', result } }; }, context);
+          return;
+        }
+        await services.wakeAt(runtime.now() + SAFETY_CHECK_MS);
+        await reportedExit(runtime, key, context);
       }
     } },
     async abort(task, runtime, context) {

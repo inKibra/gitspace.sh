@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { daemonClientForProject, type DaemonRequest } from '@gitspace/supervisor';
+import { daemonClientForProject, type DaemonBrokerClient, type DaemonRequest } from '@gitspace/supervisor';
+import type { DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, runSupervisorCommand, type ExecutorOperationHandler, type LocalAttachment } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import type { WorkspaceServiceManager } from './workspace-services.js';
@@ -8,7 +9,7 @@ import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/servic
 import { createHash } from 'node:crypto';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema, RuntimeMcpDiscoverArgumentsSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
+import { RuntimeProcessExitedInputSchema, RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema, RuntimeMcpDiscoverArgumentsSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
 import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { workspaceProcessVisible } from './workspace-process.js';
 
@@ -20,7 +21,7 @@ async function runGit(cwd: string, args: string[], environment: Record<string, s
   return stdout.trim();
 }
 
-export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (checkout: LocalAttachment) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
+export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; reportProcessExit: ProcessExitReporter; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (checkout: LocalAttachment) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
   return {
     // Fetches into a private ref and publishes from there: the base checkout's HEAD, index and branches never change.
     import_ref: async (dispatch, local, signal) => {
@@ -81,7 +82,41 @@ export function machineOperationalTools(options: { environments: Pick<WorkspaceE
   };
 }
 
-export function machineProcessOperation(options: { services: WorkspaceServiceManager }): ExecutorOperationHandler {
+/** Sends the account a workspace process's exit, so the workspace's watch ends without polling this machine. */
+export type ProcessExitReporter = (input: z.infer<typeof RuntimeProcessExitedInputSchema>) => Promise<void>;
+/** A supervisor exit wait never needs to end early: it is a local socket request. Re-issued after this long. */
+const EXIT_WAIT_MS = 6 * 3_600_000;
+/** Holds the supervisor's exit wait for one workspace process and reports each exit, following automatic restarts, until
+ * it stops for good or its name is reused. A machine that restarts loses the wait; the workspace's slow check covers it. */
+function reportExits(client: DaemonBrokerClient, started: DaemonSnapshot, identity: { projectId: string; workspaceId: string }, report: ProcessExitReporter, watching: Set<string>): void {
+  const key = `${identity.workspaceId}:${started.id}`;
+  if (watching.has(key)) return;
+  watching.add(key);
+  void (async () => {
+    let reported = -1;
+    for (;;) {
+      const waited = await client.request({ op: 'wait', name: started.name, for: 'exit', timeoutMs: EXIT_WAIT_MS });
+      if (waited.op !== 'wait' || waited.daemon.id !== started.id) return;
+      const daemon = waited.daemon;
+      if (waited.timedOut || (daemon.state !== 'exited' && daemon.state !== 'failed')) continue;
+      if (daemon.restartCount > reported) {
+        const input = RuntimeProcessExitedInputSchema.parse({ ...identity, daemon });
+        for (let attempt = 0; ; attempt++) {
+          try { await report(input); break; }
+          catch (error) { if (attempt >= 4) throw error; await Bun.sleep(1_000 * 2 ** attempt); }
+        }
+        reported = daemon.restartCount;
+      }
+      if (daemon.nextRestartCount === undefined) return;
+      // Its automatic restart has not begun: until it does, the wait answers with this exit again.
+      await Bun.sleep(1_000);
+    }
+  })().catch((error: unknown) => console.error(JSON.stringify({ event: 'process_exit_report_failed', workspaceId: identity.workspaceId, name: started.name, message: error instanceof Error ? error.message : String(error) })))
+    .finally(() => watching.delete(key));
+}
+
+export function machineProcessOperation(options: { services: WorkspaceServiceManager; reportProcessExit: ProcessExitReporter }): ExecutorOperationHandler {
+  const watching = new Set<string>();
   return async (dispatch, local, signal) => {
       const args = RuntimeProcArgumentsSchema.parse(dispatch.args);
       const client = await daemonClientForProject(local.rootPath);
@@ -100,6 +135,7 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
         const spec = { ...args.spec, cwd: args.spec.cwd ? await checkoutPath(local.rootPath, args.spec.cwd) : local.rootPath };
         const result = await mutate({ op: 'start', spec, owner });
         if (result.op !== 'start') throw new Error('Invalid supervisor start response');
+        reportExits(client, result.daemon, { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, options.reportProcessExit, watching);
         if (spec.ready) {
           const readiness = await client.request({ op: 'wait', name: spec.name, for: 'ready', timeoutMs: spec.ready.timeoutMs ?? 30_000 }, signal);
           if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');
@@ -122,6 +158,7 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
       if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Private or out-of-workspace processes are not accessible');
       const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : args.op === 'status' || args.op === 'describe' ? existing : await client.request(args, signal);
       if (args.op === 'stop') await options.services.releaseProcessRoutes(dispatch.workspaceId, args.name);
+      if (args.op === 'restart' && result.op === 'restart') reportExits(client, result.daemon, { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, options.reportProcessExit, watching);
       if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
         const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
         if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');

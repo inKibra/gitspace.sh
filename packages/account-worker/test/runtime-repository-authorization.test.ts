@@ -108,6 +108,21 @@ describe('signed repository credential authority', () => {
     expect((await f.request({ scope: 'write', generation: 2 })).status).toBe(400);
   });
 
+  it('leases an existing workspace repository without forking or importing it again', async () => {
+    const f = await fixture(['storage.access']);
+    for (let lease = 0; lease < 3; lease++) expect((await f.request()).status).toBe(200);
+    expect(ArtifactsCodeStore.prototype.forkWorkspace).not.toHaveBeenCalled();
+    expect(ArtifactsCodeStore.prototype.ensureEmptyProject).not.toHaveBeenCalled();
+  });
+
+  it('creates a missing workspace repository once, then leases it', async () => {
+    const f = await fixture(['storage.access']);
+    vi.mocked(ArtifactsCodeStore.prototype.credentials).mockRejectedValueOnce(Object.assign(new Error('Repository not found'), { name: 'ArtifactsError', code: 'NOT_FOUND' }));
+    const leased = await f.request();
+    expect({ status: leased.status, body: await leased.json() }).toEqual({ status: 200, body: { status: 'ok', value: lease } });
+    expect(ArtifactsCodeStore.prototype.forkWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it('leases the cloud workspace repository only to a machine with a live checkout', async () => {
     // The machine git remote binds only the repository; it carries no attachment generation.
     const binding = { workspaceId: undefined, generation: undefined, repository: `workspace-${workspaceId}` };

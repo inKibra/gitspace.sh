@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from '@earendil
 import { createModels } from '@earendil-works/pi-ai';
 import { ProcessSupervisor, DaemonRequestSchema } from '@gitspace/supervisor';
 import { RuntimeProcArgumentsSchema } from '@gitspace/protocol-runtime';
-import { createProcessExitTask, type JobServices } from './jobs.js';
+import { ProcessExitsDoc, createProcessExitTask, recordProcessExit, type JobServices } from './jobs.js';
 
 const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
 
@@ -115,6 +115,53 @@ for (const mode of ['exit', 'offline exit', 'Stop', 'Stop while unreachable', 'S
     harness = await Harness.open(await openNodeJsonlStorage(join(rootPath, 'session'), BACKGROUND_CONTEXT), { registry, models: createModels() }, BACKGROUND_CONTEXT);
     await harness.waitForTask(id, context);
     expect(delivered).toHaveLength(restarting ? 2 : 1);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await supervisor.request({ op: 'shutdown' });
+    await rm(rootPath, { recursive: true, force: true });
+  }
+}, 8000);
+
+test('a watch checks its machine once, then ends on the machine\'s exit report without checking again', async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), 'process-exit-report-'));
+  const supervisor = new ProcessSupervisor(rootPath);
+  await supervisor.recover();
+  const observed = Promise.withResolvers<void>();
+  let observations = 0;
+  const delivered: Parameters<JobServices['deliverConversationEvent']>[0][] = [];
+  const services: JobServices = {
+    execute: unused, reconcile: unused, cancel: unused, jobScope: unused, controlJob: unused, stopProcess: unused,
+    async wakeAt() {},
+    async observeProcess(input) {
+      observations++;
+      const observation = RuntimeProcArgumentsSchema.parse(input.args);
+      if (observation.op !== 'status') throw new Error('Unexpected observation');
+      const result = await supervisor.request(DaemonRequestSchema.parse({ ...observation, op: 'describe' }));
+      observed.resolve();
+      return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify(result) }] };
+    },
+    async deliverConversationEvent(input) { delivered.push(input); },
+  };
+  const task = createProcessExitTask(services);
+  const registry = createRegistry(); registry.install(defineExtension({ name: 'process-events', tasks: [task] }));
+  const harness = await Harness.open(await openNodeJsonlStorage(join(rootPath, 'session'), BACKGROUND_CONTEXT), { registry, models: createModels() }, BACKGROUND_CONTEXT);
+  const context = withAbortSignal(AbortSignal.timeout(4000), BACKGROUND_CONTEXT);
+  try {
+    const root = await harness.root(context);
+    const started = await supervisor.request({ op: 'start', spec: { name: 'server', application: '/bin/sleep', args: ['30'], cwd: rootPath, env: {}, pty: false, persist: true, detached: false, restart: 'no' } });
+    if (started.op !== 'start') throw new Error('Unexpected start result');
+    const id = await harness.commit(tx => tx.createTask(task, { originAttemptId: 'accepted-start', daemonId: started.daemon.id, restartCount: 0, args: { op: 'status', name: 'server', instanceId: started.daemon.id, restartCount: 0 } }, { conversationId: root.id, ownership: { kind: 'conversation' }, background: true }), context);
+    harness.resume();
+    await awaitWithContext(observed.promise, context);
+    // The machine sees the exit and reports it, as it would for a process stopped outside the conversation.
+    const stopped = await supervisor.request({ op: 'stop', name: 'server' });
+    if (stopped.op !== 'stop') throw new Error('Unexpected stop result');
+    await harness.commit(async tx => { recordProcessExit(await tx.doc(ProcessExitsDoc), stopped.daemon, Date.now()); }, context);
+    const settled = await harness.waitForTask(id, context);
+    expect(settled.state.outcome).toMatchObject({ status: 'completed' });
+    expect(observations).toBe(1);
+    expect(delivered.map(event => event.requestId)).toEqual([`process-exited:${started.daemon.id}:0`]);
+    expect((await harness.snapshot(ProcessExitsDoc, context))?.exits).toEqual({});
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
     await supervisor.request({ op: 'shutdown' });

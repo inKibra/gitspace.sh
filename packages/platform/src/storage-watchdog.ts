@@ -10,7 +10,10 @@ import { platformObjectStorage } from './storage-quarantine.js';
  *   quarantined or was resumed within that hour (its earlier writes still count there). Only GitSpace's tenant and
  *   platform objects can be quarantined; any other object is reported;
  * - reports an object that wrote at least `WATCHDOG_ALERT_ROWS` rows in the last hour, and a day whose Durable Object
- *   cost reaches `WATCHDOG_ALERT_DAILY_USD`.
+ *   cost reaches `WATCHDOG_ALERT_DAILY_USD`;
+ * - reports an object awake at least `WATCHDOG_AWAKE_HOURS` of the last 24 hours, or that read at least
+ *   `WATCHDOG_READ_ROWS` rows in them. An idle workspace sleeps: one that does not holds an alarm, timer or request
+ *   open, and is billed for every hour of it.
  * Reports go by email (`WATCHDOG_EMAIL`) and, for a tenant's object, to its Inbox. A report is sent once, and again
  * only if the problem still holds `WATCHDOG_REPEAT_MS` later; quarantines are reported each time. After
  * `WATCHDOG_BLIND_RUNS` runs in a row without analytics, the watchdog reports that it is blind.
@@ -20,6 +23,8 @@ import { platformObjectStorage } from './storage-quarantine.js';
 export const WATCHDOG_ALERT_ROWS = 1_000_000;
 export const WATCHDOG_QUARANTINE_ROWS = 5_000_000;
 export const WATCHDOG_ALERT_DAILY_USD = 20;
+export const WATCHDOG_AWAKE_HOURS = 20;
+export const WATCHDOG_READ_ROWS = 20_000_000;
 const WATCHDOG_REPEAT_MS = 6 * 3_600_000;
 const WATCHDOG_BLIND_RUNS = 3;
 const HOUR_MS = 3_600_000;
@@ -45,6 +50,8 @@ const daySchema = z.object({
   invocations: z.array(z.object({ sum: z.object({ requests: z.number() }) })),
   top: z.array(z.object({ dimensions: z.object({ namespaceId: z.string(), objectId: z.string() }), sum: z.object({ rowsWritten: z.number() }) })),
 });
+const objectDayGroupsSchema = z.array(z.object({ dimensions: z.object({ namespaceId: z.string(), objectId: z.string() }), sum: z.object({ activeTime: z.number(), rowsRead: z.number() }) }));
+const objectDaySchema = z.object({ awake: objectDayGroupsSchema, reading: objectDayGroupsSchema });
 const breakerStatusSchema = z.object({ quarantined: z.boolean(), resumedAt: z.string().nullable() });
 const stateSchema = z.object({ reported: z.record(z.string(), z.number()), failedRuns: z.number() });
 
@@ -82,6 +89,16 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
         }
       } }
     }`, {}, daySchema),
+    queryAccount({ ...request, window: { start: new Date(scheduledTime - DAY_MS).toISOString(), end } }, `query StorageWatchdogAwake($accountTag: string!, $start: Time!, $end: Time!) {
+      viewer { accounts(filter: { accountTag: $accountTag }) {
+        awake: durableObjectsPeriodicGroups(limit: ${OBJECT_LIMIT}, orderBy: [sum_activeTime_DESC], filter: { datetime_geq: $start, datetime_lt: $end }) {
+          dimensions { namespaceId objectId } sum { activeTime rowsRead }
+        }
+        reading: durableObjectsPeriodicGroups(limit: ${OBJECT_LIMIT}, orderBy: [sum_rowsRead_DESC], filter: { datetime_geq: $start, datetime_lt: $end }) {
+          dimensions { namespaceId objectId } sum { activeTime rowsRead }
+        }
+      } }
+    }`, {}, objectDaySchema),
   ]).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error(JSON.stringify({ event: 'storage-watchdog-failed', failedRuns: state.failedRuns + 1, message }));
@@ -98,7 +115,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
   }
   const recovered = state.failedRuns > 0;
   state.failedRuns = 0;
-  const [hour, day] = usage;
+  const [hour, day, lastDay] = usage;
 
   // Which script and class own a namespace: read only when something is reported.
   let namespaces: DurableObjectNamespaceEntry[] | null | undefined;
@@ -155,6 +172,17 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
     } catch (error) {
       console.error(JSON.stringify({ event: 'storage-watchdog-failed', ...subject, message: error instanceof Error ? error.message : String(error) }));
     }
+  }
+
+  const sleepless = new Map(lastDay.awake.concat(lastDay.reading)
+    .filter(({ sum }) => sum.activeTime >= WATCHDOG_AWAKE_HOURS * HOUR_MS * 1000 || sum.rowsRead >= WATCHDOG_READ_ROWS)
+    .map(group => [group.dimensions.objectId, group]));
+  for (const { dimensions: { namespaceId, objectId }, sum } of sleepless.values()) {
+    const who = await owner(namespaceId);
+    const hours = (sum.activeTime / (HOUR_MS * 1000)).toFixed(1);
+    const reason = `was awake ${hours} of the last 24 hours and read ${integer.format(sum.rowsRead)} rows (alert at ${WATCHDOG_AWAKE_HOURS} hours or ${integer.format(WATCHDOG_READ_ROWS)} rows); an idle object should sleep`;
+    console.error(JSON.stringify({ event: 'storage-watchdog-sleepless', objectId, namespaceId, className: who.className, script: who.script, ...sum }));
+    findings.push({ key: `sleepless:${objectId}`, line: `${describe(who, objectId)}: ${reason}.`, inbox: { objectId, owner: who, reason } });
   }
 
   const periodic = day.periodic[0]?.sum ?? { activeTime: 0, rowsRead: 0, rowsWritten: 0 };

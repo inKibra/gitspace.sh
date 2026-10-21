@@ -15,6 +15,8 @@ const STATE_TTL_MS = 15 * 60_000;
 /** How long an installation GitSpace did not start may stay: its setup callback can still claim it meanwhile. */
 const UNCLAIMED_GRACE_MS = 10 * 60_000;
 const UNINSTALL_RETRY_MS = 5 * 60_000;
+/** An installation token is reused while more than this remains of its hour. */
+const TOKEN_REUSE_MARGIN_MS = 5 * 60_000;
 const KEPT_DELIVERIES = 500;
 const LISTED_DELIVERIES = 50;
 const REPOSITORY_PAGE_SIZE = 100;
@@ -189,6 +191,8 @@ export async function githubRoute(request: Request, env: Env, url: URL): Promise
 /** The account's GitHub App: its public record, the installations GitSpace started, and recorded webhook deliveries.
  * Secrets live in the credential vault. */
 export class GitHubAppDO extends BudgetedDurableObject {
+  /** Installation tokens issued, by installation, repository and access; memory only, never stored. */
+  private readonly issued = new Map<string, GitHubRepositoryToken>();
   /** A manifest conversion is in flight: a second callback must not create another App meanwhile. */
   private creating = false;
 
@@ -354,6 +358,8 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** A delivery whose signature the vault verified. Its id is recorded once; a redelivery changes nothing. */
   async webhook(event: string, deliveryId: string, payloadJson: string): Promise<void> {
+    // A delivery can change what an installation covers: tokens are minted afresh after it.
+    this.issued.clear();
     let payload: DeliveryPayload | null = null;
     try {
       payload = DeliveryPayloadSchema.parse(JSON.parse(payloadJson));
@@ -414,6 +420,11 @@ export class GitHubAppDO extends BudgetedDurableObject {
   async repositoryToken(repository: string, access: GitHubRepositoryAccess): Promise<GitHubRepositoryToken> {
     const installationId = this.coverage(repository);
     if (installationId === null) throw new Error(`No GitHub App installation covers ${repository}`);
+    // An installation token lasts an hour: machines authenticate git to GitHub on every fetch and push, and minted one
+    // each time (about 5,400 a day). Reused until shortly before it expires; held in memory only.
+    const key = `${installationId}:${repository.toLowerCase()}:${access}`;
+    const held = this.issued.get(key);
+    if (held && Date.parse(held.expiresAt) - Date.now() > TOKEN_REUSE_MARGIN_MS) return held;
     const jwt = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
     const name = repository.slice(repository.indexOf('/') + 1);
     const permissions: Record<string, string> = access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' };
@@ -421,7 +432,9 @@ export class GitHubAppDO extends BudgetedDurableObject {
       method: 'POST', token: jwt, body: { repositories: [name], permissions },
       schema: z.object({ token: z.string().min(1), expires_at: z.string().datetime() }),
     });
-    return { token: issued.token, expiresAt: issued.expires_at };
+    const token = { token: issued.token, expiresAt: issued.expires_at };
+    this.issued.set(key, token);
+    return token;
   }
 
   /**

@@ -23,7 +23,7 @@ test('a cache accepts the human run the account authorized, including interactiv
   const accepted: Array<{ spaceId: string; request: LifecycleRunRequest }> = [];
   const operations = machineOperationalTools({
     environments: { async acceptRun(spaceId, request) { accepted.push({ spaceId, request }); return run; } },
-    get services() { return unexpected(); }, get authority() { return unexpected(); },
+    get services() { return unexpected(); }, get reportProcessExit() { return unexpected(); }, get authority() { return unexpected(); },
     get mcp() { return unexpected(); }, get projectRepository() { return unexpected(); }, get originEnvironment() { return unexpected(); },
   });
   const attachment = RuntimeAttachmentSchema.parse({
@@ -64,7 +64,7 @@ test('import_ref publishes the origin ref the base checkout fetched, leaving its
     const before = git(base, 'for-each-ref', '--format=%(refname)');
     const published: Array<{ ref: string; commit: string; repository: string }> = [];
     const operations = machineOperationalTools({
-      get environments() { return unexpected(); }, get services() { return unexpected(); }, get authority() { return unexpected(); }, get mcp() { return unexpected(); },
+      get environments() { return unexpected(); }, get services() { return unexpected(); }, get reportProcessExit() { return unexpected(); }, get authority() { return unexpected(); }, get mcp() { return unexpected(); },
       projectRepository: { async publishRef(input) { published.push({ ref: input.ref, commit: input.commit, repository: input.binding.repository }); } },
       originEnvironment: async () => ({}),
     });

@@ -1,12 +1,12 @@
 import { z } from 'zod';
 import type { SignedControlRequest } from '@gitspace/protocol/credential-vault';
-import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeProcessExitedInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentLeaseSchema, RuntimeGitHubTokenInputSchema, RuntimeRepositoryCredentialsInputSchema, type RuntimeRepositoryCredentialsInput } from '@gitspace/protocol-runtime/machine-controls';
 import type { GitHubRepositoryToken, MachineOriginAccess } from '@gitspace/protocol/github';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, ArtifactsNotFoundSchema, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { requireWorkspaceAccess } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
 import { originAccess } from './origin-access.js';
@@ -99,8 +99,14 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       if (!attachments.some(item => item.machineId === machine && item.state !== 'detached'
         && (input.generation === undefined || item.generation === input.generation))) throw new Error('Repository lease requires current checkout ownership');
     }
-    await ensureRuntimeCodeRepository(env, userId, identity);
-    return new ArtifactsCodeStore(env.ARTIFACTS).credentials(repository, input.scope);
+    // The workspace repository exists after its first lease: only a missing one is created (forking the project, which
+    // may import the origin and asks the GitHub App whether it covers it). Machines lease it on every sync.
+    const code = new ArtifactsCodeStore(env.ARTIFACTS);
+    return code.credentials(repository, input.scope).catch(async (error: unknown) => {
+      if (!ArtifactsNotFoundSchema.safeParse(error).success) throw error;
+      await ensureRuntimeCodeRepository(env, userId, identity);
+      return code.credentials(repository, input.scope);
+    });
   }
   if (operation === 'runtime.repository.originAccess' || operation === 'runtime.repository.githubToken') return checkoutOrigin(env, userId, machine, operation, payload);
   const identity = RuntimeIdentitySchema.parse(payload);
@@ -130,6 +136,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
       if (['setWorkspacePhase', 'saveAgentDefinition'].includes(input.command.type)) throw new Error('Administrative session changes require the direct device-signed cloud API');
       return RuntimeSessionResultSchema.parse(await (await access.authority.runtimeSession(input, { canApprove: false })).json());
     }
+    case 'runtime.process.exited': return access.authority.runtimeProcessExited(RuntimeProcessExitedInputSchema.parse(payload));
     case 'runtime.attachment.ready': {
       const input = RuntimeAttachmentReadyInputSchema.parse(payload);
       if (input.machineId !== machine) throw new Error('Attachment ready target mismatch');

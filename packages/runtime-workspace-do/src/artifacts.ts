@@ -96,7 +96,7 @@ export class ProjectImportRequiresMachineError extends TaggedError('ProjectImpor
 const ArtifactsImportRefusalSchema = z.object({ name: z.literal('ArtifactsError'), code: z.enum(['REMOTE_AUTH_REQUIRED', 'MEMORY_LIMIT']) });
 const IMPORT_REFUSAL_REASONS: Record<z.infer<typeof ArtifactsImportRefusalSchema>['code'], ProjectImportRequiresMachineReason> = { REMOTE_AUTH_REQUIRED: 'private', MEMORY_LIMIT: 'too-large' };
 const ArtifactsAlreadyExistsSchema = z.object({ name: z.literal('ArtifactsError'), code: z.literal('ALREADY_EXISTS') });
-const ArtifactsNotFoundSchema = z.object({ name: z.literal('ArtifactsError'), code: z.literal('NOT_FOUND') });
+export const ArtifactsNotFoundSchema = z.object({ name: z.literal('ArtifactsError'), code: z.literal('NOT_FOUND') });
 
 /** The branch names Artifacts resolves: Git's ref rules over letters, digits, `.`, `_`, `-` and `/`. */
 export function isSupportedBranchName(branch: string): boolean {

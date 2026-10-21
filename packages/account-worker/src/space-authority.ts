@@ -4,7 +4,7 @@ import type { LiveNotice } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -845,6 +845,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return result;
   }
 
+  async runtimeProcessExited(raw: unknown): Promise<null> {
+    const input = RuntimeProcessExitedInputSchema.parse(raw);
+    await (await this.getRuntime(input)).processExited(input.daemon);
+    return null;
+  }
   async runtimeAssignments(raw: unknown) {
     const identity = RuntimeIdentitySchema.parse(raw);
     const input = RuntimeAssignmentsInputSchema.parse(raw);

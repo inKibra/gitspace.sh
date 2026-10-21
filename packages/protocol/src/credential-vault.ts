@@ -94,6 +94,7 @@ export const controlOperationSchema = z.enum([
   'runtime.assignments',
   'runtime.attachment.cache.request',
   'runtime.attachment.ready',
+  'runtime.process.exited',
 ]);
 export type ControlOperation = z.infer<typeof controlOperationSchema>;
 
