@@ -16,8 +16,9 @@ type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string(), lastUsedAt: z.number() });
 const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stringify([kind, ...parts])}`;
 
-/** Only the Workspace DO calls this factory; no bearer or refresh token enters runtime state. */
-export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>) {
+/** Only the Workspace DO calls this factory; no bearer or refresh token enters runtime state. `retrying` names the
+ * conversations whose generation or compaction a reset interrupted and pi retries when the runtime opens. */
+export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, retrying: readonly string[]) {
   // A stub per call: this outlives any one, and one that saw an error stays broken.
   const vault = () => env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const scopes = new WeakMap<AbortSignal, { admission: Admission; models: VaultModels }>();
@@ -55,6 +56,15 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     // remains bound to the exact chat model captured by its admission.
     return { ...scope.models, getModel: () => scope.models.getModel(scope.admission.model.provider, scope.admission.model.id) };
   });
+  // pi checks a retried request's model before any hook binds it, and the router knows only registered collections:
+  // after a reset every retried turn failed "Model … is not available". Those conversations get their admitted
+  // collection back now, before the runtime opens.
+  for (const conversationId of retrying) {
+    const stored = await ctx.storage.get<unknown>(key('active', conversationId));
+    if (stored === undefined) continue;
+    const admission = admissionSchema.parse(stored);
+    router.register(await collection(admission.profile, conversationId, false, admission));
+  }
   async function active(conversationId: string): Promise<Admission> {
     const value = await ctx.storage.get<unknown>(key('active', conversationId));
     if (value === undefined) throw new Error('Conversation has no admitted inference run');

@@ -59,7 +59,7 @@ describe('durable inference selection intent', () => {
       return Response.json([], { headers: { etag: 'catalog-1' } });
     });
     const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
-    const runtime = await createCloudRuntimeInference(state, environment, identity);
+    const runtime = await createCloudRuntimeInference(state, environment, identity, []);
     const catalog = await runtime.session.catalog();
     const first = catalog.models[0]!;
     const second = catalog.models.find(model => model.id !== first.id)!;
@@ -76,7 +76,11 @@ describe('durable inference selection intent', () => {
     expect(await runtime.admitInference({ conversationId: 'child', requestId: 'child', parentConversationId: 'conversation' })).toEqual(admitted);
     expect(await runtime.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
     await expect(runtime.admitInference({ conversationId: 'conversation', requestId: 'removed', selection: { kind: 'explicit', provider: 'openai', modelId: 'removed' } })).rejects.toThrow('openai/removed is not available');
-    const recovered = await createCloudRuntimeInference(state, environment, identity);
+    // A reopened instance knows a conversation's admitted model before any hook binds it only when it restored the
+    // conversation as retrying: pi checks the model of a request a reset interrupted first.
+    expect((await createCloudRuntimeInference(state, environment, identity, [])).models.getModel('openai', first.id)).toBeUndefined();
+    const recovered = await createCloudRuntimeInference(state, environment, identity, ['conversation']);
+    expect(recovered.models.getModel('openai', first.id)).toMatchObject({ provider: 'openai', id: first.id });
     expect(await recovered.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
     const recoveredCatalog = await recovered.session.catalog();
     expect('inference' in recoveredCatalog ? recoveredCatalog.inference?.profileRevision : undefined).toBe(2);
@@ -104,7 +108,7 @@ describe('durable inference selection intent', () => {
       cloudResolveCredential: resolveCredential,
     };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json([]));
-    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }));
+    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), []);
     const historical = await runtime.session.catalog();
     expect(historical.models.some(model => model.provider === 'anthropic')).toBe(true);
     expect(historical.roles).toEqual([]);
@@ -142,7 +146,7 @@ describe('durable inference selection intent', () => {
       cloudResolveCredential: rejectMutation, cloudCredentialFailure: rejectMutation,
     };
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(rejectMutation);
-    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }));
+    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), []);
     const catalog = await runtime.session.catalog();
     expect(catalog).toEqual({
       models: [{ provider: 'studio', id: 'custom-chat:0', name: 'Custom Chat', contextWindow: 32768 }],
@@ -169,6 +173,7 @@ describe('durable inference selection intent', () => {
       { storage: { get: async () => undefined, put: rejectMutation, delete: rejectMutation } } as unknown as DurableObjectState,
       { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env,
       RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }),
+      [],
     );
     const f = await sessionFixture(runtime);
     try {
