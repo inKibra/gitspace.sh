@@ -1,0 +1,19 @@
+{
+  "name": "@gitspace/browser-extension",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun src/build.ts",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
+    "test": "bun test test"
+  },
+  "dependencies": {
+    "@gitspace/protocol-environment": "workspace:*",
+    "@gitspace/protocol-runtime": "workspace:*",
+    "@gitspace/runtime-machine": "workspace:*"
+  }
+}

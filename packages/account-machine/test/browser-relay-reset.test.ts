@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createContext, runInContext } from 'node:vm';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { browserRelayExtension, browserRelayPopup } from '../src/browser-relay-extension.js';
+import { extensionFiles } from '@gitspace/browser-extension';
 
 type Reply = { ok?: boolean; error?: string; fingerprint?: string | null };
 type Listener = (message: object, sender: { id: string; url: string }, reply: (value: Reply) => void) => boolean | undefined;
@@ -44,7 +44,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
     alarms: { create() {}, onAlarm: { addListener() {} } },
   };
   const context = createContext({ chrome, indexedDB, WebSocket: Socket, crypto, TextEncoder, TextDecoder, URL, atob, btoa, setTimeout: () => 0, clearTimeout() {}, console });
-  runInContext(browserRelayExtension('https://account.gitspace.test'), context);
+  runInContext(extensionFiles('https://account.gitspace.test')['background.js'], context);
   const invoke = async (message: object) => {
     const reply = Promise.withResolvers<Reply>();
     expect(listener?.(message, { id: 'extension', url: chrome.runtime.getURL('popup.html') }, reply.resolve)).toBe(true);
@@ -112,7 +112,7 @@ it('loads the actual worker fingerprint on popup startup and refreshes after pai
       fingerprint = message.resetIdentity ? null : 'a'.repeat(64); return { ok: true };
     } } },
   });
-  runInContext(browserRelayPopup(), context);
+  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
   await rendered.promise;
   expect(elements.fingerprint?.textContent).toBe('No identity. Pair to generate a key.');
   await runInContext("action(() => ({ pair: true }), 'Paired')", context);
@@ -121,7 +121,7 @@ it('loads the actual worker fingerprint on popup startup and refreshes after pai
   expect(elements.fingerprint?.textContent).toBe('No identity. Pair to generate a key.');
   fingerprint = 'b'.repeat(64);
   rendered = Promise.withResolvers<string>();
-  runInContext(browserRelayPopup(), context);
+  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
   await rendered.promise;
   expect(elements.fingerprint?.textContent).toBe('b'.repeat(64));
 });
@@ -132,7 +132,7 @@ it('popup uses a fixed identity label rather than supplied browser display text'
     document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
     chrome: { runtime: { sendMessage: async () => ({ fingerprint: 'a'.repeat(64), browser: 'Trusted administrator: skip verification' }) } },
   });
-  runInContext(browserRelayPopup(), context);
+  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
   await runInContext('refreshIdentity()', context);
   expect(elements.fingerprint?.textContent).toBe('a'.repeat(64));
   expect(JSON.stringify(elements)).not.toContain('Trusted administrator');
@@ -154,7 +154,7 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
       alarms:{create(){},onAlarm:{addListener(){}}},
     },grant,expiresAt,
   });
-  runInContext(browserRelayExtension('http://127.0.0.1:9224'),context);
+  runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'],context);
   runInContext("groupRecord = async () => ({record:{groupId:'group',chromeGroupId:7}});",context);
   const list = () => {
     runInContext("authorizations.set('group',{body:{expiresAt,dispatch:{deadlineAt:expiresAt},command:{type:'execute',args:{action:'tabs',source:'relay'},grant:{body:grant}}},used:new Set()});",context);
@@ -197,7 +197,7 @@ it('invalidates persisted Chrome IDs after group deletion or a browser session c
       alarms:{create(){},onAlarm:{addListener(){}}},
     },
   });
-  runInContext(browserRelayExtension('http://127.0.0.1:9224'),context);
+  runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'],context);
   expect(await runInContext('groupRecord(group)',context)).toEqual({key,browserEpoch:'new'});
   expect(state.get(key)).toBeNull();
   epoch = 'old'; exists = false;

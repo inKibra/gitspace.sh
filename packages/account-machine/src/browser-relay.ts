@@ -3,7 +3,7 @@ import { join, resolve, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { BrowserRelayStatus } from '@gitspace/protocol';
-import { browserRelayFiles } from './browser-relay-extension.js';
+import { extensionFiles } from '@gitspace/browser-extension';
 
 type BrowserRelaySupervisorOptions = { environmentRoot: string; machineId: string; accountUrl: string; privateRoot?: string; enabled: boolean };
 /** Installs the extension only. Pairing, transport and browser effects belong to the account worker. */
@@ -33,7 +33,7 @@ export class BrowserRelaySupervisor {
     await chmod(this.privateRoot, 0o700);
     await rm(this.extensionPath, { recursive: true, force: true });
     await mkdir(this.extensionPath, { mode: 0o700 });
-    const files = browserRelayFiles(this.endpoint);
+    const files = extensionFiles(this.endpoint);
     for (const [name, content] of Object.entries(files)) await writeFile(join(this.extensionPath, name), content, { mode: 0o600 });
     return this.status();
   }

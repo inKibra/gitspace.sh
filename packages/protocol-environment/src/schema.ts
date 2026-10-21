@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { browserOriginMatches } from './browser-origin.js';
 import { EnvironmentError, EnvironmentFailureSchema } from './errors.js';
 
 const identifierSchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/u);
@@ -8,15 +9,6 @@ export const BrowserOriginPatternSchema = z.string().refine((pattern) => {
   const host = pattern.startsWith('*.') ? pattern.slice(2) : pattern;
   return pattern === '*' || browserOriginMatches(host, host);
 }, { message: 'Use a lowercase hostname, *.hostname, or *; URLs, paths, and ports are not allowed' });
-
-export function browserOriginMatches(pattern: string, hostname: string): boolean {
-  const validHost = (value: string): boolean => value.length > 0 && value.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/u.test(value);
-  if (pattern !== '*' && !validHost(pattern.startsWith('*.') ? pattern.slice(2) : pattern)) return false;
-  const host = hostname.toLowerCase();
-  if (!validHost(host)) return false;
-  if (pattern === '*') return true;
-  return pattern.startsWith('*.') ? host.endsWith(`.${pattern.slice(2)}`) : host === pattern;
-}
 
 export async function browserOriginHash(pattern: string): Promise<string> {
   const canonical = BrowserOriginPatternSchema.parse(pattern);

@@ -1,7 +1,7 @@
 import { createContext, runInContext } from 'node:vm';
 import { setImmediate as flushMicrotasks } from 'node:timers/promises';
 import { expect, it } from 'vitest';
-import { browserRelayExtension } from '../src/browser-relay-extension.js';
+import { extensionFiles } from '@gitspace/browser-extension';
 
 
 type EventListener = (source: { targetId: string; sessionId?: string }, method: string, params: object) => void;
@@ -36,7 +36,7 @@ function harness(timeout = 60_000, sameDocument = false, destination = 'https://
       tabGroups: { onRemoved: { addListener() {} } }, alarms: { create() {}, onAlarm: { addListener() {} } },
     },
   });
-  runInContext(browserRelayExtension('http://127.0.0.1:9224'), context);
+  runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], context);
   runInContext(`groupRecord = async grant => ({record:{chromeGroupId:grant.groupId === 'first' ? 7 : 8}});
     const grant = {groupId:'first',origins:['approved.example'],expiresAt};
     const lease = {grant,targetId:'target',source:{targetId:'target'},sessionId:'old-session',refs:new Set(),document:0};

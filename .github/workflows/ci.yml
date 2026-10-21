@@ -103,9 +103,9 @@ jobs:
       - name: Git LFS
         run: git lfs install
       - name: Typecheck runtime source and tests
-        run: bun run --filter '@gitspace/account-worker' --filter '@gitspace/account-machine' --filter '@gitspace/account-web' --filter '@gitspace/protocol-runtime' --filter '@gitspace/runtime-core' --filter '@gitspace/runtime-workspace-do' --filter '@gitspace/runtime-machine' --filter '@gitspace/supervisor' --filter '@gitspace/catalog' --filter '@gitspace/provider-auth' typecheck
+        run: bun run --filter '@gitspace/account-worker' --filter '@gitspace/account-machine' --filter '@gitspace/browser-extension' --filter '@gitspace/account-web' --filter '@gitspace/protocol-runtime' --filter '@gitspace/runtime-core' --filter '@gitspace/runtime-workspace-do' --filter '@gitspace/runtime-machine' --filter '@gitspace/supervisor' --filter '@gitspace/catalog' --filter '@gitspace/provider-auth' typecheck
       - name: Verify runtime and account contracts
-        run: bun run --filter '@gitspace/account-worker' --filter '@gitspace/account-machine' --filter '@gitspace/account-web' --filter '@gitspace/protocol-runtime' --filter '@gitspace/runtime-core' --filter '@gitspace/runtime-workspace-do' --filter '@gitspace/runtime-machine' --filter '@gitspace/supervisor' --filter '@gitspace/catalog' --filter '@gitspace/provider-auth' --sequential test
+        run: bun run --filter '@gitspace/account-worker' --filter '@gitspace/account-machine' --filter '@gitspace/browser-extension' --filter '@gitspace/account-web' --filter '@gitspace/protocol-runtime' --filter '@gitspace/runtime-core' --filter '@gitspace/runtime-workspace-do' --filter '@gitspace/runtime-machine' --filter '@gitspace/supervisor' --filter '@gitspace/catalog' --filter '@gitspace/provider-auth' --sequential test
 
   design-tests:
     name: Design tests

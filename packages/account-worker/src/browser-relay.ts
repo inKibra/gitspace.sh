@@ -4,11 +4,11 @@ import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairin
 import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
-import { browserRelayFiles } from '@gitspace/account-machine/browser-extension';
+import { extensionFiles } from '@gitspace/browser-extension';
 import { zipSync, strToU8 } from 'fflate';
 
 export function browserRelayArchive(endpoint: string): Uint8Array {
-  return zipSync(Object.fromEntries(Object.entries(browserRelayFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
+  return zipSync(Object.fromEntries(Object.entries(extensionFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
 }
 const identity = { pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, extension: RuntimeBrowserExtensionSchema.nullable().optional() };
 const Pairing = z.discriminatedUnion('state', [

@@ -1,35 +1,15 @@
+// The extension's service worker. Bundled by `src/build.ts`; the download prepends the account it belongs to as
+// `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
+import { browserOriginMatches } from '@gitspace/protocol-environment/browser-origin';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
-import { browserOriginMatches } from '@gitspace/protocol-environment';
-import { verifyRelayAuthorization } from './browser-relay-authorization.js';
-import { BROWSER_EXTENSION_PROTOCOL } from '@gitspace/protocol-runtime';
+import { relayCommandAllowed } from './commands.ts';
+import { verifyRelayAuthorization } from './authorization.ts';
 
-
-/** Serialized into the installed extension as well as enforced by the supervisor. */
-export function relayCommandAllowed(grant: { origins: string[] }, targetId: string, session: string, method: string, params: Record<string, unknown>, sessionId?: string): boolean {
-  if (sessionId && sessionId !== session) return false;
-  if (['Target.attachToTarget', 'Target.getTargetInfo', 'Target.closeTarget'].includes(method)) return params.targetId === targetId;
-  if (method === 'Page.navigate') { try { const url = new URL(String(params.url)); return typeof params.url === 'string' && ['http:', 'https:'].includes(url.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, url.hostname)) && !params.frameId; } catch { return false; } }
-  if (method === 'Runtime.evaluate') return typeof params.expression === 'string' && !params.contextId && !params.uniqueContextId;
-  return ['Page.enable', 'Page.getFrameTree', 'Page.getLayoutMetrics', 'Page.captureScreenshot', 'DOM.enable', 'DOM.describeNode', 'DOM.getBoxModel', 'DOM.focus', 'DOM.scrollIntoViewIfNeeded', 'Accessibility.enable', 'Accessibility.getFullAXTree', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'GitSpace.screenshotPrepare', 'GitSpace.screenshotRestore', 'GitSpace.validateRef'].includes(method);
-}
-
-export function browserRelayPopup(): string {
-  return `async function refreshIdentity() { const result = await chrome.runtime.sendMessage({ identityStatus: true }); if (result?.error) throw new Error(result.error); document.getElementById('fingerprint').textContent = result.fingerprint || 'No identity. Pair to generate a key.'; document.getElementById('compatibility').textContent = result.compatibility || ''; }
-async function action(message, success) { const buttons = document.querySelectorAll('button'); buttons.forEach(button => button.disabled = true); try { const result = await chrome.runtime.sendMessage(message()); if (result?.error) throw new Error(result.error); await refreshIdentity(); document.getElementById('code').value = ''; document.getElementById('status').textContent = success; } catch(error) { document.getElementById('status').textContent = error.message; } finally { buttons.forEach(button => button.disabled = false); } }
-void refreshIdentity().catch(error => { document.getElementById('status').textContent = error.message; });
-document.getElementById('pair').addEventListener('submit', event => { event.preventDefault(); void action(() => { const pairing = JSON.parse(document.getElementById('code').value); if (!pairing.code || !pairing.pairingId || !Number.isSafeInteger(pairing.generation) || pairing.trust?.algorithm !== 'Ed25519' || !pairing.trust.accountId || !pairing.trust.publicKey || Date.parse(pairing.expiresAt) <= Date.now()) throw new Error('Copy fresh pairing data from authenticated GitSpace Settings'); return { pair: pairing }; }, 'Compare the fingerprint above with GitSpace Settings, then confirm there before agents can use this Chrome.'); });
-document.getElementById('reset').addEventListener('click', () => { void action(() => ({ resetIdentity: true }), 'Identity reset. Use Forget paired browser in GitSpace Settings, then get new pairing JSON.'); });`;
-}
-
-// Only the extension has a transport credential, entered interactively. It grants no client CDP endpoint.
-export function browserRelayExtension(endpoint: string): string {
-  return `
-const endpoint = ${JSON.stringify(new URL('/api/browser-relay/extension', endpoint).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:'))};
-const browserOriginMatches = ${browserOriginMatches.toString()};
-const allowed = ${relayCommandAllowed.toString()};
-const prepareScreenshot = ${JSON.stringify(browserScreenshotPrepareFunction)};
-const restoreScreenshot = ${JSON.stringify(browserScreenshotRestoreFunction)};
-const verifyAuthorization = ${verifyRelayAuthorization.toString()};
+const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
+const allowed = relayCommandAllowed;
+const prepareScreenshot = browserScreenshotPrepareFunction;
+const restoreScreenshot = browserScreenshotRestoreFunction;
+const verifyAuthorization = verifyRelayAuthorization;
 const database = (() => { const deferred = Promise.withResolvers(); const request = indexedDB.open('gitspace-relay-identity', 1); request.onupgradeneeded = () => request.result.createObjectStore('state'); request.onsuccess = () => deferred.resolve(request.result); request.onerror = () => deferred.reject(request.error); return deferred.promise; })();
 async function stored(key) { const db = await database; const deferred = Promise.withResolvers(); const request = db.transaction('state').objectStore('state').get(key); request.onsuccess = () => deferred.resolve(request.result); request.onerror = () => deferred.reject(request.error); return deferred.promise; }
 async function persist(key, value) { const db = await database; const deferred = Promise.withResolvers(); const tx = db.transaction('state', 'readwrite'); tx.objectStore('state').put(value, key); tx.oncomplete = deferred.resolve; tx.onerror = () => deferred.reject(tx.error); tx.onabort = () => deferred.reject(tx.error); return deferred.promise; }
@@ -66,7 +46,7 @@ async function authorize(authorization) {
   authorizations.set(id, { body, used: new Set() });
   return {};
 }
-const EXTENSION_PROTOCOL = ${BROWSER_EXTENSION_PROTOCOL};
+const EXTENSION_PROTOCOL = BROWSER_EXTENSION_PROTOCOL;
 /** Set when the account refuses this extension, or this extension refuses the account, as incompatible. */
 let incompatible = false;
 let socket;
@@ -409,7 +389,7 @@ async function connect() {
           }
           if (message.pairing !== 'server' || !serverNonce) throw new Error('Invalid relay acknowledgement');
           pairingCode = undefined; authenticated = true; clearTimeout(handshakeTimeout);
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\\/[\\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version }));
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version }));
           return;
         } finally { authenticating = false; }
       }
@@ -483,14 +463,3 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!messa
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); void connect(); });
 connect();
-`;
-}
-
-export function browserRelayFiles(endpoint: string): Record<string, string> {
-  return {
-    'background.js': browserRelayExtension(endpoint),
-    'popup.js': browserRelayPopup(),
-    'popup.html': '<!doctype html><html><body><p>Browser identity — compare this fingerprint in GitSpace Settings</p><p>Extension public key fingerprint (SHA-256)</p><code id="fingerprint"></code><p id="compatibility" role="alert"></p><form id="pair"><label>Account pairing details <input id="code" autocomplete="off" required></label><button>Pair</button></form><button id="reset" type="button">Reset identity</button><p id="status" role="status"></p><script src="popup.js"></script></body></html>',
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.1.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(endpoint).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html' } }),
-  };
-}

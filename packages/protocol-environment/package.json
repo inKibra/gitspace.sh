@@ -3,7 +3,15 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json", "test": "bun ../../scripts/test-isolated.ts test" },
-  "dependencies": { "zod": "^4.4.3" }
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser-origin": "./src/browser-origin.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
+    "test": "bun ../../scripts/test-isolated.ts test"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
 }

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it } from 'vitest';
 import { BrowserRelaySupervisor } from '../src/browser-relay.js';
-import { relayCommandAllowed } from '../src/browser-relay-extension.js';
+import { relayCommandAllowed } from '@gitspace/browser-extension';
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 it('installs account-targeted extension without opening a localhost relay or creating machine pairing credentials', async () => {

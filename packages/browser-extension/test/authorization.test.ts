@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { browserBase64, canonicalBrowserAuthorization, canonicalBrowserGrant, type RuntimeBrowserAuthorization, type RuntimeBrowserAuthorizationBody } from '@gitspace/protocol-runtime';
-import { verifyRelayAuthorization } from '../src/browser-relay-authorization.js';
+import { verifyRelayAuthorization } from '../src/authorization.js';
 
 async function fixture(authorityAgeMs = 0) {
   const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;

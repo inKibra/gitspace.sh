@@ -1,6 +1,6 @@
 import { createContext, runInContext } from 'node:vm';
 import { expect, it } from 'vitest';
-import { browserRelayExtension } from '../src/browser-relay-extension.js';
+import { extensionFiles } from '@gitspace/browser-extension';
 
 for (const transition of ['revoke', 'replacement', 'replacement after native group loss']) {
   it(`persists ${transition} group retirement across replacement and worker restart`, async () => {
@@ -37,7 +37,7 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
       },
     };
     const context = createContext(globals);
-    runInContext(browserRelayExtension('http://127.0.0.1:9224'), context);
+    runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], context);
     runInContext("channels.set('target',{grant:oldGrant,source:{targetId:'target'}})", context);
     await runInContext('groupRecord(oldGrant,true)', context);
     if (transition === 'replacement after native group loss') state.set(key, null);
@@ -50,7 +50,7 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
     await runInContext("persist(key,{groupId:'new',chromeGroupId:8,browserEpoch:'epoch'})", context);
     await expect(runInContext('groupRecord(oldGrant)', context)).rejects.toThrow('retired');
     const restarted = createContext({ ...globals });
-    runInContext(browserRelayExtension('http://127.0.0.1:9224'), restarted);
+    runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], restarted);
     await expect(runInContext('groupRecord(oldGrant)', restarted)).rejects.toThrow('retired');
     expect(await runInContext('groupRecord(nextGrant)', restarted)).toMatchObject({ record: { groupId: 'new', chromeGroupId: 8 } });
   });
@@ -85,13 +85,13 @@ it('group closure retries failures without closing stale-epoch or sibling groups
     },
   };
   const context = createContext(globals);
-  runInContext(browserRelayExtension('http://127.0.0.1:9224'), context);
+  runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], context);
   await expect(runInContext("execute({operation:'revoke',groupId:'affected'})", context)).rejects.toThrow('Tab closure failed');
   await expect(runInContext("groupRecord({groupId:'affected'})", context)).rejects.toThrow('retired');
   failRemoval = false;
   state.set('group:affected', { groupId: 'replacement', chromeGroupId: 9, browserEpoch: 'epoch' });
   const restarted = createContext({ ...globals });
-  runInContext(browserRelayExtension('http://127.0.0.1:9224'), restarted);
+  runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], restarted);
   await runInContext("execute({operation:'revoke',groupId:'affected'})", restarted);
   await runInContext("execute({operation:'revoke',groupId:'stale'})", restarted);
   expect([...tabs.keys()]).toEqual([81, 91]);

@@ -21,6 +21,7 @@
     "@earendil-works/chord": "1.3.0",
     "@gitspace/account-machine": "workspace:*",
     "@gitspace/blocks": "workspace:*",
+    "@gitspace/browser-extension": "workspace:*",
     "@gitspace/catalog": "workspace:*",
     "@gitspace/mcp-server": "workspace:*",
     "@gitspace/protocol": "workspace:*",
