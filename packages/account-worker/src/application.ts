@@ -2231,6 +2231,19 @@ async function platformCall(env: Env, userId: string, action: 'deploy' | 'revert
   }
 }
 
+/** Every workspace object hears of the new release; one still resident on older code restarts on it when idle. */
+async function restartSpacesForRelease(env: Env, userId: string, sha: string): Promise<void> {
+  const definitions = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listSpaces();
+  const namespace = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
+  const outcomes = await Promise.all(definitions.map(definition => namespace.getByName(`${userId}:${definition.spaceId}`).restartForRelease(sha).catch((error: unknown) => {
+    console.error(JSON.stringify({ event: 'release_restart_failed', sha, workspaceId: definition.spaceId, message: error instanceof Error ? error.message : String(error) }));
+    return 'failed';
+  })));
+  const counts: Record<string, number> = {};
+  for (const outcome of outcomes) counts[outcome] = (counts[outcome] ?? 0) + 1;
+  console.info(JSON.stringify({ event: 'release_restarts', sha, ...counts }));
+}
+
 /** A Worker target must reach its account-owned platform script; an unavailable platform is a failed release. */
 async function launchRelease(env: Env, userId: string, payload: Record<string, unknown>): Promise<LaunchResult> {
   const input = launchReleaseInputSchema.parse(payload);
@@ -2248,6 +2261,7 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
     outcome = { status: 'failed', error: error instanceof Error ? error.message : 'Worker deployment failed' };
   }
   const record = await releases.setWorkerStatus(input.sha, outcome.status, outcome.error) ?? launched.record;
+  if (outcome.status === 'applied') await restartSpacesForRelease(env, userId, input.sha);
   await releases.finishLaunch(record, input.targets);
   return { ...launched, record };
 }

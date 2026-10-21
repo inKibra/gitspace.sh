@@ -678,6 +678,29 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'base-cache', state: 'ready' }]);
   });
 
+  it('restarts a workspace object on a newer release once nothing runs in it, never during a running step', async () => {
+    const { userId, project } = await cloudProject('Release restart', 'https://github.com/acme/app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    // A fresh stub per call: one bound to a restarted instance stays broken.
+    const space = () => env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    const instance = () => runInDurableObject(space(), (current: SpaceAuthorityDO) => current);
+    await space().runtimeAttachments(identity);
+    expect(await space().restartForRelease('test-inference-worker')).toBe('current');
+
+    const idle = await instance();
+    expect(await space().restartForRelease('next-release')).toBe('restarting');
+    await vi.waitFor(async () => expect(await instance()).not.toBe(idle));
+
+    await space().runtimeAttachments(identity);
+    await runInDurableObject(space(), (_current, state) => { state.storage.sql.exec("INSERT INTO runtime_running(id,step,detail,started_at) VALUES('merge','sync merge','fixture',?)", Date.now()); });
+    const busy = await instance();
+    expect(await space().restartForRelease('next-release')).toBe('when-idle');
+    expect(await instance()).toBe(busy);
+    await runInDurableObject(space(), (_current, state) => { state.storage.sql.exec('DELETE FROM runtime_running'); });
+    // The object's own 5 s check restarts it; its timer runs in workerd, out of reach of fake timers.
+    await vi.waitFor(async () => expect(await instance()).not.toBe(busy), { timeout: 15_000, interval: 500 });
+  }, 30_000);
+
   it('refuses to move a project copy holding commits the origin lacks', async () => {
     const { userId, client, project, artifacts, authority } = await cloudProject('Diverged base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });

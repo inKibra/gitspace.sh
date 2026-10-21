@@ -31,6 +31,7 @@ import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type
 import { forwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
+import { WORKER_VERSION } from './tenant-releases.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
@@ -55,6 +56,8 @@ async function baseCheckoutHolds(code: ArtifactsCodeStore, repositories: readonl
 /** A sync failure reaches the conversation only once it has lasted this long. */
 const SYNC_NOTICE_AFTER_MS = 5 * 60_000;
 const SyncFailureRunSchema = z.object({ since: z.number(), noticed: z.boolean() });
+/** How often an instance waiting to restart on a newer release checks whether its work has ended. */
+const RELEASE_RESTART_CHECK_MS = 5_000;
 
 export class SpaceAuthorityDO extends BudgetedDurableObject {
   private readonly changes: LiveChanges;
@@ -65,6 +68,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
   private cloudRuntimePublished = false;
   private alarmLine: Promise<void> = Promise.resolve();
+  /** A newer release this instance's code predates: it restarts on that code once nothing is running. */
+  private releaseRestart: { version: string; since: number; checking: boolean } | null = null;
   private seeding: Promise<WorkspaceMetadata> | undefined;
   /** Tabs learn of a committed change without the writer waiting for them. */
   private readonly liveNotify = (notices: LiveNotice[]) => { this.ctx.waitUntil(notifyBrowsers(this.env, notices)); };
@@ -319,6 +324,42 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       }), () => { if (this.runtime === runtime) this.runtime = undefined; });
     }
     return this.runtime;
+  }
+
+  /** Running work an immediate restart would cut off: a working conversation, or a marked step (model request, sync
+   * merge, cloud write). An instance that never opened its runtime runs neither. */
+  private async running(): Promise<boolean> {
+    if (!this.runtime) return false;
+    const runtime = await this.runtime.catch(() => null);
+    if (!runtime) return false;
+    if ((await runtime.status()).summary.agents.green > 0) return true;
+    return this.ctx.storage.sql.exec('SELECT id FROM runtime_running LIMIT 1').toArray().length > 0;
+  }
+
+  /**
+   * A release went live. Cloudflare keeps a resident instance on the code it started with and swaps it minutes later
+   * whatever it is doing then, cutting off turns started meanwhile; an older instance restarts on the new code now
+   * when nothing is running, otherwise as soon as its running work ends.
+   */
+  async restartForRelease(version: string): Promise<'current' | 'restarting' | 'when-idle'> {
+    if (WORKER_VERSION === undefined || version === WORKER_VERSION) return 'current';
+    // A second release while this one waits replaces the version it restarts for, not the wait.
+    this.releaseRestart = { version, since: this.releaseRestart?.since ?? Date.now(), checking: this.releaseRestart?.checking ?? false };
+    const restart = this.releaseRestart;
+    const restartWhenIdle = async (): Promise<boolean> => {
+      if (await this.running()) return false;
+      console.info(JSON.stringify({ event: 'release_restart', workspaceId: this.get()?.spaceId ?? this.cloudRuntime?.workspaceId ?? null, from: WORKER_VERSION, to: restart.version, waitedMs: Date.now() - restart.since }));
+      // After this call has answered, so the release sees the outcome.
+      setTimeout(() => this.ctx.abort(`Restarting on release ${restart.version}`), 0);
+      return true;
+    };
+    if (await restartWhenIdle()) return 'restarting';
+    if (!restart.checking) {
+      restart.checking = true;
+      const check = () => setTimeout(() => { void restartWhenIdle().then(restarted => { if (!restarted) check(); }); }, RELEASE_RESTART_CHECK_MS);
+      check();
+    }
+    return 'when-idle';
   }
 
   /** Agents request attachments through the same path a person's cache request takes. */
