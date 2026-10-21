@@ -243,6 +243,14 @@ describe('user artifact flows', () => {
     expect(bytes).toEqual(Buffer.from(zip));
   });
 
+  it('records the hash of every drive file it stores, so a machine reader can name it', async () => {
+    const { workspaceId, projectId } = await fixture();
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const written = await artifacts.write('drive://workspace/notes.txt', { bytes: new TextEncoder().encode('drive notes') });
+    const stored = await env.DATA.head(`users/${env.ACCOUNT_ID}/accounts/${Buffer.from(env.ACCOUNT_ID).toString('base64url')}/artifacts/sha256/${written.hash.slice(7)}`);
+    expect(stored?.customMetadata?.sha256).toBe(written.hash);
+  });
+
   it('rejects a conflicting batch atomically and keeps re-encrypted project copies independent of later workspace edits', async () => {
     const setup = await fixture();
     const { client, projectId, workspaceId, publish, authority } = setup;

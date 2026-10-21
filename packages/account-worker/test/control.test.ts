@@ -76,6 +76,24 @@ describe('signed control transport', () => {
     expect(downloaded.status).toBe(200);
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
   });
+  it('serves a drive file stored without a recorded hash to a machine naming its hash, and refuses one recorded under another', async () => {
+    const userId = env.ACCOUNT_ID;
+    const vault = env.CREDENTIALS.getByName(userId);
+    await vault.bootstrap({ userId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)), vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)) });
+    await vault.registerDevice(signCredentialAuthorityGrant({ version: 1, userId, machineId: 'machine-a', signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)), exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)), capabilities: ['storage.access'], generation: 1 }, rootPrivateKey));
+    const bytes = new TextEncoder().encode('sealed drive file');
+    const hash = await sha256(bytes);
+    const download = (key: string, named: string) => SELF.fetch(`https://auth.test/v1/data/${key}`, { headers: { 'x-gitspace-control': signedHeader(createSignedControlRequest({ userId, machineId: 'machine-a', operation: 'data.get', payload: { key, hash: named }, signingPrivateKey: machineSigningPrivateKey })) } });
+    // Stored as the worker stored drive files: no recorded hash.
+    const unrecorded = `accounts/a/artifacts/sha256/${hash.slice(7)}`;
+    await env.DATA.put(`users/${userId}/${unrecorded}`, bytes);
+    const served = await download(unrecorded, hash);
+    expect(served.status).toBe(200);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes);
+    const recorded = 'accounts/a/artifacts/sha256/recorded';
+    await env.DATA.put(`users/${userId}/${recorded}`, bytes, { customMetadata: { sha256: hash } });
+    expect((await download(recorded, `sha256:${'0'.repeat(64)}`)).status).toBe(409);
+  });
   it('rejects oversized signed objects after authorization and preserves upload validation and immutability', async () => {
     const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);

@@ -2555,8 +2555,11 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
     }
     return new Response(null, { status: 404 });
   }
+  // An object stored with its hash is served only under that hash. Drive files the worker stored before it recorded
+  // their hash carry none: the caller checks the bytes against the hash it named (every machine reader does).
   const expectedHash = signed.payload.hash;
-  if (expectedHash !== undefined && expectedHash !== object.customMetadata?.sha256) {
+  const recordedHash = object.customMetadata?.sha256;
+  if (expectedHash !== undefined && recordedHash !== undefined && expectedHash !== recordedHash) {
     return Response.json({ status: 'error', error: { code: 'HASH_MISMATCH', message: 'Application object hash does not match' } }, { status: 409 });
   }
   const headers = new Headers({

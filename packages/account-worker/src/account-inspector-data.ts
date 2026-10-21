@@ -157,7 +157,8 @@ export class InspectorCloudArtifacts {
   private async seal(bytes: Uint8Array, scopeKey: Uint8Array): Promise<`sha256:${string}`> {
     const sealed = await encryptArtifactBytes(bytes, scopeKey);
     const hash = await digest(sealed);
-    await this.env.DATA.put(`users/${this.userId}/${artifactObjectKey(this.userId, hash)}`, sealed);
+    // Recorded as machines' uploads are, so the storage endpoint can check the hash a machine reader names.
+    await this.env.DATA.put(`users/${this.userId}/${artifactObjectKey(this.userId, hash)}`, sealed, { customMetadata: { sha256: hash }, sha256: hash.slice('sha256:'.length) });
     return hash;
   }
 
