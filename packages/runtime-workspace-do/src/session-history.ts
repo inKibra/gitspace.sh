@@ -1,4 +1,4 @@
-import type { ConversationRecord, Cursor, Storage } from '@earendil-works/pi-durable';
+import { CompactionEntry, type ConversationRecord, type Cursor, type Storage } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { pageSessionHistory, sourceHistoryMetadata, type HistorySourceEntry } from '@gitspace/protocol-agent';
 import type { SessionHistoryService } from '@gitspace/runtime-core/session-controls';
@@ -94,6 +94,9 @@ export function createSessionHistory(durable: DurableObjectStorage, storage: Sto
     async recent(target) {
       const prompts: { entryId: string; text: string }[] = [];
       let tokens: number | null = null;
+      // The context in use is what the newest answered request sent. A failed or refused request reports no usage (it
+      // read as 0%); one before the newest compaction sent a context that no longer exists.
+      let compacted = false;
       let anchorId: string | null = null;
       let seen = 0;
       let cursor: Cursor | undefined;
@@ -102,7 +105,11 @@ export function createSessionHistory(durable: DurableObjectStorage, storage: Sto
         for (const entry of page.items) {
           anchorId ??= String(entry.id);
           const assistant = entry.model?.find(message => message.role === 'assistant');
-          if (tokens === null && assistant?.role === 'assistant') tokens = assistant.usage.input + assistant.usage.cacheRead + assistant.usage.cacheWrite;
+          if (entry.kind === CompactionEntry.kind) compacted = true;
+          else if (tokens === null && !compacted && assistant?.role === 'assistant') {
+            const sent = assistant.usage.input + assistant.usage.cacheRead + assistant.usage.cacheWrite;
+            if (sent > 0) tokens = sent;
+          }
           const text = (entry.model ?? []).filter(message => message.role === 'user').flatMap(message => typeof message.content === 'string' ? [message.content] : message.content.flatMap(part => part.type === 'text' ? [part.text] : [])).join('\n');
           if (text.length > 0 && text.length <= PROMPT_CHARACTERS) prompts.push({ entryId: String(entry.id), text });
         }

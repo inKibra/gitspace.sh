@@ -40,7 +40,8 @@ const stream: StreamFunction = (_model, context, options) => {
   const text = typeof last?.content === 'string' ? last.content : (last?.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n');
   const ask = last?.role === 'user' && text === 'ask for a color';
   if (last?.role === 'user' && text === 'fail the model') {
-    const failure: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason: 'error', errorMessage: 'fixture provider rejected the request', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
+    // A provider that rejects a request reports no usage.
+    const failure: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason: 'error', errorMessage: 'fixture provider rejected the request', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     result.push({ type: 'error', reason: 'error', error: failure });
     result.end();
     return result;

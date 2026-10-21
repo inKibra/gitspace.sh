@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, setSystemTime, test } from 'bun:test';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { createAssistantMessageEventStream, createModels, type Context, type Model, type Api } from '@earendil-works/pi-ai';
 import { createRunningMarks } from '../src/running-marks.js';
@@ -44,4 +44,26 @@ test('a model request a reset cut off is described by what it sent, images and t
   const [mark] = createRunningMarks(storage(database)).leftover;
   expect(mark?.step).toBe('model request');
   expect(mark?.detail).toBe('anthropic/opus: 3 messages, 0.7 MB (2 images, 0.6 MB)');
+});
+
+test('a reply a reset cut off is described by how much of it had arrived, by kind', async () => {
+  const database = new Database(':memory:');
+  const pending = createAssistantMessageEventStream();
+  const models = createRunningMarks(storage(database)).models({ ...createModels(), streamSimple: () => pending });
+  const model: Model<Api> = { id: 'opus', name: 'Opus', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
+  const partial = { role: 'assistant' as const, content: [], api: 'anthropic-messages' as const, provider: 'anthropic', model: 'opus', stopReason: 'stop' as const, timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+  const marked = () => database.query('SELECT detail FROM runtime_running').all();
+  // The clock is set, not waited on.
+  setSystemTime(new Date('2026-10-21T22:00:00Z'));
+  try {
+    void models.streamSimple(model, { messages: [{ role: 'user', content: 'Write it', timestamp: 1 }] });
+    pending.push({ type: 'thinking_delta', contentIndex: 0, delta: 'a'.repeat(40_000), partial });
+    await Bun.sleep(0);
+    // Under five seconds: the mark still holds only the request.
+    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB' }]);
+    setSystemTime(new Date('2026-10-21T22:00:06Z'));
+    pending.push({ type: 'toolcall_delta', contentIndex: 1, delta: 'x'.repeat(120_000), partial });
+    await Bun.sleep(0);
+    expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB; reply after 6 s: 2 events, thinking 40 KB, text 0 KB, tool-call arguments 120 KB' }]);
+  } finally { setSystemTime(); }
 });

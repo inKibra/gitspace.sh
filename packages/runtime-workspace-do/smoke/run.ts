@@ -105,7 +105,10 @@ try {
   const failed = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed'));
   assert.match(failed.conversations.find(item => item.status === 'failed')?.error ?? '', /fixture provider rejected the request/);
   assert.equal(summary(failed).primaryColor, 'red', 'A failed main agent is not red');
-  console.log('PASS failed model request surfaces its error and turns the workspace red');
+  // A failed request reports no usage, and is never read as an empty context. (The fixture's small window compacts
+  // before every request, so no request has been answered since and no figure is shown.)
+  assert.notEqual((await session({ type: 'control' })).control.context?.tokens, 0, 'A failed request read as an empty context');
+  console.log('PASS failed model request surfaces its error, turns the workspace red and keeps the context in use');
 
 
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
@@ -254,9 +257,9 @@ try {
   assert.equal(JSON.parse(content).text, `history-619 ${'x'.repeat(600000)}`);
   const usageBefore = (await session({ type: 'usage' }, seeded.conversationId)).usage!;
   assert(usageBefore.totals.requests > 0);
-  assert.equal(usageBefore.totals.input, usageBefore.totals.requests);
-  assert.equal(usageBefore.totals.output, usageBefore.totals.requests);
-  assert.equal(usageBefore.totals.totalTokens, usageBefore.totals.requests * 2);
+  // A rejected request is counted and reports no tokens.
+  assert(usageBefore.totals.input > 0 && usageBefore.totals.input < usageBefore.totals.requests);
+  assert.equal(usageBefore.totals.totalTokens, usageBefore.totals.input + usageBefore.totals.output);
   await worker.dispose();
   worker = new Miniflare(options);
   const coldTranscript = (await session({ type: 'transcriptPage', request: { generation: latestTranscript.generation, before: null, after: null, around: null } }, seeded.conversationId)).transcriptPage!;
