@@ -120,16 +120,6 @@ export async function publishRef(input: { remote: string; auth: GitHttpAuth; ref
   await publishSnapshotPack({ remote: input.remote, auth: input.auth, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack }, request);
 }
 
-/** Advertised refs, optionally narrowed by protocol v2 ls-refs; peeled tags use `<tag>^{}`. */
-export async function readAdvertisedRefs(input: { remote: string; auth: GitHttpAuth | null; refPrefix?: string }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
-  return (await readGitAdvertisement(input, request)).refs;
-}
-
-/** The v0 advertisement carries the repository's shallow boundaries, including those outside HEAD. */
-export async function readShallowCommits(input: { remote: string; auth: GitHttpAuth | null }, request: ArtifactsFetch = fetch): Promise<string[]> {
-  return (await readGitAdvertisement(input, request)).shallow;
-}
-
 async function readGitDiscovery(remote: URL, headers: Record<string, string>, request: ArtifactsFetch) {
   const signal = AbortSignal.timeout(15_000);
   const advertised = await request(`${remote.href.replace(/\/$/u, '')}/info/refs?service=git-upload-pack`, { headers, signal, redirect: 'manual' });
@@ -138,7 +128,8 @@ async function readGitDiscovery(remote: URL, headers: Record<string, string>, re
   return packets(await collectBytes(streamBytes(advertised.body, signal), 64 * 1024)).filter(line => !line.startsWith('#'));
 }
 
-async function readGitAdvertisement(input: { remote: string; auth: GitHttpAuth | null; refPrefix?: string }, request: ArtifactsFetch) {
+/** Advertised refs, optionally narrowed by protocol v2 ls-refs; peeled tags use `<tag>^{}`. */
+export async function readAdvertisedRefs(input: { remote: string; auth: GitHttpAuth | null; refPrefix?: string }, request: ArtifactsFetch = fetch): Promise<Map<string, string>> {
   const remote = gitRemote(input.remote);
   if (input.refPrefix !== undefined && (!input.refPrefix || /[\0\r\n]/u.test(input.refPrefix))) throw new Error('Invalid Git ref prefix');
   const base = remote.href.replace(/\/$/u, '');
@@ -163,10 +154,7 @@ async function readGitAdvertisement(input: { remote: string; auth: GitHttpAuth |
   // A v0-only origin returns its advertisement directly. It must fit the same bound;
   // neither a refused v2 negotiation nor an oversized response triggers an unbounded retry.
   const refs = new Map<string, string>();
-  const shallow: string[] = [];
   for (const line of lines) {
-    const boundary = /^shallow ([0-9a-f]{40})\n?$/u.exec(line);
-    if (boundary) { shallow.push(boundary[1]!); continue; }
     const [oid, ref, ...attributes] = (line.trimEnd().split('\0')[0] ?? '').split(' ');
     if (!oid || !ref || !/^[0-9a-f]{40}$/u.test(oid) || (input.refPrefix !== undefined && !ref.startsWith(input.refPrefix))) continue;
     refs.set(ref, oid);
@@ -175,7 +163,7 @@ async function readGitAdvertisement(input: { remote: string; auth: GitHttpAuth |
       if (peeled && /^[0-9a-f]{40}$/u.test(peeled)) refs.set(`${ref}^{}`, peeled);
     }
   }
-  return { refs, shallow };
+  return refs;
 }
 
 const PACK_SIGNATURE = encoder.encode('PACK');
@@ -309,32 +297,36 @@ function packStream(reader: PacketReader, chunks: AsyncGenerator<Uint8Array>, ve
   });
 }
 
-/** Requests the reachable graph of `commit` without thin packs. Destination shallow boundaries qualify its haves; the
- * source's shallow boundaries precede its pack, so they are known before the first pack byte is forwarded. */
-async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; haves: readonly string[]; shallow: readonly string[]; signal: AbortSignal }, request: ArtifactsFetch): Promise<{ shallow: string[]; pack: ReadableStream<Uint8Array> }> {
+/** Requests the reachable graph of `commit` without thin packs. Each have is also declared a client shallow commit: the
+ * destination holds the have and its tree but not necessarily its ancestry (a seed may omit old history, and Artifacts
+ * advertises no shallow boundaries), so the source omits only objects reachable from the haves' own trees. A source
+ * that cannot take shallow lines gets no haves. The source's shallow boundaries precede its pack, so they are known
+ * before the first pack byte is forwarded. */
+async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; haves: readonly string[]; signal: AbortSignal }, request: ArtifactsFetch): Promise<{ shallow: string[]; pack: ReadableStream<Uint8Array> }> {
   const remote = gitRemote(input.remote);
   if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new Error('Invalid Git commit');
-  const haves = new Set(input.haves);
-  const shallow = new Set(input.shallow);
-  if (haves.size > 32 || [...haves, ...shallow].some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git negotiation commits');
+  if (input.haves.length > 32 || input.haves.some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git negotiation commits');
   const discovery = await readGitDiscovery(remote, { ...gitAuthorizationHeaders(input.auth), 'Git-Protocol': 'version=2' }, request);
   const version2 = discovery[0]?.trimEnd() === 'version 2';
-  const boundaries = new Set(shallow);
+  const boundaries = new Set<string>();
+  let shallowCapable: boolean;
   if (version2) {
     const capability = discovery.find(line => line.trimEnd().split('=')[0] === 'fetch');
     if (!capability) throw new Error('Git server does not support fetch');
-    const features = capability.trimEnd().split('=')[1]?.split(' ') ?? [];
-    if (shallow.size && !features.includes('shallow')) throw new Error('Git server does not support shallow fetch');
+    shallowCapable = (capability.trimEnd().split('=')[1]?.split(' ') ?? []).includes('shallow');
   } else {
+    shallowCapable = (discovery[0]?.trimEnd().split('\0')[1]?.split(' ') ?? []).includes('shallow');
     // A v0-only origin must fit the existing discovery bound; never retry unbounded.
     for (const line of discovery) {
       const boundary = /^shallow ([0-9a-f]{40})\n?$/u.exec(line);
       if (boundary) boundaries.add(boundary[1]!);
     }
   }
+  const haves = new Set(shallowCapable ? input.haves : []);
+  const shallow = [...haves].map(oid => packet(`shallow ${oid}\n`));
   const parts = version2
-    ? [packet('command=fetch\n'), encoder.encode('0001'), packet('no-progress\n'), packet(`want ${input.commit}\n`), ...[...shallow].map(oid => packet(`shallow ${oid}\n`)), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n'), encoder.encode('0000')]
-    : [packet(`want ${input.commit}${boundaries.size ? ' shallow' : ''}\n`), ...[...shallow].map(oid => packet(`shallow ${oid}\n`)), encoder.encode('0000'), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n')];
+    ? [packet('command=fetch\n'), encoder.encode('0001'), packet('no-progress\n'), packet(`want ${input.commit}\n`), ...shallow, ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n'), encoder.encode('0000')]
+    : [packet(`want ${input.commit}${shallowCapable ? ' shallow' : ''}\n`), ...shallow, encoder.encode('0000'), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n')];
   const response = await request(`${remote.href.replace(/\/$/u, '')}/git-upload-pack`, {
     method: 'POST', headers: { ...gitAuthorizationHeaders(input.auth), ...(version2 ? { 'Git-Protocol': 'version=2' } : {}), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
     body: concatBytes(parts), signal: input.signal, redirect: 'manual',
@@ -361,9 +353,9 @@ const TRANSFER_TIMEOUT_MS = 10 * 60_000;
  * transfers. The ref moves only from `previous` (null: absent). Source shallow boundaries travel with the pack so a
  * copy never invents complete ancestry. No credentials follow redirects, and an interrupted download fails the push
  * (receive-pack verifies the pack before moving the ref), so it has no destination-side effect. */
-export async function transferCommit(input: { source: { remote: string; auth: GitHttpAuth | null }; destination: { remote: string; auth: GitHttpAuth }; ref: string; previous: string | null; commit: string; haves?: readonly string[]; shallow?: readonly string[] }, request: ArtifactsFetch = fetch): Promise<void> {
+export async function transferCommit(input: { source: { remote: string; auth: GitHttpAuth | null }; destination: { remote: string; auth: GitHttpAuth }; ref: string; previous: string | null; commit: string; haves?: readonly string[] }, request: ArtifactsFetch = fetch): Promise<void> {
   const signal = AbortSignal.timeout(TRANSFER_TIMEOUT_MS);
-  const opened = await openCommitPack({ ...input.source, commit: input.commit, haves: input.haves ?? [], shallow: input.shallow ?? [], signal }, request);
+  const opened = await openCommitPack({ ...input.source, commit: input.commit, haves: input.haves ?? [], signal }, request);
   try {
     await publishSnapshotPack({ ...input.destination, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack: opened.pack, shallow: opened.shallow, signal }, request);
   } finally {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, readShallowCommits, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { changedSnapshotEntries, planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
@@ -315,9 +315,9 @@ export class ArtifactsCodeStore {
     await this.fetchIntoRepository(name, { remote: source.url, auth }, ref, commit, null);
   }
 
-  /** Streams `commit` from an origin into a repository ref, negotiating with the repository's recent history qualified
-   * by its shallow boundaries: a machine seed may deliberately omit old history while retaining the original base
-   * commit ID. The ref moves only from `previous` (null: absent), or from whatever it holds for `replace`. */
+  /** Streams `commit` from an origin into a repository ref, negotiating with the repository's recent history (each have
+   * declared shallow, since a machine seed may deliberately omit old history while retaining the original base commit
+   * ID). The ref moves only from `previous` (null: absent), or from whatever it holds for `replace`. */
   private async fetchIntoRepository(repository: string, origin: { remote: string; auth: GitHttpAuth | null }, ref: string, commit: string, previous: string | null | 'replace'): Promise<void> {
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try {
@@ -325,9 +325,8 @@ export class ArtifactsCodeStore {
       const [info, token] = await Promise.all([repo.info(), repo.createToken('write', TRANSFER_LEASE_SECONDS)]);
       const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
       try {
-        const shallow = await readShallowCommits({ remote: info.remote, auth });
         const from = previous === 'replace' ? (await readAdvertisedRefs({ remote: info.remote, auth, refPrefix: ref })).get(ref) ?? null : previous;
-        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, haves, shallow });
+        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, haves });
       } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
   }
@@ -437,8 +436,7 @@ export class ArtifactsCodeStore {
             const readToken = await origin.createToken('read', TRANSFER_LEASE_SECONDS);
             try {
               const haves = (await target.log({ ...(previous === null ? {} : { ref: previous }), limit: 32 })).map(entry => entry.hash);
-              const shallow = await readShallowCommits({ remote: info.remote, auth });
-              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, haves, shallow });
+              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, haves });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
         }

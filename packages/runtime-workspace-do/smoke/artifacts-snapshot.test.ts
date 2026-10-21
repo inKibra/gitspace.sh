@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import git from 'isomorphic-git';
 import fs from 'node:fs';
-import { readAdvertisedRefs, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
+import { readAdvertisedRefs, transferCommit, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
 
@@ -1121,6 +1121,58 @@ for (const protocolVersion of [0, 2] as const) test(`copies a shallow checkpoint
     const missing = Bun.spawnSync(['git', '-C', cold, 'cat-file', '-e', absent]);
     expect(missing.exitCode).not.toBe(0);
   } finally { request.mockRestore(); await source.close(); await target.close(); await rm(cold, { recursive: true, force: true }); }
+}, 15_000);
+
+for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects only older history holds when the destination is shallow at its have, over Git v${protocolVersion}`, async () => {
+  // C restores a tree that only A holds, below the destination's shallow boundary B. Artifacts advertises no shallow
+  // boundaries, so the have B must not tell the source that the destination holds A.
+  const root = await mkdtemp(join(tmpdir(), 'shallow-have-'));
+  const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+  const run = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, ...identity } });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const work = join(root, 'work');
+  const source = join(root, 'source.git');
+  const destination = join(root, 'destination.git');
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const child = Bun.spawn(['git', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), url.hostname === 'source.invalid' ? source : destination], {
+      stdin: advertise ? 'ignore' : new Response(init?.body).body, stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? new Headers(init?.headers).get('git-protocol') ?? 'version=0' : 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) return new Response(error, { status: 500 });
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  try {
+    run(root, 'init', '-q', '-b', 'main', work);
+    await Bun.write(join(work, 'config/settings.json'), '{}\n');
+    await Bun.write(join(work, 'app.txt'), 'a\n');
+    run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', 'A');
+    await Bun.write(join(work, 'config/pending.md'), 'pending\n');
+    await Bun.write(join(work, 'app.txt'), 'b\n');
+    run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', 'B');
+    run(work, 'rm', '-q', 'config/pending.md');
+    await Bun.write(join(work, 'app.txt'), 'c\n');
+    run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', 'C');
+    const [c, b] = [run(work, 'rev-parse', 'HEAD'), run(work, 'rev-parse', 'HEAD~1')];
+    const restored = run(work, 'rev-parse', 'HEAD:config');
+    expect(run(work, 'rev-parse', 'HEAD~2:config')).toBe(restored);
+    run(root, 'clone', '-q', '--bare', work, source);
+    // Reachability bitmaps make upload-pack omit everything reachable from a have, as GitHub and Artifacts do.
+    run(source, 'repack', '-q', '-a', '-d', '-b');
+    run(root, 'init', '-q', '--bare', '-b', 'main', destination);
+    run(destination, '-c', 'protocol.file.allow=always', 'fetch', '-q', '--depth', '1', `file://${source}`, `${b}:refs/heads/main`);
+    expect(Bun.spawnSync(['git', 'cat-file', '-e', restored], { cwd: destination }).exitCode).not.toBe(0);
+    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: b, commit: c, haves: [b] });
+    expect(run(destination, 'rev-parse', 'refs/heads/main')).toBe(c);
+    expect(run(destination, 'cat-file', '-t', restored)).toBe('tree');
+  } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
 }, 15_000);
 
 test('native reconciliation preserves staged and working layers across a large directory change', async () => {
