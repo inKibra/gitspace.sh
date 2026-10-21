@@ -31,20 +31,22 @@ export class MachineExecutor {
     const signature = supplied && /^[A-Za-z0-9_-]+$/u.test(supplied) ? Buffer.from(supplied, 'base64url') : Buffer.alloc(0);
     if (signature.byteLength !== expected.byteLength || !timingSafeEqual(signature, expected)) return new Response('Execution authentication failed', { status: 403 });
     const fingerprint = createHash('sha256').update(raw).digest('base64url');
-    const finished = this.options.journal.executionResult(dispatch.attemptId);
+    const finished = this.options.journal.executionResult(dispatch.attachmentId, dispatch.attemptId);
     if (finished) return finished.fingerprint === fingerprint ? Response.json(finished.result) : Response.json({ error: 'Another command already ran with this attempt id' }, { status: 409 });
-    let attempt = this.attempts.get(dispatch.attemptId);
+    // Attempt ids are unique within a workspace, so an attempt is its attachment's.
+    const attemptKey = JSON.stringify([dispatch.attachmentId, dispatch.attemptId]);
+    let attempt = this.attempts.get(attemptKey);
     if (attempt && attempt.fingerprint !== fingerprint) return Response.json({ error: 'Another command is running with this attempt id' }, { status: 409 });
     if (!attempt) {
       try { this.authorize(dispatch); }
       catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
       const done = this.execute(dispatch, request.signal).then(result => {
         // A replay-safe read is simply run again; only results a replay must not repeat are kept.
-        if (dispatch.replay === 'unsafe') this.options.journal.saveExecutionResult(dispatch.attemptId, fingerprint, result);
+        if (dispatch.replay === 'unsafe') this.options.journal.saveExecutionResult(dispatch.attachmentId, dispatch.attemptId, fingerprint, result);
         return result;
-      }).finally(() => this.attempts.delete(dispatch.attemptId));
+      }).finally(() => this.attempts.delete(attemptKey));
       attempt = { fingerprint, done };
-      this.attempts.set(dispatch.attemptId, attempt);
+      this.attempts.set(attemptKey, attempt);
     }
     return Response.json(await attempt.done);
   }

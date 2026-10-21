@@ -13,9 +13,11 @@ export class ExecutorJournal {
   constructor(path: string, options: { readonly?: boolean } = {}) {
     this.database = new Database(path, options.readonly ? { readonly: true } : { create: true });
     if (options.readonly) return;
-    this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS executor_attachments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS executor_proposals(id TEXT PRIMARY KEY, payload TEXT NOT NULL); DROP TABLE IF EXISTS executor_attempts; CREATE TABLE IF NOT EXISTS executor_results(attempt_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, completed_at INTEGER NOT NULL);');
-    // Results of replay-safe reads (process observations, one per poll) are no longer kept; drop the ones stored before.
-    this.database.exec("DELETE FROM executor_results WHERE attempt_id LIKE 'process-observation:%' OR attempt_id LIKE 'process-stop-observation:%'");
+    this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS executor_attachments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS executor_proposals(id TEXT PRIMARY KEY, payload TEXT NOT NULL); DROP TABLE IF EXISTS executor_attempts;');
+    // Attempt ids are unique only within one workspace (`tool:<pi task id>`), so results are kept per attachment: keyed by
+    // the attempt alone, one workspace's command refused another's with the same id. Old rows are 24-hour replay records.
+    if (!this.database.query('PRAGMA table_info(executor_results)').all().some(column => z.object({ name: z.string() }).parse(column).name === 'attachment_id')) this.database.exec('DROP TABLE IF EXISTS executor_results');
+    this.database.exec('CREATE TABLE IF NOT EXISTS executor_results(attachment_id TEXT NOT NULL, attempt_id TEXT NOT NULL, fingerprint TEXT NOT NULL, result TEXT NOT NULL, completed_at INTEGER NOT NULL, PRIMARY KEY(attachment_id, attempt_id))');
     // Rows from the old attachment lifecycle: lost/draining become detached and an old-shape cache observation is
     // dropped (the next heartbeat sends a new one). A row that still does not parse is removed; the cloud reassigns it.
     const OldRowSchema = z.object({ id: z.string(), payload: z.string() });
@@ -54,16 +56,16 @@ export class ExecutorJournal {
   }
   saveProposal(id: string, value: unknown): void { this.database.query('INSERT INTO executor_proposals(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(id, JSON.stringify(value)); }
   /** A finished command's result and the fingerprint of the dispatch that ran it. */
-  executionResult(attemptId: string): { fingerprint: string; result: RuntimeToolResult } | null {
-    const row = this.database.query('SELECT fingerprint, result FROM executor_results WHERE attempt_id = ?').get(attemptId);
+  executionResult(attachmentId: string, attemptId: string): { fingerprint: string; result: RuntimeToolResult } | null {
+    const row = this.database.query('SELECT fingerprint, result FROM executor_results WHERE attachment_id = ? AND attempt_id = ?').get(attachmentId, attemptId);
     if (row === null) return null;
     const { fingerprint, result } = z.object({ fingerprint: z.string(), result: z.string() }).parse(row);
     return { fingerprint, result: RuntimeToolResultSchema.parse(JSON.parse(result)) };
   }
-  saveExecutionResult(attemptId: string, fingerprint: string, result: RuntimeToolResult): void {
+  saveExecutionResult(attachmentId: string, attemptId: string, fingerprint: string, result: RuntimeToolResult): void {
     const now = Date.now();
     this.database.query('DELETE FROM executor_results WHERE completed_at < ?').run(now - 24 * 60 * 60 * 1000);
-    this.database.query('INSERT OR REPLACE INTO executor_results(attempt_id, fingerprint, result, completed_at) VALUES (?, ?, ?, ?)').run(attemptId, fingerprint, JSON.stringify(result), now);
+    this.database.query('INSERT OR REPLACE INTO executor_results(attachment_id, attempt_id, fingerprint, result, completed_at) VALUES (?, ?, ?, ?, ?)').run(attachmentId, attemptId, fingerprint, JSON.stringify(result), now);
   }
   close(): void { this.database.close(); }
 }

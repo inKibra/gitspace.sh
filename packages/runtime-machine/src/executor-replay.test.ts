@@ -15,9 +15,10 @@ async function fixture() {
   directories.push(root);
   const journal = new ExecutorJournal(join(root, 'journal.sqlite'));
   const secret = Buffer.from('s'.repeat(32)).toString('base64url');
-  journal.installAttachment({
+  // Two workspaces' checkouts on one machine.
+  for (const name of ['a', 'b']) journal.installAttachment({
     attachment: {
-      projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'attachment-a', machineId: 'machine-a', generation: 1,
+      projectId: 'project-a', workspaceId: `workspace-${name}`, attachmentId: `attachment-${name}`, machineId: 'machine-a', generation: 1,
       checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['bash'], updatedAt: new Date().toISOString(), online: true, failure: null,
     },
     rootPath: root, executionSecret: secret, prerequisitesComplete: true,
@@ -25,8 +26,8 @@ async function fixture() {
   let runs = 0;
   const release = Promise.withResolvers<void>();
   const executor = new MachineExecutor({ machineId: 'machine-a', journal, runCommand: async () => { runs += 1; await release.promise; return { exitCode: 0, output: `run ${runs}` }; } });
-  const dispatch = (attemptId: string, command: string) => JSON.stringify({
-    version: 1, projectId: 'project-a', workspaceId: 'workspace-a', machineId: 'machine-a', attachmentId: 'attachment-a', generation: 1,
+  const dispatch = (attemptId: string, command: string, workspace = 'a') => JSON.stringify({
+    version: 1, projectId: 'project-a', workspaceId: `workspace-${workspace}`, machineId: 'machine-a', attachmentId: `attachment-${workspace}`, generation: 1,
     conversationId: 'conversation-a', conversationKind: 'main', taskId: 'task-a', requestId: 'request-a', attemptId,
     tool: 'bash', args: { command }, replay: 'unsafe', deadlineAt: new Date(Date.now() + 60_000).toISOString(),
   });
@@ -51,5 +52,19 @@ test('a command sent again after its reply was lost runs once and answers with i
   expect(runs()).toBe(1);
   // A different command reusing the attempt id is refused rather than answered with another command's result.
   expect((await send(dispatch('attempt-a', 'rm -rf .'))).status).toBe(409);
+  journal.close();
+});
+
+test("two workspaces' commands with the same attempt id both run and each replays its own result", async () => {
+  const { send, dispatch, release, runs, journal } = await fixture();
+  release.resolve();
+  // Attempt ids are `tool:<pi task id>`, and each workspace counts its tasks from 1.
+  const a = dispatch('tool:3620', 'echo from a', 'a'), b = dispatch('tool:3620', 'echo from b', 'b');
+  const first = RuntimeToolResultSchema.parse(await (await send(a)).json());
+  const second = await send(b);
+  expect(second.status).toBe(200);
+  expect(RuntimeToolResultSchema.parse(await second.json()).content).toEqual([{ type: 'text', text: 'Exit code: 0\nrun 2' }]);
+  expect(RuntimeToolResultSchema.parse(await (await send(a)).json())).toEqual(first);
+  expect(runs()).toBe(2);
   journal.close();
 });
