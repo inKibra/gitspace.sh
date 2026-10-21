@@ -35,6 +35,25 @@ function dispatchFixture(tenant: string, route: 'tenant' | 'service' | 'applicat
 
 afterEach(() => vi.restoreAllMocks());
 
+describe('reserved platform hostnames', () => {
+  it.each(['www.gitspace.sh', 'api.gitspace.sh'])('sends %s to the platform site instead of dispatching a tenant', async (hostname) => {
+    const bindings: Env = {
+      ...env,
+      DISPATCHER: { get() { throw new Error('A reserved platform hostname must not dispatch a tenant'); } } as unknown as DispatchNamespace,
+    };
+    const response = await worker.fetch(new Request(`https://${hostname}/pricing?ref=nav`), bindings, createExecutionContext());
+    expect(response.status).toBe(308);
+    expect(response.headers.get('location')).toBe('https://gitspace.sh/pricing?ref=nav');
+  });
+
+  it('still dispatches an account hostname that is not reserved', async () => {
+    const fixture = dispatchFixture(`tenant-${crypto.randomUUID().slice(0, 8)}`, 'application', false);
+    const response = await worker.fetch(fixture.request, fixture.bindings, createExecutionContext());
+    expect(response.status).toBe(201);
+    expect(await response.text()).toBe('tenant response');
+  });
+});
+
 describe('dispatch without billing authorization', () => {
   it.each(dispatchPaths)('serves $route upgrade=$upgrade while accounting is pending, then records usage despite exhausted/quarantined credits', async ({ route, upgrade }) => {
     const tenant = `dispatch-${crypto.randomUUID().slice(0, 8)}`;
