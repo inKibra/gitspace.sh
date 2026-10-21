@@ -235,7 +235,7 @@ export function workspaceStatusLabel(space: SpaceStatusView): string {
   const { primaryColor, agents, machines, sync } = space.status;
   const state = primaryColor === 'green' ? 'Working'
     : primaryColor === 'blue' ? 'Waiting'
-      : primaryColor === 'orange' ? agents.orange ? 'Needs approval' : 'Sync conflict'
+      : primaryColor === 'orange' ? agents.orange ? 'Needs you' : 'Sync conflict'
         : space.holder.kind === 'cloud' ? 'No activity' : 'Agent unavailable';
   const offline = machines.attached - machines.online;
   return [state, offline ? `${offline} ${offline === 1 ? 'machine' : 'machines'} offline` : null, sync.problems ? 'sync problem' : null].filter(Boolean).join(' · ');
