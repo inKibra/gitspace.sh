@@ -311,7 +311,9 @@ export function interceptRuntimeModelStream(stream: AssistantMessageEventStream,
     try {
       for await (const event of stream) {
         if ('partial' in event) latest = event.partial;
-        if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
+        // Prose is checked as it streams; a tool call once its arguments are complete. Checking every delta of a file
+        // write re-read (and, for AST rules, re-parsed) the whole file each time.
+        if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_end') {
           const output = outputs(event.partial)[event.contentIndex];
           if (output && (await binding.check(output, false, binding.context)).some(match => match.interrupt)) {
             controller.abort(new RuleGenerationDiscard());

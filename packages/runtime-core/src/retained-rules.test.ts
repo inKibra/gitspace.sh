@@ -54,6 +54,17 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
       if (mode === 'spawn' && requests.length === 1) { reply.content = [{ type: 'toolCall', id: 'spawn-call', name: 'spawn', arguments: {} }]; reply.stopReason = 'toolUse'; }
       // A provider that publishes only its terminal message must also be caught.
       if (mode === 'delta' && requests.length === 1) stream.push({ type: 'text_delta', contentIndex: 0, delta: 'FORBIDDEN', partial: reply });
+      // A file write streams as a provider sends it: the arguments grow delta by delta, then the call ends.
+      const [call] = reply.content;
+      if (mode === 'write' && requests.length === 1 && call?.type === 'toolCall') {
+        const written = String(call.arguments.content);
+        stream.push({ type: 'toolcall_start', contentIndex: 0, partial: { ...reply, content: [{ ...call, arguments: {} }] } });
+        for (let quarter = 1; quarter <= 4; quarter++) {
+          const content = written.slice(0, Math.ceil(written.length * quarter / 4));
+          stream.push({ type: 'toolcall_delta', contentIndex: 0, delta: content, partial: { ...reply, content: [{ ...call, arguments: { ...call.arguments, content } }] } });
+        }
+        stream.push({ type: 'toolcall_end', contentIndex: 0, toolCall: call, partial: reply });
+      }
       stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply }); stream.end(reply);
     }
     return interceptRuntimeModelStream(stream, options?.signal, controller);
@@ -197,6 +208,19 @@ describe('durable rule generation discard', () => {
       expect((await f.harness().snapshot(RuleInterruptionsDoc, f.root.id, BACKGROUND_CONTEXT))?.active ?? null).toBeNull();
     } finally { warning.mockRestore(); await f.harness().close(BACKGROUND_CONTEXT); }
   });
+  it('matches AST rules against a streamed file write once it is complete, never against part of it', async () => {
+    const file = 'export const value = compute();\nexport const other = compute();\n';
+    const seen: string[] = [];
+    const f = await fixture('write', { async loadRules() { return [parseRetainedRule('ast.md', '---\nastCondition: ["dangerous($A)"]\n---\nAST instruction')]; }, async matchAst(_conversationId, content) { seen.push(content); return false; } }, { path: 'src/lib.ts', text: file });
+    try {
+      await f.root.submit({ type: 'input', content: 'Proceed' }, BACKGROUND_CONTEXT);
+      await f.root.waitForIdle(BACKGROUND_CONTEXT);
+      expect(f.effects()).toBe(1);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(new Set(seen)).toEqual(new Set([file]));
+    } finally { await f.harness().close(BACKGROUND_CONTEXT); }
+  });
+
   it('gives an explicit-role child its role-scoped rules rather than main-only instructions', async () => {
     const f = await fixture('spawn', { async loadRules() { return [
       parseRetainedRule('main.md', '---\nagents: main\nalwaysApply: true\n---\nMAIN-ONLY-INSTRUCTION'),

@@ -1,5 +1,5 @@
 /// <reference path="./wasm-modules.d.ts" />
-import { Language, Parser } from 'web-tree-sitter';
+import { Language, Parser, Tree } from 'web-tree-sitter';
 import * as astGrep from '@ast-grep/wasm/wasm_bg.js';
 import astGrepModule from '@ast-grep/wasm/wasm_bg.wasm';
 import treeSitterModule from 'web-tree-sitter/web-tree-sitter.wasm';
@@ -10,6 +10,12 @@ import tsxGrammar from 'tree-sitter-typescript/tree-sitter-tsx.wasm';
 const grammars: Readonly<Record<string, WebAssembly.Module>> = { typescript: typescriptGrammar, tsx: tsxGrammar };
 const languageByExtension: Readonly<Record<string, string>> = { '.ts': 'typescript', '.mts': 'typescript', '.cts': 'typescript', '.js': 'typescript', '.mjs': 'typescript', '.cjs': 'typescript', '.tsx': 'tsx', '.jsx': 'tsx' };
 
+/**
+ * Trees web-tree-sitter made during the current match. ast-grep's binding parses and copies trees but never deletes
+ * them, and tree-sitter's WebAssembly memory never shrinks: 600 matches of a 65 KB file held 1.7 GB, and a rule
+ * checked on every streamed delta of a file write reset its workspace object (2026-10-21). Each match deletes its own.
+ */
+const trees: Tree[] = [];
 let ready: Promise<void> | undefined;
 /**
  * Once per isolate. ast-grep asks web-tree-sitter to start and to load grammars by path; a Worker has neither files
@@ -27,6 +33,18 @@ function initialize(): Promise<void> {
       done(treeSitter, treeSitterModule);
       return treeSitter.exports;
     } });
+    const parse = Parser.prototype.parse;
+    Parser.prototype.parse = function (this: Parser, ...args: Parameters<Parser['parse']>) {
+      const tree = parse.apply(this, args);
+      if (tree) trees.push(tree);
+      return tree;
+    };
+    const copy = Tree.prototype.copy;
+    Tree.prototype.copy = function (this: Tree) {
+      const tree = copy.call(this);
+      trees.push(tree);
+      return tree;
+    };
     const load = Language.load.bind(Language);
     Language.load = input => {
       const grammar = typeof input === 'string' ? grammars[input] : undefined;
@@ -48,10 +66,21 @@ export async function matchAstPatterns(content: string, paths: readonly string[]
   if (!languages.length) return false;
   await initialize();
   for (const language of languages) {
-    const root = astGrep.parse(language, content).root();
-    for (const pattern of patterns) {
-      try { if (root.find(pattern)) return true; }
-      catch (error) { console.warn(`Unsupported AST rule pattern for ${language}: ${pattern}`, error); }
+    // ast-grep's objects live in WebAssembly memory until freed, as do the trees beneath them.
+    const parsed = astGrep.parse(language, content);
+    const root = parsed.root();
+    try {
+      for (const pattern of patterns) {
+        try {
+          const found = root.find(pattern);
+          if (found) { found.free(); return true; }
+        }
+        catch (error) { console.warn(`Unsupported AST rule pattern for ${language}: ${pattern}`, error); }
+      }
+    } finally {
+      root.free();
+      parsed.free();
+      for (const tree of trees.splice(0)) tree.delete();
     }
   }
   return false;
