@@ -25,8 +25,17 @@ const definitionTrees = new Map<string, ArtifactsTreeEntry[]>([
   ['a'.repeat(40), [entry('agents', 'b'.repeat(40), 'tree')]],
   ['b'.repeat(40), [entry('repository.md', 'c'.repeat(40), 'blob')]],
 ]);
-const stream: StreamFunction = (_model, context) => {
+/** Requests the runtime refused, by signal: they fail with the reason, as the cloud router fails them. */
+const refused = new WeakMap<AbortSignal, string>();
+const stream: StreamFunction = (_model, context, options) => {
   const result = createAssistantMessageEventStream();
+  const refusal = options?.signal ? refused.get(options.signal) : undefined;
+  if (refusal !== undefined) {
+    const failure: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason: 'error', errorMessage: refusal, timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    result.push({ type: 'error', reason: 'error', error: failure });
+    result.end();
+    return result;
+  }
   const last = context.messages.findLast(message => message.role !== 'system');
   const text = typeof last?.content === 'string' ? last.content : (last?.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n');
   const ask = last?.role === 'user' && text === 'ask for a color';
@@ -61,6 +70,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
       onReport: error => console.error('RUNTIME_REPORT', String(error)),
       admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
+      refuseRequest: (signal, reason) => { refused.set(signal, reason); },
       bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => {
         if (await ctx.storage.get('fail-binding')) throw new Error('fixture inference binding failed');
         for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');

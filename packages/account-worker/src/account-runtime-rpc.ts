@@ -74,7 +74,7 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
   });
   const session = server.implement(runtimeSessionContract).handler(async ({ input, errors }) => {
     try {
-      const read = ['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'messages', 'transcriptPage', 'transcriptContent', 'usage'].includes(input.command.type);
+      const read = ['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage'].includes(input.command.type);
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, read ? 'rpc.read' : 'session.prompt');
       if (['setWorkspacePhase', 'saveAgentDefinition', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(input.command.type)
         && !deviceCanAdminister(device, 'account.admin')) throw new Error('This session command requires account administration');

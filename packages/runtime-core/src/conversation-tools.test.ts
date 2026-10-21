@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { z } from 'zod';
 import { Type } from 'typebox';
-import { Harness, MemoryStorage, createRegistry, defineExtension, defineTask, defineTool, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
+import { Harness, MemoryStorage, UserEntry, createRegistry, defineExtension, defineTask, defineTool, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
 import { createModels, createAssistantMessageEventStream, type Models, type Model, type Api, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -87,8 +87,32 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
     await child.waitForIdle(context);
     return { output, child };
   }
-  return { harness, root, storage, lifecycle, call, spawned, seen, requests, controls, browserTargets, backgroundReceived: backgroundReceived.promise };
+  return { harness, root, storage, lifecycle, invoke, ownerId, call, spawned, seen, requests, controls, browserTargets, backgroundReceived: backgroundReceived.promise };
 }
+
+test('rewind drops what came after its checkpoint from the model context and keeps what came before', async () => {
+  const f = await fixture();
+  try {
+    const tool = async (name: 'checkpoint' | 'rewind', args: JsonValue) => {
+      const result = await f.invoke({ tool: name, args, conversationId: String(f.root.id), taskId: String(f.ownerId), attemptId: crypto.randomUUID(), requestId: crypto.randomUUID(), replay: 'safe' });
+      const text = result.content.find(part => part.type === 'text');
+      return text?.type === 'text' ? text.text : '';
+    };
+    const say = (content: string) => f.root.commit(tx => tx.appendEntry(UserEntry, f.root.id, { model: [{ role: 'user', content, timestamp: Date.now() }] }), context);
+    await say('EARLY DECISION');
+    const { checkpoint } = z.object({ checkpoint: z.string() }).parse(JSON.parse(await tool('checkpoint', { goal: 'Inspect' })));
+    await say('EXPLORATION ONE');
+    await say('EXPLORATION TWO');
+    expect(await tool('rewind', { checkpoint, report: 'FINDINGS REPORT' })).toBe('Context rewound; immutable history retained.');
+    await f.root.submit({ type: 'input', content: 'continue', requestId: 'after-rewind' }, context);
+    await f.root.waitForIdle(context);
+    const sent = f.seen.at(-1) ?? '';
+    expect(sent).toContain('EARLY DECISION');
+    expect(sent).toContain('FINDINGS REPORT');
+    expect(sent).not.toContain('EXPLORATION ONE');
+    expect(sent).not.toContain('EXPLORATION TWO');
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
 
 test('both agent directories accept declared names and invalid paths explain both choices', () => {
   for (const directory of ['.omp', '.agents']) {

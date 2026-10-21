@@ -52,7 +52,7 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
       tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => '', authorizeCronTool: unsupported, preflight: unsupported },
       operations: { execute: unsupported, reconcile: unsupported, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: unsupported },
       retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
-      onReport: error => { throw error; }, admitInference: unsupported, bindInferenceConversation: async () => undefined,
+      onReport: error => { throw error; }, admitInference: unsupported, bindInferenceConversation: async () => undefined, refuseRequest: unsupported,
       session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported },
       qa: { list: async () => [], act: unsupported },
       attachments: { seal: async secret => secret, open: async secret => secret, dispatch: unsupported },

@@ -10,7 +10,7 @@ import { admitProfileProviders, contextWindowLimits } from './admission.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
-import { claudeCodeFetch } from './claude-code-request.js';
+import { claudeCode } from './claude-code-request.js';
 export * from './selection.js';
 export * from './catalog.js';
 export * from './admission.js';
@@ -71,7 +71,8 @@ function requestAuth(resolved: ResolvedCredential): AuthResult {
 
 /** Each dispatch gets its own Models/auth object; concurrent accounts never share a credential slot. */
 export async function createVaultModels(options: VaultModelsOptions): Promise<VaultModels> {
-  const cloudFetch = await claudeCodeFetch(options.profileId);
+  const claude = await claudeCode(options.profileId);
+  const cloudFetch = claude.fetch;
   const source = options.providers ?? [...builtinProviders().map(provider => withPublishedCatalog(provider)), ...createLegacyCloudProviders()];
   const listed = admitProfileProviders(options.settings ?? {}, source.map(applyProviderCatalog)).map(provider => {
     const pinned = options.pinnedModels?.filter(model => model.provider === provider.id);
@@ -214,13 +215,13 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       return lazyStream(model, async () => {
         rejectOverrides(request);
         return streamAttempts(model, (models, observe) => models.stream<T>(model, context, Object.assign({}, request, {
-          fetch: cloudFetch,
+          fetch: cloudFetch, onPayload: claude.onPayload,
           onResponse: async (response: ProviderResponse, selected: Model<Api>) => { observe(response.status); await request?.onResponse?.(response, selected); },
         })), request?.signal);
       });
     },
     complete: (model, context, request) => facade.stream(model, context, request).result(),
-    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, (models, observe) => models.streamSimple(model, context, { ...request, fetch: cloudFetch, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
+    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, (models, observe) => models.streamSimple(model, context, { ...request, fetch: cloudFetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
     completeSimple: (model, context, request) => facade.streamSimple(model, context, request).result(),
     streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await options.pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
     fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),

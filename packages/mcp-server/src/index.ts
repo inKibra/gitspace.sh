@@ -40,7 +40,7 @@ const excluded = (path: string) => path.startsWith('providers.login.') || [
   'storageIncidents.list', 'storageIncidents.resume',
 ].includes(path);
 const agentSessionCommands = [
-  'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'messages', 'persist', 'handoff', 'resume', 'stop',
+  'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'persist', 'handoff', 'resume', 'stop',
   'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged', 'prompt',
   'setWorkspacePhase', 'cycleRole', 'setModel', 'setThinking', 'setFast', 'setGoal',
   'compact', 'removeQueuedMessage', 'promoteQueuedMessage', 'navigateTree', 'saveAgentDefinition',

@@ -22,6 +22,8 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   // A stub per call: this outlives any one, and one that saw an error stays broken.
   const vault = () => env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const scopes = new WeakMap<AbortSignal, { admission: Admission; models: VaultModels }>();
+  /** Requests a hook stopped, by signal, and why: the request fails with that reason instead of running. */
+  const refusals = new WeakMap<AbortSignal, string>();
   const collections = new Map<string, Promise<VaultModels>>();
   const pinsFor = (profileId: string, conversationId: string): CredentialPins => ({
     async read(provider) { const stored = await ctx.storage.get<unknown>(key('pin', profileId, conversationId, provider)); return stored === undefined ? null : pinSchema.parse(stored); },
@@ -49,6 +51,8 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   // Opening history must neither migrate vault state nor choose a replacement provider.
   // Real collections are registered only by explicit admission or catalog interaction.
   const router = createRunModelsRouter(null, async signal => {
+    const refusal = signal ? refusals.get(signal) : undefined;
+    if (refusal !== undefined) throw new Error(refusal);
     const scope = signal ? scopes.get(signal) : undefined;
     if (!scope) throw new Error('Model request has no durable inference admission');
     signal?.throwIfAborted();
@@ -113,6 +117,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
       return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }), ...(admission.role === undefined ? {} : { role: admission.role }) };
     },
     bindInferenceConversation,
+    refuseRequest(signal: AbortSignal, reason: string) { refusals.set(signal, reason); },
     async describeImages(signal: AbortSignal, messages: readonly Message[]) {
       const scope = scopes.get(signal);
       const model = scope?.models.getModel(scope.admission.model.provider, scope.admission.model.id);

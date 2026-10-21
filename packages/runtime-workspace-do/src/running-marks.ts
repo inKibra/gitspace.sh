@@ -2,6 +2,14 @@ import { createAssistantMessageEventStream, type Context, type Models } from '@e
 
 export type RunningMark = { step: string; detail: string; startedAt: string };
 
+/** Characters of every string in a value (a tool call's arguments: a written file, a command), without serializing it. */
+function textLength(value: unknown): number {
+  if (typeof value === 'string') return value.length;
+  if (Array.isArray(value)) return value.reduce((total: number, item: unknown) => total + textLength(item), 0);
+  if (typeof value === 'object' && value !== null) return Object.values(value).reduce((total: number, item: unknown) => total + textLength(item), 0);
+  return 0;
+}
+
 /**
  * What a workspace object is doing that can exhaust its memory: a model request, a sync merge, a cloud write. A step
  * is recorded before it starts and removed when it settles, so rows still present when the object next opens are what
@@ -9,7 +17,11 @@ export type RunningMark = { step: string; detail: string; startedAt: string };
  */
 export function createRunningMarks(sql: SqlStorage) {
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_running(id TEXT PRIMARY KEY, step TEXT NOT NULL, detail TEXT NOT NULL, started_at INTEGER NOT NULL)');
-  sql.exec('CREATE TABLE IF NOT EXISTS runtime_unfinished(key TEXT PRIMARY KEY, started_at INTEGER NOT NULL)');
+  sql.exec('CREATE TABLE IF NOT EXISTS runtime_unfinished(key TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 1)');
+  // One-time: marks recorded before attempts were counted read as one attempt.
+  if (!sql.exec<{ name: string }>('PRAGMA table_info(runtime_unfinished)').toArray().some(column => column.name === 'attempts')) {
+    sql.exec('ALTER TABLE runtime_unfinished ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1');
+  }
   const leftover = sql.exec<{ step: string; detail: string; started_at: number }>('SELECT step, detail, started_at FROM runtime_running ORDER BY started_at').toArray()
     .map((row): RunningMark => ({ step: row.step, detail: row.detail, startedAt: new Date(row.started_at).toISOString() }));
   if (leftover.length) sql.exec('DELETE FROM runtime_running');
@@ -26,24 +38,30 @@ export function createRunningMarks(sql: SqlStorage) {
     /** What the previous instance was running when it was reset. */
     leftover,
     run,
-    /** One record per key (a conversation's turn, its compaction): still present at `begin`, the previous one never finished. */
+    /** One record per key (a conversation's turn, its compaction) counting attempts that have not finished. */
     unfinished: {
-      begin(key: string): boolean {
-        const previous = sql.exec('SELECT key FROM runtime_unfinished WHERE key=?', key).toArray().length > 0;
-        sql.exec('INSERT OR REPLACE INTO runtime_unfinished(key,started_at) VALUES(?,?)', key, Date.now());
-        return previous;
+      begin(key: string): number {
+        const earlier = sql.exec<{ attempts: number }>('SELECT attempts FROM runtime_unfinished WHERE key=?', key).toArray()[0]?.attempts ?? 0;
+        sql.exec('INSERT OR REPLACE INTO runtime_unfinished(key,started_at,attempts) VALUES(?,?,?)', key, Date.now(), earlier + 1);
+        return earlier;
       },
       end(key: string): void { sql.exec('DELETE FROM runtime_unfinished WHERE key=?', key); },
     },
     /** Model requests are marked from the call until the response stream ends, however the caller consumes it. */
     models(models: Models): Models {
       const describe = (model: { provider: string; id: string }, context: Context) => {
-        let characters = 0;
+        let characters = 0, images = 0, imageCharacters = 0;
         for (const message of context.messages) {
           if (typeof message.content === 'string') { characters += message.content.length; continue; }
-          for (const block of message.content) characters += 'text' in block ? block.text.length : 'thinking' in block ? block.thinking.length : 0;
+          for (const block of message.content) {
+            if (block.type === 'image') { images++; imageCharacters += block.data.length; }
+            else if (block.type === 'toolCall') characters += textLength(block.arguments);
+            else if (block.type === 'text') characters += block.text.length;
+            else if (block.type === 'thinking') characters += block.thinking.length;
+          }
         }
-        return `${model.provider}/${model.id}: ${context.messages.length} messages, ${characters} characters`;
+        const megabytes = (count: number) => `${(count / 1_000_000).toFixed(1)} MB`;
+        return `${model.provider}/${model.id}: ${context.messages.length} messages, ${megabytes(characters + imageCharacters)}${images ? ` (${images} images, ${megabytes(imageCharacters)})` : ''}`;
       };
       return new Proxy(models, {
         get: (target, key, receiver) => {

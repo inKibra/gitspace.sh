@@ -35,7 +35,7 @@ export const RuntimeSubagentRecordSchema = z.object({ parentId: z.string(), name
 export type RuntimeSubagentRecord = z.infer<typeof RuntimeSubagentRecordSchema>;
 export const AgentDefinitionDiagnosticSchema = z.object({ name: z.string(), winnerPath: z.string(), ignoredPath: z.string() });
 export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema), diagnostics: z.array(AgentDefinitionDiagnosticSchema).optional(), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
-const simple = ['control', 'agentSetup', 'historyAnchorId', 'messages', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
+const simple = ['control', 'agentSetup', 'historyAnchorId', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
@@ -61,7 +61,7 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('saveAgentDefinition'), path: z.string(), expectedRevision: z.string().nullable(), content: z.string() }),
 ]);
 export const RuntimeSessionInputSchema = RuntimeIdentitySchema.extend({ conversationId: z.string().optional(), command: RuntimeSessionCommandSchema });
-export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), setup: AgentSetupSchema.optional(), messages: z.array(z.unknown()).optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
+export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;
 export type RuntimeSessionResult = z.infer<typeof RuntimeSessionResultSchema>;

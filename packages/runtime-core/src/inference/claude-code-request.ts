@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Api, Model } from '@earendil-works/pi-ai';
 
 /**
  * Claude subscription (OAuth) requests are billed to the plan only when they look like Claude Code's: pi-ai sends a
@@ -6,7 +7,14 @@ import { z } from 'zod';
  * shape oh-my-pi's Anthropic provider sends (captured from it): Claude Code headers and betas, a JSON
  * `metadata.user_id`, `_`-prefixed tool names, and the billing system block with its `cch` attestation. Tool names in
  * the streamed response are restored. Every other request passes through unchanged.
+ *
+ * The shape is applied to pi-ai's payload object (`onPayload`), before the SDK serializes it once; `fetch` then encodes
+ * that one string to bytes, hashes them and writes the attestation into them. Parsing, copying and re-serializing the
+ * serialized body held several copies of a large conversation at once (two bytes per character), enough to exhaust a
+ * workspace object's memory beside its neighbours'.
  */
+/** The Claude Code release the requests present, in the billing header and the user agent; pi-ai's must match. */
+const CLAUDE_CODE_VERSION = '2.1.280';
 const CLAUDE_CODE_INSTRUCTION = "You are Claude Code, Anthropic's official CLI for Claude.";
 const FINGERPRINT_SALT = '59cf53e54c78';
 const CCH_PLACEHOLDER = 'cch=00000';
@@ -41,6 +49,7 @@ const BodySchema = z.object({
   tool_choice: z.object({ type: z.string(), name: z.string().optional() }).loose().optional(),
   output_config: z.unknown().optional(),
 }).loose();
+const SystemProbeSchema = z.object({ system: z.array(z.object({ text: z.unknown() }).loose()) }).loose();
 const ToolStartSchema = z.object({ type: z.literal('content_block_start'), content_block: z.object({ type: z.literal('tool_use'), name: z.string() }).loose() }).loose();
 
 const MASK = 0xffffffffffffffffn;
@@ -109,23 +118,18 @@ function unprefixToolUse(response: Response): Response {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
-/** Rewrites a pi-ai Claude subscription request to Claude Code's shape; returns undefined for any other request. */
-export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestInit | undefined, identity: { deviceId: string; sessionId: string }): Promise<RequestInit | undefined> {
-  const raw = init?.body;
-  if (typeof raw !== 'string') return undefined;
-  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-  if (!url.startsWith('https://api.anthropic.com/v1/messages')) return undefined;
-  const headers = new Headers(init?.headers);
-  if (!headers.get('authorization')?.startsWith('Bearer sk-ant-oat')) return undefined;
+/** Claude Code's shape on a pi-ai Anthropic subscription payload: pi-ai starts only those with Claude Code's system
+ * block. Any other payload is left as it is (undefined). Strings are shared with pi-ai's payload; only the objects around
+ * them are new. */
+async function shapePayload(payload: unknown, model: Model<Api>, identity: { deviceId: string; sessionId: string }): Promise<unknown> {
+  if (model.api !== 'anthropic-messages') return undefined;
+  const probe = SystemProbeSchema.safeParse(payload);
+  if (!probe.success || probe.data.system[0]?.text !== CLAUDE_CODE_INSTRUCTION) return undefined;
   // Sent as it is, a subscription request is billed as a third-party app's (extra usage), so one that can't take Claude
   // Code's shape is not sent.
-  const version = /^claude-cli\/([^\s(]+)/.exec(headers.get('user-agent') ?? '')?.[1];
-  if (!version) throw new Error('Claude subscription request has no claude-cli user agent; not sent as a third-party request');
-  const parsed = BodySchema.safeParse(JSON.parse(raw));
+  const parsed = BodySchema.safeParse(payload);
   if (!parsed.success) throw new Error(`Claude subscription request has an unexpected shape (${parsed.error.issues.slice(0, 3).map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}); not sent as a third-party request`);
-  if (parsed.data.system[0]?.text !== CLAUDE_CODE_INSTRUCTION) throw new Error("Claude subscription request does not start with Claude Code's system block; not sent as a third-party request");
   const body = parsed.data;
-
   for (const tool of body.tools ?? []) tool.name = prefixed(tool.name);
   if (body.tool_choice?.name) body.tool_choice.name = prefixed(body.tool_choice.name);
   // Tool changes reference tools by name (`tool_addition`/`tool_removal`), so they name the prefixed declarations too.
@@ -137,22 +141,51 @@ export async function claudeCodeRequest(input: RequestInfo | URL, init: RequestI
     if (change.success) Object.assign(block, { tool: { ...change.data.tool, name: prefixed(change.data.tool.name) } });
   }
   body.metadata = { user_id: JSON.stringify({ device_id: identity.deviceId, session_id: identity.sessionId }) };
+  // The SDK sends `betas` as the anthropic-beta header, where fetch orders it as Claude Code does.
+  if (body.output_config !== undefined) body.betas = [...(Array.isArray(body.betas) ? body.betas : []), EFFORT_BETA];
   const firstUser = body.messages.find(message => message.role === 'user')?.content;
   const text = typeof firstUser === 'string' ? firstUser : firstUser?.flatMap(block => { const parsed = TextSchema.safeParse(block); return parsed.success ? [parsed.data.text] : []; })[0] ?? '';
-  const fingerprint = (await sha256Hex(`${FINGERPRINT_SALT}${[4, 7, 20].map(index => text[index] ?? '0').join('')}${version}`)).slice(0, 3);
-  body.system = [{ type: 'text', text: `x-anthropic-billing-header: cc_version=${version}.${fingerprint}; cc_entrypoint=cli; ${CCH_PLACEHOLDER};` }, ...body.system];
-  // The attestation hashes the final body with the placeholder in place, then replaces it in the billing header (message
-  // text serializes first and may contain the same placeholder).
-  const placeholderBody = JSON.stringify(body);
-  const cch = (xxHash64(new TextEncoder().encode(placeholderBody), CCH_SEED) & 0xfffffn).toString(16).padStart(5, '0');
-  const at = placeholderBody.indexOf(CCH_PLACEHOLDER, placeholderBody.indexOf('"system":[{"type":"text","text":"x-anthropic-billing-header:'));
+  const fingerprint = (await sha256Hex(`${FINGERPRINT_SALT}${[4, 7, 20].map(index => text[index] ?? '0').join('')}${CLAUDE_CODE_VERSION}`)).slice(0, 3);
+  body.system = [{ type: 'text', text: `x-anthropic-billing-header: cc_version=${CLAUDE_CODE_VERSION}.${fingerprint}; cc_entrypoint=cli; ${CCH_PLACEHOLDER};` }, ...body.system];
+  return body;
+}
 
-  const betas = (headers.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
-  headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(body.output_config === undefined ? [] : [EFFORT_BETA]), ...betas])].join(','));
-  headers.set('user-agent', `claude-cli/${version} (external, cli)`);
+const encoder = new TextEncoder();
+const BILLING_BLOCK = encoder.encode('"system":[{"type":"text","text":"x-anthropic-billing-header:');
+const PLACEHOLDER_BYTES = encoder.encode(CCH_PLACEHOLDER);
+function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): number {
+  const first = needle[0];
+  if (first === undefined) return from;
+  for (let index = haystack.indexOf(first, from); index !== -1 && index + needle.length <= haystack.length; index = haystack.indexOf(first, index + 1)) {
+    let offset = 1;
+    while (offset < needle.length && haystack[index + offset] === needle[offset]) offset++;
+    if (offset === needle.length) return index;
+  }
+  return -1;
+}
+
+/** The bytes and headers a shaped subscription request goes out with: the attestation hashes the serialized body with
+ * the placeholder in place, then is written over that placeholder in the billing block (message text serializes first
+ * and may contain the same placeholder). */
+function attest(body: unknown, incoming: Headers, identity: { sessionId: string }): { headers: Headers; body: Uint8Array<ArrayBuffer> } {
+  const version = /^claude-cli\/([^\s(]+)/.exec(incoming.get('user-agent') ?? '')?.[1];
+  if (!version) throw new Error('Claude subscription request has no claude-cli user agent; not sent as a third-party request');
+  if (version !== CLAUDE_CODE_VERSION) throw new Error(`pi-ai presents Claude Code ${version} but requests are shaped as ${CLAUDE_CODE_VERSION}; update CLAUDE_CODE_VERSION. Not sent as a third-party request`);
+  if (typeof body !== 'string') throw new Error('Claude subscription request body is not serialized JSON; not sent as a third-party request');
+  const bytes = encoder.encode(body);
+  const block = indexOfBytes(bytes, BILLING_BLOCK);
+  if (block === -1) throw new Error("Claude subscription request does not start with Claude Code's system block; not sent as a third-party request");
+  const at = indexOfBytes(bytes, PLACEHOLDER_BYTES, block);
+  if (at === -1) throw new Error('Claude subscription billing block has no attestation placeholder; not sent as a third-party request');
+  const cch = (xxHash64(bytes, CCH_SEED) & 0xfffffn).toString(16).padStart(5, '0');
+  for (let index = 0; index < cch.length; index++) bytes[at + 'cch='.length + index] = cch.charCodeAt(index);
+  const headers = new Headers(incoming);
+  const betas = (incoming.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
+  headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(betas.includes(EFFORT_BETA) ? [EFFORT_BETA] : []), ...betas])].join(','));
+  headers.set('user-agent', `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`);
   headers.set('x-claude-code-session-id', identity.sessionId);
   for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS)) headers.set(name, value);
-  return { ...init, headers, body: `${placeholderBody.slice(0, at)}cch=${cch}${placeholderBody.slice(at + CCH_PLACEHOLDER.length)}` };
+  return { headers, body: bytes };
 }
 
 const CLAUDE_CODE_BLOCKS: Record<string, true> = { text: true, image: true, document: true, tool_use: true, tool_result: true, thinking: true, redacted_thinking: true, tool_addition: true, tool_removal: true };
@@ -174,20 +207,27 @@ function requestShape(body: string): JsonShape {
   return { bytes: body.length, messages: parsed.data.messages.length, tools: parsed.data.tools?.length ?? 0, systemBlocks: parsed.data.system.length, counts, unusual };
 }
 type JsonShape = { [key: string]: string | number | boolean | Record<string, number> | JsonShape[] };
-/** Fetch for admitted credentials: never follows redirects; Claude subscription requests go out as Claude Code. */
-export async function claudeCodeFetch(profileId: string): Promise<typeof fetch> {
+/** Transport for admitted credentials: `fetch` never follows redirects, and with `onPayload` Claude subscription
+ * requests go out as Claude Code's. */
+export async function claudeCode(profileId: string): Promise<{ fetch: typeof fetch; onPayload(payload: unknown, model: Model<Api>): Promise<unknown> }> {
   const identity = { deviceId: await sha256Hex(`gitspace-claude-device-v1:${profileId}`), sessionId: crypto.randomUUID() };
-  return async (input, init) => {
-    let rewritten: RequestInit | undefined;
-    // A refused request answers as Anthropic's own 400 would: the SDK reports a throw from fetch as a retried
-    // "Connection error." and drops the reason.
-    try { rewritten = await claudeCodeRequest(input, init, identity); }
-    catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
-    const response = await fetch(input, { ...(rewritten ?? init), redirect: 'manual' });
-    if (rewritten && response.status >= 400 && typeof rewritten.body === 'string') {
-      const text = await response.clone().text();
-      if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: new Headers(rewritten.headers).get('anthropic-beta'), shape: requestShape(rewritten.body) }));
-    }
-    return rewritten ? unprefixToolUse(response) : response;
+  return {
+    onPayload: (payload, model) => shapePayload(payload, model, identity),
+    async fetch(input, init) {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const headers = new Headers(init?.headers);
+      if (!url.startsWith('https://api.anthropic.com/v1/messages') || !headers.get('authorization')?.startsWith('Bearer sk-ant-oat')) return fetch(input, { ...init, redirect: 'manual' });
+      let sent: { headers: Headers; body: Uint8Array<ArrayBuffer> };
+      // A refused request answers as Anthropic's own 400 would: the SDK reports a throw from fetch as a retried
+      // "Connection error." and drops the reason.
+      try { sent = attest(init?.body, headers, identity); }
+      catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
+      const response = await fetch(input, { ...init, headers: sent.headers, body: sent.body, redirect: 'manual' });
+      if (response.status >= 400) {
+        const text = await response.clone().text();
+        if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: sent.headers.get('anthropic-beta'), shape: requestShape(new TextDecoder().decode(sent.body)) }));
+      }
+      return unprefixToolUse(response);
+    },
   };
 }

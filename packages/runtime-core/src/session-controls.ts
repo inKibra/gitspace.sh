@@ -1,4 +1,4 @@
-import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryId, type Cursor } from '@earendil-works/pi-durable';
+import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryId } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
@@ -154,20 +154,6 @@ export function createSessionControls(services: SessionControlServices) {
       }
     }, ctx);
   }
-  async function messages(target: Conversation): Promise<NonNullable<RuntimeSessionResult['messages']>> {
-    const values: NonNullable<RuntimeSessionResult['messages']> = [];
-    let cursor: Cursor | undefined;
-    do {
-      // Pi has no model/kind scan filter. Discard each bounded passive-payload page
-      // immediately; reverse messages within entries as well as the final result.
-      const page = await target.entries({}, 128, cursor, ctx);
-      for (const entry of page.items) {
-        for (let index = (entry.model?.length ?? 0) - 1; index >= 0; index--) values.push(entry.model![index]!);
-      }
-      cursor = page.next;
-    } while (cursor);
-    return values.reverse();
-  }
   async function control(target: Conversation): Promise<SessionControlView> {
     await target.commit(async tx => { await tx.doc(SessionControlsDoc, target.id); }, ctx);
     const [state, agent, inbox, usage, todos, questions, history, catalog, workspace] = await Promise.all([harness.snapshot(SessionControlsDoc, target.id, ctx), target.agent(ctx), harness.snapshot(InboxDoc, target.id, ctx), harness.snapshot(UsageDoc, target.id, ctx), harness.snapshot(TodosDoc, target.id, ctx), harness.snapshot(QuestionsDoc, ctx), services.history.recent(target.id), services.catalog(), harness.snapshot(WorkspaceDoc, ctx)]);
@@ -191,7 +177,7 @@ export function createSessionControls(services: SessionControlServices) {
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
     const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child;
-    if (child && !['control', 'agentSetup', 'historyAnchorId', 'messages', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'stop'].includes(command.type)) {
+    if (child && !['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'stop'].includes(command.type)) {
       throw new Error('Subagents accept inspection and scoped Stop only; target the workspace main conversation for user messages and mutations');
     }
     if (!child && ['agentSetup', 'saveAgentDefinition', 'prompt', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(command.type)) await loadDefinitions(target);
@@ -306,14 +292,13 @@ export function createSessionControls(services: SessionControlServices) {
       case 'reloadSettings': case 'instructionsChanged': case 'inferenceChanged': { const kind = command.type === 'reloadSettings' ? 'settings' : command.type === 'instructionsChanged' ? 'instructions' : 'inference'; await services.reload(kind); await mutate(draft => { if (kind === 'settings') draft.settingsRevision++; else if (kind === 'instructions') draft.instructionsRevision++; else draft.inferenceRevision++; }); break; }
       case 'resume': harness.resume(); break;
       case 'persist': case 'handoff': await mutate(draft => { draft.revision++; }); break;
-      case 'control': case 'agentSetup': case 'historyAnchorId': case 'messages': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': break;
+      case 'control': case 'agentSetup': case 'historyAnchorId': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': break;
     }
     const result: RuntimeSessionResult = { control: await control(target) };
     if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') {
       const state = await harness.snapshot(SessionControlsDoc, target.id, ctx);
       result.setup = { sessionId: String(target.id), ...(child ? { agents: child.definition ? [{ ...child.definition, editable: false }] : [], diagnostics: [], definitionErrors: [] } : { ...resolveAgentDefinitions(state?.definitions ?? []), definitionErrors: state?.definitionErrors ?? [] }) };
     }
-    if (command.type === 'messages') result.messages = await messages(target);
     if (command.type === 'historyPage') result.historyPage = await services.history.page(target.id, command.request);
     if (command.type === 'transcriptPage') result.transcriptPage = await services.history.transcriptPage(target.id, command.request);
     if (command.type === 'transcriptContent') result.transcriptContent = await services.history.transcriptContent(target.id, command.request);

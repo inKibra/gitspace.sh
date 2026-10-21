@@ -1,4 +1,4 @@
-import { defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryRecord } from '@earendil-works/pi-durable';
+import { defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryId } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
@@ -35,10 +35,19 @@ export function createConversationTools(options: ConversationToolOptions) {
     }
     return { self, members };
   }
-  async function entries(id: ConversationId) {
-    const result: EntryRecord[] = []; let cursor: Cursor | undefined;
-    do { const page = await storage.scanEntries({ conversationId: id }, 128, cursor, context); result.push(...page.items); cursor = page.next; } while (cursor);
-    return result;
+  /** The entries after a checkpoint, scanned newest first only back to it (one page held at a time); null when `checkpoint`
+   * is not one of this conversation's checkpoints. */
+  async function since(id: ConversationId, checkpoint: string): Promise<EntryId[] | null> {
+    const after: EntryId[] = []; let cursor: Cursor | undefined;
+    do {
+      const page = await storage.scanEntries({ conversationId: id, order: 'descending' }, 128, cursor, context);
+      for (const entry of page.items) {
+        if (String(entry.id) === checkpoint) return entry.kind === 'gitspace.checkpoint' ? after : null;
+        after.push(entry.id);
+      }
+      cursor = page.next;
+    } while (cursor);
+    return null;
   }
   return async (input: Parameters<ToolServices['invoke']>[0]): Promise<RuntimeToolResult> => {
     const target = await resolve(input.conversationId);
@@ -138,9 +147,9 @@ export function createConversationTools(options: ConversationToolOptions) {
       output = JSON.stringify({ checkpoint: anchor });
     } else if (input.tool === 'rewind') {
       const args = RuntimeRewindArgumentsSchema.parse(input.args);
-      const all = await entries(target.id); const index = all.findIndex(entry => String(entry.id) === args.checkpoint && entry.kind === 'gitspace.checkpoint');
-      if (index < 0) throw new Error('Context checkpoint not found');
-      await target.commit(tx => tx.appendEntry(target.id, { kind: 'gitspace.rewind', edits: all.slice(index + 1).map(entry => ({ target: entry.id, action: 'omit' as const })), model: [{ role: 'user', content: args.report, timestamp: Date.now() }] }), context);
+      const omitted = await since(target.id, args.checkpoint);
+      if (!omitted) throw new Error('Context checkpoint not found');
+      await target.commit(tx => tx.appendEntry(target.id, { kind: 'gitspace.rewind', edits: omitted.map(entry => ({ target: entry, action: 'omit' as const })), model: [{ role: 'user', content: args.report, timestamp: Date.now() }] }), context);
       output = 'Context rewound; immutable history retained.';
     } else throw new Error('Not a conversation tool');
     return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: output }] };
