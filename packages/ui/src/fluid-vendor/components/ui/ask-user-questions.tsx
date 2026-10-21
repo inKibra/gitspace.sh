@@ -10,6 +10,7 @@ import {
   useState,
   type HTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { RadioGroup as RadioGroupPrimitive } from "@base-ui/react/radio-group";
@@ -99,6 +100,10 @@ export interface AskUserQuestionsProps
   onComplete?: (answers: Record<string, AskUserAnswer>) => void;
   onSkip?: (questionId: string, currentIndex: number) => void;
   skipLabel?: string;
+  /** Renders a question's text in place of the heading: a long or formatted
+   *  question (an agent writes Markdown) reads at body size instead of as one
+   *  bold heading. */
+  renderTitle?: (title: string) => ReactNode;
   /** Pins the flow to one step of the size ladder (default 36px, compact
    *  28px — see /docs/sizes). Omitted, it follows the surrounding
    *  SizeProvider. */
@@ -140,6 +145,7 @@ const AskUserQuestions = forwardRef<HTMLDivElement, AskUserQuestionsProps>(
       onComplete,
       onSkip,
       skipLabel = "Skip",
+      renderTitle,
       size,
       className,
       ...rest
@@ -1317,13 +1323,19 @@ const AskUserQuestions = forwardRef<HTMLDivElement, AskUserQuestionsProps>(
             >
               <div key={qId} className="flex flex-col gap-2">
               {/* Question title */}
-              <h3
-                id={`${reactId}-${qId}-title`}
-                className="text-[16px] text-foreground leading-snug"
-                style={{ fontVariationSettings: fontWeights.semibold }}
-              >
-                {question.title}
-              </h3>
+              {renderTitle ? (
+                <div id={`${reactId}-${qId}-title`} className="text-[14px] text-foreground leading-relaxed">
+                  {renderTitle(question.title)}
+                </div>
+              ) : (
+                <h3
+                  id={`${reactId}-${qId}-title`}
+                  className="text-[16px] text-foreground leading-snug"
+                  style={{ fontVariationSettings: fontWeights.semibold }}
+                >
+                  {question.title}
+                </h3>
+              )}
 
               {/* freeText: a single open-ended textarea is the whole answer —
                   no option rows, no chips. It auto-focuses (see the freeText

@@ -253,6 +253,7 @@ export function AskBlockView({ item, onAnswer, state, onStateChange }: { item: A
       currentIndex={interaction.questionIndex}
       onCurrentIndexChange={(questionIndex) => update({ questionIndex })}
       onComplete={onAnswer ? complete : undefined}
+      renderTitle={(prompt) => <GitSpaceMarkdown>{prompt}</GitSpaceMarkdown>}
     />
     {error ? <p role="alert" className="mt-2 text-caption text-destructive [overflow-wrap:anywhere]">{error}</p> : null}
   </div>;
