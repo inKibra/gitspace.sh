@@ -2,7 +2,7 @@ import { providerErrorText } from '@gitspace/blocks';
 import { createWithdrawnNotices } from './withdrawn-notices.js';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication } from '@earendil-works/pi-durable';
-import { defineDoc } from '@earendil-works/pi-durable';
+import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
 import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, QuestionsDoc, WorkspaceDoc, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
@@ -225,6 +225,17 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const dirtyConversations = new Set<ConversationId>();
   const taskViews = new Map<number, { status: StoredTask['state']['status']; view: TaskView }>();
   const dirtyTasks = new Map<number, StoredTask>();
+  // Each conversation's newest generation and its error when it failed. A generation can fail with no assistant reply
+  // (a step before or around the model request threw, as after a reset), which read as idle with no reason at all.
+  const latestGenerations = new Map<string, { id: number; failure: string | null }>();
+  function noteGeneration(task: StoredTask): void {
+    if (task.kind !== GenerationTask.definition.name) return;
+    const id = Number(task.id), conversationId = String(task.conversationId);
+    if ((latestGenerations.get(conversationId)?.id ?? -1) > id) return;
+    const outcome = task.state.status === 'terminal' ? task.state.outcome : null;
+    // `faulted` is an uncaught throw in a step; `failed` one the generation committed itself (a model error).
+    latestGenerations.set(conversationId, { id, failure: outcome?.status === 'failed' || outcome?.status === 'faulted' ? outcome.error.message : outcome?.status === 'orphaned' ? outcome.reason : null });
+  }
   let conversationsLoaded = false;
   let tasksLoaded = false;
   // Agent counts of the last rebuild, read live from tasks and questions.
@@ -300,13 +311,13 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         let taskCursor: Cursor | undefined = status === 'terminal' && terminalFloor !== undefined ? { after: terminalFloor - 1 } : undefined;
         do {
           const page = await storage.scanTasks({ status }, 128, taskCursor, BACKGROUND_CONTEXT);
-          for (const task of page.items) taskViews.set(Number(task.id), { status: task.state.status, view: taskView(task) });
+          for (const task of page.items) { taskViews.set(Number(task.id), { status: task.state.status, view: taskView(task) }); noteGeneration(task); }
           taskCursor = status === 'terminal' ? undefined : page.next;
         } while (taskCursor);
       }
       tasksLoaded = true;
     }
-    for (const [id, task] of dirtyTasks) taskViews.set(id, { status: task.state.status, view: taskView(task) });
+    for (const [id, task] of dirtyTasks) { taskViews.set(id, { status: task.state.status, view: taskView(task) }); noteGeneration(task); }
     dirtyTasks.clear();
     const terminal = [...taskViews].flatMap(([id, task]) => task.status === 'terminal' ? [id] : []).sort((left, right) => left - right);
     for (const id of terminal.slice(0, Math.max(0, terminal.length - TERMINAL_TASK_WINDOW))) taskViews.delete(id);
@@ -337,7 +348,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     await refreshTasks();
     const questions = await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT);
     // Working means a live task right now, never a flag an earlier rebuild stored; a blocked task cannot run.
-    const views = [...conversationViews.values()];
+    // The newest generation decides; the transcript's failed reply speaks only for a conversation whose generations
+    // are past the loaded task window.
+    const views = [...conversationViews.values()].map(view => {
+      const generation = latestGenerations.get(view.id);
+      return generation === undefined ? view : { ...view, failure: generation.failure === null ? null : providerErrorText(generation.failure) };
+    });
     const activity = agentActivity({ conversations: views, tasks: inspection.tasks.flatMap(task => task.state.kind === 'blocked' ? [] : [{ conversationId: String(task.record.conversationId), background: task.record.background }]), questions: questions?.items ?? [] });
     agents = agentCounts(views, activity);
     const conversations: RuntimeSnapshot['conversations'] = [];

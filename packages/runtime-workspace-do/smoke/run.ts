@@ -105,13 +105,14 @@ try {
   assert.equal(summary(failed).primaryColor, 'red', 'A failed main agent is not red');
   console.log('PASS failed model request surfaces its error and turns the workspace red');
 
+
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
   for (const surface of ['session', 'answer'] as const) {
     const before = assistantReplies(RuntimeSnapshotSchema.parse(await request('/')));
     await request(`/submit?text=ask%20for%20a%20color&requestId=ask-${surface}`);
     const pending = await until(snapshot => snapshot.questions.some(question => question.kind === 'ask' && question.answer === null));
     const question = pending.questions.find(item => item.kind === 'ask' && item.answer === null)!;
-    assert.equal(summary(pending).primaryColor, 'blue', 'A question for the user is not blue');
+    assert.equal(summary(pending).primaryColor, 'orange', 'A question for the user is not amber');
     await worker.dispose();
     worker = new Miniflare(options);
     const recovered = (await session({ type: 'control' })).control;
@@ -280,6 +281,17 @@ try {
   const noticePage = JSON.stringify((await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, noticed.conversationId)).transcriptPage!.rows);
   assert(!noticePage.includes('Sync with Darktop failed') && noticePage.includes('Machine Darktop went offline.'), 'Withdrawn sync notices still in the history');
   console.log('PASS past sync-failure notices are withdrawn from the chat and history on reopen');
+
+  // A generation can fail before any reply exists (a step around the request threw, as after a reset): it shows why,
+  // and the next turn that runs clears it.
+  await request('/fail-binding');
+  await request('/submit?text=bind%20fails');
+  const unbound = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed' && (item.error ?? '').includes('fixture inference binding failed')));
+  assert.equal(summary(unbound).primaryColor, 'red', 'A generation that failed without a reply is not red');
+  await request('/fail-binding?on=false');
+  await request('/submit?text=recover');
+  await until(snapshot => !snapshot.conversations.some(item => item.status === 'failed'));
+  console.log('PASS a generation that fails without a reply surfaces its error until the next turn runs');
 } finally {
   try { await worker?.dispose(); } finally { await rm(directory, { recursive: true, force: true }); }
 }

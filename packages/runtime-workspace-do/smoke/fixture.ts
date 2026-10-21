@@ -62,6 +62,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       onReport: error => console.error('RUNTIME_REPORT', String(error)),
       admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
       bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => {
+        if (await ctx.storage.get('fail-binding')) throw new Error('fixture inference binding failed');
         for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');
       },
       session: { catalog: async () => ({ inference: { profileId: 'fixture-profile', profileName: 'Fixture', profileRevision: 1, assignmentRevision: 1 }, models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [{ id: 'scout', label: 'Scout', provider: 'fixture', model: 'fixture', thinking: null, current: false }] }), reload: unsupported },
@@ -75,6 +76,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
     try {
       const runtime = await this.runtime;
       const url = new URL(request.url);
+      if (url.pathname === '/fail-binding') { await this.ctx.storage.put('fail-binding', url.searchParams.get('on') !== 'false'); return Response.json({ armed: url.searchParams.get('on') !== 'false' }); }
       if (url.pathname === '/enable-definitions') { await this.ctx.storage.put('definitions-enabled', true); return Response.json({ enabled: true }); }
       if (url.pathname === '/draft') return Response.json(await runtime.saveDraft(WorkspaceDraftSaveSchema.parse(await request.json()), request.headers.get('x-fixture-device') ?? 'fixture-browser'));
       if (url.pathname === '/events') {
