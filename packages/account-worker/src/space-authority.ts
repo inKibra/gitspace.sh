@@ -326,14 +326,14 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return this.runtime;
   }
 
-  /** Running work an immediate restart would cut off: a working conversation, or a marked step (model request, sync
-   * merge, cloud write). An instance that never opened its runtime runs neither. */
+  /** Running work an immediate restart would cut off: a live foreground pi task (a generation, a tool, the next round
+   * between them) or a marked step (sync merge, cloud write). Read from storage, not the status summary, which a
+   * rebuild updates later. An instance that never opened its runtime runs neither. */
   private async running(): Promise<boolean> {
     if (!this.runtime) return false;
-    const runtime = await this.runtime.catch(() => null);
-    if (!runtime) return false;
-    if ((await runtime.status()).summary.agents.green > 0) return true;
-    return this.ctx.storage.sql.exec('SELECT id FROM runtime_running LIMIT 1').toArray().length > 0;
+    if (!(await this.runtime.catch(() => null))) return false;
+    return this.ctx.storage.sql.exec("SELECT id FROM tasks WHERE status != 'terminal' AND background = 0 LIMIT 1").toArray().length > 0
+      || this.ctx.storage.sql.exec('SELECT id FROM runtime_running LIMIT 1').toArray().length > 0;
   }
 
   /**

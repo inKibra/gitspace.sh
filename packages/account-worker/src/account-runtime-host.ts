@@ -1,4 +1,3 @@
-import { CompactionTask, GenerationTask } from '@earendil-works/pi-durable';
 import type { WorkspaceEnvironment } from './space-environment.js';
 import { createDocumentMarkdown } from './document-markdown.js';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
@@ -76,10 +75,11 @@ export async function createAccountWorkspaceRuntime(
   const base = metadata().kind === 'base';
   // A project's base space has no phase; it is never plan-locked.
   const workspacePhase = base ? 'code' : metadata().phase ?? 'plan';
-  // Model work a reset interrupted (live generation or compaction tasks), which pi retries as the runtime opens. pi's
-  // `tasks` table exists from the workspace's first open on.
+  // Conversations with live foreground work as the runtime opens: pi retries an interrupted generation, and a live tool's
+  // completion starts the conversation's next one, both before any hook binds its model. pi's `tasks` table exists from
+  // the workspace's first open on.
   const tasksTable = ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").toArray().length > 0;
-  const retrying = tasksTable ? ctx.storage.sql.exec<{ conversation_id: number }>("SELECT DISTINCT conversation_id FROM tasks WHERE status != 'terminal' AND kind IN (?, ?)", GenerationTask.definition.name, CompactionTask.definition.name).toArray().map(row => String(row.conversation_id)) : [];
+  const retrying = tasksTable ? ctx.storage.sql.exec<{ conversation_id: number }>("SELECT DISTINCT conversation_id FROM tasks WHERE status != 'terminal' AND background = 0").toArray().map(row => String(row.conversation_id)) : [];
   const inference = await createCloudRuntimeInference(ctx, env, identity, retrying);
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
