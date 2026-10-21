@@ -39,9 +39,9 @@ export function agentCounts(conversations: LiveAgents['conversations'], activity
   for (const conversation of conversations) {
     const main = conversation.parentId === null;
     switch (activity.get(conversation.id) ?? 'idle') {
-      case 'approval': agents.orange += 1; break;
+      // Both wait on a person: amber.
+      case 'approval': case 'question': agents.orange += 1; break;
       case 'working': agents.green += 1; break;
-      case 'question': agents.blue += 1; break;
       case 'failed': if (main) agents.red += 1; break;
       case 'idle': if (main) agents.blue += 1; break;
     }

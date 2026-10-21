@@ -79,6 +79,11 @@ function toolTarget(tool: string, args: Record<string, unknown>): string | undef
   return undefined;
 }
 function askQuestions(args: Record<string, unknown>): AskBlock['questions'] {
+  // GitSpace's `ask` asks one question: `prompt`, answered from `choices` or free text.
+  if (typeof args.prompt === 'string') {
+    const choices = Array.isArray(args.choices) ? args.choices.filter((choice): choice is string => typeof choice === 'string') : [];
+    return [{ id: 'question-1', prompt: args.prompt, ...(choices.length ? { options: choices.map((choice) => ({ id: choice, title: choice })) } : {}) }];
+  }
   if (!Array.isArray(args.questions)) return [];
   return args.questions.flatMap((rawQuestion, index) => {
     const question = record(rawQuestion);

@@ -164,10 +164,12 @@ export function projectNotice(watch: ProjectWatch, report: WorkspaceReport): str
   const name = `Workspace ${watch.name}`;
   switch (report.summary.primaryColor) {
     case 'red': return `${name} failed: ${report.failure ?? 'open it to see why'}`;
-    case 'orange': return report.waitingOn?.kind === 'approval' ? `${name} needs approval: ${report.waitingOn.prompt}` : `${name} has a sync conflict.`;
+    case 'orange':
+      if (report.waitingOn?.kind === 'approval') return `${name} needs approval: ${report.waitingOn.prompt}`;
+      return report.waitingOn?.kind === 'ask' ? `${name} asked: ${report.waitingOn.prompt}` : `${name} has a sync conflict.`;
     case 'blue':
       if (watch.color !== 'green') return null;
-      return report.waitingOn?.kind === 'ask' ? `${name} asked: ${report.waitingOn.prompt}` : `${name} finished its turn${report.lastReply ? `: ${report.lastReply}` : '.'}`;
+      return `${name} finished its turn${report.lastReply ? `: ${report.lastReply}` : '.'}`;
     case 'green': case 'dim': return null;
   }
 }

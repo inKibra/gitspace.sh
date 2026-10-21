@@ -29,13 +29,13 @@ test('a live foreground task is green; background work alone is not', () => {
   expect(background.statuses).toEqual({ main: 'idle' });
 });
 
-test('an approval waiting on a person is orange even while its task runs; a question waits blue', () => {
+test('a question or approval waiting on a person is orange even while its task runs', () => {
   const tasks = [{ conversationId: 'main', background: false }];
   const approval = summarize({ conversations: [main], tasks, questions: [{ conversationId: 'main', kind: 'approval', answer: null }] });
   expect(approval.summary.primaryColor).toBe('orange');
   expect(approval.statuses).toEqual({ main: 'waiting' });
   const question = summarize({ conversations: [main], tasks, questions: [{ conversationId: 'main', kind: 'ask', answer: null }] });
-  expect(question.summary.primaryColor).toBe('blue');
+  expect(question.summary.primaryColor).toBe('orange');
   const answered = summarize({ conversations: [main], tasks, questions: [{ conversationId: 'main', kind: 'approval', answer: true }] });
   expect(answered.summary.primaryColor).toBe('green');
 });

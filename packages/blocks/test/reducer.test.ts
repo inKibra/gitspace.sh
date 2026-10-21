@@ -131,6 +131,17 @@ describe('reduceTranscriptToTurns', () => {
     }));
   });
 
+  it("projects GitSpace's single-question ask with its choices", () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'ask-1', toolName: 'ask', args: { prompt: 'Push now?', choices: ['Push', 'Wait'] } } },
+    ]);
+    expect(turns[0]?.items[0]).toEqual(expect.objectContaining({
+      type: 'ask', status: 'pending',
+      questions: [{ id: 'question-1', prompt: 'Push now?', options: [{ id: 'Push', title: 'Push' }, { id: 'Wait', title: 'Wait' }] }],
+    }));
+  });
+
   it('retains submitted ask answers in the completed block', () => {
     const turns = reduceTranscriptToTurns([
       { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
