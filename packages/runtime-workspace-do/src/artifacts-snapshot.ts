@@ -22,6 +22,13 @@ export class GitDiscoveryError extends Error {
   get needsCredentials(): boolean { return this.status === 401 || this.status === 403 || this.status === 404; }
 }
 
+/** A failed Git HTTP response as a message: its status and the start of its body, the server's own reason (Artifacts
+ * answers a failed upload-pack with 500 and a text body). */
+async function gitHttpFailure(operation: string, response: Response): Promise<string> {
+  const reason = await response.text().then(text => text.trim().slice(0, 300), () => '');
+  return `${operation} failed (${response.status})${reason ? `: ${reason}` : ''}`;
+}
+
 /** Credentials travel only in headers, on every request of a transfer; never in the remote URL, which must be a
  * plain HTTPS repository root. */
 function gitRemote(url: string): URL {
@@ -99,7 +106,7 @@ export async function publishSnapshotPack(input: { remote: string; auth: GitHttp
   input.signal?.throwIfAborted();
   input.onPublicationState?.('unknown');
   const response = await request(`${base}/git-receive-pack`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/x-git-receive-pack-request', Accept: 'application/x-git-receive-pack-result' }, body, signal: input.signal, redirect: 'manual' });
-  if (!response.ok) throw new Error(`Git push failed (${response.status})`);
+  if (!response.ok) throw new Error(await gitHttpFailure('Git push', response));
   const status = packets(new Uint8Array(await response.arrayBuffer())).map(line => line.trimEnd());
   if (status.some(line => line.startsWith(`ng ${input.ref} `)) && !status.includes(`ok ${input.ref}`)) input.onPublicationState?.('not-published');
   if (!status.includes('unpack ok') || !status.includes(`ok ${input.ref}`)) throw new Error(`Git push rejected: ${status.join('; ')}`);
@@ -332,7 +339,7 @@ async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null;
     method: 'POST', headers: { ...gitAuthorizationHeaders(input.auth), ...(version2 ? { 'Git-Protocol': 'version=2' } : {}), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
     body: concatBytes(parts), signal: input.signal, redirect: 'manual',
   });
-  if (!response.ok) throw new Error(`Git fetch failed (${response.status})`);
+  if (!response.ok) throw new Error(await gitHttpFailure('Git fetch', response));
   if (!response.body) throw new Error('Git fetch returned no pack');
   const chunks = streamBytes(response.body, input.signal);
   const reader = new PacketReader(chunks);
