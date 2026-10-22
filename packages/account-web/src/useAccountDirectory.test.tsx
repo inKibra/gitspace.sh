@@ -3,27 +3,19 @@ import type { SpacePlacementView } from '@gitspace/protocol';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import type { StreamEvent } from '@gitspace/protocol-sync';
-import type { BaseSpaceViewCodec, WorkspaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import { SidebarProvider } from '@gitspace/ui';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { InputOf } from 'result-rpc';
-import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { AppSidebar } from './AppSidebar.js';
 import type { ProjectLifecycleView } from './GitSpaceShell.js';
 import { ACCOUNT_DIRECTORY_CHANGED, type ProductRoute } from './routes.js';
-import { useWorkspaceProjection, type Directory, type DirectoryClient, type WorkspaceProjection } from './useAccountDirectory.js';
+import { useWorkspaceProjection, type Directory, type WorkspaceProjection } from './useAccountDirectory.js';
 import { SynchronizationContext, useAccountMachines, useAccountProjects } from './SynchronizationProvider.js';
 import { SynchronizationOwner, type SynchronizationSource } from './synchronization.js';
 import { WorkspaceStatuses } from './workspace-statuses.js';
 
 type DirectoryProject = Pick<ProjectLifecycleView, 'id' | 'name' | 'lifecycle'>;
-type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
-interface RuntimeSnapshot {
-  baseSpace: Mutable<InputOf<typeof BaseSpaceViewCodec>>;
-  workspaces: Array<Mutable<InputOf<typeof WorkspaceViewCodec>>>;
-}
-type RuntimeReply = { status: 'ok'; value: RuntimeSnapshot } | { status: 'error'; error: Error };
 interface Fixture {
   projects: DirectoryProject[];
   saved: { a: CloudWorkspaceDefinition[]; b: CloudWorkspaceDefinition[] };
@@ -31,10 +23,7 @@ interface Fixture {
   cloud: Set<string>;
   placements: Array<{ -readonly [Key in keyof SpacePlacementView]: SpacePlacementView[Key] }>;
   machines: Array<{ id: string; label: string; state: 'online' | 'offline'; desiredState: 'online' | 'offline' }>;
-  runtime: RuntimeSnapshot;
-  failures: { directory: string | null; runtime: string | null };
-  spaceView: Mock<() => Promise<RuntimeReply>>;
-  client: DirectoryClient;
+  failures: { directory: string | null };
   source: SynchronizationSource<AccountDirectorySnapshot>;
   revisions: Record<string, number>;
   publish: () => void;
@@ -42,6 +31,9 @@ interface Fixture {
 const working = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
 const waiting = { ...working, primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 } };
 
+let statuses: WorkspaceStatuses;
+
+/** Project `a` and its worktree are open on the desk machine with working status rows; project `b` is released. */
 function fixture(): Fixture {
   const projects = [{ id: 'a', name: 'Alpha', lifecycle: 'active' as const }, { id: 'b', name: 'Beta', lifecycle: 'active' as const }];
   const savedMetadata = { sourceKind: 'base' as const, sourceRef: 'main', sourceCommit: null, lifecycle: 'active' as const, goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' };
@@ -52,16 +44,7 @@ function fixture(): Fixture {
   const saved = { a: definitions('a'), b: definitions('b') };
   const placements = projects.flatMap(({ id }) => definitions(id).map((space) => ({ spaceId: space.id, projectId: id, kind: space.kind, holderId: id === 'a' ? 'desk' : 'unassigned', generation: 1, state: id === 'a' ? 'open' : 'closed', endpoint: id === 'a' ? '/machine/desk/rpc' : null })));
   const machines: Fixture['machines'] = [{ id: 'desk', label: 'Desk machine', state: 'online', desiredState: 'online' }, { id: 'laptop', label: 'Laptop', state: 'online', desiredState: 'online' }];
-  const runtime: RuntimeSnapshot = {
-    baseSpace: { id: 'a', projectId: 'a', kind: 'base', name: 'Alpha', branch: 'main', possessedBy: 'desk', spaceGeneration: 1, closedAt: null, status: working },
-    workspaces: [{
-      id: 'a-work', projectId: 'a', projectName: 'Alpha', name: 'Alpha work', branch: 'feature', rootPath: '/workspaces/a-work',
-      phase: 'code', possessedBy: 'desk', spaceGeneration: 1, possessionGeneration: 1, closedAt: null, status: working,
-      relations: { dependsOn: ['a-parent'], relatedTo: ['a-related'], stackedOn: 'a-parent' },
-      stack: { blockedBy: ['a-parent'], blocking: ['a-child'], findings: [{ code: 'parent-behind', message: 'Parent branch is behind', workspaceId: 'a-parent' }] },
-    }],
-  };
-  const failures = { directory: null as string | null, runtime: null as string | null };
+  const failures = { directory: null as string | null };
   const cloud = new Set<string>();
   const revisions = { a: 1, b: 1 };
   const snapshot = (): AccountDirectorySnapshot => structuredClone({
@@ -94,9 +77,8 @@ function fixture(): Fixture {
     queued.push({ type: 'change', resource: 'account-directory', cursor, revision: cursor, previous, value: snapshot() });
     notify();
   };
-  const spaceView = vi.fn<() => Promise<RuntimeReply>>(async () => failures.runtime ? { status: 'error', error: new Error(failures.runtime) } : { status: 'ok', value: structuredClone(runtime) });
-  const client: DirectoryClient = { spaceView };
-  return { projects, saved, cloud, placements, machines, runtime, failures, spaceView, client, source, revisions, publish };
+  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a', status: working }, { projectId: 'a', workspaceId: 'a-work', status: working }] });
+  return { projects, saved, cloud, placements, machines, failures, source, revisions, publish };
 }
 
 let container: HTMLDivElement;
@@ -115,6 +97,7 @@ beforeEach(() => {
   root = createRoot(container);
   directory = {};
   synchronization = new SynchronizationOwner();
+  statuses = new WorkspaceStatuses();
 });
 
 afterEach(async () => {
@@ -125,12 +108,11 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-let statuses = new WorkspaceStatuses();
 function Probe(props: { scene: Fixture; selected?: { projectId: string; workspaceId: string | null } | null; view?: ProductRoute; projects?: Fixture['projects'] }) {
   return <SynchronizationContext.Provider value={synchronization}><DirectoryProbe {...props} /></SynchronizationContext.Provider>;
 }
 function DirectoryProbe({ scene, selected = null, view = 'settings', projects = scene.projects }: { scene: Fixture; selected?: { projectId: string; workspaceId: string | null } | null; view?: ProductRoute; projects?: Fixture['projects'] }) {
-  ({ directory, acceptRuntime } = useWorkspaceProjection(projects, scene.client, scene.source, statuses));
+  ({ directory, acceptRuntime } = useWorkspaceProjection(projects, scene.source, statuses));
   return <SidebarProvider persist={false}><AppSidebar view={view} onView={() => undefined} selected={selected} projects={projects.map((project) => ({ ...project, ...(directory[project.id] ?? { workspaces: [] }) }))} machines={[]} onSelectWorkspace={() => undefined} /></SidebarProvider>;
 }
 
@@ -153,14 +135,9 @@ it('populates every project and holder independently of the selected pane', asyn
   await act(async () => { root.render(<Probe scene={scene} />); });
   expect(directory.a?.baseSummary?.status?.primaryColor).toBe('green');
   expect(directory.a?.workspaces[0]?.summary?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk machine' });
+  expect(directory.a?.workspaces[0]?.definition).toMatchObject({ name: 'Alpha work', branch: 'feature', phase: 'code' });
   expect(directory.b?.baseSummary?.holder.kind).toBe('released');
   expect(directory.b?.workspaces[0]?.summary?.holder.kind).toBe('released');
-  expect(directory.a?.workspaces[0]?.runtime).toMatchObject({
-    kind: 'workspace', projectId: 'a', projectName: 'Alpha', name: 'Alpha work', branch: 'feature', phase: 'code', generation: 1,
-    holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' },
-    relations: { dependsOn: ['a-parent'], relatedTo: ['a-related'], stackedOn: 'a-parent' },
-    stack: { blockedBy: ['a-parent'], blocking: ['a-child'], findings: [{ code: 'parent-behind', workspaceId: 'a-parent' }] },
-  });
   const betaCircle = row('Beta work').querySelector('.status-dot');
   expect(betaCircle).not.toBeNull();
   await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });
@@ -169,72 +146,52 @@ it('populates every project and holder independently of the selected pane', asyn
 });
 
 it('shows a cloud workspace by its status row, without its stale legacy placement or any machine', async () => {
-  statuses = new WorkspaceStatuses();
   const scene = fixture();
   scene.cloud.add('a-work');
   statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting }] });
   await act(async () => { root.render(<Probe scene={scene} />); });
   expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh', refreshing: false });
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk machine' });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
   expect(container.textContent).not.toContain('Desk machine');
 });
 
-it('updates one unopened cloud row from its status message, with no read', async () => {
-  statuses = new WorkspaceStatuses();
+it('updates one unopened cloud row from its status message', async () => {
   const scene = fixture();
   scene.projects[0]!.lifecycle = 'cloud-only';
   scene.machines.length = 0;
-  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a', status: working }, { projectId: 'a', workspaceId: 'a-work', status: working }] });
   await act(async () => { root.render(<Probe scene={scene} view="projects" />); });
   expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: working, freshness: 'fresh' });
-  const reads = scene.spaceView.mock.calls.length;
   await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
   expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh' });
   expect(directory.a?.baseSummary?.status).toEqual(working);
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
-  expect(scene.spaceView).toHaveBeenCalledTimes(reads);
 });
 
-it('retains accepted activity across navigation and older reads, then converges on a newer read', async () => {
+it('shows a machine-held workspace by its status row and updates it when the row changes', async () => {
   const scene = fixture();
-  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });
-  const oldRead = Promise.withResolvers<RuntimeReply>();
-  scene.spaceView.mockImplementationOnce(() => oldRead.promise);
-  await refresh();
-  let release: (() => void) | undefined;
-  await act(async () => { release = acceptRuntime('a', 'a-work', { ...workspaceSummary()!, status: waiting, freshness: 'fresh', refreshing: false }); });
-  expect(row('Alpha work').querySelector('.status-dot')?.hasAttribute('data-pulse')).toBe(false);
-  await act(async () => {
-    release?.();
-    root.render(<Probe scene={scene} view="settings" />);
-    oldRead.resolve({ status: 'ok', value: structuredClone(scene.runtime) });
-  });
-  expect(workspaceSummary()?.status?.primaryColor).toBe('blue');
-  await refresh();
-  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
+  await act(async () => { root.render(<Probe scene={scene} />); });
+  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, freshness: 'fresh', refreshing: false, detail: null });
+  expect(row('Alpha work').getAttribute('title')).toBe('feature · Working');
+  await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, status: waiting, freshness: 'fresh' });
+  expect(directory.a?.baseSummary?.status).toEqual(working);
+  expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
+  await act(async () => { statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a', status: working }] }); });
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, freshness: 'unknown' });
+  expect(workspaceSummary()?.status).toBeUndefined();
 });
 
-it('keeps open-pane readiness through native reads and releases it without losing activity', async () => {
+it('keeps an open pane\'s accepted activity over an older status row across directory refreshes', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });
-  const nativeReads = scene.spaceView.mock.calls.length;
-  let release: (() => void) | undefined;
   await act(async () => {
-    release = acceptRuntime('a', 'a-work', { ...workspaceSummary()!, status: waiting, freshness: 'stale', detail: 'Connection unavailable' });
+    acceptRuntime('a', 'a-work', { ...workspaceSummary()!, status: waiting, freshness: 'stale', detail: 'Connection unavailable' });
   });
-  expect(scene.spaceView.mock.calls.length).toBe(nativeReads);
-  expect(workspaceSummary()?.freshness).toBe('stale');
+  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'stale' });
   await refresh();
-  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
-  expect(workspaceSummary()?.freshness).toBe('stale');
+  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'stale' });
   expect(row('Alpha work').querySelector('.status-dot')?.hasAttribute('data-pulse')).toBe(false);
-  await act(async () => { release?.(); });
-  await refresh();
-  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
-  expect(workspaceSummary()?.freshness).toBe('fresh');
-  expect(row('Alpha work').querySelector('.status-dot')?.hasAttribute('data-pulse')).toBe(true);
 });
 
 it('rejects active observations after cloud close and across holder or generation changes', async () => {
@@ -252,44 +209,7 @@ it('rejects active observations after cloud close and across holder or generatio
   placement.generation = 2;
   await act(async () => { scene.publish(); });
   await act(async () => { acceptRuntime('a', 'a-work', oldSummary); });
-  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'laptop' }, generation: 2 });
-  expect(workspaceSummary()?.status).toBeUndefined();
-});
-
-it('retains the same status circles through partial and failed refreshes, then confirms fresh recovery', async () => {
-  const scene = fixture();
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  const workspaceCircle = row('Alpha work').querySelector('.status-dot');
-  const baseCircle = row('Alpha').querySelector('.status-dot');
-  const rowCount = container.querySelectorAll('[data-sidebar="menu-sub-item"]').length;
-  const pending = Promise.withResolvers<RuntimeReply>();
-  scene.spaceView.mockImplementationOnce(() => pending.promise);
-  await refresh();
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh', refreshing: true });
-  expect(directory.a?.workspaces[0]?.runtime?.stack.blockedBy).toEqual(['a-parent']);
-  expect(row('Alpha work').querySelector('.status-dot')).toBe(workspaceCircle);
-  expect(workspaceCircle?.getAttribute('data-pulse')).toBe('true');
-  await act(async () => { pending.resolve({ status: 'error', error: new Error('Runtime disconnected') }); });
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'stale', refreshing: false });
-  expect(directory.a?.workspaces[0]?.runtime?.relations.stackedOn).toBe('a-parent');
-  expect(row('Alpha work').querySelector('.status-dot')).toBe(workspaceCircle);
-  expect(row('Alpha').querySelector('.status-dot')).toBe(baseCircle);
-  expect(workspaceCircle?.hasAttribute('data-pulse')).toBe(false);
-  expect(row('Alpha').getAttribute('aria-description')).toContain('Runtime disconnected');
-  expect(container.querySelectorAll('[data-sidebar="menu-sub-item"]')).toHaveLength(rowCount);
-  const recovery = Promise.withResolvers<RuntimeReply>();
-  scene.spaceView.mockImplementationOnce(() => recovery.promise);
-  await refresh();
-  expect(workspaceSummary()?.freshness).toBe('stale');
-  expect(row('Alpha').getAttribute('aria-description')).toContain('Runtime disconnected');
-  scene.runtime.workspaces[0]!.status = waiting;
-  await act(async () => { recovery.resolve({ status: 'ok', value: structuredClone(scene.runtime) }); });
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'fresh', refreshing: false });
-  expect(row('Alpha work').querySelector('.status-dot')).toBe(workspaceCircle);
-  expect(row('Alpha').querySelector('.status-dot')).toBe(baseCircle);
-  expect(baseCircle?.getAttribute('data-pulse')).toBe('true');
-  expect(row('Alpha').hasAttribute('aria-description')).toBe(false);
-  expect(directory.a?.error).toBeNull();
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'laptop' }, generation: 2, status: working });
 });
 
 it('retains compatible data on directory failure and applies confirmed closes on recovery even with an offline machine', async () => {
@@ -297,8 +217,7 @@ it('retains compatible data on directory failure and applies confirmed closes on
   await act(async () => { root.render(<Probe scene={scene} />); });
   scene.failures.directory = 'Directory disconnected';
   await refresh();
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, holder: { kind: 'held', machineId: 'desk' }, freshness: 'stale' });
-  expect(directory.a?.workspaces[0]?.runtime?.relations.stackedOn).toBe('a-parent');
+  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, holder: { kind: 'held', machineId: 'desk' } });
   expect(directory.a?.error).not.toBeNull();
   scene.failures.directory = null;
   scene.saved.a[1]!.name = 'Renamed work';
@@ -308,95 +227,27 @@ it('retains compatible data on directory failure and applies confirmed closes on
   expect(directory.a?.workspaces[0]?.name).toBe('Renamed work');
   expect(workspaceSummary()).toMatchObject({ holder: { kind: 'released' }, freshness: 'fresh' });
   expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   expect(directory.a?.workspaces[0]?.definition?.phase).toBe('code');
-  expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'stale' });
-  scene.machines[0]!.state = 'online';
-  await refresh();
-  expect(directory.a?.baseSummary?.freshness).toBe('fresh');
+  expect(directory.a?.baseSummary).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, status: { primaryColor: 'green' }, freshness: 'fresh' });
   expect(directory.a?.error).toBeNull();
 });
 
-it('rejects old runtime status after same-holder generation changes and moves', async () => {
-  const scene = fixture();
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  const placement = scene.placements.find((space) => space.spaceId === 'a-work')!;
-  placement.generation = 2;
-  await refresh();
-  expect(workspaceSummary()).toMatchObject({ generation: 2, freshness: 'unknown' });
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-  expect(row('Alpha work').querySelector('.status-dot')).not.toBeNull();
-  expect(row('Alpha work').querySelector('[data-pulse]')).toBeNull();
-  expect(directory.a?.error).not.toBeNull();
-  scene.runtime.workspaces[0]!.spaceGeneration = 2;
-  scene.runtime.workspaces[0]!.status = waiting;
-  await refresh();
-  expect(workspaceSummary()).toMatchObject({ generation: 2, status: { primaryColor: 'blue' }, freshness: 'fresh' });
-  expect(directory.a?.workspaces[0]?.runtime).toMatchObject({ generation: 2, status: { primaryColor: 'blue' } });
-  placement.holderId = 'laptop';
-  placement.endpoint = '/machine/laptop/rpc';
-  await refresh();
-  expect(workspaceSummary()?.holder).toMatchObject({ kind: 'held', machineId: 'laptop' });
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-  scene.runtime.workspaces[0]!.possessedBy = 'laptop';
-  await refresh();
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'fresh' });
-  expect(directory.a?.workspaces[0]?.runtime?.holder).toEqual({ kind: 'held', machineId: 'laptop', label: 'Laptop' });
-  placement.state = 'closing';
-  await refresh();
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-  placement.state = 'open';
-  placement.generation = 3;
-  await refresh();
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-});
-
-it('coalesces changes during an in-flight read and ignores its superseded runtime response', async () => {
-  const scene = fixture();
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  const pending = Promise.withResolvers<RuntimeReply>();
-  const staleRuntime = structuredClone(scene.runtime);
-  scene.spaceView.mockImplementationOnce(() => pending.promise);
-  await refresh();
-  const placement = scene.placements.find((space) => space.spaceId === 'a-work')!;
-  placement.generation = 2;
-  scene.runtime.workspaces[0]!.spaceGeneration = 2;
-  scene.runtime.workspaces[0]!.status = waiting;
-  await act(async () => {
-    window.dispatchEvent(new Event(ACCOUNT_DIRECTORY_CHANGED));
-    window.dispatchEvent(new Event(ACCOUNT_DIRECTORY_CHANGED));
-  });
-  expect(workspaceSummary()?.generation).toBe(2);
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-  await act(async () => { pending.resolve({ status: 'ok', value: staleRuntime }); });
-  expect(workspaceSummary()).toMatchObject({ generation: 2, status: { primaryColor: 'blue' }, freshness: 'fresh' });
-  expect(directory.a?.workspaces[0]?.runtime).toMatchObject({ generation: 2, status: { primaryColor: 'blue' } });
-});
-
-it('does not resurrect archived, removed, or reintroduced project scopes from retained runtime data', async () => {
+it('does not resurrect archived, removed, or reintroduced project scopes from retained data', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
   const placementIndex = scene.placements.findIndex((space) => space.spaceId === 'a-work');
   const [placement] = scene.placements.splice(placementIndex, 1);
   await refresh();
   expect(directory.a?.workspaces[0]?.id).toBe('a-work');
-  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'unknown' }, freshness: 'unknown' });
-  expect(workspaceSummary()?.status).toBeUndefined();
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'unknown' }, detail: 'Placement unavailable' });
   expect(workspaceSummary()?.generation).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   scene.placements.push(placement!);
   await refresh();
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, status: { primaryColor: 'green' }, freshness: 'fresh' });
   scene.saved.a[1]!.archivedAt = '2026-09-01T00:00:00.000Z';
   await refresh();
   expect(workspaceSummary()?.closedAt).toEqual(new Date('2026-09-01T00:00:00.000Z'));
   expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   expect(directory.a?.workspaces[0]?.definition?.archivedAt).toBe('2026-09-01T00:00:00.000Z');
   scene.saved.a = scene.saved.a.filter((space) => space.kind === 'base');
   await refresh();
@@ -404,11 +255,9 @@ it('does not resurrect archived, removed, or reintroduced project scopes from re
   expect(container.textContent).not.toContain('Alpha work');
   await act(async () => { root.render(<Probe scene={scene} projects={[]} />); });
   expect(directory).toEqual({});
-  scene.failures.runtime = 'Runtime unavailable';
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(directory.a?.baseSummary?.status).toBeUndefined();
-  expect(directory.a?.baseSummary?.freshness).toBe('unknown');
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
+  expect(directory.a?.workspaces).toEqual([]);
+  expect(container.textContent).not.toContain('Alpha work');
 });
 
 it('keeps canonical phases and source metadata for released, offline, and unknown workspaces across projects', async () => {
@@ -422,37 +271,17 @@ it('keeps canonical phases and source metadata for released, offline, and unknow
   scene.machines[1]!.state = 'offline';
   await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="kanban" />); });
   expect(directory.a?.workspaces[0]?.definition?.phase).toBe('plan');
-  expect(directory.a?.workspaces[0]?.runtime?.phase).toBe('code');
-  expect(directory.b?.workspaces.map((space) => ({ id: space.id, phase: space.definition?.phase, holder: space.summary?.holder.kind, runtime: space.runtime }))).toEqual([
-    { id: 'b-work', phase: 'review', holder: 'released', runtime: undefined },
-    { id: 'b-offline', phase: 'ship', holder: 'held', runtime: undefined },
-    { id: 'b-unknown', phase: null, holder: 'unknown', runtime: undefined },
+  expect(directory.b?.workspaces.map((space) => ({ id: space.id, phase: space.definition?.phase, holder: space.summary?.holder.kind }))).toEqual([
+    { id: 'b-work', phase: 'review', holder: 'released' },
+    { id: 'b-offline', phase: 'ship', holder: 'held' },
+    { id: 'b-unknown', phase: null, holder: 'unknown' },
   ]);
   expect(directory.b?.workspaces.find((space) => space.id === 'b-offline')?.definition).toMatchObject({ sourceKind: 'workspace', sourceRef: 'b-work' });
-  scene.failures.runtime = 'Holder unavailable';
   await refresh();
   await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'b', workspaceId: 'b-offline' }} view="inbox" />); });
   expect(directory.a?.workspaces[0]?.definition?.phase).toBe('plan');
   expect(directory.b?.workspaces.map((space) => space.id)).toEqual(['b-work', 'b-offline', 'b-unknown']);
   expect(directory.b?.workspaces.find((space) => space.id === 'b-offline')?.summary?.holder).toEqual({ kind: 'held', machineId: 'laptop', label: 'Laptop' });
-});
-
-it('rejects another project runtime and invalidates a confirmed native close without removing its cloud definition', async () => {
-  const scene = fixture();
-  scene.runtime.workspaces[0]!.projectId = 'b';
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.definition?.phase).toBe('code');
-  scene.runtime.workspaces[0]!.projectId = 'a';
-  await refresh();
-  expect(directory.a?.workspaces[0]?.runtime?.relations.stackedOn).toBe('a-parent');
-  scene.runtime.workspaces[0]!.closedAt = new Date('2026-09-12T00:00:00.000Z');
-  scene.runtime.workspaces[0]!.possessedBy = null;
-  await refresh();
-  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
-  expect(workspaceSummary()?.status).toBeUndefined();
-  expect(directory.a?.workspaces[0]?.definition).toMatchObject({ id: 'a-work', phase: 'code', archivedAt: null });
 });
 
 it('keeps archived project workspace records available to the account Projects page', async () => {
@@ -466,64 +295,6 @@ it('keeps archived project workspace records available to the account Projects p
   expect(directory.b?.workspaces[0]?.definition?.phase).toBe('review');
   expect(directory.b?.workspaces[0]?.closedAt).toEqual(new Date('2026-09-12T00:00:00.000Z'));
   expect(directory.b?.workspaces[0]?.summary?.holder.kind).toBe('released');
-  expect(directory.b?.workspaces[0]?.runtime).toBeUndefined();
-});
-
-it('refreshes activity revisions only for the affected project without idle sidebar fan-out', async () => {
-  const scene = fixture();
-  const source = vi.fn(scene.source);
-  scene.source = source;
-  for (let index = 0; index < 100; index++) scene.saved.b.push({ ...scene.saved.b[1]!, id: `b-archived-${index}`, lifecycle: 'archived', archivedAt: '2026-09-12T00:00:00.000Z' });
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(source).toHaveBeenCalledOnce();
-  expect(scene.spaceView).toHaveBeenCalledOnce();
-  scene.runtime.workspaces[0]!.status = waiting;
-  scene.revisions.b!++;
-  await act(async () => { scene.publish(); });
-  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
-  expect(scene.spaceView).toHaveBeenCalledOnce();
-  scene.revisions.a!++;
-  await act(async () => { scene.publish(); });
-  expect(workspaceSummary()?.status?.primaryColor).toBe('blue');
-  expect(scene.spaceView).toHaveBeenCalledTimes(2);
-  expect(source).toHaveBeenCalledOnce();
-});
-
-it('refreshes only the changed holder and confirms status after that machine returns online', async () => {
-  const scene = fixture();
-  const placement = scene.placements.find((space) => space.spaceId === 'a-work')!;
-  placement.holderId = 'laptop';
-  placement.endpoint = '/machine/laptop/rpc';
-  scene.runtime.workspaces[0]!.possessedBy = 'laptop';
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(scene.spaceView).toHaveBeenCalledTimes(2);
-  scene.runtime.baseSpace.status = waiting;
-  scene.runtime.workspaces[0]!.status = waiting;
-  scene.machines[1]!.state = 'offline';
-  await act(async () => { scene.publish(); });
-  expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'stale' });
-  expect(scene.spaceView).toHaveBeenCalledTimes(2);
-  scene.machines[1]!.state = 'online';
-  await act(async () => { scene.publish(); });
-  expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
-  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'fresh' });
-  expect(scene.spaceView).toHaveBeenCalledTimes(3);
-});
-
-it('does not let a late native response resurrect a project deleted by the directory feed', async () => {
-  const scene = fixture();
-  await act(async () => { root.render(<Probe scene={scene} />); });
-  const pending = Promise.withResolvers<RuntimeReply>();
-  scene.spaceView.mockImplementationOnce(() => pending.promise);
-  scene.revisions.a!++;
-  await act(async () => { scene.publish(); });
-  scene.projects.splice(0, 1);
-  await act(async () => { scene.publish(); });
-  expect(directory.a).toBeUndefined();
-  await act(async () => { pending.resolve({ status: 'ok', value: scene.runtime }); });
-  expect(directory.a).toBeUndefined();
-  expect(directory.b?.workspaces[0]?.id).toBe('b-work');
 });
 
 it('shares the sidebar snapshot with account project and machine consumers', async () => {
@@ -545,5 +316,4 @@ it('shares the sidebar snapshot with account project and machine consumers', asy
   expect(workspaceSummary()?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Renamed desk' });
   expect(container.querySelector('output')?.textContent).toContain('Renamed desk,Laptop');
   expect(source).toHaveBeenCalledOnce();
-  expect(scene.spaceView).toHaveBeenCalledOnce();
 });

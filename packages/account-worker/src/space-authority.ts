@@ -165,10 +165,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return this.ctx.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record)));
   }
 
-  /** The project listing's one read of this workspace: its legacy placement and the status summary its runtime last
-   * published, read without opening the runtime (null before its first publication under this release). */
-  listingState(): { placement: SpaceAuthorityRecord | null; status: WorkspaceStatusSummary | null } {
-    return { placement: this.get(), status: readWorkspaceStatus(this.ctx.storage) };
+  /** The status summary this workspace's runtime last published, read without opening it (null before its first
+   * publication). Only the one-time seed of the account's status rows reads it; views read those rows. */
+  publishedStatus(): WorkspaceStatusSummary | null {
+    return readWorkspaceStatus(this.ctx.storage);
   }
 
   /** The report this workspace's runtime published last, read without opening it; null before its first publication. */

@@ -777,7 +777,7 @@ describe('cloud projects and workspace relations with no machines', () => {
     expect((await env.USER_PROJECTS.getByName(fixture.userId).list()).map((project) => project.id)).toContain(projectId);
     expect(await client.space.view({ projectId, workspaceId: null })).toMatchObject({ status: 'ok', value: {
       project: { id: projectId, baseBranch: 'main', connected: true },
-      baseSpace: { id: projectId, kind: 'base', branch: 'main', possessedBy: null, closedAt: null, status: { primaryColor: 'dim' } },
+      baseSpace: { id: projectId, kind: 'base', branch: 'main', closedAt: null, status: { primaryColor: 'dim' } },
       workspaces: [],
     } });
   });

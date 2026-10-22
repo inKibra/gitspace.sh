@@ -371,6 +371,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
         CREATE TABLE IF NOT EXISTS deleted_projects(project_id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS environment_values(name TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS workspace_statuses(workspace_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,summary TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS workspace_statuses_project ON workspace_statuses(project_id);
       `);
       for (const column of ['role TEXT', 'source_json TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
@@ -406,7 +407,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     this.statusSeed ??= (async () => {
       const workspaces = this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string }>('SELECT workspace_id,project_id FROM workspace_projects').toArray();
       await Promise.all(workspaces.map(async ({ workspace_id: workspaceId, project_id: projectId }) => {
-        const { status } = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).listingState();
+        const status = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).publishedStatus();
         if (status && !this.ctx.storage.sql.exec('SELECT 1 FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray().length) {
           this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary) VALUES(?,?,?)', workspaceId, projectId, JSON.stringify(status));
         }
@@ -414,6 +415,13 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO directory_metadata(name,value) VALUES('statuses',1)");
     })().finally(() => { this.statusSeed = null; });
     await this.statusSeed;
+  }
+
+  /** One project's stored status rows, by workspace: the project view reads these, never the workspaces themselves. */
+  async projectWorkspaceStatuses(projectId: string): Promise<Record<string, WorkspaceStatusRow['status']>> {
+    await this.seedWorkspaceStatuses();
+    const rows = this.ctx.storage.sql.exec<{ workspace_id: string; summary: string }>('SELECT workspace_id,summary FROM workspace_statuses WHERE project_id=?', projectId).toArray();
+    return Object.fromEntries(rows.map(row => [row.workspace_id, workspaceStatusRowSchema.shape.status.parse(JSON.parse(row.summary))]));
   }
 
   private workspaceStatuses(): WorkspaceStatusRow[] {

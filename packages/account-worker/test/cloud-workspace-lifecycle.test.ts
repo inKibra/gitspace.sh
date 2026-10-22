@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Result } from 'better-result';
 import { tenantRootPrivateKey } from './setup.js';
 import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
+import { readCloudSpaceView } from '../src/cloud-project.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { GitHubAppDO } from '../src/github-app.js';
 import { UserProjectIndexDO } from '../src/project-authority.js';
@@ -112,7 +113,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     if (created.status === 'error') throw created.error;
     const workspaceId = created.value.workspace.id;
     expect(created.value).toMatchObject({
-      workspace: { projectId: project.id, name: 'Cloud feature', branch: 'feature/cloud', phase: 'plan', possessedBy: null, closedAt: null },
+      workspace: { projectId: project.id, name: 'Cloud feature', branch: 'feature/cloud', phase: 'plan', closedAt: null },
       operation: { projectId: project.id, workspaceId, kind: 'workspace.create', state: 'succeeded', error: null },
     });
     expect((await authority.listWorkspaces()).find(workspace => workspace.id === workspaceId)).toMatchObject({ lifecycle: 'active', sourceKind: 'base', sourceRef: 'main', sourceCommit: commit('1') });
@@ -435,13 +436,14 @@ describe('cloud workspace lifecycle with no machines', () => {
     if (created.status === 'error') throw created.error;
     const workspaceId = created.value.workspace.id;
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-    expect((await space.listingState()).status).toBeNull();
+    expect(await space.publishedStatus()).toBeNull();
     expect(await client.runtime.snapshot(RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }))).toMatchObject({ status: 'ok' });
-    const published = (await space.listingState()).status;
+    const published = await space.publishedStatus();
     if (!published) throw new Error('Opening the runtime publishes its status');
     // A freshly opened runtime has no live task: its main agent waits for the user.
     expect(published).toEqual({ primaryColor: 'blue', agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } });
-    expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, status: published }] } });
+    // The project view shows it from the account's status row, which the runtime pushes as it publishes.
+    await vi.waitFor(async () => expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, status: published }], statusError: null } }));
     // The project agent's report before any message: nothing waited on, no model admitted, no checkpoint yet.
     const report = await space.workspaceReport();
     expect(report).toMatchObject({ summary: published, phase: 'plan', waitingOn: null, failure: null, lastReply: null, model: null, code: null });
@@ -450,12 +452,36 @@ describe('cloud workspace lifecycle with no machines', () => {
       state.storage.sql.exec("DELETE FROM runtime_replica WHERE kind='snapshot'");
       const local = new SpaceAuthorityDO(state, { ...env, PROJECT_AUTHORITY: new Proxy(env.PROJECT_AUTHORITY, { get() { throw new Error('ProjectAuthority was consulted'); } }) });
       await state.blockConcurrencyWhile(async () => {});
-      expect(local.listingState().status).toEqual(published);
+      expect(local.publishedStatus()).toEqual(published);
       expect(local.workspaceReport()).toEqual(report);
       // A summary an older release derived from conversation flags is not shown until the runtime publishes again.
       state.storage.sql.exec('UPDATE workspace_status SET summary=? WHERE id=1', JSON.stringify({ primaryColor: 'green', agents: { green: 1, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } }));
-      expect(local.listingState().status).toBeNull();
+      expect(local.publishedStatus()).toBeNull();
     });
+  });
+
+  it('reads a project view without reaching any workspace object, statuses from the account rows', async () => {
+    const { userId, client, project, index } = await cloudProject('Asleep');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Idle', branch: 'idle', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const status = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
+    await index.setWorkspaceStatus({ projectId: project.id, workspaceId: created.value.workspace.id, status });
+    // Every workspace object is unreachable: a view that read one would fail (and would have woken it).
+    const asleep = { ...env, SPACE_AUTHORITY: new Proxy(env.SPACE_AUTHORITY, { get() { throw new Error('A workspace object was read'); } }) };
+    const view = await readCloudSpaceView(asleep, userId, project.id);
+    expect(view.workspaces).toMatchObject([{ id: created.value.workspace.id, name: 'Idle', status }]);
+    expect(view.baseSpace).toMatchObject({ id: project.id, kind: 'base' });
+    expect(view.statusError).toBeNull();
+  });
+
+  it('still lists workspaces and relations when statuses cannot be read, and says why', async () => {
+    const { userId, client, project } = await cloudProject('Status outage');
+    const created = await client.workspace.create({ projectId: project.id, name: 'Listed', branch: 'listed', sourceKind: 'base', sourceRef: '' });
+    if (created.status === 'error') throw created.error;
+    const failing = { ...env, USER_PROJECTS: new Proxy(env.USER_PROJECTS, { get() { throw new Error('Internal error in Durable Object storage caused object to be reset'); } }) };
+    const view = await readCloudSpaceView(failing, userId, project.id);
+    expect(view.workspaces).toMatchObject([{ id: created.value.workspace.id, name: 'Listed', status: { primaryColor: 'dim' }, relations: { dependsOn: [] } }]);
+    expect(view.statusError).toContain('Internal error in Durable Object storage');
   });
 
   it('switches an opened clean base checkout and keeps the new branch after reopening', async () => {

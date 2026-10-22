@@ -72,7 +72,7 @@ async function click(label: string) {
 }
 
 it('shows other projects and released workspaces without runtime, preserving canonical unassigned and unknown phases', async () => {
-  directory.alpha!.workspaces.push(saved('unassigned', 'alpha', null, { runtime: { ...verticalSliceFixture.workspaces[0]!, id: 'unassigned', projectId: 'alpha', phase: 'code', relations: { dependsOn: ['alpha-work'], relatedTo: [], stackedOn: 'alpha-work' }, stack: { blockedBy: ['alpha-work'], blocking: [], findings: [] } } }));
+  directory.alpha!.workspaces.push(saved('unassigned', 'alpha', null));
   directory.beta!.workspaces.push(saved('unknown-phase', 'beta', 'code', { definition: undefined, summary: { holder: { kind: 'unknown' }, closedAt: null, status: idle, freshness: 'stale' } }));
   await render('kanban');
   expect(container.querySelector('[aria-label="Plan"]')?.textContent).toContain('alpha-work');
@@ -80,8 +80,6 @@ it('shows other projects and released workspaces without runtime, preserving can
   expect(container.querySelector('[aria-label="Unassigned"]')?.textContent).toContain('unassigned');
   expect(container.querySelector('[aria-label="Code"]')?.textContent).not.toContain('unassigned');
   expect(container.querySelector('[aria-label="Phase unknown"]')?.textContent).toContain('unknown-phase');
-  expect(container.querySelector('[aria-label="Unassigned"]')?.textContent).toContain('blocked · 1');
-  expect(container.querySelector('[title="Stacked on alpha-work"]')).not.toBeNull();
   expect(container.querySelector('[aria-label="Open beta-archive"]')).toBeNull();
   expect(container.querySelector('[aria-label="Review"] [data-freshness="unknown"]')).not.toBeNull();
   expect(container.querySelector('[aria-label="Phase unknown"] [data-freshness="stale"]')).not.toBeNull();

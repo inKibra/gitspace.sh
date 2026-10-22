@@ -30,7 +30,7 @@ describe('AppSidebar Source pill', () => {
   it('reserves the collapsed disclosure for archived spaces', () => {
     if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
     const archived = { ...verticalSliceFixture.workspace, closedAt: new Date('2026-09-01T00:00:00.000Z') };
-    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} projects={[{ ...base.projects[0]!, workspaces: [{ ...archived, runtime: archived }] }]} deployment={null} /></SidebarProvider>);
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} projects={[{ ...base.projects[0]!, workspaces: [archived] }]} deployment={null} /></SidebarProvider>);
     expect(html).toContain('>Archived<');
     expect(html).not.toContain('>Closed<');
   });

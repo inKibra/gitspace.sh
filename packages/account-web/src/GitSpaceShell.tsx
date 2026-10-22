@@ -168,7 +168,6 @@ export interface GitSpaceShellProps {
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectProject?: (projectId: string) => void;
   onArchiveWorkspace?: (workspaceId: string) => void | Promise<void>;
-  onMoveWorkspace?: (spaceId: string, destinationMachineId: string) => void | Promise<void>;
   onCreateProject?: (input: CreateProjectInput) => void | Promise<void>;
   onCreateWorkspace?: (input: CreateWorkspaceInput) => void | Promise<void>;
   onArchiveProject?: (projectId: string, expectedRevision: number) => void | Promise<void>;
@@ -586,7 +585,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -638,7 +637,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     byProject.set(baseSpace.projectId, { ...byProject.get(baseSpace.projectId), id: baseSpace.projectId, name: baseSpace.projectName, base: baseSpace, ...(workspace.id === baseSpace.id ? { baseSummary: selectedSummary } : {}), workspaces: [] });
     for (const item of workspaces) {
       const entry: SidebarProject = byProject.get(item.projectId) ?? { id: item.projectId, name: item.projectName, workspaces: [] };
-      entry.workspaces.push({ id: item.id, projectId: item.projectId, name: item.name, branch: item.branch, closedAt: item.closedAt, runtime: item, ...(workspace.id === item.id ? { summary: selectedSummary } : {}) });
+      entry.workspaces.push({ id: item.id, projectId: item.projectId, name: item.name, branch: item.branch, closedAt: item.closedAt, summary: (workspace.id === item.id ? selectedSummary : undefined) ?? item });
       byProject.set(item.projectId, entry);
     }
     return [...byProject.values()];
@@ -658,7 +657,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     onSelectProject,
     onSelectWorkspace: (target) => { onSelectWorkspace?.(target.id); navigate('agent'); },
     onArchive: onArchiveWorkspace,
-    onMove: onMoveWorkspace,
     onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'plan' }) : undefined,
     onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
     onOpenSettings,

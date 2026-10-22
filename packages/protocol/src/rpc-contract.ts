@@ -200,8 +200,6 @@ export const BaseSpaceViewCodec = wire.object({
   name: wire.string,
   branch: wire.string,
   closedAt: wire.nullable(wire.date),
-  possessedBy: wire.nullable(wire.string),
-  spaceGeneration: wire.number,
   status: WorkspaceStatusCodec,
 });
 export const SessionActivityCodec = wire.serializable((value): value is SessionActivity => SessionActivitySchema.safeParse(value).success, { id: 'gitspace/agent-activity/v1', jsonSchema: SessionActivitySchema });
@@ -228,9 +226,6 @@ export const WorkspaceViewCodec = wire.object({
   rootPath: wire.string,
   phase: WorkspacePhaseCodec,
   closedAt: wire.nullable(wire.date),
-  possessedBy: wire.nullable(wire.string),
-  spaceGeneration: wire.number,
-  possessionGeneration: wire.nullable(wire.number),
   status: WorkspaceStatusCodec,
   relations: WorkspaceRelationsCodec,
   stack: WorkspaceStackCodec,
@@ -509,6 +504,8 @@ export const SpaceViewCodec = wire.object({
   project: ProjectViewCodec,
   workspaces: wire.array(WorkspaceViewCodec),
   baseSpace: BaseSpaceViewCodec,
+  /** Why statuses are unknown in this view (their read failed), or null. Workspaces and relations are still current. */
+  statusError: wire.nullable(wire.string),
 });
 export type SpaceView = InputOf<typeof SpaceViewCodec>;
 

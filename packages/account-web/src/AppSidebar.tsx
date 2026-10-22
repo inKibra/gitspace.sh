@@ -1,8 +1,3 @@
-import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
-import { rpcClient } from './rpc-client.js';
-import { rpcErrorMessage } from './rpc-error-message.js';
-import { runtimeLfsHeldBack, useLfsTransition } from './LfsTransition.js';
-import { navigateProductUrl, setProductRoute } from './routes.js';
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import type { CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
 import type { IconComponentProps } from '@gitspace/ui';
@@ -35,7 +30,7 @@ import {
   WorkspaceTile,
   type IconComponent,
 } from '@gitspace/ui';
-import { Archive, ArrowDown, Calendar, ChevronRight, Columns03, DotsHorizontal, FolderClosed, FolderPlus, HardDrive, Inbox01, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01 } from '@untitledui/icons';
+import { Archive, ArrowDown, Calendar, ChevronRight, Columns03, DotsHorizontal, FolderClosed, FolderPlus, Inbox01, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01 } from '@untitledui/icons';
 import { createContext, useContext, useState, type Dispatch, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
@@ -93,7 +88,6 @@ const ArchiveGlyph = glyph(Archive);
 const DeleteGlyph = glyph(Trash01);
 const ReopenGlyph = glyph(RefreshCcw01);
 const CloseGlyph = glyph(Square);
-const MachineGlyph = glyph(HardDrive);
 const LaunchGlyph = glyph(Rocket02);
 const SettingsGlyph = glyph(Settings01);
 const ProjectGlyph = glyph(FolderClosed);
@@ -115,14 +109,13 @@ export interface SidebarWorkspace {
   branch: string;
   closedAt: Date | null;
   definition?: CloudWorkspaceDefinition;
-  runtime?: WorkspaceView;
   summary?: SidebarSpaceSummary;
 }
 
-/** The status a workspace row shows: its directory summary, else its open runtime view. An archived row is archived
- * whatever either says. Pickers offering the same workspace show this too. */
+/** The status a workspace row shows: its directory summary. An archived row is archived whatever it says. Pickers
+ * offering the same workspace show this too. */
 export function sidebarWorkspaceSummary(workspace: SidebarWorkspace): SidebarSpaceSummary | undefined {
-  const supplied = workspace.summary ?? workspace.runtime;
+  const supplied = workspace.summary;
   return workspace.closedAt ? { ...supplied, closedAt: workspace.closedAt, holder: supplied?.holder ?? { kind: 'unknown' } } : supplied;
 }
 
@@ -156,7 +149,6 @@ export interface AppSidebarProps {
   onArchive?(spaceId: string): void | Promise<void>;
   onDelete?(spaceId: string): void | Promise<void>;
   onRestore?(spaceId: string): void | Promise<void>;
-  onMove?(spaceId: string, destinationMachineId: string): void | Promise<void>;
   onNewWorkspace?(projectId: string): void;
   onOpenProjectSettings?(projectId: string): void;
   onNewProject?(): void;
@@ -175,40 +167,18 @@ function launchedFrom(deployment: SidebarDeploymentProps | null | undefined, wor
   return release !== null && RELEASE_TARGETS.some((target) => deployment.status.desired[target] === release.sha);
 }
 
-function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onMove, onInspect, onNewWorkspace, onOpenProjectSettings, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; runtime?: AgentScopeView; summary?: SidebarSpaceSummary; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'machines' | 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onMove'>) {
-  const lfsTransition = useLfsTransition();
-  const [movePending, setMovePending] = useState(false);
-  const [moveError, setMoveError] = useState<string | null>(null);
-  const move = async (machine: AppSidebarProps['machines'][number]) => {
-    if (movePending || !runtime) return;
-    if (!window.confirm(`Move ${space.name} to ${machine.label}? Ignored files and machine-local secrets will not move.`)) return;
-    setMovePending(true); setMoveError(null);
-    try {
-      const identity = RuntimeIdentitySchema.parse({ projectId: runtime.projectId, workspaceId: space.id });
-      const result = await rpcClient.runtime.snapshot(identity);
-      if (result.status === 'error') throw result.error;
-      if (!await lfsTransition.confirm(runtimeLfsHeldBack(result.value), () => {
-        const url = setProductRoute(new URL(window.location.href), 'agent');
-        url.searchParams.set('project', identity.projectId);
-        url.searchParams.set('workspace', identity.workspaceId);
-        navigateProductUrl(url);
-      })) return;
-      await onMove?.(space.id, machine.id);
-    } catch (cause) { setMoveError(rpcErrorMessage(cause, 'Move workspace')); }
-    finally { setMovePending(false); }
-  };
+function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onInspect, onNewWorkspace, onOpenProjectSettings, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; summary?: SidebarSpaceSummary; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete'>) {
   const archived = !!summary?.closedAt;
-  const held = !!runtime && !archived && summary?.holder.kind === 'held';
+  const held = !archived && summary?.holder.kind === 'held';
   const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && deployment?.isGitSpaceProject === true;
   const canRelease = !archived && !summary?.creation && !!onReleaseMachines;
   const canRestore = kind === 'workspace' && archived && !!onRestore;
   const canArchive = kind === 'workspace' && !archived && !summary?.creation && !!onArchive;
-  const canMove = held && !!onMove && machines.length > 0;
   const canDelete = kind === 'workspace' && !!onDelete;
-  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !canRelease && !canRestore && !canArchive && !canDelete && !canMove && !launchable) return null;
+  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !canRelease && !canRestore && !canArchive && !canDelete && !launchable) return null;
   const launching = deployment?.launch?.status === 'running';
   let index = 0;
-  return <>{lfsTransition.dialog}{moveError ? <p role="alert" className="text-caption text-destructive">{moveError}</p> : null}<DropdownMenu>
+  return <DropdownMenu>
     <DropdownTrigger render={<SidebarMenuAction className={triggerClassName} aria-label={`Space actions for ${space.name}`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction>} />
     <DropdownContent className="min-w-[240px] w-[240px]" align="start" sideOffset={4}>
       {onInspect ? <MenuItem index={index++} icon={ProjectGlyph} label="Open project" onSelect={onInspect} /> : null}
@@ -218,12 +188,11 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
       {canRestore ? <MenuItem index={index++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
       {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
       {canDelete ? <MenuItem index={index++} icon={DeleteGlyph} label="Delete workspace" onSelect={() => void onDelete?.(space.id)} /> : null}
-      {canMove ? machines.map((machine) => <MenuItem key={machine.id} index={index++} icon={MachineGlyph} label={`Move to ${machine.label}`} disabled={movePending} onSelect={() => void move(machine)} />) : null}
       {launchable && deployment ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch GitSpace from here" disabled={launching} onSelect={() => void deployment.onLaunch(space.id)} /> : null}
       {kind === 'project' && deployment?.isGitSpaceProject ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch canonical develop" disabled={launching} onSelect={() => void deployment.onLaunchCanonical()} /> : null}
       {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={index++} icon={ReopenGlyph} label="Back to stable" disabled={launching} onSelect={() => void deployment.onRevert()} /> : null}
     </DropdownContent>
-  </DropdownMenu></>;
+  </DropdownMenu>;
 }
 
 function LaunchedGlyph() {
@@ -275,7 +244,7 @@ function SourcePill({ deployment, onOpenSettings }: { deployment: SidebarDeploym
  */
 const FOLDED_ACTION_REVEAL = 'opacity-0 group-hover/menu-item:opacity-100 group-focus-within/menu-item:opacity-100 data-[popup-open]:opacity-100';
 
-function ProjectRows({ project, collapsed, onCollapse, selected, machines, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onMove, onNewWorkspace, onOpenProjectSettings }: { project: SidebarProject; collapsed: boolean; onCollapse(projectId: string, collapsed: boolean): void } & Pick<AppSidebarProps, 'selected' | 'machines' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onMove' | 'onNewWorkspace' | 'onOpenProjectSettings'>) {
+function ProjectRows({ project, collapsed, onCollapse, selected, machines, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onNewWorkspace, onOpenProjectSettings }: { project: SidebarProject; collapsed: boolean; onCollapse(projectId: string, collapsed: boolean): void } & Pick<AppSidebarProps, 'selected' | 'machines' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onNewWorkspace' | 'onOpenProjectSettings'>) {
   const { base, workspaces } = project;
   const [showArchived, setShowArchived] = useState(false);
   const visible = workspaces.filter((workspace) => !workspace.closedAt);
@@ -288,13 +257,12 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
   const createWorkspace = onNewWorkspace && project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' ? () => onNewWorkspace(project.id) : undefined;
   const running = workspaces.filter((workspace) => { const summary = sidebarWorkspaceSummary(workspace); return summary && workspaceStatusColor(summary) === 'green'; }).length;
   const row = (workspace: SidebarWorkspace) => {
-    const runtime = workspace.runtime;
     const summary = sidebarWorkspaceSummary(workspace);
     const released = summary?.holder.kind === 'released';
     const suffix = released && !summary?.closedAt;
     return <SpaceSummaryContext.Provider key={workspace.id} value={summary}><SidebarMenuSubItem>
       <SidebarMenuSubButton className={released ? 'text-muted-foreground' : undefined} render={<button type="button" onClick={() => onSelectWorkspace(workspace)} />} isActive={selected?.projectId === workspace.projectId && selected.workspaceId === workspace.id} icon={SpaceStatusGlyph} title={`${workspace.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${suffix ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}>{workspace.name}{workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={workspace.branch} /> : null}{launchedFrom(deployment, workspace.id) ? <LaunchedGlyph /> : null}{suffix ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuSubButton>
-      <SidebarMenuActions showOnHover><SpaceMenu space={workspace} kind="workspace" runtime={runtime} summary={summary} machines={machines} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onMove={onMove} /></SidebarMenuActions>
+      <SidebarMenuActions showOnHover><SpaceMenu space={workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} /></SidebarMenuActions>
     </SidebarMenuSubItem></SpaceSummaryContext.Provider>;
   };
   return <SidebarMenuItem>
@@ -305,7 +273,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
     <SidebarMenuActions showOnHover={open}>
       <SidebarMenuAction aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} aria-expanded={open} onClick={() => onCollapse(project.id, open)}><ChevronRight width={16} height={16} strokeWidth={1.5} className={open ? 'rotate-90 transition-[rotate] duration-80' : 'transition-[rotate] duration-80'} /></SidebarMenuAction>
       {createWorkspace ? <Tooltip content="New workspace" side="top"><SidebarMenuAction className={open ? undefined : FOLDED_ACTION_REVEAL} aria-label={`New workspace in ${project.name}`} onClick={createWorkspace}><Plus width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction></Tooltip> : null}
-      <SpaceMenu space={base ?? project} kind="project" runtime={base} summary={baseSummary} machines={machines} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onMove={onMove} onInspect={onSelectProject ? () => onSelectProject(project.id) : undefined} onNewWorkspace={createWorkspace} onOpenProjectSettings={onOpenProjectSettings ? () => onOpenProjectSettings(project.id) : undefined} triggerClassName={open ? undefined : FOLDED_ACTION_REVEAL} />
+      <SpaceMenu space={base ?? project} kind="project" summary={baseSummary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onInspect={onSelectProject ? () => onSelectProject(project.id) : undefined} onNewWorkspace={createWorkspace} onOpenProjectSettings={onOpenProjectSettings ? () => onOpenProjectSettings(project.id) : undefined} triggerClassName={open ? undefined : FOLDED_ACTION_REVEAL} />
     </SidebarMenuActions>
     <SidebarMenuSub open={open}>
       {visible.map(row)}
@@ -328,7 +296,7 @@ function readCollapsedProjects(): ReadonlySet<string> {
   return new Set(Array.isArray(parsed) ? parsed.filter((id: unknown): id is string => typeof id === 'string') : []);
 }
 
-export function AppSidebar({ view, onView, selected, selectedSummary, projects, machines, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onMove, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, user, deployment }: AppSidebarProps) {
+export function AppSidebar({ view, onView, selected, selectedSummary, projects, machines, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, user, deployment }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const collapseProject = (projectId: string, collapse: boolean): void => {
@@ -365,7 +333,7 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
             ? selected.workspaceId === null
               ? { ...project, baseSummary: selectedSummary }
               : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: selectedSummary } : workspace) }
-            : project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} machines={machines} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onMove={onMove} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} />)}
+            : project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} machines={machines} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} />)}
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>

@@ -306,7 +306,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       const view = await readCloudSpaceView(env, userId, input.projectId);
       if (input.workspaceId !== null && !view.workspaces.some((workspace) => workspace.id === input.workspaceId)) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
       return ok(view);
-    } catch (error) { return err(errors.OperationFailed({ operation: 'read workspace relations', message: message(error) })); }
+    } catch (error) { return err(errors.OperationFailed({ operation: 'load project workspaces', message: message(error) })); }
   });
   const setRelations = server.implement(setWorkspaceRelationsContract).handler(async ({ input, errors }) => {
     try {

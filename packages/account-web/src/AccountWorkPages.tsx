@@ -63,14 +63,12 @@ function accountWorkspaces(projects: readonly ProjectLifecycleView[], directory:
     branch: workspace.branch,
     closedAt: workspace.closedAt,
     // A saved null is deliberately unassigned; absent metadata is unknown.
-    phase: workspace.definition ? workspace.definition.phase : workspace.runtime?.phase,
+    phase: workspace.definition?.phase,
     holder: workspace.summary?.holder ?? { kind: 'unknown' as const },
     status: workspace.summary?.status,
     statusLabel: summaryStatusLabel(workspace.summary),
     freshness: summaryFreshness(workspace.summary),
     creation: workspace.summary?.creation,
-    relations: workspace.runtime?.relations,
-    stack: workspace.runtime?.stack,
   })));
 }
 

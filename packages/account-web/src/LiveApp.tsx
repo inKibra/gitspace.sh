@@ -492,7 +492,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         {children}
         {lfsTransition.dialog}
       </SidebarInset>
-      <CreateWorkspaceDialog key={newWorkspaceProject ?? 'closed'} projectId={newWorkspaceProject} workspaces={sidebarProjects.flatMap((project) => project.workspaces.map((workspace) => ({ ...workspace, ...(sidebarWorkspaceSummary(workspace) ?? { holder: { kind: 'unknown' as const } }), phase: workspace.definition?.phase ?? workspace.runtime?.phase ?? null })))} pending={createPending} error={createError} onOpenChange={(open) => { if (!open && !createPendingRef.current) { setNewWorkspaceProject(null); setCreateError(null); } }} onSubmit={async (input) => {
+      <CreateWorkspaceDialog key={newWorkspaceProject ?? 'closed'} projectId={newWorkspaceProject} workspaces={sidebarProjects.flatMap((project) => project.workspaces.map((workspace) => ({ ...workspace, ...(sidebarWorkspaceSummary(workspace) ?? { holder: { kind: 'unknown' as const } }), phase: workspace.definition?.phase ?? null })))} pending={createPending} error={createError} onOpenChange={(open) => { if (!open && !createPendingRef.current) { setNewWorkspaceProject(null); setCreateError(null); } }} onSubmit={async (input) => {
         if (createPendingRef.current) return;
         createPendingRef.current = true; setCreatePending(true); setCreateError(null);
         try { await actions.onCreateWorkspace(input); setNewWorkspaceProject(null); }

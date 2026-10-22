@@ -46,10 +46,10 @@ describe('runtime to existing shell adapter', () => {
     expect(workspaceStatusColor({ ...runtimeScope(stuck, stale).workspace, freshness: 'fresh' })).toBe('blue');
   });
 
-  const listedBase: InputOf<typeof SpaceViewCodec>['baseSpace'] = { id: project.id, projectId: project.id, kind: 'base', name: project.name, branch: 'main', possessedBy: null, spaceGeneration: 0, closedAt: null, status: idle };
+  const listedBase: InputOf<typeof SpaceViewCodec>['baseSpace'] = { id: project.id, projectId: project.id, kind: 'base', name: project.name, branch: 'main', closedAt: null, status: idle };
   function listed(id: string, status: InputOf<typeof SpaceViewCodec>['workspaces'][number]['status'] = idle): InputOf<typeof SpaceViewCodec>['workspaces'][number] {
     return {
-      id, projectId: project.id, projectName: project.name, name: id, branch: id, rootPath: '', phase: 'code', possessedBy: null, spaceGeneration: 0, possessionGeneration: null, closedAt: null, status,
+      id, projectId: project.id, projectName: project.name, name: id, branch: id, rootPath: '', phase: 'code', closedAt: null, status,
       relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] },
     };
   }

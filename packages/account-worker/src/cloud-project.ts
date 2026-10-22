@@ -1,6 +1,6 @@
 import { cloudResourceId, normalizeRemoteRepositoryUrl, type CloudProjectOperation, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import type { SpaceView } from '@gitspace/protocol/rpc-contract';
-import { emptyRelations, emptyStack, emptyWorkspaceStatus, validateStack } from '@gitspace/protocol-workspace';
+import { emptyRelations, emptyStack, emptyWorkspaceStatus, validateStack, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { gitAuthorizationHeaders } from '@gitspace/runtime-workspace-do';
 import { originAccess } from './origin-access.js';
 
@@ -95,41 +95,45 @@ export async function createCloudProject(env: Env, userId: string, input: { name
   }
 }
 
-/** The project's workspaces, relations, and stack read from cloud state; no machine is consulted. */
+/** A read Cloudflare reports as safe to repeat (`retryable`: the object was reset, as by a storage fault) runs once more. */
+async function readOnceMore<T>(read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) {
+    if (typeof error === 'object' && error !== null && 'retryable' in error && error.retryable === true) return read();
+    throw error;
+  }
+}
+
+/**
+ * The project's workspaces, relations, stack and statuses, from two stored sources: the project object and the account's
+ * status rows (each workspace pushes its own on change). No workspace object is read, so opening a project wakes none,
+ * and one workspace's failure cannot fail the view. Statuses that cannot be read are reported in `statusError`.
+ */
 export async function readCloudSpaceView(env: Env, userId: string, projectId: string): Promise<SpaceView> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const [project, definitions, relations] = await Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()]);
+  const [[project, definitions, relations], statusRead] = await Promise.all([
+    readOnceMore(() => Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()])),
+    readOnceMore(() => env.USER_PROJECTS.getByName(userId).projectWorkspaceStatuses(projectId))
+      .then(statuses => ({ statuses, error: null }), (error: unknown) => ({ statuses: Object.fromEntries<WorkspaceStatusSummary>([]), error: error instanceof Error ? error.message : String(error) })),
+  ]);
   if (!project || project.lifecycle === 'deleting') throw new Error(`Project ${projectId} is unavailable`);
   const live = definitions.filter(definition => definition.lifecycle !== 'deleting');
   const base = live.find(definition => definition.kind === 'base') ?? await authority.ensureBaseWorkspace({ userId, projectId });
   const worktrees = live.filter(definition => definition.kind === 'worktree');
-  const placement = async (definition: CloudWorkspaceDefinition) => {
-    // One read of stored state per workspace; no runtime opens and no snapshot is re-derived.
-    const { placement: record, status } = await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).listingState();
-    const possessedBy = record?.state === 'open' ? record.machineId : null;
-    return {
-      closedAt: definition.archivedAt ? new Date(definition.archivedAt) : null,
-      possessedBy, spaceGeneration: record?.generation ?? 0,
-      status: status ?? emptyWorkspaceStatus,
-    };
-  };
+  const listed = (definition: CloudWorkspaceDefinition) => ({
+    closedAt: definition.archivedAt ? new Date(definition.archivedAt) : null,
+    status: statusRead.statuses[definition.id] ?? emptyWorkspaceStatus,
+  });
   const stacks = validateStack(worktrees.map(definition => ({
     id: definition.id, name: definition.name, phase: definition.phase ?? 'plan', closedAt: definition.archivedAt, relations: relations[definition.id] ?? emptyRelations(),
   })));
-  const [baseSpace, workspaces] = await Promise.all([
-    placement(base),
-    Promise.all(worktrees.map(async definition => {
-      const state = await placement(definition);
-      return {
-        ...state, id: definition.id, projectId, projectName: project.name, name: definition.name, branch: definition.branch, rootPath: '',
-        phase: definition.phase ?? 'plan', possessionGeneration: state.possessedBy ? state.spaceGeneration : null,
-        relations: relations[definition.id] ?? emptyRelations(), stack: stacks.get(definition.id) ?? emptyStack(),
-      };
-    })),
-  ]);
   return {
     project: { id: project.id, name: project.name, baseBranch: project.baseBranch, connected: true },
-    workspaces,
-    baseSpace: { ...baseSpace, id: base.id, projectId, kind: 'base', name: base.name, branch: base.branch },
+    workspaces: worktrees.map(definition => ({
+      ...listed(definition), id: definition.id, projectId, projectName: project.name, name: definition.name, branch: definition.branch, rootPath: '',
+      phase: definition.phase ?? 'plan', relations: relations[definition.id] ?? emptyRelations(), stack: stacks.get(definition.id) ?? emptyStack(),
+    })),
+    baseSpace: { ...listed(base), id: base.id, projectId, kind: 'base', name: base.name, branch: base.branch },
+    statusError: statusRead.error,
   };
 }
