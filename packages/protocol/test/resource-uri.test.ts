@@ -13,6 +13,15 @@ describe('OMP resource URIs', () => {
     expect(parseResourceUri('artifact://report.txt')).toBeNull();
   });
 
+  it('names a repository file as it is now or pinned to a full commit hash, never escaping the repository', () => {
+    const commit = 'a'.repeat(40);
+    expect(parseResourceUri('repo://docs/screens/home%20page.png')).toMatchObject({ kind: 'repo', path: 'docs/screens/home page.png', commit: null, url: 'repo://docs/screens/home%20page.png' });
+    expect(parseResourceUri(`repo://docs/home.png@${commit}`)).toMatchObject({ kind: 'repo', path: 'docs/home.png', commit, url: `repo://docs/home.png@${commit}` });
+    // Only a full hash pins; anything else after `@` is part of the name.
+    expect(parseResourceUri('repo://docs/home.png@abc123')).toMatchObject({ kind: 'repo', path: 'docs/home.png@abc123', commit: null });
+    for (const uri of ['repo://../secret', `repo://docs/%2e%2e/secret@${commit}`, 'repo://docs//home.png', 'repo://']) expect(parseResourceUri(uri)).toBeNull();
+  });
+
   it('rejects traversal before URL normalization and refuses executable or ambiguous URI forms', () => {
     for (const uri of [
       'javascript:alert(1)', 'data:text/html,hello', 'file:///etc/passwd', 'https://example.com', 'agent://12',

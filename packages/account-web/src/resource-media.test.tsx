@@ -78,6 +78,19 @@ describe('files in messages', () => {
     expect(resolve.mock.calls.map(([uri]) => uri)).toEqual(['drive://workspace/chart.png', 'drive://workspace/demo.mp4', 'drive://workspace/voice.mp3', 'drive://workspace/data.zip']);
   });
 
+  it('shows a repository image pinned to a commit beside its current version, or once when unchanged', async () => {
+    const commit = 'c'.repeat(40);
+    const versions: Record<string, string> = { [`repo://shots/home.png@${commit}`]: 'old', 'repo://shots/home.png': 'new', [`repo://shots/logo.png@${commit}`]: 'same', 'repo://shots/logo.png': 'same' };
+    const resolve = vi.fn(async (uri: string): Promise<ResourceFile> => ({ url: `blob:${uri}`, downloadUrl: `blob:${uri}`, size: 10, mediaType: 'image/png', version: versions[uri], expiresAt: new Date(Date.now() + 600_000).toISOString() }));
+    await act(async () => root.render(<Message markdown={`![Home](repo://shots/home.png@${commit})\n\n![Logo](repo://shots/logo.png@${commit})`} resolve={resolve} />));
+    await settle();
+    const compared = container.querySelector(`[aria-label="Home: at ${commit.slice(0, 8)} and now"]`);
+    expect([...compared?.querySelectorAll('img') ?? []].map((image) => image.getAttribute('src'))).toEqual([`blob:repo://shots/home.png@${commit}`, 'blob:repo://shots/home.png']);
+    expect(compared?.textContent).toContain('Now');
+    expect(container.querySelectorAll('img[alt^="Logo"]')).toHaveLength(1);
+    expect(container.textContent).toContain(`Unchanged since ${commit.slice(0, 8)}`);
+  });
+
   it('shows a tool call’s images while the call itself is collapsed', () => {
     const turns: TurnBlock[] = [{ id: 'turn', type: 'turn', status: 'done', sideAgents: [], items: [{
       id: 'call', type: 'tool-call', toolCallId: 'call', tool: 'read', target: 'screen.png', status: 'done',

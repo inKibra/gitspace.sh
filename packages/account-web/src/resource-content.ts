@@ -94,6 +94,7 @@ export async function loadInspectorResource(transport: ResourceTransport, contex
     })(), uri, signal);
   }
   const request = { spaceId: context.spaceId, expectedGeneration: context.generation };
+  if (resource.kind === 'repo') return loadInspectorContent(transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal }), uri, signal);
   if (resource.kind !== 'drive') throw new Error('Machine-session output spills are not retained cloud artifacts. Use a published drive:// evidence link.');
   if (resource.mount === null && context.runtimeAvailable) return loadInspectorContent(transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal }), uri, signal);
   const input = { ...request, url: `${canonicalDriveResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null };

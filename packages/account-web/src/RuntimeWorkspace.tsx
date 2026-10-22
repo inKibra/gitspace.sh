@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react';
-import { canonicalDriveResourceUrl, parseResourceUri } from '@gitspace/protocol/resource-uri';
+import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { ResourceFile } from './resource-files.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
@@ -154,7 +154,16 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   // One resolver per workspace version, so every message showing a file shares its URL.
   const resolveResourceFile = useMemo(() => async (uri: string): Promise<ResourceFile> => {
     const resource = parseResourceUri(uri);
-    if (resource?.kind !== 'drive') throw new Error('Only drive:// files can be shown here');
+    if (resource?.kind === 'repo') {
+      const read = await rpcClient.inspector.repository.file({ spaceId, expectedGeneration: generation, mode: 'current', path: resource.path, ...(resource.commit ? { commit: resource.commit } : {}) });
+      if (read.status === 'error') throw new Error(rpcErrorMessage(read.error, 'Open repository file'));
+      const bytes = read.value.encoding === 'base64' ? Uint8Array.from(atob(read.value.content), character => character.charCodeAt(0)) : new TextEncoder().encode(read.value.content);
+      const mediaType = resourceMediaType(resource.path);
+      // Kept for the page's life like any cached file; a pinned version never changes, the current one is re-read after a minute.
+      const url = URL.createObjectURL(new Blob([bytes], { type: mediaType ?? 'application/octet-stream' }));
+      return { url, downloadUrl: url, size: bytes.length, mediaType, version: read.value.blobId ?? undefined, expiresAt: new Date(Date.now() + (resource.commit ? 24 * 60 : 11) * 60_000).toISOString() };
+    }
+    if (resource?.kind !== 'drive') throw new Error('Only drive:// and repo:// files can be shown here');
     const result = await rpcClient.inspector.artifacts.file({ spaceId, expectedGeneration: generation, url: canonicalDriveResourceUrl(resource, String(spaceId) === String(snapshot.projectId) ? 'base' : 'workspace'), hash: null });
     if (result.status === 'error') throw new Error(rpcErrorMessage(result.error, 'Open file'));
     return result.value;

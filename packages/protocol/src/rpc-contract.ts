@@ -1807,7 +1807,8 @@ export const inspectorRepositoryStatusContract = gitspaceRpc
 
 export const inspectorRepositoryFileContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), mode: inspectorRepositoryModeCodec, path: wire.string }))
+  // `commit` reads the file as it was at that commit instead of in `mode`.
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), mode: inspectorRepositoryModeCodec, path: wire.string, commit: wire.optional(wire.string) }))
   .output(RepositoryFileViewCodec)
   .errors(inspectorReadErrors)
   .query();

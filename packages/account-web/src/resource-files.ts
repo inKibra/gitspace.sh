@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 
 /** A short-lived URL serving one file's bytes, with what it is. */
-export interface ResourceFile { url: string; downloadUrl: string; size: number; mediaType: string | null; expiresAt: string }
+/** `version` names a repository file's content (its blob id), so two versions can be compared. */
+export interface ResourceFile { url: string; downloadUrl: string; size: number; mediaType: string | null; expiresAt: string; version?: string }
 /** Turns a resource address (`drive://…`) into a file URL; null where no workspace can serve files. */
 export const ResourceFiles = createContext<((uri: string) => Promise<ResourceFile>) | null>(null);
 

@@ -67,17 +67,23 @@ function FileCard({ uri, label, size, downloadUrl }: { uri: string; label: strin
 
 function fileName(uri: string): string {
   const resource = parseResourceUri(uri);
-  const path = resource?.kind === 'drive' ? resource.path : uri;
+  const path = resource?.kind === 'drive' || resource?.kind === 'repo' ? resource.path : uri;
   return decodeURIComponent(path.split('/').at(-1) || path);
 }
 
 /** A file shown in a message: images and video by their content, audio as a player, anything else as a card. Its
  * type is known from its name first, so the right frame shows while the file URL is fetched. */
 export function ResourceMedia({ uri, alt }: { uri: string; alt?: string }) {
-  const { file, error, unavailable } = useResourceFile(uri);
   const resource = parseResourceUri(uri);
   const label = alt || fileName(uri);
-  const mediaType = file?.mediaType ?? (resource?.kind === 'drive' ? resourceMediaType(resource.path) : null);
+  const named = resource?.kind === 'drive' || resource?.kind === 'repo' ? resourceMediaType(resource.path) : null;
+  if (resource?.kind === 'repo' && resource.commit && named?.startsWith('image/') && named !== 'image/svg+xml') return <RepositoryImageComparison uri={uri} path={resource.path} commit={resource.commit} label={label} />;
+  return <ResourceFileView uri={uri} label={label} named={named} />;
+}
+
+function ResourceFileView({ uri, label, named }: { uri: string; label: string; named: string | null }) {
+  const { file, error, unavailable } = useResourceFile(uri);
+  const mediaType = file?.mediaType ?? named;
   if (unavailable || error) return <span className="inline-flex flex-col gap-1">
     <FileCard uri={uri} label={label} size={null} downloadUrl={null} />
     {error ? <span role="alert" className="text-caption text-destructive">{error}</span> : null}
@@ -87,6 +93,23 @@ export function ResourceMedia({ uri, alt }: { uri: string; alt?: string }) {
   if (mediaType?.startsWith('video/')) return <VideoPoster label={label} src={file.url} />;
   if (mediaType?.startsWith('audio/')) return <audio aria-label={label} className="block w-full max-w-md" controls preload="metadata" src={file.url} />;
   return <FileCard uri={uri} label={label} size={file.size} downloadUrl={file.downloadUrl} />;
+}
+
+/** A repository image pinned to a commit beside its current version, or once when the two are the same content. */
+function RepositoryImageComparison({ uri, path, commit, label }: { uri: string; path: string; commit: string; label: string }) {
+  const pinned = useResourceFile(uri);
+  const current = useResourceFile(`repo://${path.split('/').map(encodeURIComponent).join('/')}`);
+  const at = commit.slice(0, 8);
+  if (pinned.error || pinned.unavailable) return <ResourceFileView uri={uri} label={label} named={null} />;
+  if (!pinned.file || (!current.file && !current.error)) return <span aria-busy="true" aria-label={`Loading ${label}`} className="block h-24 w-40 animate-pulse rounded-md bg-surface-2" />;
+  const caption = 'mt-1 block text-caption text-muted-foreground';
+  if (current.file?.version !== undefined && current.file.version === pinned.file.version) return <figure className="inline-block">
+    <TranscriptImage alt={label} label={`Open ${label}`} src={pinned.file.url} /><figcaption className={caption}>Unchanged since {at}</figcaption>
+  </figure>;
+  return <div className="flex min-w-0 flex-wrap items-start gap-3" role="group" aria-label={`${label}: at ${at} and now`}>
+    <figure><TranscriptImage alt={`${label} at ${at}`} label={`Open ${label} at ${at}`} src={pinned.file.url} /><figcaption className={caption}>At {at}</figcaption></figure>
+    <figure>{current.file ? <TranscriptImage alt={`${label} now`} label={`Open ${label} now`} src={current.file.url} /> : null}<figcaption className={caption}>{current.file ? 'Now' : 'Not in the workspace now'}</figcaption></figure>
+  </div>;
 }
 
 /** A thumbnail shown while hovering a link to an image; it loads only then. */
@@ -114,7 +137,7 @@ export function MarkdownResourceMedia(props: Record<string, unknown>) {
 export function MarkdownResourceAnchor(props: Record<string, unknown> & { href?: string; children?: ReactNode }) {
   const uri = props.href ? resourceUriFromHref(props.href) : null;
   const resource = uri ? parseResourceUri(uri) : null;
-  const mediaType = resource?.kind === 'drive' ? resourceMediaType(resource.path) : null;
+  const mediaType = resource?.kind === 'drive' || resource?.kind === 'repo' ? resourceMediaType(resource.path) : null;
   const link = <MarkdownResourceLink {...props} />;
   return uri && mediaType?.startsWith('image/') && mediaType !== 'image/svg+xml' ? <Tooltip content={<ImageHoverPreview uri={uri} />} delayDuration={300}><span className="inline">{link}</span></Tooltip> : link;
 }
@@ -127,7 +150,7 @@ export function rehypeResourceMediaMarkers() {
   return (tree: MarkdownNode): void => {
     const visit = (node: MarkdownNode): void => {
       const src = node.properties?.src;
-      if (node.tagName === 'img' && typeof src === 'string' && parseResourceUri(src)?.kind === 'drive') node.properties = { ...node.properties, src: `${MEDIA_PATH}${encodeURIComponent(src)}` };
+      if (node.tagName === 'img' && typeof src === 'string' && (parseResourceUri(src)?.kind === 'drive' || parseResourceUri(src)?.kind === 'repo')) node.properties = { ...node.properties, src: `${MEDIA_PATH}${encodeURIComponent(src)}` };
       node.children?.forEach(visit);
     };
     visit(tree);
@@ -154,7 +177,7 @@ export function rehypeResourceMedia(origin: string) {
 }
 
 /** A resource address as written in prose; trailing sentence punctuation is not part of it. */
-const ADDRESS = /drive:\/\/[^\s<>()[\]{}`'"]+/gu;
+const ADDRESS = /(?:drive|repo):\/\/[^\s<>()[\]{}`'"]+/gu;
 
 function addressOf(text: string): string | null {
   const trimmed = text.replace(/[.,;:!?]+$/u, '');
@@ -169,7 +192,7 @@ export function rehypeResourceAddresses() {
       if (!node.children) return;
       const children: MarkdownNode[] = [];
       for (const child of node.children) {
-        if (child.type === 'text' && child.value?.includes('drive://')) {
+        if (child.type === 'text' && (child.value?.includes('drive://') || child.value?.includes('repo://'))) {
           let last = 0;
           for (const match of child.value.matchAll(ADDRESS)) {
             const address = addressOf(match[0]);

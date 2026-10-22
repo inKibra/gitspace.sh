@@ -4,6 +4,8 @@ export interface ResourceSelector {
 }
 export type ResourceUri = (
   | { kind: 'drive'; mount: 'base' | 'workspace' | 'workspaces' | null; path: string; workspaceId: string | null }
+  /** A file in the workspace's repository: its current version, or the version at `commit`. */
+  | { kind: 'repo'; path: string; commit: string | null }
   | { kind: 'artifact'; id: string }
   | { kind: 'browser-artifact'; machineId: string; id: string }
 ) & { url: string; selector: ResourceSelector; suffix: string };
@@ -11,7 +13,7 @@ export type ResourceUri = (
 /** Parse OMP resources without URL's dot-segment normalization or hostname lowercasing. */
 export function parseResourceUri(input: string): ResourceUri | null {
   if (input.length > 8_192 || /[\u0000-\u0020\u007f\\?#]/u.test(input)) return null;
-  const match = /^(drive|artifact|browser-artifact):\/\/(.*)$/iu.exec(input);
+  const match = /^(drive|repo|artifact|browser-artifact):\/\/(.*)$/iu.exec(input);
   if (!match) return null;
   const scheme = match[1]!.toLowerCase();
   let target = match[2]!;
@@ -45,9 +47,14 @@ export function parseResourceUri(input: string): ResourceUri | null {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/u.test(machineId) || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/u.test(id)) return null;
     return { kind: 'browser-artifact', machineId, id, url: `browser-artifact://${encodeURIComponent(machineId)}/${encodeURIComponent(id)}`, selector, suffix };
   }
+  const pinned = scheme === 'repo' ? /^(.*)@([a-f0-9]{40}|[a-f0-9]{64})$/u.exec(target) : null;
   let parts: string[];
-  try { parts = target.split('/').map((part) => decodeURIComponent(part)); } catch { return null; }
+  try { parts = (pinned ? pinned[1]! : target).split('/').map((part) => decodeURIComponent(part)); } catch { return null; }
   if (!parts.length || parts.some((part) => !part || part === '.' || part === '..' || /[\u0000-\u001f\u007f/\\]/u.test(part))) return null;
+  if (scheme === 'repo') {
+    const commit = pinned ? pinned[2]! : null;
+    return { kind: 'repo', path: parts.join('/'), commit, url: `repo://${parts.map(encodeURIComponent).join('/')}${commit ? `@${commit}` : ''}`, selector, suffix };
+  }
   const mount = parts[0] === 'base' || parts[0] === 'workspace' || parts[0] === 'workspaces' ? parts.shift()! as 'base' | 'workspace' | 'workspaces' : null;
   const workspaceId = mount === 'workspaces' ? parts.shift() ?? null : null;
   if (!parts.length || (mount === 'workspaces' && !workspaceId)) return null;
@@ -106,7 +113,7 @@ export function* createResourcePreview(url: string, bytes: Uint8Array, mediaType
   const resource = parseResourceUri(url);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
   if (bytes.byteLength > 16 * 1024 * 1024) throw new Error('Resource reads are limited to 16 MiB');
-  mediaType ??= resource.kind === 'drive' ? resourceMediaType(resource.path) : 'text/plain';
+  mediaType ??= resource.kind === 'drive' || resource.kind === 'repo' ? resourceMediaType(resource.path) : 'text/plain';
   const binary = mediaType !== null && (/^(audio|video|image)\//u.test(mediaType) && mediaType !== 'image/svg+xml' || mediaType === 'application/pdf');
   let text: string | null = null;
   if (!binary) {

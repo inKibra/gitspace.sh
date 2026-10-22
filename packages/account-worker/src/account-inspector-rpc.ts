@@ -63,12 +63,26 @@ import type { SpaceAuthorityDO } from './space-authority.js';
 import { createGuideShare, guideShareView } from './guide-shares.js';
 import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, withPinnedCloudCheckout, type CloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
-import { canonicalDriveResourceUrl, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { InspectorCloudContext } from './account-inspector-data.js';
+
+const LIVE_REPOSITORY_UNAVAILABLE = 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.';
+
+/** A repository file as it is now in the workspace, or as it was at `commit`. */
+async function repositoryFileAt(env: Env, userId: string, source: InspectorCloudContext, path: string, commit: string | null) {
+  if (!await env.SPACE_AUTHORITY.getByName(`${userId}:${source.workspace.id}`).hasCloudRuntime()) throw new InspectorStateError(LIVE_REPOSITORY_UNAVAILABLE);
+  if (commit === null) return withCloudCheckout(env, userId, source, 'current', null, checkout => cloudRepositoryFile(env, userId, checkout, 'current', path));
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(commit)) throw new InspectorStateError('A commit is named by its full hash');
+  return withPinnedCloudCheckout(env, source, commit, commit, checkout => cloudRepositoryFile(env, userId, checkout, 'current', path));
+}
 
 async function readCloudResource(env: Env, userId: string, source: InspectorCloudContext, url: string) {
   const resource = parseResourceUri(url);
   if (!resource) throw new InspectorStateError('Unsupported or unsafe resource URI');
+  if (resource.kind === 'repo') {
+    const file = await repositoryFileAt(env, userId, source, resource.path, resource.commit);
+    return createResourcePreview(url, file.encoding === 'base64' ? Uint8Array.from(atob(file.content), character => character.charCodeAt(0)) : new TextEncoder().encode(file.content));
+  }
   if (resource.kind === 'artifact') throw new InspectorStateError('This tool output was retained only in its originating machine session, not in cloud artifacts.');
   if (resource.kind === 'browser-artifact') throw new InspectorStateError('Read browser artifacts through the authorized cloud browser control.');
   // Published local artifacts are workspace-scoped, not session-scoped. An old
@@ -583,7 +597,6 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     }
   });
   // Only a legacy machine-held space without a live holder reaches these handlers without cloud runtime state.
-  const legacyRuntimeUnavailable = 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.';
   /** Null for a legacy space without cloud runtime state; otherwise `read` runs against its checkout. */
   const withRepositoryCheckout = async <T>(input: { spaceId: string; expectedGeneration: number; mode: RepositoryMode; baseRef?: string | null }, read: (checkout: CloudCheckout) => Promise<T>) => {
     const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
@@ -593,7 +606,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const repositoryTree = server.implement(inspectorRepositoryTreeContract).stream(async function* ({ input, errors, signal }) {
     try {
       const entries = await withRepositoryCheckout(input, checkout => cloudRepositoryTree(checkout, input.mode, input.path));
-      if (!entries) { yield err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable })); return; }
+      if (!entries) { yield err(errors.InspectorState({ resource: 'runtime', message: LIVE_REPOSITORY_UNAVAILABLE })); return; }
       // Sixteen entries per frame stay below the frame limit, as on a machine.
       if (entries.length === 0 && !signal.aborted) yield ok([]);
       for (let offset = 0; offset < entries.length && !signal.aborted; offset += 16) yield ok(entries.slice(offset, offset + 16));
@@ -606,7 +619,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const repositoryTreePage = server.implement(inspectorRepositoryTreePageContract).handler(async ({ input, errors }) => {
     try {
       const entries = await withRepositoryCheckout(input, checkout => cloudRepositoryTree(checkout, input.mode, input.path));
-      if (!entries) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      if (!entries) return err(errors.InspectorState({ resource: 'runtime', message: LIVE_REPOSITORY_UNAVAILABLE }));
       const frames = [];
       for (let offset = 0; offset < entries.length; offset += 16) frames.push(entries.slice(offset, offset + 16));
       const { cursor, limit, ...identity } = input;
@@ -652,7 +665,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const repositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(async ({ input, errors }) => {
     try {
       const entries = await withRepositoryCheckout(input, checkout => cloudRepositoryStatus(checkout, input.mode, input.path));
-      if (!entries) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      if (!entries) return err(errors.InspectorState({ resource: 'runtime', message: LIVE_REPOSITORY_UNAVAILABLE }));
       return ok(entries);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
@@ -662,8 +675,9 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   });
   const repositoryFile = server.implement(inspectorRepositoryFileContract).handler(async ({ input, errors }) => {
     try {
+      if (input.commit !== undefined) return ok(await repositoryFileAt(env, userId, await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration), input.path, input.commit));
       const file = await withRepositoryCheckout(input, checkout => cloudRepositoryFile(env, userId, checkout, input.mode, input.path));
-      if (!file) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      if (!file) return err(errors.InspectorState({ resource: 'runtime', message: LIVE_REPOSITORY_UNAVAILABLE }));
       return ok(file);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
@@ -674,7 +688,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const repositoryDiff = server.implement(inspectorRepositoryDiffContract).handler(async ({ input, errors }) => {
     try {
       const diff = await withRepositoryCheckout(input, checkout => cloudRepositoryDiff(env, userId, checkout, input.mode, input.path));
-      if (!diff) return err(errors.InspectorState({ resource: 'runtime', message: legacyRuntimeUnavailable }));
+      if (!diff) return err(errors.InspectorState({ resource: 'runtime', message: LIVE_REPOSITORY_UNAVAILABLE }));
       return ok(diff);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
