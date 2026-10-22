@@ -58,7 +58,7 @@ async function attachedWorkspace(workspaceId: string, indexed = true) {
   const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
   await project.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: workspaceId, branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const identity = { projectId, workspaceId };
-  await space(workspaceId).runtimeAttachments(identity);
+  await space(workspaceId).runtimeSnapshot(identity);
   const connected = indexed && (await fleet().attachMachineWorkspace(machineId, identity)).connected;
   await runInDurableObject(space(workspaceId), async (_instance, state) => {
     const store = new AttachmentStore(state.storage, { seal: async () => 'sealed', open: async () => 'secret', dispatch: async () => { throw new Error('No dispatch in presence tests'); } });
@@ -89,7 +89,7 @@ async function eventually(check: () => Promise<boolean>): Promise<void> {
   throw new Error('Condition was not reached');
 }
 
-const attachmentOnline = async (workspaceId: string) => (await space(workspaceId).runtimeAttachments({ projectId, workspaceId })).find(item => item.machineId === machineId)?.online;
+const attachmentOnline = async (workspaceId: string) => (await space(workspaceId).runtimeAttachmentRecords({ projectId, workspaceId })).find(item => item.machineId === machineId)?.online;
 const machineState = async () => (await fleet().getMachine(machineId))?.state;
 
 describe('relay presence', () => {
@@ -192,7 +192,7 @@ describe('machine-wide assignments', () => {
     const indexed = await attachedWorkspace('indexed-a');
     // Another workspace of the account that this machine is not attached to: the account-wide fan-out read it too.
     await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).putWorkspace({ id: 'unattached-b', projectId, kind: 'worktree', name: 'unattached-b', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    await space('unattached-b').runtimeAttachments({ projectId, workspaceId: 'unattached-b' });
+    await space('unattached-b').runtimeSnapshot({ projectId, workspaceId: 'unattached-b' });
     const reads = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAssignments');
     const response = await worker.fetch(new Request('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -244,7 +244,7 @@ describe('machine notices', () => {
 
   it('tells the conversation of a failed setup step once', async () => {
     const workspace = await attachedWorkspace('notice-setup');
-    const [attachment] = await space(workspace.workspaceId).runtimeAttachments(workspace);
+    const [attachment] = await space(workspace.workspaceId).runtimeAttachmentRecords(workspace);
     const report = () => space(workspace.workspaceId).runtimeHeartbeat({
       ...workspace, machineId, attachmentId: attachment!.attachmentId, generation: attachment!.generation,
       executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: null },
@@ -257,7 +257,7 @@ describe('machine notices', () => {
 
   it('tells the conversation of a sync failure only once it lasts five minutes', async () => {
     const workspace = await attachedWorkspace('notice-sync');
-    const [attachment] = await space(workspace.workspaceId).runtimeAttachments(workspace);
+    const [attachment] = await space(workspace.workspaceId).runtimeAttachmentRecords(workspace);
     const report = (syncProblem: string | null) => space(workspace.workspaceId).runtimeHeartbeat({
       ...workspace, machineId, attachmentId: attachment!.attachmentId, generation: attachment!.generation,
       executionObservation: { activeExecutions: 0, observedAt: new Date().toISOString(), materializedCommit: null },

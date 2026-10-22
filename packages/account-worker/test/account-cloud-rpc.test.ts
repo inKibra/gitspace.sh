@@ -587,7 +587,7 @@ describe('account routing of machine work', () => {
     const catalog = env.FLEET_CATALOG.getByName(fixture.userId);
     const machines = ['machine-a', 'machine-b', 'machine-c'];
     for (const id of machines) await catalog.putMachine(machine(id));
-    if (cloudRuntime) await held.placement.runtimeAttachments({ projectId: held.projectId, workspaceId: held.spaceId });
+    if (cloudRuntime) await held.placement.runtimeSnapshot({ projectId: held.projectId, workspaceId: held.spaceId });
     const reached: Array<{ machine: string; signedTarget: string | null }> = [];
     network.use(...machines.map((id) => http.post(`https://${id}.test/rpc`, ({ request }) => {
       reached.push({ machine: id, signedTarget: request.headers.get('x-gitspace-signed-target') });

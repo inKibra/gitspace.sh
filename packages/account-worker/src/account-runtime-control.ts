@@ -21,7 +21,7 @@ async function projectRepositoryCredentials(env: Env, userId: string, machine: s
   const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:${input.projectId}`).getProject();
   if (!project) throw new Error('Runtime project is unavailable');
   if (project.repositoryReference === null) throw new Error('Only imported projects are seeded from a machine');
-  const attachments = await access.authority.runtimeAttachments(base);
+  const attachments = await access.authority.runtimeAttachmentRecords(base);
   if (!attachments.some(item => item.machineId === machine && item.state !== 'detached'
     && (input.generation === undefined || item.generation === input.generation))) throw new Error('Project repository lease requires a checkout of the base workspace on this machine');
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
@@ -39,7 +39,7 @@ async function checkoutOrigin(env: Env, userId: string, machine: string, operati
   if (input.machineId !== machine) throw new Error('Origin access target does not match the authenticated machine');
   const write = token?.access === 'write';
   const access = await requireWorkspaceAccess(env, userId, input, write);
-  const attachment = (await access.authority.runtimeAttachments(input))
+  const attachment = (await access.authority.runtimeAttachmentRecords(input))
     .find(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation);
   if (!attachment || attachment.state === 'detached') throw new Error('Origin access requires a current assigned checkout');
   if (write && attachment.state !== 'ready') throw new Error('This attachment cannot push to its origin');
@@ -51,8 +51,36 @@ async function checkoutOrigin(env: Env, userId: string, machine: string, operati
   return env.GITHUB_APP.getByName(env.ACCOUNT_ID).repositoryToken(origin.repository, token.access);
 }
 
+/** A runtime request this slow points at a cold or stuck workspace object; faster ones are not logged. */
+const SLOW_RUNTIME_REQUEST_MS = 30_000;
+
+/** Runs one machine-control or browser runtime request, logging it only when it took SLOW_RUNTIME_REQUEST_MS or more.
+ * `failed` tells a request that answered with an error value (the browser procedures' results) from a success. */
+export async function observeRuntimeRequest<T>(caller: 'machine' | 'browser', operation: string, workspaceId: string | null, run: () => Promise<T>, failed?: (value: T) => boolean): Promise<T> {
+  // Diagnostic for idle wakes (2026-10-22): remove once diagnosed. Idle workspaces receive requests nothing else attributes.
+  if (Math.random() < 0.05) console.log(JSON.stringify({ event: 'runtime_request_sample', operation, workspaceId, caller }));
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'error';
+  try {
+    const value = await run();
+    if (!failed?.(value)) outcome = 'ok';
+    return value;
+  } finally {
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= SLOW_RUNTIME_REQUEST_MS) console.warn(JSON.stringify({ event: 'slow_runtime_request', operation, workspaceId, durationMs, outcome }));
+  }
+}
+
 /** Called after authorizeControl verifies the signed envelope and operation-specific capability. */
-export async function runtimeMachineControl(env: Env, request: SignedControlRequest): Promise<unknown> {
+export function runtimeMachineControl(env: Env, request: SignedControlRequest): Promise<unknown> {
+  const { workspaceId, repository } = request.payload;
+  // Machine git remotes name only the repository.
+  const workspace = typeof workspaceId === 'string' ? workspaceId
+    : typeof repository === 'string' && repository.startsWith('workspace-') ? repository.slice('workspace-'.length) : null;
+  return observeRuntimeRequest('machine', request.operation, workspace, () => dispatchMachineControl(env, request));
+}
+
+async function dispatchMachineControl(env: Env, request: SignedControlRequest): Promise<unknown> {
   const { operation, payload, userId, machineId } = request;
   const machine = RuntimeMachineIdSchema.parse(machineId);
   if ('machineId' in payload && payload.machineId !== machineId) throw new Error('Machine control identity mismatch');
@@ -88,14 +116,14 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     if (input.repository !== undefined && input.repository !== repository) throw new Error('Repository does not belong to the requested workspace');
     const access = await requireWorkspaceAccess(env, userId, identity, input.scope === 'write');
     if (input.attachmentId !== undefined) {
-      const attachments = await access.authority.runtimeAttachments(identity);
+      const attachments = await access.authority.runtimeAttachmentRecords(identity);
       const attachment = attachments.find(item => item.attachmentId === input.attachmentId && item.machineId === machine && item.generation === input.generation);
       if (!attachment || attachment.state === 'detached') throw new Error('Repository lease requires a current assigned checkout');
       if (input.scope === 'write' && attachment.state !== 'ready') throw new Error('This attachment cannot publish repository changes');
     } else {
       // Machine git remotes bind only the repository: any machine with a live checkout qualifies, and checkouts
       // publish their baseline before ready.
-      const attachments = await access.authority.runtimeAttachments(identity);
+      const attachments = await access.authority.runtimeAttachmentRecords(identity);
       if (!attachments.some(item => item.machineId === machine && item.state !== 'detached'
         && (input.generation === undefined || item.generation === input.generation))) throw new Error('Repository lease requires current checkout ownership');
     }
@@ -116,7 +144,7 @@ export async function runtimeMachineControl(env: Env, request: SignedControlRequ
     if (input.machineId !== machine) throw new Error('Cache request target mismatch');
     return access.authority.runtimeCacheAttachmentRequest(input);
   }
-  const attachments = await access.authority.runtimeAttachments(identity);
+  const attachments = await access.authority.runtimeAttachmentRecords(identity);
   if (!attachments.some(item => item.machineId === machine && item.state !== 'detached')) throw new Error('Machine has no active assignment in this workspace');
   if (operation === 'runtime.browser.authority') {
     const input = RuntimeIdentitySchema.extend({ machineId: z.string(), attachmentId: z.string(), generation: z.number().int().nonnegative() }).parse(payload);

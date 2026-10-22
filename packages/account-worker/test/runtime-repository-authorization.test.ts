@@ -6,6 +6,8 @@ import { ArtifactsCodeStore, AttachmentStore, type AttachmentServices } from '@g
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { GitHubAppDO } from '../src/github-app.js';
+import { runtimeMachineControl } from '../src/account-runtime-control.js';
+import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
 
 const projectId = 'repository-project';
@@ -32,7 +34,7 @@ const services: AttachmentServices = {
 
 async function attach(machineId: string, generation: number) {
   const authority = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`);
-  await authority.runtimeAttachments({ projectId, workspaceId });
+  await authority.runtimeSnapshot({ projectId, workspaceId });
   await runInDurableObject(authority, async (_instance, state) => {
     await new AttachmentStore(state.storage, services).attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId, machineId, generation, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), true);
   });
@@ -134,13 +136,35 @@ describe('signed repository credential authority', () => {
     const write = await f.request({ ...binding, scope: 'write' }, 'unassigned');
     expect(write.status, await write.text()).toBe(200);
   });
+
+  it('authorizes leases from the stored checkout records while the workspace runtime cannot start', async () => {
+    const f = await fixture(['storage.access']);
+    await runInDurableObject(f.authority, async (_instance, state) => {
+      // A fresh instance over the attached workspace: its runtime is closed, and opening it would fail.
+      const cold = new SpaceAuthorityDO(state, {
+        ...env,
+        USER_SETTINGS: new Proxy(env.USER_SETTINGS, { get() { throw new Error('The workspace runtime was started'); } }),
+        PROJECT_AUTHORITY: new Proxy(env.PROJECT_AUTHORITY, { get() { throw new Error('The project was consulted'); } }),
+      });
+      await state.blockConcurrencyWhile(async () => {});
+      const routed = { ...env, SPACE_AUTHORITY: new Proxy(env.SPACE_AUTHORITY, { get: (target, key) => key === 'getByName' ? () => cold : Reflect.get(target, key) }) };
+      const request = (machineId: string, payload: Record<string, unknown>) => runtimeMachineControl(routed, createSignedControlRequest({
+        userId: env.ACCOUNT_ID, machineId, operation: 'runtime.repository.credentials', payload: { projectId, scope: 'read', ...payload }, signingPrivateKey: signingKey,
+      }));
+      // A checkout's lease at its generation, and a git remote's, which names only the repository.
+      await expect(request('assigned', { workspaceId, generation: 1 })).resolves.toEqual(lease);
+      await expect(request('assigned', { repository: `workspace-${workspaceId}` })).resolves.toEqual(lease);
+      await expect(request('assigned', { workspaceId, generation: 0 })).rejects.toThrow('Repository lease requires current checkout ownership');
+      await expect(request('unassigned', { repository: `workspace-${workspaceId}` })).rejects.toThrow('Repository lease requires current checkout ownership');
+    });
+  });
 });
 
 describe('signed checkout origin access', () => {
   const installationToken = { token: 'ghs_test-installation-token', expiresAt: '2099-01-01T00:00:00.000Z' };
   async function originFixture(repositoryReference: string, capabilities: Array<'storage.access' | 'space.control'> = ['storage.access']) {
     const f = await fixture(capabilities, repositoryReference);
-    const [attachment] = await f.authority.runtimeAttachments({ projectId, workspaceId });
+    const [attachment] = await f.authority.runtimeAttachmentRecords({ projectId, workspaceId });
     if (!attachment) throw new Error('The fixture attached no checkout');
     const tokens = vi.spyOn(GitHubAppDO.prototype, 'repositoryToken').mockResolvedValue(installationToken);
     // The App's installation covers Owner/Repo; GitHub itself is never called.

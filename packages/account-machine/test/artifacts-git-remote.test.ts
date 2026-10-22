@@ -61,6 +61,32 @@ it('refuses to move a remote branch that holds different history', async () => {
   expect(git(f.remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(`refs/heads/main ${base}`);
   expect(f.scopes).toEqual(['read']);
 });
+it('reuses one repository lease across git operations until the remote refuses it', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'leased'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'leased');
+  const commit = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'update-ref', f.checkpointRef, commit);
+  const fetch = () => f.publication.fetchCheckpoint({ repositoryPath: f.root, binding: { projectId: 'test', repository: 'test' }, checkpointRef: f.checkpointRef, commit });
+  const redirect = (from: string, to: string) => {
+    git(f.root, 'config', '--remove-section', `url.${from}`);
+    git(f.root, 'config', `url.${to}.insteadOf`, 'https://artifacts.invalid/repository');
+  };
+  await f.publish();
+  // The write lease also serves the read.
+  await fetch();
+  expect(f.scopes).toEqual(['write']);
+  // Artifacts answers 401 once it no longer accepts the token.
+  const refusing = Bun.serve({ port: 0, fetch: () => new Response('revoked', { status: 401 }) });
+  const refusal = `http://127.0.0.1:${refusing.port}/repository`;
+  try {
+    redirect(f.remote, refusal);
+    await expect(fetch()).rejects.toThrow('could not read Username');
+    expect(f.scopes).toEqual(['write']);
+  } finally { await refusing.stop(true); }
+  redirect(refusal, f.remote);
+  await fetch();
+  expect(f.scopes).toEqual(['write', 'read']);
+});
 it('publishes a blob at the exact decimal 32 MB boundary', async () => {
   const f = fixture();
   writeFileSync(join(f.root, 'boundary.bin'), Buffer.alloc(32_000_000));

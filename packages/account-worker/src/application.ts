@@ -3582,7 +3582,7 @@ const worker = {
                   ? await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).getMachine(body.machineId)
                   : null;
                 const attachment = input.op === 'claim' && input.attachment
-                  ? (await space.runtimeAttachments(identity)).find(item => item.attachmentId === input.attachment?.attachmentId && item.generation === input.attachment.generation && item.workspaceId === spaceId)
+                  ? (await space.runtimeAttachmentRecords(identity)).find(item => item.attachmentId === input.attachment?.attachmentId && item.generation === input.attachment.generation && item.workspaceId === spaceId)
                   : undefined;
                 authorizeLifecycleMachineMutation(input, {
                   machineId: body.machineId,

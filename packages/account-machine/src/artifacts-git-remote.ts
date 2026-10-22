@@ -112,8 +112,16 @@ export async function verifyArtifactsGitUpload(repositoryPath: string, commit: s
   await checkCurrentLayers(repositoryPath, commit, headCommit);
 }
 
-/** No daemon, S3 authority, persisted credential URL, or credential cache. */
+/** A lease is renewed this long before it expires, so no git operation starts with a token about to lapse. */
+const LEASE_RENEWAL_MS = 60_000;
+/** How git reports a token the remote refused: 401 without a prompt to fall back on, or 403. */
+const AUTHENTICATION_FAILURE = /could not read (?:Username|Password)|Authentication failed|returned error: 40[13]\b|\bHTTP 40[13]\b/u;
+type RepositoryLease = { remote: string; renewAt: number; environment: Record<string, string> };
+
+/** No daemon, S3 authority, or persisted credential URL. Leases live in memory only. */
 export class ArtifactsGitRemote {
+  private readonly leases = new Map<string, Partial<Record<'read' | 'write', RepositoryLease>>>();
+
   constructor(private readonly options: ArtifactsGitRemoteOptions) {}
 
   /** `remoteHead` is a HEAD the remote already holds (the last accepted one), or null when unknown. A HEAD
@@ -135,7 +143,7 @@ export class ArtifactsGitRemote {
     }
     await withShallowBoundary(boundary, async shallow => {
       const auth = await this.auth(input.binding, 'write');
-      await pushToArtifacts(input.repositoryPath, ['--force', auth.remote, `${commit}:${input.checkpointRef}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
+      await this.transfer(input.binding, pushToArtifacts(input.repositoryPath, ['--force', auth.remote, `${commit}:${input.checkpointRef}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' }));
     });
   }
 
@@ -151,13 +159,13 @@ export class ArtifactsGitRemote {
       await checkCurrentLayers(input.repositoryPath, input.commit, null, shallow);
       // Even read credentials may create the remote repository: check first.
       const probe = await this.auth(input.binding, 'read');
-      const advertised = await git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, input.ref], probe.environment);
+      const advertised = await this.transfer(input.binding, git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, input.ref], probe.environment));
       // ls-remote patterns match ref suffixes; only the exact ref counts.
       const current = advertised.split('\n').map(line => line.split('\t')).find(([, name]) => name === input.ref)?.[0];
       if (current === input.commit) return;
       if (current !== undefined) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
       const auth = await this.auth(input.binding, 'write');
-      await pushToArtifacts(input.repositoryPath, [auth.remote, `${input.commit}:${input.ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' });
+      await this.transfer(input.binding, pushToArtifacts(input.repositoryPath, [auth.remote, `${input.commit}:${input.ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' }));
     });
   }
 
@@ -173,11 +181,11 @@ export class ArtifactsGitRemote {
     const auth = await this.auth(input.binding, 'read');
     const environment = { ...auth.environment, GIT_LFS_SKIP_SMUDGE: '1' };
     if (commit === undefined) {
-      await git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${checkpointRef}:${checkpointRef}`], environment);
+      await this.transfer(input.binding, git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${checkpointRef}:${checkpointRef}`], environment));
       return;
     }
     const owned = `refs/gitspace/fetch/${crypto.randomUUID()}`;
-    await git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${commit}:${owned}`], environment);
+    await this.transfer(input.binding, git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${commit}:${owned}`], environment));
     // Exact match: for-each-ref patterns also match refs below `checkpointRef/`.
     const anchor = async () => (await git(repositoryPath, ['for-each-ref', '--format=%(objectname) %(refname)', checkpointRef])).split('\n').map(line => line.split(' ')).find(([, name]) => name === checkpointRef)?.[0] ?? null;
     try {
@@ -202,15 +210,33 @@ export class ArtifactsGitRemote {
     if (!ref.startsWith('refs/gitspace/') || ref.includes('..') || !/^[A-Za-z0-9._/-]+$/u.test(ref)) throw new ArtifactsGitError('checkpoint', 'Invalid private checkpoint ref');
   }
 
-  private async auth(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write') {
+  /** A lease is reused until a minute before it expires, and a write lease also serves reads: every lease costs the
+   * cloud a workspace wake-up, and sync runs git several times a minute. */
+  private async auth(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write'): Promise<RepositoryLease> {
+    const key = JSON.stringify([binding.projectId, binding.repository]);
+    const held = this.leases.get(key);
+    const now = Date.now();
+    if (held?.write && held.write.renewAt > now) return held.write;
+    if (scope === 'read' && held?.read && held.read.renewAt > now) return held.read;
     const credential = await this.options.credentials(binding, scope);
     const remote = new URL(credential.remote);
     if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new ArtifactsGitError('credentials', 'Invalid credential-free repository URL');
-    if (Date.parse(credential.expiresAt) <= Date.now() + 60_000 || !Number.isFinite(Date.parse(credential.expiresAt))) throw new ArtifactsGitError('credentials', 'Repository token expires too soon');
+    if (Date.parse(credential.expiresAt) <= Date.now() + LEASE_RENEWAL_MS || !Number.isFinite(Date.parse(credential.expiresAt))) throw new ArtifactsGitError('credentials', 'Repository token expires too soon');
     if (!credential.plaintext || /[\r\n]/u.test(credential.plaintext)) throw new ArtifactsGitError('credentials', 'Invalid repository token');
-    return { remote: remote.href, environment: {
+    const lease = { remote: remote.href, renewAt: Date.parse(credential.expiresAt) - LEASE_RENEWAL_MS, environment: {
       GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: `http.${remote.href}.extraHeader`, GIT_CONFIG_VALUE_0: `Authorization: Bearer ${credential.plaintext}`,
       GIT_CONFIG_KEY_1: 'http.followRedirects', GIT_CONFIG_VALUE_1: 'false', GIT_CONFIG_KEY_2: 'credential.helper', GIT_CONFIG_VALUE_2: '', GIT_TERMINAL_PROMPT: '0',
     } };
+    this.leases.set(key, { ...this.leases.get(key), [scope]: lease });
+    return lease;
+  }
+
+  /** A remote that refuses a lease (revoked, or rotated by the cloud) makes the binding mint a fresh one next time. */
+  private async transfer<T>(binding: ArtifactsRepositoryBinding, operation: Promise<T>): Promise<T> {
+    try { return await operation; }
+    catch (error) {
+      if (error instanceof ArtifactsGitError && AUTHENTICATION_FAILURE.test(error.message)) this.leases.delete(JSON.stringify([binding.projectId, binding.repository]));
+      throw error;
+    }
   }
 }

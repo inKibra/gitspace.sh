@@ -40,7 +40,9 @@ export async function watchGitWorktree(options: {
   root: string;
   clock: GitWorktreeClock;
   events: GitWorktreeEvents;
-  changed(): void;
+  /** `worktree`: a file in the checkout changed (a person's or tool's edit). `git`: only Git's own metadata or ignore
+   * configuration did, which git commands (`git status` refreshing the index) also change. */
+  changed(cause: 'worktree' | 'git'): void;
   failed(error: Error): void;
 }): Promise<{ close(): void }> {
   const cache = new Map<string, boolean>();
@@ -79,7 +81,7 @@ export async function watchGitWorktree(options: {
     if (closed || next === previousMetadata) return;
     previousMetadata = next;
     invalidate();
-    options.changed();
+    options.changed('git');
   };
   const poll = () => {
     pollCancel = options.clock.schedule(5000, () => {
@@ -105,7 +107,7 @@ export async function watchGitWorktree(options: {
         if (cache.size + unknown.length > 4096) cache.clear();
         for (const path of unknown.slice(-4096)) cache.set(path, ignored.has(path));
       }
-      if (relevant) options.changed();
+      if (relevant) options.changed('worktree');
     }
   };
   const stopEvents = options.events(options.root, async name => {
@@ -115,10 +117,10 @@ export async function watchGitWorktree(options: {
       // Refresh the external ignore baseline now, so subsequent external edits
       // are compared to this config, not to a stale path from watcher startup.
       await refresh();
-      if (!closed) options.changed();
+      if (!closed) options.changed(name.endsWith('.gitignore') ? 'worktree' : 'git');
       return;
     }
-    if (name.startsWith('.git/')) { options.changed(); return; }
+    if (name.startsWith('.git/')) { options.changed('git'); return; }
     pending.add(name);
     do {
       if (!processing) {

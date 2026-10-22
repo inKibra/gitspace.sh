@@ -72,6 +72,14 @@ export async function createAccountWorkspaceRuntime(
     if (!current || current.projectId !== identity.projectId || current.workspaceId !== identity.workspaceId) throw new Error('Workspace metadata is unavailable');
     return current;
   };
+  // Diagnostic for idle wakes (2026-10-22): remove once diagnosed. Background work this slow keeps the object awake.
+  const waitUntil = (label: string, promise: Promise<unknown>) => {
+    const startedAt = Date.now();
+    ctx.waitUntil(promise.finally(() => {
+      const durationMs = Date.now() - startedAt;
+      if (durationMs >= 30_000) console.warn(JSON.stringify({ event: 'slow_wait_until', label, durationMs }));
+    }));
+  };
   const base = metadata().kind === 'base';
   // A project's base space has no phase; it is never plan-locked.
   const workspacePhase = base ? 'code' : metadata().phase ?? 'plan';
@@ -112,20 +120,20 @@ export async function createAccountWorkspaceRuntime(
     published: (snapshot, report) => {
       const status = report.summary;
       // The sidebar's row: sent to every tab only when the status changed.
-      if (storeWorkspaceStatus(ctx.storage, status)) ctx.waitUntil(env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+      if (storeWorkspaceStatus(ctx.storage, status)) waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       storeWorkspaceReport(ctx.storage, report);
       const watch = readProjectWatch(ctx.storage);
       if (watch && status.primaryColor !== watch.color) {
         writeProjectWatch(ctx.storage, watch.name, status.primaryColor);
         const line = projectNotice(watch, report);
-        if (line) ctx.waitUntil(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeProjectNotice({ projectId: identity.projectId, workspaceId: identity.projectId }, line).catch((error: unknown) => console.error('Project notice was not sent', { workspaceId: identity.workspaceId, error })));
+        if (line) waitUntil('project notice', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeProjectNotice({ projectId: identity.projectId, workspaceId: identity.projectId }, line).catch((error: unknown) => console.error('Project notice was not sent', { workspaceId: identity.workspaceId, error })));
       }
-      ctx.waitUntil(notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
+      waitUntil('browser notice', notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
     },
     snapshotChanged: machineIds => {
-      ctx.waitUntil(notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
+      waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
       // The environment is derived from the workspace's files: derive it when they change, not when it is read.
-      ctx.waitUntil(environment.currentLifecycleState(identity).catch((error: unknown) => console.error('Environment was not derived', { workspaceId: identity.workspaceId, error })));
+      waitUntil('environment derivation', environment.currentLifecycleState(identity).catch((error: unknown) => console.error('Environment was not derived', { workspaceId: identity.workspaceId, error })));
     },
     code,
     lfs,
@@ -149,17 +157,17 @@ export async function createAccountWorkspaceRuntime(
     browser: services.browser,
     storage: ctx.storage,
     identity,
-    waitUntil: promise => ctx.waitUntil(promise),
+    waitUntil: promise => waitUntil('runtime', promise),
     schedule,
     qa,
-    onReport: error => { ctx.waitUntil(qa.report(error instanceof Error ? error.message : String(error))); },
+    onReport: error => { waitUntil('qa report', qa.report(error instanceof Error ? error.message : String(error))); },
     attachments: {
       seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),
       dispatch: input => dispatchRuntimeAttachment(env, input),
     },
   });
-  ctx.waitUntil(runtime.wake());
+  waitUntil('wake', runtime.wake());
   return runtime;
 }
 

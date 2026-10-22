@@ -28,8 +28,10 @@ async function watcherProof(run: (proof: {
   event(path: string): Promise<void>;
   duringCapture(action: () => Promise<void>): void;
   waitForFinal(): Promise<void>;
-  /** The cloud refuses the next `count` snapshot commits, as it did with "internal error; reference = …". */
-  failCommits(count: number): void;
+  /** The cloud refuses the next `count` snapshot commits with `reason`, by default as it did with "internal error; reference = …". */
+  failCommits(count: number, reason?: string): void;
+  /** Closes the executor and starts another on the same journals, as a machine restart does. */
+  restart(): Promise<MachineExecutorRuntime>;
   /** The simulated time of each snapshot commit attempt. */
   commitTimes(): number[];
 }) => Promise<void>) {
@@ -50,7 +52,7 @@ async function watcherProof(run: (proof: {
     let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     let checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null = null;
     let captureAction: (() => Promise<void>) | undefined;
-    let refusals = 0;
+    let refusals = 0, refusal = '';
     const attempts: number[] = [];
     const uploads: string[][] = [], publications: string[][] = [];
     const final = Promise.withResolvers<void>();
@@ -83,7 +85,7 @@ async function watcherProof(run: (proof: {
     const lfs = async () => ({ store: { has: unavailable, put: unavailable, get: unavailable }, originEnvironment: async () => {
       const action = captureAction; captureAction = undefined; await action?.(); return {};
     } });
-    runtime = await createMachineExecutor({
+    const start = () => createMachineExecutor({
       checkpointClock: clock,
       checkpointEvents: (_root, changed) => { watchers++; event = changed; return () => { watchers--; }; },
       environmentRoot: join(root, 'runtime'), managedSpaceRoot: join(root, 'spaces'), machineId: 'machine',
@@ -92,7 +94,7 @@ async function watcherProof(run: (proof: {
       lfs: { read: lfs, publish: lfs },
       commitSnapshot: async (_local, candidate, previous) => {
         attempts.push(clock.now);
-        if (refusals > 0) { refusals--; throw new Error('internal error; reference = proof'); }
+        if (refusals > 0) { refusals--; throw new Error(refusal); }
         const worktreeCommit = await git(checkout, 'commit-tree', candidate.worktreeTree,
           '-p', candidate.worktreeCommit, ...(previous ? ['-p', previous] : []), '-m', 'Accepted canonical snapshot');
         const accepted = { ...candidate, checkpointRef: `${candidate.checkpointRef}-accepted`, worktreeCommit };
@@ -104,10 +106,16 @@ async function watcherProof(run: (proof: {
         return accepted;
       },
     });
+    runtime = await start();
     await clock.until(runtime.sync());
     uploads.length = 0; publications.length = 0; attempts.length = 0;
-    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: count => { refusals = count; }, commitTimes: () => attempts, waitForFinal: async () => {
+    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: (count, reason = 'internal error; reference = proof') => { refusals = count; refusal = reason; }, commitTimes: () => attempts, waitForFinal: async () => {
       await clock.until(final.promise);
+    }, restart: async () => {
+      await runtime?.close();
+      runtime = await start();
+      await clock.until(runtime.sync());
+      return runtime;
     } });
   } finally { await runtime?.close(); await rm(root, { recursive: true, force: true }); }
 }
@@ -341,3 +349,76 @@ test('a failed sync pass is retried without waiting for an edit, so an idle chec
     expect(publications).toEqual([['tracked.txt:final']]);
   });
 });
+
+/** Moves simulated time on in `stepMs` steps until `done`. Retry waits are 5 s and longer, which the manual clock never
+ * advances by itself; the short real sleep gives each attempt's git processes time to run. */
+async function advanceUntil(clock: ManualWorktreeClock, stepMs: number, steps: number, done: () => boolean) {
+  for (let step = 0; step < steps && !done(); step++) { clock.advance(stepMs); await clock.until(Bun.sleep(2)); }
+}
+const syncProblem = (runtime: MachineExecutorRuntime) => runtime.journal.attachment('watch-cache')?.attachment.failure?.message ?? '';
+
+test('a sync that keeps failing stops after 8 attempts, and the next edit starts it again', async () => {
+  await watcherProof(async ({ checkout, runtime, clock, event, failCommits, commitTimes, publications, waitForFinal }) => {
+    failCommits(1_000);
+    await writeFile(join(checkout, 'tracked.txt'), 'first\n');
+    await event('tracked.txt');
+    await advanceUntil(clock, 5_000, 2_000, () => commitTimes().length > 8 || syncProblem(runtime).includes('after 8 attempts'));
+    // An idle hour later the workspace has not been asked again.
+    await advanceUntil(clock, 60_000, 60, () => commitTimes().length > 8);
+    expect(commitTimes()).toHaveLength(8);
+    expect(syncProblem(runtime)).toBe('Changes on this machine could not be sent after 8 attempts: internal error; reference = proof. Edit a file or retry sync to try again.');
+    failCommits(0);
+    await writeFile(join(checkout, 'tracked.txt'), 'final\n');
+    await event('tracked.txt');
+    await waitForFinal();
+    // The snapshot left pending is sent first, then the edit.
+    expect(publications).toEqual([['tracked.txt:first'], ['tracked.txt:final']]);
+  });
+}, 30_000);
+
+test('a stopped sync stays stopped through Git metadata changes, and restarts on an edit', async () => {
+  await watcherProof(async ({ checkout, runtime, clock, event, failCommits, commitTimes, publications, waitForFinal }) => {
+    failCommits(1_000);
+    await writeFile(join(checkout, 'tracked.txt'), 'first\n');
+    await event('tracked.txt');
+    await advanceUntil(clock, 5_000, 2_000, () => commitTimes().length > 8 || syncProblem(runtime).includes('after 8 attempts'));
+    // An editor running `git status` refreshes the index again and again.
+    for (let refresh = 0; refresh < 10; refresh++) { await event('.git/index'); await advanceUntil(clock, 60_000, 2, () => commitTimes().length > 8); }
+    expect(commitTimes()).toHaveLength(8);
+    failCommits(0);
+    await writeFile(join(checkout, 'tracked.txt'), 'final\n');
+    await event('tracked.txt');
+    await waitForFinal();
+    expect(publications).toEqual([['tracked.txt:first'], ['tracked.txt:final']]);
+  });
+}, 30_000);
+
+test('a checkout state no retry can change is not retried until an edit', async () => {
+  await watcherProof(async ({ checkout, clock, event, failCommits, commitTimes, publications, waitForFinal }) => {
+    failCommits(1, 'Git LFS write-tree: bun.lock: unmerged');
+    await writeFile(join(checkout, 'tracked.txt'), 'first\n');
+    await event('tracked.txt');
+    await advanceUntil(clock, 5_000, 200, () => commitTimes().length > 1);
+    expect(commitTimes()).toHaveLength(1);
+    await writeFile(join(checkout, 'tracked.txt'), 'final\n');
+    await event('tracked.txt');
+    await waitForFinal();
+    expect(publications).toEqual([['tracked.txt:first'], ['tracked.txt:final']]);
+  });
+}, 30_000);
+
+test('a restart continues the attempt count of a failing sync instead of starting over', async () => {
+  await watcherProof(async ({ checkout, clock, event, failCommits, commitTimes, restart }) => {
+    failCommits(1_000);
+    await writeFile(join(checkout, 'tracked.txt'), 'first\n');
+    await event('tracked.txt');
+    // The wait after the third failure: three attempts are counted.
+    const third = clock.pending(20_000, 10_000);
+    await advanceUntil(clock, 5_000, 2_000, () => commitTimes().length >= 3);
+    await third;
+    const runtime = await restart();
+    await advanceUntil(clock, 5_000, 2_000, () => commitTimes().length > 8 || syncProblem(runtime).includes('after 8 attempts'));
+    await advanceUntil(clock, 60_000, 60, () => commitTimes().length > 8);
+    expect(commitTimes()).toHaveLength(8);
+  });
+}, 30_000);

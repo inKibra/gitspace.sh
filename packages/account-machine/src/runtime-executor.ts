@@ -39,6 +39,11 @@ const CLOSE_GRACE_MS = 30_000;
 /** The first wait before retrying a failed sync, and the longest it doubles to. */
 const SYNC_RETRY_FIRST_MS = 5_000;
 const SYNC_RETRY_MAX_MS = 300_000;
+/** Automatic attempts a failing sync gets (about 10 minutes on that backoff) before it waits for an edit, a newer cloud
+ * version or an explicit sync: each attempt wakes the workspace in the cloud. */
+const SYNC_RETRY_ATTEMPTS = 8;
+/** Checkout states no retry can change; sync waits for the edit (or explicit sync) that repairs them. */
+const PERMANENT_SYNC_FAILURES = [/\bunmerged\b/u, /ref HEAD is not a symbolic ref/u, /HEAD must name a branch/u];
 
 /** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, every
  * `assignments` notice) and `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
@@ -67,6 +72,10 @@ export async function createMachineExecutor(options: {
   const snapshots = new Database(join(directory, 'snapshots.sqlite'));
   snapshots.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS snapshots (attachment TEXT PRIMARY KEY, revision INTEGER NOT NULL, pending TEXT, committed TEXT)');
   snapshots.exec('DROP TABLE IF EXISTS snapshot_rejections; DROP TABLE IF EXISTS attachment_failures');
+  // Consecutive failed syncs per checkout, and the cloud version last offered to it: a restart must not hand a failing
+  // sync its attempts back.
+  snapshots.exec('CREATE TABLE IF NOT EXISTS sync_failures (attachment TEXT PRIMARY KEY, failures INTEGER NOT NULL, incoming TEXT)');
+  const resetSyncFailures = (key: string) => { snapshots.query('DELETE FROM sync_failures WHERE attachment=?').run(key); };
   const keyOf = (attachment: RuntimeAttachment) => `${attachment.attachmentId}:${attachment.generation}`;
   const snapshotRow = (key: string) => snapshots.query<{ committed: string | null; pending: string | null }, [string]>('SELECT committed,pending FROM snapshots WHERE attachment=?').get(key);
   const committedOf = (key: string) => {
@@ -76,12 +85,14 @@ export async function createMachineExecutor(options: {
   const captures = new Map<string, IncrementalGitSnapshots>();
   const captureAborts = new Map<string, AbortController>();
   /** Drops a capture stream without waiting, since a stuck upload never settles. What it has in flight can no longer
-   * save or commit, and its pending snapshot is forgotten; the files are still on disk for the next capture. */
+   * save or commit, and its pending snapshot is forgotten, with the failures sending it; the files are still on disk
+   * for the next capture. */
   const abandonCapture = (key: string) => {
     captureAborts.get(key)?.abort(new Error('Capture abandoned by sync'));
     captureAborts.delete(key);
     captures.delete(key);
     snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
+    resetSyncFailures(key);
   };
   const clock = options.checkpointClock ?? gitWorktreeClock;
   const lfs = options.lfs;
@@ -182,8 +193,9 @@ export async function createMachineExecutor(options: {
   const reconciling = new Map<string, Promise<void>>();
   /** Per followed checkout: ends its retry wait once any reconciliation succeeds. */
   const retryResets = new Map<string, () => void>();
-  /** Schedules a checkout's next sync attempt after a failure, on the same backoff as a failed edit sync. */
-  const retryAfterFailure = new Map<string, () => void>();
+  /** Per followed checkout: schedules its next sync attempt after a failure, on the same backoff as a failed edit sync,
+   * and returns the failure to report. */
+  const retryAfterFailure = new Map<string, (error: unknown) => unknown>();
   /** Publishes local changes, then applies a newer cloud version. One reconciliation per checkout runs at a time. */
   const reconcile = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null): Promise<void> => {
     const prior = reconciling.get(local.rootPath) ?? Promise.resolve();
@@ -213,36 +225,58 @@ export async function createMachineExecutor(options: {
       }
     });
     reconciling.set(local.rootPath, run);
-    void run.then(() => retryResets.get(local.rootPath)?.(), () => {});
+    void run.then(() => { resetSyncFailures(keyOf(local.attachment)); retryResets.get(local.rootPath)?.(); }, () => {});
     return run.finally(() => { if (reconciling.get(local.rootPath) === run) reconciling.delete(local.rootPath); });
   };
-  /** Publishes local edits shortly after the checkout changes. A failed sync is retried after 5 s, doubling to 5 minutes:
-   * a failing cloud sees one attempt per wait, not one per edit, and a checkout nobody edits is still retried. Edits
-   * during a wait are held back and captured once a sync succeeds (a retry first re-sends the snapshot the cloud has not
-   * accepted). A refused oversized file waits for the edit that removes it. */
+  /** Publishes local edits shortly after the checkout changes. A failed sync is retried after 5 s, doubling to 5 minutes,
+   * for `SYNC_RETRY_ATTEMPTS` attempts counted across restarts: a failing cloud sees one attempt per wait, not one per
+   * edit, a checkout nobody edits is still retried, and one that keeps failing stops waking the workspace. Edits during
+   * a wait are held back and captured once a sync succeeds (a retry first re-sends the snapshot the cloud has not
+   * accepted); an edit after sync stopped starts it again. A checkout state no retry can change waits for an edit. */
   const follow = async (local: LocalAttachment) => {
     if (watchers.has(local.rootPath)) return;
+    const key = keyOf(local.attachment);
     let cancel: (() => void) | undefined;
-    const retry: { failures: number; cancel: (() => void) | null; held: boolean } = { failures: 0, cancel: null, held: false };
+    const retry: { cancel: (() => void) | null; held: boolean } = { cancel: null, held: false };
     const attempt = () => {
       const current = journal.attachment(local.attachment.attachmentId);
       if (stopping.signal.aborted || current?.attachment.state !== 'ready') return;
       void reconcile(current).catch(error => {
         if (artifactsPublicationRejection(error) || stopping.signal.aborted) return;
         console.error('[runtime-cache]', message(error));
-        failed();
+        failed(error);
       });
     };
-    const failed = () => {
-      retry.failures++;
+    const failed = (error: unknown): unknown => {
+      if (artifactsPublicationRejection(error) || PERMANENT_SYNC_FAILURES.some(pattern => pattern.test(message(error)))) return error;
+      const failures = snapshots.query<{ failures: number }, [string]>('INSERT INTO sync_failures (attachment, failures) VALUES (?, 1) ON CONFLICT (attachment) DO UPDATE SET failures=failures+1 RETURNING failures').get(key)?.failures ?? 1;
       retry.cancel?.();
-      retry.cancel = clock.schedule(Math.min(SYNC_RETRY_FIRST_MS * 2 ** (retry.failures - 1), SYNC_RETRY_MAX_MS), () => { retry.cancel = null; attempt(); });
+      retry.cancel = null;
+      if (failures < SYNC_RETRY_ATTEMPTS) {
+        retry.cancel = clock.schedule(Math.min(SYNC_RETRY_FIRST_MS * 2 ** (failures - 1), SYNC_RETRY_MAX_MS), () => { retry.cancel = null; attempt(); });
+        return error;
+      }
+      // Held edits are on disk and ride along with the next attempt; only a new event starts one.
+      retry.held = false;
+      const stopped = new AttachmentOperationFailure('sync', new Error(`Changes on this machine could not be sent after ${failures} attempts: ${message(error)}. Edit a file or retry sync to try again.`));
+      recordFailure(journal.attachment(local.attachment.attachmentId) ?? local, stopped);
+      return stopped;
     };
-    const changed = () => {
+    const changed = (cause: 'worktree' | 'git') => {
       if (stopping.signal.aborted) return;
+      // A sync that stopped waits for an edit: an editor's `git status` refreshing the index is not one.
+      if (cause === 'git' && (snapshots.query<{ failures: number }, [string]>('SELECT failures FROM sync_failures WHERE attachment=?').get(key)?.failures ?? 0) >= SYNC_RETRY_ATTEMPTS) return;
       if (retry.cancel) { retry.held = true; return; }
       cancel?.();
-      cancel = clock.schedule(200, () => { cancel = undefined; attempt(); });
+      // An edit is a new event: a sync that stopped, or waits for a repair, gets its attempts back. Git metadata alone
+      // is not: `git status` rewrites the index, and a failing sync must not refill its attempts from that. A snapshot
+      // still pending from the failed sync is sent first, so the edit is held for the capture after it.
+      cancel = clock.schedule(200, () => {
+        cancel = undefined;
+        if (cause === 'worktree') resetSyncFailures(key);
+        if (snapshotRow(key)?.pending) retry.held = true;
+        attempt();
+      });
     };
     const watcher = await watchGitWorktree({
       root: local.rootPath, clock, events: options.checkpointEvents ?? gitWorktreeEvents, changed,
@@ -252,8 +286,9 @@ export async function createMachineExecutor(options: {
     retryAfterFailure.set(local.rootPath, failed);
     retryResets.set(local.rootPath, () => {
       const held = retry.held;
-      retry.failures = 0; retry.cancel?.(); retry.cancel = null; retry.held = false;
-      if (held) changed();
+      retry.cancel?.(); retry.cancel = null; retry.held = false;
+      // Edits held during the wait; the success already cleared the count.
+      if (held) changed('worktree');
     });
     watchers.set(local.rootPath, { close() { cancel?.(); retry.cancel?.(); retryResets.delete(local.rootPath); retryAfterFailure.delete(local.rootPath); watcher.close(); } });
   };
@@ -262,12 +297,26 @@ export async function createMachineExecutor(options: {
    * bring cloud changes. */
   const keepSyncing = async (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null) => {
     await follow(local);
-    const applied = committedOf(keyOf(local.attachment));
+    const key = keyOf(local.attachment);
+    const applied = committedOf(key);
+    const newer = incoming && applied && applied.worktreeCommit !== incoming.worktreeCommit ? incoming : undefined;
+    // A cloud version not offered before is a new event; one offered again (every relay connection re-reads it while
+    // local changes keep it from applying) is not.
+    if (newer) snapshots.query('INSERT INTO sync_failures (attachment, failures, incoming) VALUES (?, 0, ?) ON CONFLICT (attachment) DO UPDATE SET failures=0, incoming=excluded.incoming WHERE incoming IS NOT excluded.incoming').run(key, newer.worktreeCommit);
     try {
-      await reconcile(local, incoming && applied && applied.worktreeCommit !== incoming.worktreeCommit ? incoming : undefined);
+      await reconcile(local, newer);
     } catch (error) {
       // Retried like a failed edit sync, so a checkout nobody edits does not keep a failure until its next edit.
-      if (!artifactsPublicationRejection(error) && !stopping.signal.aborted) retryAfterFailure.get(local.rootPath)?.();
+      throw stopping.signal.aborted ? error : retryAfterFailure.get(local.rootPath)?.(error) ?? error;
+    }
+  };
+  /** An explicit sync is a new event: a checkout whose sync stopped gets its attempts back, and if this one fails too,
+   * automatic retries start again from the first wait. */
+  const syncNow = async <T>(local: LocalAttachment, run: () => Promise<T>): Promise<T> => {
+    resetSyncFailures(keyOf(local.attachment));
+    try { return await run(); }
+    catch (error) {
+      if (!stopping.signal.aborted) retryAfterFailure.get(local.rootPath)?.(error);
       throw error;
     }
   };
@@ -322,7 +371,7 @@ export async function createMachineExecutor(options: {
     const reply = (value: unknown): ExecutorContent => [{ type: 'text', text: JSON.stringify(value) }];
     const binding = { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` };
     if (args.op === 'capture') {
-      const accepted = await capture(local);
+      const accepted = await syncNow(local, () => capture(local));
       return reply(RuntimeSyncMachineCaptureSchema.parse({ version: accepted?.worktreeCommit ?? null, conflicts: accepted?.conflicts ?? [] }));
     }
     const emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -398,7 +447,7 @@ export async function createMachineExecutor(options: {
       ...options.operations,
       sync_machine: (dispatch, local) => syncMachine(dispatch, local),
       checkpoint: async (_dispatch, local) => {
-        const checkpoint = await capture(local);
+        const checkpoint = await syncNow(local, () => capture(local));
         if (!checkpoint) throw new Error('The workspace checkout is not syncing');
         return [{ type: 'text', text: JSON.stringify({ checkpoint }) }];
       },
@@ -696,7 +745,7 @@ export async function createMachineExecutor(options: {
       }
       const ready = journal.attachment(local.attachment.attachmentId);
       if (!ready || ready.attachment.state !== 'ready') throw new Error(`The workspace checkout on this machine is not ready${ready?.attachment.failure ? `: ${ready.attachment.failure.message}` : ''}`);
-      await reconcile(ready);
+      await syncNow(ready, () => reconcile(ready));
     },
     drainWorkspace: async workspaceId => {
       await settled(workspaceId);

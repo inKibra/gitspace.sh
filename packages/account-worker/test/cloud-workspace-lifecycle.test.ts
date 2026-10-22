@@ -349,7 +349,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const workspaceId = created.value.workspace.id;
     const identity = { projectId: project.id, workspaceId };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-    await space.runtimeAttachments(identity);
+    await space.runtimeSnapshot(identity);
     const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'cache-a', machineId: 'gone-machine', generation: 1, role: 'cache', state: 'ready',
       checkout: { kind: 'shared', branch: 'archived' }, capabilities: [], updatedAt: new Date().toISOString(), online: true });
     await runInDurableObject(space, (_instance, state) => {
@@ -362,7 +362,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     };
     const archive = async () => client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null });
     expect(await archive()).toMatchObject({ status: 'ok', value: { id: workspaceId, lifecycle: 'archived' } });
-    expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
+    expect(await space.runtimeAttachmentRecords(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
     expect((await authority.listOperations()).find(operation => operation.kind === 'workspace.archive' && operation.workspaceId === workspaceId)).toMatchObject({ state: 'succeeded' });
     expect(await client.space.view({ projectId: project.id, workspaceId })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, closedAt: expect.any(Date) }] } });
 
@@ -386,7 +386,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     if (created.status === 'error') throw created.error;
     const active = created.value.workspace.id;
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${active}`);
-    await space.runtimeAttachments({ projectId: project.id, workspaceId: active });
+    await space.runtimeSnapshot({ projectId: project.id, workspaceId: active });
     expect(await client.workspace.delete({ workspaceId: active })).toMatchObject({ status: 'ok', value: { workspaceId: active, deleted: true } });
     expect(await authority.getWorkspace(active)).toBeNull();
     expect(await space.hasCloudRuntime()).toBe(false);
@@ -407,7 +407,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const workspaceId = created.value.workspace.id;
     const identity = { projectId: project.id, workspaceId };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
-    await space.runtimeAttachments(identity);
+    await space.runtimeSnapshot(identity);
     const definition = async () => {
       const current = await authority.getWorkspace(workspaceId);
       if (!current) throw new Error('Workspace definition is missing');
@@ -701,7 +701,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), worktreeCommit: commit('2') });
     expect(notices.mock.calls.map(call => call[1])).toEqual(['Base branch main updated to 2222222 from origin.']);
-    expect(await space.runtimeAttachments(identity)).toMatchObject([{ attachmentId: 'base-cache', state: 'ready' }]);
+    expect(await space.runtimeAttachmentRecords(identity)).toMatchObject([{ attachmentId: 'base-cache', state: 'ready' }]);
   });
 
   it('restarts a workspace object on a newer release once nothing runs in it, never during a running step', async () => {
@@ -710,14 +710,14 @@ describe('cloud workspace lifecycle with no machines', () => {
     // A fresh stub per call: one bound to a restarted instance stays broken.
     const space = () => env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     const instance = () => runInDurableObject(space(), (current: SpaceAuthorityDO) => current);
-    await space().runtimeAttachments(identity);
+    await space().runtimeSnapshot(identity);
     expect(await space().restartForRelease('test-inference-worker')).toBe('current');
 
     const idle = await instance();
     expect(await space().restartForRelease('next-release')).toBe('restarting');
     await vi.waitFor(async () => expect(await instance()).not.toBe(idle));
 
-    await space().runtimeAttachments(identity);
+    await space().runtimeSnapshot(identity);
     await runInDurableObject(space(), (_current, state) => { state.storage.sql.exec("INSERT INTO runtime_running(id,step,detail,started_at) VALUES('merge','sync merge','fixture',?)", Date.now()); });
     const busy = await instance();
     expect(await space().restartForRelease('next-release')).toBe('when-idle');

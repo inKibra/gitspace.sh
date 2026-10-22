@@ -314,8 +314,15 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     } else await this.ctx.storage.put('runtime.identity', identity);
     this.publishCloudRuntime(identity);
     if (!this.runtime) {
+      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed.
+      const openStartedAt = Date.now();
       const runtime = this.openRuntime(identity);
       this.runtime = runtime;
+      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed. A failed open is reported by the chain below.
+      runtime.then(() => {
+        const durationMs = Date.now() - openStartedAt;
+        if (durationMs >= 5_000) console.warn(JSON.stringify({ event: 'runtime_cold_open', workspaceId: identity.workspaceId, durationMs }));
+      }, () => {});
       // A storage error ends the session for good: forget it so the next call opens a fresh one from what was committed.
       runtime.then(opened => opened.harness.closed.then(end => {
         if (end.reason !== 'failed' || this.runtime !== runtime) return;
@@ -368,7 +375,16 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   }
 
   async runtimeSnapshot(raw: unknown): Promise<Response> { return Response.json(await (await this.getRuntime(raw)).snapshot()); }
-  async runtimeAttachments(raw: unknown) { return (await this.getRuntime(raw)).attachments.list(); }
+  /** Attachment records for authorizing a machine, read without starting the runtime: every git authentication asks,
+   * and an idle workspace must not wake for it. An object without runtime state has none. */
+  async runtimeAttachmentRecords(raw: unknown): Promise<RuntimeAttachment[]> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const stored = await this.ctx.storage.get('runtime.identity');
+    if (stored === undefined) return [];
+    const runtime = RuntimeIdentitySchema.parse(stored);
+    if (runtime.projectId !== identity.projectId || runtime.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
+    return this.storedAttachments();
+  }
   async runtimeCodeCheckpoint(raw: unknown) {
     const identity = RuntimeIdentitySchema.parse(raw);
     const authority = this.get();
@@ -784,8 +800,13 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const input = RuntimeSnapshotCommitInputSchema.parse(raw);
     // The failing step is logged with the error: callers see only its message, often the runtime's bare "internal error".
     let step = 'open runtime';
+    // Diagnostic for idle wakes (2026-10-22): remove once diagnosed.
+    const startedAt = Date.now();
+    let openedAt: number | null = null;
+    let verifiedAt: number | null = null;
     try {
       const runtime = await this.getRuntime(input);
+      openedAt = Date.now();
       step = 'verify published commits';
       const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
       const repository = artifactsWorkspaceRepository(input.workspaceId);
@@ -794,6 +815,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       await Promise.all([...commits].map(async commit => {
         if (!await code.readCommit(repository, commit)) throw new Error('Checkpoint commit was not published');
       }));
+      verifiedAt = Date.now();
       step = 'commit snapshot';
       return await runtime.snapshotCommit(input);
     } catch (error) {
@@ -802,6 +824,13 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
         error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack ?? null : null,
       }));
       throw error;
+    } finally {
+      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed.
+      const endedAt = Date.now();
+      if (endedAt - startedAt >= 10_000) console.warn(JSON.stringify({
+        event: 'snapshot_commit_slow', workspaceId: input.workspaceId, attachmentId: input.attachmentId, step, durationMs: endedAt - startedAt,
+        openMs: (openedAt ?? endedAt) - startedAt, verifyMs: openedAt === null ? null : (verifiedAt ?? endedAt) - openedAt, commitMs: verifiedAt === null ? null : endedAt - verifiedAt,
+      }));
     }
   }
 
