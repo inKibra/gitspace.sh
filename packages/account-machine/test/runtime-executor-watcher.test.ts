@@ -82,16 +82,16 @@ async function watcherProof(run: (proof: {
       }
     }
     const unavailable = async (): Promise<never> => { throw new Error('External service forbidden'); };
-    const lfs = async () => ({ store: { has: unavailable, put: unavailable, get: unavailable }, originEnvironment: async () => {
-      const action = captureAction; captureAction = undefined; await action?.(); return {};
-    } });
+    const lfs = async () => ({ store: { has: unavailable, put: unavailable, get: unavailable }, originEnvironment: async () => ({}) });
+    // Every capture sets up its LFS publication while it runs; the human edit lands there.
+    const publish = async () => { const action = captureAction; captureAction = undefined; await action?.(); return lfs(); };
     const start = () => createMachineExecutor({
       checkpointClock: clock,
       checkpointEvents: (_root, changed) => { watchers++; event = changed; return () => { watchers--; }; },
       environmentRoot: join(root, 'runtime'), managedSpaceRoot: join(root, 'spaces'), machineId: 'machine',
       cloud: new LocalCloud({ baseUrl: 'https://proof.invalid', userId: 'account', machineId: 'machine', signingPrivateKey: new Uint8Array(32) }),
       gitRemote: new LocalGitRemote({ credentials: unavailable }), prepareAttachment: async () => {},
-      lfs: { read: lfs, publish: lfs },
+      lfs: { read: lfs, publish },
       commitSnapshot: async (_local, candidate, previous) => {
         attempts.push(clock.now);
         if (refusals > 0) { refusals--; throw new Error(refusal); }
