@@ -36,11 +36,11 @@ const samples: Record<string, ToolCall['arguments']> = {
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
 };
-async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = []) {
+async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
   const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, context) {
+  const models: Models = { ...createModels(), getModel: () => chatModel, streamSimple(_model, context) {
     const providerSchema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()), anyOf: z.never().optional(), oneOf: z.never().optional(), allOf: z.never().optional() });
     for (const tool of getCurrentTools(context.messages)) providerSchema.parse(tool.parameters);
     const calls = rounds[generation++];
@@ -48,7 +48,7 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
   } };
   const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
-  const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
+  const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: chatModel.provider, modelId: chatModel.id }, tools } });
   await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
   return { harness, root, tools };
 }
@@ -71,6 +71,26 @@ test('every registered tool advertises its real object contract and executes thr
     expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'ask']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
+});
+test('an image the conversation\'s model cannot take never enters history; the agent is told why instead', async () => {
+  const png = (width: number, height: number) => {
+    const bytes = new Uint8Array(33);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+    new DataView(bytes.buffer).setUint32(16, width); new DataView(bytes.buffer).setUint32(20, height);
+    return { type: 'image' as const, mimeType: 'image/png', data: btoa(String.fromCharCode(...bytes)) };
+  };
+  const vision: Model<Api> = { ...model, input: ['text', 'image'], inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4_718_592 } } } };
+  const fixture = await registered([[call('read', samples.read ?? {})]], async input => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: 'Two captures' }, png(1440, 5400), png(1280, 800)] }), operations, [], vision);
+  try {
+    await fixture.root.submit({ type: 'input', content: 'Read the screenshots.' }, BACKGROUND_CONTEXT);
+    await fixture.root.waitForIdle(BACKGROUND_CONTEXT);
+    const [result] = (await fixture.root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
+    expect(result?.content.map(part => part.type === 'image' ? `image ${part.data === png(1280, 800).data ? '1280x800' : 'other'}` : part.text)).toEqual([
+      'Two captures',
+      '[Image not shown: it is 1440x5400, larger than the 2000x2000 the model accepts. Crop it, capture only the visible viewport, or describe what you need from it.]',
+      'image 1280x800',
+    ]);
+  } finally { await fixture.harness.close(BACKGROUND_CONTEXT); }
 });
 test('published operation parameters admit both command and control arguments', () => {
   const advertised = z.fromJSONSchema(runtimeToolParameters(RuntimeBashArgumentsSchema));

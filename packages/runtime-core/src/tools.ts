@@ -11,6 +11,7 @@ import { cronToolScopes } from './cron.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
+import { admitToolImages, imageLimits } from './inference/image-limits.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
 export type CodemodeToolOutcome =
   | { status: 'completed'; value: JsonValue }
@@ -235,7 +236,10 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         const result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools } : {}) });
         if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
         const content = result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }];
-        return { output: content, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
+        // An image the conversation's model cannot take never enters history: every later request would resend it.
+        const ref = content.some(item => item.type === 'image') ? (await api.agent(context)).model : undefined;
+        const output = ref === undefined ? content : admitToolImages(content, imageLimits(api.models.getModel(ref.provider, ref.modelId)));
+        return { output, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
       return safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run);
     },

@@ -7,6 +7,7 @@ import { applyProviderCatalog, limitContextWindows } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
 import { classifyAuthFailure, orderedAccounts, type VaultAccess, type CredentialPins, type ResolvedCredential } from './selection.js';
 import { admitProfileProviders, contextWindowLimits } from './admission.js';
+import { fitRequestImages, imageLimits } from './image-limits.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
@@ -225,14 +226,15 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     stream<T extends Api>(model: Model<T>, context: Context, request?: ModelsApiStreamOptions<T>) {
       return lazyStream(model, async () => {
         rejectOverrides(request);
-        return streamAttempts(model, (models, observe, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, context, Object.assign({}, request, {
+        const fitted = fitRequestImages(context, imageLimits(model));
+        return streamAttempts(model, (models, observe, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, fitted, Object.assign({}, request, {
           fetch: cloudFetch, onPayload: claude.onPayload,
           onResponse: async (response: ProviderResponse, selected: Model<Api>) => { observe(response.status); await request?.onResponse?.(response, selected); },
         })), request?.signal);
       });
     },
     complete: (model, context, request) => facade.stream(model, context, request).result(),
-    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, (models, observe, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, context, { ...request, fetch: cloudFetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
+    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); const fitted = fitRequestImages(context, imageLimits(model)); return streamAttempts(model, (models, observe, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, fitted, { ...request, fetch: cloudFetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
     completeSimple: (model, context, request) => facade.streamSimple(model, context, request).result(),
     streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await options.pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
     fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),
