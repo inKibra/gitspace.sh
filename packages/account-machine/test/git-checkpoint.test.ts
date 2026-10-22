@@ -124,6 +124,23 @@ describe('Git intermediate checkpoint', () => {
     expect(pending).toBeNull();
   });
 
+  it('drops a stored snapshot taken against an older base, its journal row included', async () => {
+    const { source } = fixture();
+    const committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'stale', revision: 1 });
+    const stale = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'stale', captureId: 'cache-stale', revision: 2, checkpointRef: 'refs/gitspace/spaces/cache-stale/snapshot' });
+    let pending: PendingGitSnapshot | null = { checkpoint: stale, base: 'f'.repeat(40) };
+    const publications: GitIntermediateCheckpoint[] = [];
+    const snapshots = new IncrementalGitSnapshots({
+      repositoryPath: source, spaceId: 'stale', captureId: 'cache-stale', allocateRevision: async () => 3,
+      loadPending: async () => pending, loadCommitted: async () => committed,
+      savePending: async next => { pending = next; }, clearPending: async () => { pending = null; },
+      publish: async checkpoint => { publications.push(checkpoint); }, commit: async checkpoint => checkpoint,
+    });
+    expect(await snapshots.capture()).toEqual(committed);
+    expect(pending).toBeNull();
+    expect(publications).toEqual([]);
+  });
+
   it('does not publish the private checkout branch but preserves an explicit human branch switch', async () => {
     const { source } = fixture();
     let committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'branch', revision: 1 });

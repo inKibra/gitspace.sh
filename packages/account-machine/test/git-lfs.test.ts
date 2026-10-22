@@ -412,3 +412,18 @@ for (const configuration of ['local', 'committed']) it(`keeps ${configuration} q
   } finally { request.mockRestore(); }
 });
 
+
+it('a capture asks neither the origin nor the store about objects the committed snapshot placed', async () => {
+  const f = fixture();
+  const base = await f.capture(1);
+  let origin = 0; let checks = 0;
+  const lfs = { store: { ...f.lfs.store, has: async (object: Parameters<GitLfsStore['has']>[0]) => { checks++; return f.lfs.store.has(object); } }, originEnvironment: async () => { origin++; return { GIT_TERMINAL_PROMPT: '0' }; } };
+  const next = await createGitIntermediateCheckpoint({ repositoryPath: f.root, spaceId: 'space', revision: 2, lfs, committedLfs: base.lfs });
+  expect(next.lfs).toEqual(base.lfs);
+  expect({ origin, checks, uploads: f.uploads.length }).toEqual({ origin: 0, checks: 0, uploads: 1 });
+  // A newly committed object is still confirmed and stored.
+  const added = f.pointer('new bytes'); writeFileSync(join(f.root, 'new.bin'), added.text); git(f.root, 'add', 'new.bin'); git(f.root, 'commit', '-m', 'new');
+  const after = await createGitIntermediateCheckpoint({ repositoryPath: f.root, spaceId: 'space', revision: 3, lfs, committedLfs: next.lfs });
+  expect(after.lfs?.objects.map(object => object.oid).sort()).toEqual([f.base.object.oid, added.object.oid].sort());
+  expect({ origin, uploads: f.uploads }).toEqual({ origin: 1, uploads: [f.base.object.oid, added.object.oid] });
+});

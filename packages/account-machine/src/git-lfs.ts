@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { streamBytes, GitLfsRestoredSchema, parseGitLfsPointer, type GitLfsObject, type GitLfsRestored, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
-import { downloadQueryObject, hydrationEndpoint, originConfirmation } from './git-lfs-origin.js';
+import { downloadQueryObject, hydrationEndpoint, originConfirmation, type GitLfsOriginConfirm } from './git-lfs-origin.js';
 import { committedLfsInventory } from './git-lfs-inventory.js';
 import { cachedLfsObject, installLfsObject, verifiedLfsSource } from './git-lfs-cache.js';
 
@@ -101,17 +101,29 @@ export async function readGitLfsPointers(root: string, revisions: string[]): Pro
   return result;
 }
 
-export async function captureGitLfs(root: string, head: string | null, authorityIndex: string, access?: MachineGitLfsPublication) {
+/** `committed` is the snapshot this capture follows. An object it already placed keeps that place: objects are
+ * content-addressed and do not move, and asking again costs an origin grant, a GitHub token and a store check on every
+ * capture. Only objects it does not list are confirmed at the origin or stored. */
+export async function captureGitLfs(root: string, head: string | null, authorityIndex: string, access?: MachineGitLfsPublication, committed?: GitLfsSnapshot) {
   const snapshot: GitLfsSnapshot = { objects: [], heldBack: [] };
   const headEntries = head ? await tree(root, head) : new Map<string, Entry>();
   const history = await committedLfsInventory(root, head, git, readGitLfsPointers);
-  const confirm = await originConfirmation(root, head, git, access?.canonicalOrigin === null ? {} : await access?.originEnvironment() ?? {}, access);
-  const origin = new Map((await confirm([...history.values()])).map(object => [object.oid, object]));
-  const unconfirmed = [...history.values()].filter(object => !origin.has(object.oid));
+  const placed = new Map((committed?.objects ?? []).map(object => [object.oid, object]));
+  const unplaced = [...history.values()].filter(object => placed.get(object.oid)?.size !== object.size);
+  // Set up on first use: only an object nobody placed yet costs an origin grant and a GitHub token.
+  let confirmation: Promise<GitLfsOriginConfirm> | undefined;
+  const confirm = async (objects: readonly GitLfsObject[]) => {
+    confirmation ??= (async () => originConfirmation(root, head, git, access?.canonicalOrigin === null ? {} : await access?.originEnvironment() ?? {}, access))();
+    return (await confirmation)(objects);
+  };
+  const origin = new Map((unplaced.length ? await confirm(unplaced) : []).map(object => [object.oid, object]));
+  const unconfirmed = unplaced.filter(object => !origin.has(object.oid));
   const protectedObjects = unconfirmed.length && access?.store.protect ? new Map((await access.store.protect(unconfirmed)).map(object => [object.oid, object.size])) : undefined;
   for (const object of history.values()) {
+    const prior = placed.get(object.oid);
     const confirmed = origin.get(object.oid);
-    if (confirmed) snapshot.objects.push({ ...confirmed, source: 'origin' });
+    if (prior && prior.size === object.size) snapshot.objects.push(prior);
+    else if (confirmed) snapshot.objects.push({ ...confirmed, source: 'origin' });
     else if (protectedObjects ? protectedObjects.get(object.oid) === object.size : await access?.store.has(object)) snapshot.objects.push({ ...object, source: 'r2' });
     else {
       if (!access) throw new Error(`Git LFS store required for committed object ${object.oid}`);

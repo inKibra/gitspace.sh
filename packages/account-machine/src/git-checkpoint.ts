@@ -108,6 +108,8 @@ export async function createGitIntermediateCheckpoint(input: {
   checkpointRef?: string;
   portableUntrackedPaths?: string[];
   lfs?: MachineGitLfsPublication;
+  /** The LFS objects of the snapshot this capture follows; objects it placed are not confirmed or stored again. */
+  committedLfs?: GitIntermediateCheckpoint['lfs'];
 }): Promise<GitIntermediateCheckpoint> {
   const { branch, headCommit } = await readGitCheckpointHead(input.repositoryPath);
   const checkpointRef = input.checkpointRef ?? spaceGitCheckpointRef(input.captureId ?? input.spaceId, input.revision);
@@ -115,7 +117,7 @@ export async function createGitIntermediateCheckpoint(input: {
   const temporaryIndex = join(temporary, 'index');
   const indexEnvironment = { GIT_INDEX_FILE: temporaryIndex };
   try {
-    const lfs = await captureGitLfs(input.repositoryPath, headCommit, join(temporary, 'authority-index'), input.lfs);
+    const lfs = await captureGitLfs(input.repositoryPath, headCommit, join(temporary, 'authority-index'), input.lfs, input.committedLfs);
     const realIndex = (await runGit(input.repositoryPath, ['rev-parse', '--git-path', 'index'])).stdout;
     try { await copyFile(resolve(input.repositoryPath, realIndex), temporaryIndex); }
     catch (error) {
@@ -374,6 +376,8 @@ export class IncrementalGitSnapshots {
       // The ref may already be gone; it is only this snapshot's own publication ref.
       await runGit(this.options.repositoryPath, ['update-ref', '-d', stored.checkpoint.checkpointRef], { allowMissingRef: true }).catch(() => undefined);
       await (await this.options.lfs?.(stored.checkpoint.checkpointRef))?.releasePublication?.();
+      // Its journal row goes too, or every later capture loads and drops it again.
+      await this.options.clearPending();
       this.unpublished = undefined;
       stored = null;
     }
@@ -407,6 +411,7 @@ export class IncrementalGitSnapshots {
           revision,
           checkpointRef: publicationId,
           lfs,
+          committedLfs: committed?.lfs,
         });
         if (stable !== await readGitCheckpointInputStamp(this.options.repositoryPath)) {
           // Never journal, upload, or admit a candidate captured across a write.

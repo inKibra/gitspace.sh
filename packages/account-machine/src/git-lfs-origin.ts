@@ -74,9 +74,11 @@ function originIdentity(origin: string): string | null {
   } catch { return null; }
 }
 
+/** Which of the given objects the origin's Git LFS server holds, each with where it was found. */
+export type GitLfsOriginConfirm = (objects: readonly GitLfsObject[]) => Promise<GitLfsConfirmedObject[]>;
 export async function originConfirmation(root: string, head: string | null, git: Git, environment: Record<string, string>, options?: {
   canonicalOrigin?: string | null;
-}) {
+}): Promise<GitLfsOriginConfirm> {
   const config = async (args: string[]) => {
     try { return decode(await git(root, ['config', ...args], environment)); } catch { return ''; }
   };
