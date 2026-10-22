@@ -103,6 +103,27 @@ describe('Git intermediate checkpoint', () => {
     expect(publications).toEqual([]);
   });
 
+  it('an unchanged checkout is not published again when the committed snapshot lists LFS keys in another order', async () => {
+    const { source } = fixture();
+    const location = { origin: 'https://github.com/example/repo.git', endpoint: 'https://github.com/example/repo.git/info/lfs' };
+    const oid = 'a'.repeat(64);
+    const captured = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'lfs-order', revision: 1 });
+    // As the cloud returns it (its schema's key order) and as the machine captures it.
+    const committed = { ...captured, lfs: { objects: [{ oid, size: 12, source: 'origin' as const, location }], heldBack: [] } };
+    const stored = { ...captured, lfs: { objects: [{ oid, size: 12, location, source: 'origin' as const }], heldBack: [] } };
+    let pending: PendingGitSnapshot | null = { checkpoint: stored, base: committed.worktreeCommit };
+    const publications: GitIntermediateCheckpoint[] = [];
+    const snapshots = new IncrementalGitSnapshots({
+      repositoryPath: source, spaceId: 'lfs-order', allocateRevision: async () => 2,
+      loadPending: async () => pending, loadCommitted: async () => committed,
+      savePending: async next => { pending = next; }, clearPending: async () => { pending = null; },
+      publish: async checkpoint => { publications.push(checkpoint); }, commit: async checkpoint => checkpoint,
+    });
+    expect(await snapshots.capture()).toEqual(committed);
+    expect(publications).toEqual([]);
+    expect(pending).toBeNull();
+  });
+
   it('does not publish the private checkout branch but preserves an explicit human branch switch', async () => {
     const { source } = fixture();
     let committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'branch', revision: 1 });

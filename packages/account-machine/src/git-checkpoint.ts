@@ -419,7 +419,10 @@ export class IncrementalGitSnapshots {
         break;
       }
     }
-    if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree && JSON.stringify(committed.lfs) === JSON.stringify(checkpoint.lfs)) {
+    // The committed snapshot came back through the cloud's schema, which orders each LFS object's keys its own way;
+    // compared as captured, an unchanged checkout always looked changed and was published again, forever.
+    if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree
+      && JSON.stringify(RuntimeGitCheckpointSchema.shape.lfs.parse(committed.lfs)) === JSON.stringify(RuntimeGitCheckpointSchema.shape.lfs.parse(checkpoint.lfs))) {
       // A stored snapshot can match what was committed after it (a restore, an applied cloud version) and its ref may
       // be gone already: it is dropped, not replayed, or every later capture would fail on it.
       if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit], { allowMissingRef: true });
