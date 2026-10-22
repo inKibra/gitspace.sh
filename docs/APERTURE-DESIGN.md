@@ -6,7 +6,7 @@
 
 A GitSpace workspace can use **browsers**: your own Chrome (through the GitSpace extension) and cloud Chrome (Cloudflare Browser Run). GitSpace owns which browsers and tabs a workspace may use, who controls them at any moment, what gets recorded, and how browsers reach the workspace's services. Agents and people work in the same browser sessions:
 
-- **Agents** operate tabs through grants, with semantic tools and a Playwright endpoint.
+- **Agents** operate tabs through grants, mainly by writing Playwright scripts (`browser.run`), with a snapshot tool for looking at unknown pages; an animated ghost cursor shows what they do.
 - **People** watch and control any session remotely, including their own Chrome from a phone, and take over from an agent and hand back.
 - **Collaboration:** comments on pages, skills recorded from a demonstration, share links for a tab.
 - **Identity:** passwords filled without the agent seeing them, and cookies copied into a cloud browser with approval.
@@ -18,7 +18,7 @@ The extension, the account relay, pairing, signed grants and hosted services tha
 In scope (V1, milestones B0–B4):
 - your Chrome and cloud Chrome as browser sources;
 - one tab group per workspace as the grant boundary;
-- agent tools (`observe`/`act`) and a per-grant Playwright (CDP) endpoint;
+- agent tools: Playwright scripts (`browser.run`) as the main surface, `observe`/`act`, a per-grant Playwright (CDP) endpoint, and the ghost cursor;
 - remote view and remote control of any session, from any signed-in device, phone included;
 - the control lease and takeover;
 - share links for a tab;
@@ -30,7 +30,7 @@ In scope (V1, milestones B0–B4):
 
 Later: WebMCP, learned site capabilities, preference learning, visual CSS proposals, multi-person review sessions, share links for agents outside GitSpace (MCP endpoint per share), machine-hosted headless Chromium, desktops (`docs/CUA-INTEGRATION-DESIGN.md`).
 
-Placement: Aperture is built in the GitSpace monorepo as its own packages (extension, relay endpoints, protocol, browser runtime) behind its own API, so GitSpace consumes it like any other consumer and extracting it for Zerbly later is a move, not a rewrite. AI Constructs reach it through a GitSpace browsing agent (`use(task)`, §6.3), not directly.
+Placement: Aperture is built in the GitSpace monorepo as its own packages (extension, relay endpoints, protocol, browser runtime) behind its own API, so GitSpace consumes it like any other consumer and extracting it for Zerbly later is a move, not a rewrite. AI Constructs reach it through a GitSpace browsing agent (`use(task)`, §6.5), not directly.
 
 ## 3. What exists today
 
@@ -103,36 +103,51 @@ Rows change through small messages from the extension and the runtime; the UI re
 
 ## 6. Agent surface
 
-### 6.1 Semantic tools
+Agents write code. The main tool runs a Playwright script against the workspace's tabs, as Playwriter's `execute` does: one call navigates, fills a form, loops over rows and waits on the network, where step-by-step tools spend a model turn per step. A snapshot tool covers looking at an unknown page, and a single-step tool covers one click. Everything an agent does with the pointer shows in the page as a ghost cursor.
+
+### 6.1 Scripts: `browser.run` (main surface)
+
+`browser.run({ session, script })` runs Playwright code with `page`, `context` and a `state` object that persists between calls on the same session (Playwriter's sandbox). It returns the script's return value and its console output, both bounded. Scripts can address elements from the latest `browser.observe` with `aria-ref=<ref>` locators, so look-then-script needs no model-written selectors.
+
+| Browser | Script runs in | Cost per CDP command |
+|---|---|---|
+| Cloud Chrome | The session's `BrowserSessionDO`, next to Browser Run (Cloudflare's Workers build of Playwright; **[unverified]** against our endpoint) | Inside Cloudflare |
+| Your Chrome | Sandboxed, next to the account relay (`UserRelayDO`) | One round trip between Cloudflare and your computer |
+
+Playwright is a CDP client, and each action is several commands in sequence (a click: scroll into view, box model, mouse move, press, release, plus waits). When the script runs away from your Chrome, each of those commands crosses the network to the extension and back, so a click costs several round trips **[unmeasured]**; page loads and waits usually dominate a script anyway. A GitSpace machine on the same computer does not shorten this today: the extension's only channel is the account relay, so the machine's commands would go to Cloudflare and back too. A local channel is an open question (§16).
+
+Enforcement is in the CDP layer, never in reading the script: the grant's tabs and origins only, input only with the control lease, whole-browser cookie and cache commands blocked. For your Chrome the extension's allowlist (`browser-extension/src/commands.ts`) enforces it too; today it allows only the commands `observe`/`act` use, so B0's extension update widens it to what Playwright needs (target auto-attach, `Runtime.callFunctionOn`, init scripts, network events). Recorded skills replay through `browser.run`.
+
+### 6.2 Looking and single steps
 
 | Tool | Does |
 |---|---|
 | `browser.list` | The workspace's sessions, sources, leases, shares. |
 | `browser.open({ source, url })` | Opens a tab in the workspace group (or a cloud page). |
-| `browser.observe({ session })` | One compact result: accessibility snapshot with element references (Playwriter's `aria-ref` style), URL, title; a screenshot only when asked. |
-| `browser.act({ session, observationId, target, action, args })` | Click, type, select, scroll, key, navigate on an element from a specific observation. Rejected without the lease or with a stale observation. |
+| `browser.observe({ session })` | One compact result: accessibility snapshot with element references (Playwriter's `aria-ref` style), URL, title; a screenshot only when asked. The way to look at an unknown page before scripting it. |
+| `browser.act({ session, observationId, target, action, args })` | One click, type, select, scroll, key or navigation on an element from a specific observation, without writing a script. Rejected with a stale observation. |
 | `browser.ask_takeover({ session, reason })` | Asks a person to take over (sign-in, 2FA, captcha) through the `ask` flow, linking to the remote viewer. |
 
-### 6.2 Playwright endpoint
+The lease check lives in the CDP layer, so `act`, `browser.run` and a machine's Playwright are held to the same rule.
 
-`wss://<account>/cdp/<grantId>?token=…` is a CDP endpoint the relay multiplexes to the extension (or a cloud session), scoped to the grant's tabs and origins. Playwright connects with `chromium.connectOverCDP(...)`. Uses: test suites and scripts on a GitSpace machine, the Tester's checks, debugging. Rules:
+### 6.3 Playwright endpoint
+
+A grant (§4) is a workspace's signed authority over its tab group: allowed origins, capabilities, expiry. The per-grant endpoint `wss://<account>/cdp/<grantId>?token=…` is a CDP WebSocket tied to one grant: the relay multiplexes it to the extension (or a cloud session) and shows Playwright only that grant's tabs, so `chromium.connectOverCDP(...)` cannot see or touch the rest of your browser. `browser.run` uses it; so do test suites and scripts on a GitSpace machine, the Tester's checks, and debugging. Rules:
 - only for GitSpace agents and your machines (device- or grant-signed), never for share links;
 - whole-browser cookie and storage commands stay blocked (`Network.getAllCookies`, `Storage.getCookies`, `Storage.setCookies`, cache clears), as Playwriter does even for trusted agents;
 - target discovery returns only the grant's tabs.
 
-### 6.3 Scripts: `browser.run`
+### 6.4 Ghost cursor
 
-`browser.run({ session, script })` runs Playwright code against the grant's CDP endpoint, as Playwriter's `execute` does. Most of the speed comes from fewer model turns: one call fills a form, loops over rows, waits on the network. Sessions keep a `state` object between calls.
+Every pointer action an agent sends shows in the page as an animated cursor, whether it comes from `browser.run`, `act` or a machine's Playwright (Playwriter's always-on ghost cursor). The CDP layer (the relay for your Chrome, `BrowserSessionDO` for cloud) sees each `Input.dispatchMouseEvent` and moves an overlay it injects with `Page.addScriptToEvaluateOnNewDocument`, so the cursor survives navigation:
+- an eased move to each point, a short press animation on click, a typing indicator at the focused field, and a fade after 5 s idle;
+- labeled with the acting agent's name, since subagents share the workspace group;
+- `pointer-events: none` in a closed shadow root, left out of `observe` snapshots, so it never changes the page or what the agent reads;
+- a person's own input draws nothing.
 
-| Browser | Script runs in |
-|---|---|
-| Cloud Chrome | The session's `BrowserSessionDO`, next to Browser Run (Cloudflare's Workers build of Playwright; **[unverified]** against our endpoint) |
-| Your Chrome, GitSpace machine on the same computer | That machine (Node Playwright), no relay detour |
-| Your Chrome, otherwise | The session object, through the relay (each step is a network round trip) |
+The overlay ships server-side through CDP, so changing its look needs no extension update. Injecting it is no more power than `Runtime.evaluate`, which grants already allow on their tabs. The B1 viewer and B3 recordings show the cursor too.
 
-Enforcement is in the relay's CDP proxy, never in reading the script: grant tabs and origins only, whole-browser cookie and cache commands blocked. Recorded skills replay through `browser.run`. `observe`/`act` stays the default for unknown pages and judgment calls.
-
-### 6.4 Browsing tasks from Constructs
+### 6.5 Browsing tasks from Constructs
 
 A Construct never drives a browser. It gives GitSpace an instruction: `use(task, outputSchema?)` sends it to a GitSpace agent (`runtime.submit`) and returns its reply (`runtime.watch`), validated against the schema when one is given.
 
@@ -211,7 +226,7 @@ Modeled on Playwriter's skill recorder.
 
 - **Record** in the in-page toolbar (or the agent's `recorder.start`). Captured per step: Playwright locator code (`getByRole(...)`), navigations, typed values with secrets masked, mutating network requests, a JPEG per visual change, plus a timeline. The recording attaches to the workspace group's tabs and stops after 20 minutes.
 - On **done**, the agent reads the thin timeline, checks each locator against the live page, and writes a skill into the project's skills: a `SKILL.md` with steps and expected outcomes, and a small replay script.
-- The agent then replays the script end to end to check it. Later replays run through `observe`/`act`, checking state at each step and adapting when the page differs.
+- The agent then replays the script end to end to check it. Later replays run the script through `browser.run`; when a step fails because the page differs, the agent observes the page and fixes the script.
 - Recordings (timeline, frames, optional `tabCapture` video) are saved under `drive://browser/recordings/…` and can be attached to goals and test reports.
 
 ## 12. Service mesh relay
@@ -224,7 +239,7 @@ Browsers and machines reach workspace services through the one account relay.
 | Cloud Chrome → a machine's service | CDP `Fetch` interception, buffered, no WebSockets | Give the cloud session a short-lived service session cookie for the workspace's `*-srv` hosts; it loads the hosted URL directly, so WebSockets and streaming work and the interception code goes. |
 | Machine → another machine's service | `/api/services/fetch`, loopback forward (HTTP and WebSocket) | Unchanged. |
 | Anyone → an undeclared dev server | No route | `service.expose({ port })` creates a route lease for any port on an attached machine, giving it a hosted name. |
-| Machine / Playwright → a browser | None | The per-grant CDP endpoint (§6.2). |
+| Machine / Playwright → a browser | None | The per-grant CDP endpoint (§6.3). |
 | Phone / other device → a browser | None | The session viewer (§7). |
 | Machine ↔ machine, plain TCP | None | Later: TCP forwarding over the same tunnel frames. |
 
@@ -245,6 +260,8 @@ The extension updates on a different cycle from the rest of GitSpace, so it is k
 [Playwriter](https://github.com/remorses/playwriter) (MIT) is the closest prior art. Taken:
 - extension-attached CDP to your real Chrome, no relaunch, no remote-debugging flag;
 - Playwright over CDP through a relay (`connectOverCDP`);
+- `execute`-style Playwright scripts with state kept between calls as the main agent surface (`browser.run`);
+- the always-on ghost cursor;
 - `aria-ref` accessibility snapshots;
 - tab groups (theirs per session, ours per workspace);
 - in-page toolbar for record and share;
@@ -254,13 +271,13 @@ The extension updates on a different cycle from the rest of GitSpace, so it is k
 - cookie copy into a cloud browser;
 - blocking whole-browser cookie commands even for trusted agents.
 
-Not taken: its localhost relay on port 19988 (our extension connects to the account relay); its third-party tunnel; arbitrary JavaScript as the default agent surface (kept behind the Playwright endpoint).
+Not taken: its localhost relay on port 19988 (our extension connects to the account relay); its third-party tunnel.
 
 ## 14. Milestones
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
-| **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.observe`/`act` with `aria-ref` snapshots and freshness; `browser.run` with session state; per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
+| **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.run` as the main agent surface on both sources (session state, `aria-ref` locators, CDP allowlist widened for Playwright); `browser.observe`/`act` with freshness; the ghost cursor (§6.4); per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
 | **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view/control/comment, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
 | **B2** | Comments | Comment mode, threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
 | **B3** | Skill recording | Recorder, timeline and frames; agent writes `SKILL.md` plus replay script and replays it successfully; recordings in `drive://`. |
@@ -284,6 +301,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 3. Should a share's `control` capability ever allow filling a credential (it does not in this draft)?
 4. Machine-hosted headless Chromium: which milestone, now that the cloud browser can reach services directly?
 5. When does Aperture's API become public for Zerbly, and does the relay move to its own Worker then?
+6. Should the extension get a local channel to a GitSpace machine on the same computer (Chrome native messaging), so scripts against your Chrome skip the round trip through Cloudflare? Decide after measuring `browser.run` through the relay.
 
 ## 17. References
 
