@@ -2,10 +2,11 @@ import type { AskBlock, ExecutionBlock, MessageImage, RichContentBlock, SideAgen
 import type { PendingAskAnswer } from '@gitspace/protocol';
 import { RuntimeBrowserExecutionSchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
-import { AskUserQuestions, Badge, Button, ChatMessage, Dialog, DialogContent, DialogTitle, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
+import { AskUserQuestions, Badge, Button, ChatMessage, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
 import { AlertCircle, ChevronDown, ChevronRight, GitBranch01, Link03, ShieldTick, Terminal, Users01 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceLink } from './ResourceNavigation.js';
+import { TranscriptImage } from './resource-media.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { glyph } from './glyph.js';
 import { useState, type ReactNode } from 'react';
@@ -24,36 +25,6 @@ function RichContent({ block }: { block: RichContentBlock }) {
       <TableBody>{block.rows.map((row, index) => <TableRow key={index}>{row.map((cell, cellIndex) => <TableCell key={cellIndex}>{cell}</TableCell>)}</TableRow>)}</TableBody>
     </Table></div>;
   }
-}
-
-function TranscriptImage({ alt, label, src }: { alt: string; label: string; src: string }) {
-  const [open, setOpen] = useState(false);
-  const shape = useShape();
-  return <>
-    <button
-      aria-label={label}
-      className={`${shape.container} block w-fit max-w-full cursor-zoom-in overflow-hidden bg-surface-2 shadow-surface-1 outline-none transition-transform duration-80 active:scale-[0.96] focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]`}
-      onClick={() => setOpen(true)}
-      type="button"
-    >
-      <img
-        alt={alt}
-        className="block max-h-64 max-w-full object-contain outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
-        loading="lazy"
-        src={src}
-      />
-    </button>
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] !max-w-[calc(100vw-2rem)] items-center justify-center overflow-hidden bg-surface-1 p-4" size="lg">
-        <DialogTitle className="sr-only">{alt}</DialogTitle>
-        <img
-          alt={alt}
-          className={`${shape.container} block max-h-[calc(100dvh-4rem)] max-w-full object-contain outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10`}
-          src={src}
-        />
-      </DialogContent>
-    </Dialog>
-  </>;
 }
 
 function MessageAttachments({ images }: { images: MessageImage[] }) {
@@ -77,28 +48,33 @@ function ToolArguments({ args }: { args: unknown }) {
 /** One tool call is one reasoning-steps block: header names the tool, the step carries the target and status, details hold input and result. */
 function ToolCall({ block, state, onStateChange }: { block: ToolCallBlock } & ItemInteractionProps) {
   const hasArgs = !(block.input?.length) && block.args !== undefined;
-  const hasDetail = hasArgs || (block.input?.length ?? 0) + (block.result?.length ?? 0) > 0;
-  const hasImage = block.input?.some((content) => content.type === 'image') || block.result?.some((content) => content.type === 'image');
+  // Images (screenshots, generated pictures) show below the tool call, even while it is collapsed; its details keep everything else.
+  const images = [...block.input ?? [], ...block.result ?? []].flatMap((content) => content.type === 'image' ? [content] : []);
+  const input = block.input?.filter((content) => content.type !== 'image') ?? [];
+  const result = block.result?.filter((content) => content.type !== 'image') ?? [];
+  const hasDetail = hasArgs || input.length + result.length > 0;
   const failed = block.status === 'error';
   // Cloud agents call it web_browser (an OpenAI-reserved name otherwise); machine sessions keep browser.
   const chrome = block.tool === 'browser' || block.tool === 'web_browser' ? browserExecutionDetails.safeParse(block.details) : null;
-  return <ThinkingSteps className="w-full" defaultOpen={failed} open={state?.open} onOpenChange={(open) => onStateChange?.({ open })}>
+  return <><ThinkingSteps className="w-full" defaultOpen={failed} open={state?.open} onOpenChange={(open) => onStateChange?.({ open })}>
     <ThinkingStepsHeader>{block.tool}{chrome?.success ? <span className="ml-2 text-caption font-normal" title={chrome.data.browser.pairingId}>· {chrome.data.browser.name}</span> : null}</ThinkingStepsHeader>
     <ThinkingStepsContent>
       <ThinkingStep label={block.target ?? block.tool} description={failed ? 'failed' : block.status} status={block.status === 'running' ? 'active' : 'complete'} icon={TOOL_ICON[block.status]} isLast>
-        {hasDetail ? <ThinkingSteps className="w-full" key={hasImage ? 'image' : 'detail'} defaultOpen={failed || hasImage} open={state?.detailsOpen} onOpenChange={(detailsOpen) => onStateChange?.({ detailsOpen })}>
+        {hasDetail ? <ThinkingSteps className="w-full" defaultOpen={failed} open={state?.detailsOpen} onOpenChange={(detailsOpen) => onStateChange?.({ detailsOpen })}>
           <ThinkingStepsHeader>Details</ThinkingStepsHeader>
           <ThinkingStepsContent>
           <div className="flex min-w-0 flex-col gap-2">
-            {block.input?.map((content) => <RichContent block={content} key={content.id} />)}
+            {input.map((content) => <RichContent block={content} key={content.id} />)}
             {hasArgs ? <ToolArguments args={block.args} /> : null}
-            {block.result?.map((content) => <RichContent block={content} key={content.id} />)}
+            {result.map((content) => <RichContent block={content} key={content.id} />)}
           </div>
           </ThinkingStepsContent>
         </ThinkingSteps> : null}
       </ThinkingStep>
     </ThinkingStepsContent>
-  </ThinkingSteps>;
+  </ThinkingSteps>
+  {images.length ? <div aria-label={`Images from ${block.tool}`} className="flex min-w-0 flex-wrap gap-2" role="group">{images.map((image) => <RichContent block={image} key={image.id} />)}</div> : null}
+  </>;
 }
 
 function SideAgents({ agents, state, onStateChange }: { agents: SideAgentBlock[] } & ItemInteractionProps) {

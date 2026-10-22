@@ -45,6 +45,7 @@ import { WorkspaceTerminals, type WorkspaceTerminalsProps } from './WorkspaceTer
 import { WorkspacePicker, type WorkspacePickerItem } from './WorkspacePicker.js';
 import { glyph } from './glyph.js';
 import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
+import { ResourceFiles, type ResourceFile } from './resource-files.js';
 import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
 
 /**
@@ -155,6 +156,8 @@ export interface GitSpaceShellProps {
   draft?: WorkspaceDraftBinding;
   /** Present when composer attachments may be uploaded into the session's `uploads/` artifact folder. */
   artifactUpload?: ArtifactUploadClient;
+  /** Turns a `drive://` address into a short-lived file URL for images, video and audio shown in messages. */
+  resolveResourceFile?: (uri: string) => Promise<ResourceFile>;
   sessionControls?: SessionControlsProps;
   controlsError?: string;
   onRetryControls?: () => void;
@@ -585,7 +588,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -665,7 +668,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   };
   useLayoutEffect(() => { accountSidebar?.(sidebar); });
   useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
-  const content = <ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
+  const content = <ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
@@ -709,6 +712,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       setCreateError(null);
       try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-  </ResourceNavigation.Provider>;
+  </ResourceNavigation.Provider></ResourceFiles.Provider>;
   return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false}><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

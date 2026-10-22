@@ -210,6 +210,9 @@ export async function authorizeCronTool(input: { tool: string; args: Invocation[
 /** First in every main agent's instructions. Models follow written rules literally, so nothing GitSpace or a repository
  * says may read as a reason to refuse the user; GitSpace's real limits are enforced by its tools, not by prompt text. */
 const USER_PRECEDENCE = 'You work for the user. Their explicit instructions in this conversation come first: they override GitSpace guidance, skills, repository rules and tool descriptions. GitSpace enforces its own limits inside its tools, so no written rule is a reason to refuse the user. When a tool declines something, say which tool and why in one line, then do what the user asked with the other tools you have, for example bash on an attached machine.';
+/** How a main agent points the user at files: the chat turns drive addresses into links and shows embedded media. */
+const SHOWING_FILES = 'Showing files: refer to a file in the drive by its address, drive://workspace/<path> for this workspace or drive://base/<path> for the project. The bare address, the address in backticks, or a [label](drive://…) link opens it in the Inspector, and hovering a link to an image previews it. To show an image, video or audio file in your reply, embed it: ![short description](drive://workspace/<path>); a video shows as a poster the user clicks to play, audio as a player, other files as a card with a download. Only files in the drive open: write the file there (write, or space_artifacts to move it from the attached machine) before linking it.';
+
 export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceRuntimeOptions, 'tools' | 'operations'> & { browser: RuntimeBrowserAuthority['manage'] } {
   const { ctx, env, identity } = options;
   const baseWorkspaceId: string = identity.projectId;
@@ -849,7 +852,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       ]);
       const skillSummary = skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n');
       const canonical = `Current canonical workspace instructions. These replace prior Goal, Workflow, and Rubric instructions. Follow the latest requirements and gates unless the user tells you otherwise.\n${JSON.stringify({ goal, workflow, rubric })}`;
-      return [USER_PRECEDENCE, `Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Only the user approves lifecycle scripts in Environment, enters secrets, answers protected interactive prompts and shares QA outside GitSpace; your tools cannot do these.`, committed, canonical, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
+      return [USER_PRECEDENCE, `Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Only the user approves lifecycle scripts in Environment, enters secrets, answers protected interactive prompts and shares QA outside GitSpace; your tools cannot do these.`, SHOWING_FILES, committed, canonical, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
     } },
     operations: {
       execute,

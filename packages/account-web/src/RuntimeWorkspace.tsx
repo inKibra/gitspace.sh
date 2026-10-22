@@ -1,4 +1,6 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { canonicalDriveResourceUrl, parseResourceUri } from '@gitspace/protocol/resource-uri';
+import type { ResourceFile } from './resource-files.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
 import type { InspectorView, LaunchSourceView } from '@gitspace/protocol';
@@ -148,6 +150,15 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   // Terminals open only on a ready machine the user picked for this workspace: never a default machine.
   const terminalMachines = machines.flatMap((machine): WorkspaceTerminalMachine[] => machine.ready ? [{ id: machine.id, label: inspection.machines.find(candidate => candidate.id === machine.id)?.label ?? machine.id }] : []);
   const selectTerminalMachine = (machineId: string) => setTerminalChoice({ spaceId, machineId });
+  const generation = scope.workspace.generation;
+  // One resolver per workspace version, so every message showing a file shares its URL.
+  const resolveResourceFile = useMemo(() => async (uri: string): Promise<ResourceFile> => {
+    const resource = parseResourceUri(uri);
+    if (resource?.kind !== 'drive') throw new Error('Only drive:// files can be shown here');
+    const result = await rpcClient.inspector.artifacts.file({ spaceId, expectedGeneration: generation, url: canonicalDriveResourceUrl(resource, String(spaceId) === String(snapshot.projectId) ? 'base' : 'workspace'), hash: null });
+    if (result.status === 'error') throw new Error(rpcErrorMessage(result.error, 'Open file'));
+    return result.value;
+  }, [spaceId, snapshot.projectId, generation]);
   return <>
     {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
@@ -176,6 +187,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
+      resolveResourceFile={resolveResourceFile}
       terminals={{
         spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,
         onSelectMachine: selectTerminalMachine,

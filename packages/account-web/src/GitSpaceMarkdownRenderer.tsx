@@ -4,10 +4,11 @@ import type { Components, PluginConfig } from 'streamdown';
 import 'streamdown/styles.css';
 import { useEffect, useState } from 'react';
 import type { GitSpaceMarkdownProps } from './GitSpaceMarkdown.js';
-import { MarkdownResourceLink, rehypeResourceAnchors, rehypeResourceLinks } from './ResourceNavigation.js';
+import { rehypeResourceAnchors, rehypeResourceLinks } from './ResourceNavigation.js';
+import { MarkdownResourceAnchor, MarkdownResourceMedia, rehypeResourceAddresses, rehypeResourceMedia, rehypeResourceMediaMarkers } from './resource-media.js';
 import { rehypeArtifactImageMarkers, rehypeArtifactImageSources } from './markdown-artifact-images.js';
 
-const RESOURCE_COMPONENTS = { 'gitspace-resource': MarkdownResourceLink } satisfies Components;
+const RESOURCE_COMPONENTS = { 'gitspace-resource': MarkdownResourceAnchor, 'gitspace-media': MarkdownResourceMedia } satisfies Components;
 
 // Prose typography lives on the wrapper as Tailwind utilities over Fluid
 // tokens; streamdown's own stylesheet handles block layout, and the theme
@@ -52,8 +53,10 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
     components={RESOURCE_COMPONENTS}
     rehypePlugins={[
       defaultRehypePlugins.raw,
+      rehypeResourceAddresses,
       rehypeResourceLinks,
-      ...(resolveImage ? [rehypeArtifactImageMarkers(resolveImage)] : []),
+      // Inspector documents load their images ahead and pass a resolver; messages resolve each file as it renders.
+      ...(resolveImage ? [rehypeArtifactImageMarkers(resolveImage)] : [rehypeResourceMediaMarkers]),
       defaultRehypePlugins.sanitize,
       [harden, {
         defaultOrigin: origin,
@@ -62,7 +65,7 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
         allowedImagePrefixes: [origin],
         allowDataImages: false,
       }],
-      ...(resolveImage ? [rehypeArtifactImageSources(resolveImage, origin)] : []),
+      ...(resolveImage ? [rehypeArtifactImageSources(resolveImage, origin)] : [rehypeResourceMedia(origin)]),
       rehypeResourceAnchors,
     ]}
   >{children}</Streamdown>;
