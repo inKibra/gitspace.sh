@@ -13,24 +13,41 @@ async function* frames(body = bytes, text = false) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('Inspector bounded resource content', () => {
-  it('assembles cloud media exactly without an originating session and revokes each object URL once', async () => {
+  it('plays published media from its file URL without reading its bytes, and assembles live media exactly', async () => {
     const blobs: Blob[] = [];
-    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => { if (!(blob instanceof Blob)) throw new Error('Expected a Blob preview'); blobs.push(blob); return `blob:preview-${blobs.length}`; });
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => { if (!(blob instanceof Blob)) throw new Error('Expected a Blob preview'); blobs.push(blob); return `blob:preview-${blobs.length}`; })
     const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-    const transport = { readArtifact: vi.fn(() => frames()), readResource: vi.fn(() => frames()) };
+    const file = { url: '/files/capture', downloadUrl: '/files/capture?download=1', size: bytes.length, mediaType: 'audio/wav' };
+    const transport = { readArtifact: vi.fn(() => frames()), readResource: vi.fn(() => frames()), artifactFile: vi.fn(async () => file) };
     const context = { spaceId: 'workspace', projectId: 'project', generation: 3, sessionId: null, runtimeAvailable: true };
-    const published = await loadInspectorContent(frames(), url);
     const durable = await loadInspectorResource(transport, context, url);
+    expect(durable).toEqual({ url, source: null, mediaType: 'audio/wav', previewUrl: '/files/capture', downloadUrl: '/files/capture?download=1' });
+    expect(transport.artifactFile).toHaveBeenCalledWith({ spaceId: 'workspace', expectedGeneration: 3, url, hash: null }, { signal: undefined });
+    expect(transport.readArtifact).not.toHaveBeenCalled();
     const live = await loadInspectorResource(transport, context, 'drive://live-capture.wav');
-    for (const [index, content] of [published, durable, live].entries()) {
-      expect(content.source).toBeNull();
-      expect(content.mediaType).toBe('audio/wav');
-      expect(new Uint8Array(await blobs[index]!.arrayBuffer())).toEqual(bytes);
-      expect(content.previewUrl).toBe(`blob:preview-${index + 1}`);
-      content.dispose?.();
-      content.dispose?.();
-    }
-    expect(revoke.mock.calls).toEqual([['blob:preview-1'], ['blob:preview-2'], ['blob:preview-3']]);
+    expect(new Uint8Array(await blobs[0]!.arrayBuffer())).toEqual(bytes);
+    expect(live.previewUrl).toBe('blob:preview-1');
+    live.dispose?.();
+    live.dispose?.();
+    expect(revoke.mock.calls).toEqual([['blob:preview-1']]);
+  });
+
+  it('reads text up to the preview limit, offers larger files as downloads, and reads line selections of any size', async () => {
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:preview');
+    const html = new TextEncoder().encode('<h1>Report</h1>');
+    const transport = {
+      readArtifact: vi.fn(() => frames(html, true)), readResource: vi.fn(() => frames()),
+      artifactFile: vi.fn(async ({ url: requested }: { url: string }) => ({ url: '/files/report', downloadUrl: '/files/report?download=1', size: requested.endsWith('large.html') ? 4 * 1024 * 1024 + 1 : html.length, mediaType: 'text/html' })),
+    };
+    const context = { spaceId: 'workspace', projectId: 'project', generation: 3, sessionId: null, runtimeAvailable: false };
+    const small = await loadInspectorResource(transport, context, 'drive://workspace/report.html');
+    expect(small).toMatchObject({ source: '<h1>Report</h1>', downloadUrl: '/files/report?download=1' });
+    expect(transport.readArtifact).toHaveBeenCalledTimes(1);
+    const large = await loadInspectorResource(transport, context, 'drive://workspace/large.html');
+    expect(large).toMatchObject({ source: null, oversized: true, downloadUrl: '/files/report?download=1' });
+    expect(transport.readArtifact).toHaveBeenCalledTimes(1);
+    await loadInspectorResource(transport, context, 'drive://workspace/large.html:1-200');
+    expect(transport.readArtifact).toHaveBeenCalledTimes(2);
   });
 
   it('does not publish bytes when a full body is followed by a typed stream failure', async () => {
@@ -61,7 +78,7 @@ describe('Inspector bounded resource content', () => {
     const body = new TextEncoder().encode(source);
     const artifact = { id: 'output', url: 'browser-artifact://machine/output', mediaType: 'text/plain', bytes: body.length, expiresAt: new Date(Date.now() + 60_000).toISOString() };
     const transport = {
-      readArtifact: vi.fn(() => frames()), readResource: vi.fn(() => frames()),
+      readArtifact: vi.fn(() => frames()), readResource: vi.fn(() => frames()), artifactFile: vi.fn(async () => { throw new Error('Browser output is not a drive file'); }),
       readBrowserArtifact: vi.fn(async ({ offset, limit }: { offset: number; limit: number }) => {
         const end = Math.min(body.length, offset + limit);
         return { artifact, offset, nextOffset: end < body.length ? end : null, data: Buffer.from(body.subarray(offset, end)).toString('base64') };

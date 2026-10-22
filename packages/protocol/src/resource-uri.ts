@@ -97,6 +97,10 @@ export function resourceMediaType(path: string): string | null {
   return MEDIA_TYPES[path.split('.').at(-1)?.toLowerCase() ?? ''] ?? null;
 }
 
+/** The largest text resource previewed in full; larger text files are downloaded. HTML reports with inline images
+ * run to a few MiB. */
+export const RESOURCE_TEXT_PREVIEW_BYTES = 4 * 1024 * 1024;
+
 /** Finite byte stream: callers accept the preview only after clean completion. */
 export function* createResourcePreview(url: string, bytes: Uint8Array, mediaType: string | null = null): Generator<ResourcePreviewFrame> {
   const resource = parseResourceUri(url);
@@ -114,7 +118,7 @@ export function* createResourcePreview(url: string, bytes: Uint8Array, mediaType
     bytes = new TextEncoder().encode(text);
   }
   if (resource.selector.raw || resource.selector.ranges.length) mediaType = 'text/plain';
-  if (text !== null && bytes.byteLength > 128 * 1024) throw new Error('This text resource exceeds the 128 KiB preview limit. Use a smaller line range, for example :1-200.');
+  if (text !== null && bytes.byteLength > RESOURCE_TEXT_PREVIEW_BYTES) throw new Error(`This file is larger than the ${RESOURCE_TEXT_PREVIEW_BYTES / 1024 / 1024} MiB preview limit; download it to read it, or open a line range such as :1-200.`);
   yield { type: 'metadata', url, mediaType, text: text !== null, size: bytes.byteLength };
   // Divisible by three, so each base64 payload is independently decodable.
   for (let offset = 0; offset < bytes.byteLength; offset += 48 * 1024) {

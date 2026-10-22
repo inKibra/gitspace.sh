@@ -62,6 +62,11 @@ async function clickLink(label: string) {
 describe('Markdown resource navigation', () => {
   it('opens authenticated published artifacts and runtime files in the actual Inspector and displays missing-resource failures', async () => {
     const transport = {
+      artifactFile: async ({ spaceId, url }: { spaceId: string; url: string }) => {
+        if (spaceId !== 'workspace') throw new Error('Wrong workspace');
+        if (url !== 'drive://workspace/PLAN.md') throw new Error('Artifact does not exist');
+        return { url: '/files/plan', downloadUrl: '/files/plan?download=1', size: 30, mediaType: 'text/markdown' };
+      },
       readArtifact: async function* ({ spaceId, url }: { spaceId: string; url: string }) {
         if (spaceId !== 'workspace') throw new Error('Wrong workspace');
         if (url !== 'drive://workspace/PLAN.md') { yield { status: 'error' as const, error: new Error('Artifact does not exist') }; return; }

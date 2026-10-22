@@ -41,7 +41,7 @@ import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRe
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useRepositoryTree } from './useRepositoryTree.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
-import { loadInspectorContent, loadInspectorResource } from './resource-content.js';
+import { loadDriveArtifact, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
 import { liveTicks, useLiveChanges } from './live-notices.js';
@@ -215,6 +215,11 @@ export function LiveInspector({
     resourceRequest={resourceRequest}
     onRequestResource={(uri, signal) => loadInspectorResource({
       readArtifact: (input, options) => rpcClient.inspector.artifacts.read(input, options),
+      artifactFile: async (input, options) => {
+        const result = await rpcClient.inspector.artifacts.file(input, options);
+        if (result.status === 'error') throw result.error;
+        return result.value;
+      },
       readResource: (input, options) => rpcClient.inspector.resources.read(input, options),
       readBrowserArtifact: async (input: { machineId: string; artifactId: string; offset: number; limit: number }, signal?: AbortSignal) => {
         const response = await rpcClient.runtime.session({ projectId: runtimeContext.snapshot.projectId, workspaceId: runtimeContext.snapshot.workspaceId, ...(runtimeContext.conversationId ? { conversationId: runtimeContext.conversationId } : {}), command: { type: 'browserArtifact', ...input } }, { signal });
@@ -299,12 +304,16 @@ export function LiveInspector({
     renderSubagentTranscript={conversationId => <RuntimeSubagentHistory snapshot={runtimeContext.snapshot} conversationId={conversationId} />}
     usage={runtimeInspector.usage}
     agentSetup={runtimeInspector.agentSetup}
-    onRequestArtifact={(reference, signal) => loadInspectorContent(
-      // Catalog URLs carry raw names ("report (1).zip", "100% done.txt"); resource URIs reject raw whitespace, `?`, `#`, and bare `%`.
-      rpcClient.inspector.artifacts.read({ spaceId, expectedGeneration: generation, url: reference.url.replace(/[\u0000-\u0020\u007f?#]|%(?![0-9A-Fa-f]{2})/gu, encodeURIComponent), hash: reference.hash }, { signal }),
-      reference.url,
-      signal,
-    )}
+    onRequestArtifact={(reference, signal) => loadDriveArtifact({
+      readArtifact: (input, options) => rpcClient.inspector.artifacts.read(input, options),
+      artifactFile: async (input, options) => {
+        const result = await rpcClient.inspector.artifacts.file(input, options);
+        if (result.status === 'error') throw result.error;
+        return result.value;
+      },
+    },
+    // Catalog URLs carry raw names ("report (1).zip", "100% done.txt"); resource URIs reject raw whitespace, `?`, `#`, and bare `%`.
+    { spaceId, expectedGeneration: generation, url: reference.url.replace(/[\u0000-\u0020\u007f?#]|%(?![0-9A-Fa-f]{2})/gu, encodeURIComponent), hash: reference.hash }, reference.url, signal)}
     reviewerId={reviewerId}
     sectionErrors={{
       files: repository.state === 'failure' ? { message: rpcErrorMessage(repository.error, 'inspector.repository.tree'), retained: repositoryValue !== undefined, retry: () => void repository.refetch() } : undefined,

@@ -15,7 +15,8 @@ import type { SpaceContextDO } from './space-context.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { applyTextEdits, RuntimeSnapshotSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
-import { readArtifactObject, readArtifactManifestObject } from './artifact-object-reader.js';
+import { artifactObjectSize, readArtifactObject, readArtifactManifestObject } from './artifact-object-reader.js';
+import { mintArtifactFileUrl } from './artifact-file-url.js';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES } from '@gitspace/protocol/rpc-contract';
 
 export class InspectorWorkspaceMissing extends Error {
@@ -186,16 +187,30 @@ export class InspectorCloudArtifacts {
     return createResourcePreview(url, bytes, mediaType);
   }
 
-  /** A drive file's stored bytes, at most 16 MiB, and its media type. */
-  async bytes(url: string, hash?: string | null): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
+  /** The stored version a drive URL names: its current one, or the exact `hash` of an earlier one. */
+  private async version(url: string, hash?: string | null) {
     const resource = parseResourceUri(url);
     if (resource?.kind !== 'drive' || !resource.mount) throw new Error('Inspector artifacts require a canonical drive resource URI');
     const resolved = await this.resolve(resource.url);
     const current = (await this.entries(resolved.scope)).find((candidate) => candidate.path === resolved.path);
     const entry = hash ? { blobHash: hash, mediaType: current?.mediaType ?? null, size: current?.blobHash === hash ? current.size : undefined } : current;
     if (!entry) throw new Error('Artifact does not exist');
-    const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, resolved.scope.id), entry.size, 16 * 1024 * 1024);
-    return { bytes, mediaType: entry.mediaType ?? resourceMediaType(resource.path) };
+    return { scope: resolved.scope, path: resolved.path, entry, mediaType: entry.mediaType ?? resourceMediaType(resource.path) };
+  }
+
+  /** A drive file's stored bytes, at most 16 MiB, and its media type. */
+  async bytes(url: string, hash?: string | null): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
+    const { scope, entry, mediaType } = await this.version(url, hash);
+    const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, scope.id), entry.size, 16 * 1024 * 1024);
+    return { bytes, mediaType };
+  }
+
+  /** A short-lived URL serving a drive file's bytes over HTTP, for media elements and downloads. */
+  async file(url: string, hash?: string | null) {
+    const { scope, path, entry, mediaType } = await this.version(url, hash);
+    const size = entry.size ?? await artifactObjectSize(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, scope.id));
+    const minted = await mintArtifactFileUrl(this.env, { scopeId: scope.id, hash: entry.blobHash, size, mediaType, name: (path.split('/').at(-1) || 'file').slice(0, 255) });
+    return { ...minted, size, mediaType };
   }
 
   /** The stored object a drive URL names and the scope whose key opens it, for a machine to fetch itself. */

@@ -5,7 +5,7 @@ import { ARTIFACT_UPLOAD_CHUNK_BYTES, gitspaceContract } from '@gitspace/protoco
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import type { ProjectAuthorityDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -196,7 +196,7 @@ describe('user artifact flows', () => {
 
   it('applies the text preview limit before streaming and allows bounded resource selections', async () => {
     const { client, workspaceId, publish } = await fixture();
-    await publish(workspaceId, 1, [{ path: 'output.txt', content: `retained line\n${'large output\n'.repeat(20_000)}` }]);
+    await publish(workspaceId, 1, [{ path: 'output.txt', content: `retained line\n${'large output\n'.repeat(330_000)}` }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null, url: 'drive://output.txt' };
     const frames = [];
     for await (const frame of client.inspector.resources.read(request)) frames.push(frame);
@@ -207,13 +207,17 @@ describe('user artifact flows', () => {
 
   it('keeps oversized previews inside the RPC error contract and reads selected canonical text ranges', async () => {
     const { client, workspaceId, publish } = await fixture();
-    await publish(workspaceId, 1, [{ path: 'output.txt', content: `selected line\n${'remaining output\n'.repeat(20_000)}` }]);
+    await publish(workspaceId, 1, [{ path: 'output.txt', content: `selected line\n${'remaining output\n'.repeat(250_000)}` }]);
     const request = { spaceId: workspaceId, expectedGeneration: 0, hash: null };
     const full = [];
     for await (const frame of client.inspector.artifacts.read({ ...request, url: 'drive://workspace/output.txt' })) full.push(frame);
     expect(full).toMatchObject([{ status: 'error' }]);
     const selected = await readBytes(client.inspector.artifacts.read({ ...request, url: 'drive://workspace/output.txt:raw:1-1' }));
     expect(selected.toString()).toBe('selected line');
+    // A report with inline images runs to a few MiB and previews whole.
+    const report = `<html><body>${'<img src="data:image/png;base64,AAAA">'.repeat(30_000)}</body></html>`;
+    await publish(workspaceId, 2, [{ path: 'report.html', content: report, mediaType: 'text/html' }]);
+    expect((await readBytes(client.inspector.artifacts.read({ ...request, url: 'drive://workspace/report.html' }))).toString()).toBe(report);
   });
 
   it('streams encrypted published audio beyond a single RPC reply without changing bytes', async () => {
@@ -295,6 +299,59 @@ describe('user artifact flows', () => {
     const copiedHash = replaced.value.artifacts.find((artifact) => artifact.url === 'drive://base/report.txt')!.hash;
     expect((await client.inspector.artifacts.copyToProject({ ...request, expectedProjectGeneration: scopeGeneration, files: [{ ...file, destinationPath: 'report.txt/child.txt', expectedDestinationHash: copiedHash }] })).status).toBe('error');
   });
+
+  it('serves a drive file from a sealed short-lived URL with byte ranges, and never as an active page', async () => {
+    const { client, workspaceId, publish, origin } = await fixture();
+    const audio = Array.from({ length: 1000 }, (_, index) => String.fromCharCode(65 + index % 26)).join('');
+    const [first] = await publish(workspaceId, 1, [{ path: 'take one.wav', content: audio, mediaType: 'audio/wav' }]);
+    const minted = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/take%20one.wav', hash: null });
+    if (minted.status === 'error') throw minted.error;
+    expect(minted.value).toMatchObject({ size: 1000, mediaType: 'audio/wav' });
+    const get = (path: string, headers: Record<string, string> = {}, method = 'GET') => worker.fetch(new Request(new URL(path, origin), { method, headers }), env);
+    const whole = await get(minted.value.url);
+    expect(whole.status).toBe(200);
+    expect(await whole.text()).toBe(audio);
+    expect(Object.fromEntries(['content-type', 'content-length', 'accept-ranges', 'x-content-type-options'].map(name => [name, whole.headers.get(name)]))).toEqual({ 'content-type': 'audio/wav', 'content-length': '1000', 'accept-ranges': 'bytes', 'x-content-type-options': 'nosniff' });
+    expect(whole.headers.get('content-security-policy')).toContain('sandbox');
+    expect(whole.headers.get('content-disposition')).toMatch(/^inline;.*take%20one\.wav$/u);
+    const middle = await get(minted.value.url, { range: 'bytes=26-51' });
+    expect(middle.status).toBe(206);
+    expect(middle.headers.get('content-range')).toBe('bytes 26-51/1000');
+    expect(await middle.text()).toBe(audio.slice(26, 52));
+    expect(await (await get(minted.value.url, { range: 'bytes=-4' })).text()).toBe(audio.slice(-4));
+    expect((await get(minted.value.url, { range: 'bytes=1000-' })).status).toBe(416);
+    expect((await get(minted.value.url, { 'if-none-match': `"${first!.blobHash}"` })).status).toBe(304);
+    expect((await get(minted.value.downloadUrl)).headers.get('content-disposition')).toMatch(/^attachment;/u);
+    const head = await get(minted.value.url, {}, 'HEAD');
+    expect([head.status, head.headers.get('content-length'), await head.text()]).toEqual([200, '1000', '']);
+    // A token cannot be altered, and stops working when it expires.
+    const token = minted.value.url.slice('/files/'.length);
+    expect((await get(`/files/${token.slice(0, -2)}${token.endsWith('AA') ? 'BB' : 'AA'}`)).status).toBe(404);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(minted.value.expiresAt) + 1);
+    try { expect((await get(minted.value.url)).status).toBe(404); } finally { vi.restoreAllMocks(); }
+
+    // HTML and SVG are files to save, never pages of this origin.
+    await publish(workspaceId, 2, [{ path: 'report.html', content: '<script>steal()</script>', mediaType: 'text/html' }, { path: 'take one.wav', content: 'replaced', mediaType: 'audio/wav' }]);
+    const html = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/report.html', hash: null });
+    if (html.status === 'error') throw html.error;
+    expect((await get(html.value.url)).headers.get('content-disposition')).toMatch(/^attachment;/u);
+    // An earlier version, pinned by hash, keeps its own bytes and size.
+    const pinned = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/take%20one.wav', hash: first!.blobHash });
+    if (pinned.status === 'error') throw pinned.error;
+    expect(pinned.value.size).toBe(1000);
+    expect(await (await get(pinned.value.url, { range: 'bytes=0-1' })).text()).toBe('AB');
+  });
+
+  it('serves a range at the end of a chunked file from its last parts', async () => {
+    const { client, workspaceId, publishChunked, origin } = await fixture();
+    const chunked = await publishChunked();
+    const large = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/large.bin', hash: chunked.blobHash });
+    if (large.status === 'error') throw large.error;
+    const tail = await worker.fetch(new Request(new URL(large.value.url, origin), { headers: { range: `bytes=${chunked.size - 20}-` } }), env);
+    expect(tail.status).toBe(206);
+    expect(tail.headers.get('content-range')).toBe(`bytes ${chunked.size - 20}-${chunked.size - 1}/${chunked.size}`);
+    expect([...new Uint8Array(await tail.arrayBuffer())]).toEqual([...Array(3).fill(1), ...Array(17).fill(2)]);
+  }, 30_000);
 
   it('serves only the fixed shared version as an attachment, enforcing persisted expiry and revocation', async () => {
     const { client, workspaceId, publish, authority, origin } = await fixture();

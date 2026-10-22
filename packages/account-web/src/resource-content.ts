@@ -1,12 +1,28 @@
-import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
+import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, RESOURCE_TEXT_PREVIEW_BYTES, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
 import type { InspectorArtifactContent } from './inspector/Inspector.js';
 
 type ReadResult = { status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown };
-interface ResourceTransport {
-  readArtifact(input: { spaceId: string; expectedGeneration: number; url: string; hash: null }, options: { signal?: AbortSignal }): AsyncIterable<ReadResult>;
+type ArtifactInput = { spaceId: string; expectedGeneration: number; url: string; hash: string | null };
+/** A short-lived URL serving one drive file over HTTP, with its size and media type. */
+type ArtifactFile = { url: string; downloadUrl: string; size: number; mediaType: string | null };
+interface DriveArtifactTransport {
+  artifactFile(input: ArtifactInput, options: { signal?: AbortSignal }): Promise<ArtifactFile>;
+  readArtifact(input: ArtifactInput, options: { signal?: AbortSignal }): AsyncIterable<ReadResult>;
+}
+interface ResourceTransport extends DriveArtifactTransport {
   readResource(input: { spaceId: string; expectedGeneration: number; sessionId: string | null; url: string }, options: { signal?: AbortSignal }): AsyncIterable<ReadResult>;
   readBrowserArtifact?(input: { machineId: string; artifactId: string; offset: number; limit: number }, signal?: AbortSignal): Promise<RuntimeBrowserArtifactPage>;
+}
+
+/** A drive file for the inspector. Images, audio and video play from a file URL (byte ranges, the browser's cache), so
+ * no bytes pass through the page; a file over the text preview limit only downloads; anything else is read in. */
+export async function loadDriveArtifact(transport: DriveArtifactTransport, input: ArtifactInput, url: string, signal?: AbortSignal): Promise<InspectorArtifactContent> {
+  const file = await transport.artifactFile(input, { signal });
+  const { mediaType } = file;
+  if (mediaType && /^(image|audio|video)\//u.test(mediaType) && mediaType !== 'image/svg+xml') return { url, source: null, mediaType, previewUrl: file.url, downloadUrl: file.downloadUrl };
+  if (file.size > RESOURCE_TEXT_PREVIEW_BYTES && mediaType !== 'application/pdf') return { url, source: null, mediaType, previewUrl: file.url, downloadUrl: file.downloadUrl, oversized: true };
+  return { ...await loadInspectorContent(transport.readArtifact(input, { signal }), url, signal), downloadUrl: file.downloadUrl };
 }
 
 /** Do not publish partial bytes, including a complete body followed by a stream error. */
@@ -19,7 +35,7 @@ export async function loadInspectorContent(stream: AsyncIterable<ReadResult>, ur
     if (result.status === 'error') throw result.error;
     const frame = result.value;
     if (frame.type === 'metadata') {
-      if (metadata || typeof frame.url !== 'string' || !frame.url || typeof frame.text !== 'boolean' || (frame.mediaType !== null && typeof frame.mediaType !== 'string') || !Number.isSafeInteger(frame.size) || frame.size < 0 || frame.size > 16 * 1024 * 1024 || (frame.text && frame.size > 128 * 1024)) throw new Error('Invalid resource preview metadata');
+      if (metadata || typeof frame.url !== 'string' || !frame.url || typeof frame.text !== 'boolean' || (frame.mediaType !== null && typeof frame.mediaType !== 'string') || !Number.isSafeInteger(frame.size) || frame.size < 0 || frame.size > 16 * 1024 * 1024 || (frame.text && frame.size > RESOURCE_TEXT_PREVIEW_BYTES)) throw new Error('Invalid resource preview metadata');
       metadata = frame;
     } else {
       if (!metadata || frame.type !== 'chunk' || typeof frame.base64 !== 'string' || frame.base64.length > 64 * 1024 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(frame.base64)) throw new Error('Invalid resource preview chunk');
@@ -79,8 +95,8 @@ export async function loadInspectorResource(transport: ResourceTransport, contex
   }
   const request = { spaceId: context.spaceId, expectedGeneration: context.generation };
   if (resource.kind !== 'drive') throw new Error('Machine-session output spills are not retained cloud artifacts. Use a published drive:// evidence link.');
-  const stream = resource.mount !== null || !context.runtimeAvailable
-    ? transport.readArtifact({ ...request, url: `${canonicalDriveResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null }, { signal })
-    : transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal });
-  return loadInspectorContent(stream, uri, signal);
+  if (resource.mount === null && context.runtimeAvailable) return loadInspectorContent(transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal }), uri, signal);
+  const input = { ...request, url: `${canonicalDriveResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null };
+  // A line selection reads just those lines, however large the file.
+  return resource.suffix ? loadInspectorContent(transport.readArtifact(input, { signal }), uri, signal) : loadDriveArtifact(transport, input, uri, signal);
 }

@@ -1,4 +1,5 @@
 import { FileDiff } from '@pierre/diffs/react';
+import { RESOURCE_TEXT_PREVIEW_BYTES } from '@gitspace/protocol/resource-uri';
 import { parsePatchFiles, type DiffLineAnnotation, type FileDiffOptions, type SelectedLineRange } from '@pierre/diffs';
 import { FileTree, useFileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
@@ -112,6 +113,10 @@ export interface InspectorArtifactContent {
   source: string | null;
   previewUrl: string;
   mediaType: string | null;
+  /** Saves the file under its own name; absent for content that is not a stored drive file. */
+  downloadUrl?: string;
+  /** Larger than the preview limit: offered as a download instead. */
+  oversized?: boolean;
   dispose?(): void;
 }
 export interface CreateInspectorThread {
@@ -623,7 +628,9 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
   onRequest(reference: ArtifactReference): Promise<void>;
 }) {
   const shape = useShape();
-  if (mode === 'source') return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(File02, 22)} title="Source is unavailable" description="This binary artifact has no text source." /></Padded>;
+  const download = content.downloadUrl ? <a href={content.downloadUrl} download={reference.label} className="text-body text-primary underline">Download {reference.label}</a> : undefined;
+  if (content.oversized) return <Padded><EmptyState icon={ic(File02, 22)} title="Too large to preview" description={`Files over ${RESOURCE_TEXT_PREVIEW_BYTES / 1024 / 1024} MiB open as a download.`} action={download} /></Padded>;
+  if (mode === 'source') return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(File02, 22)} title="Source is unavailable" description="This binary artifact has no text source." action={download} /></Padded>;
   const mediaType = content.mediaType ?? reference.mediaType;
   if (mediaType?.startsWith('image/')) return <PreviewFrame><img src={content.previewUrl} alt={reference.label} className={`${shape.container} max-h-full max-w-full bg-surface-3 object-contain shadow-surface-1`} /></PreviewFrame>;
   if ((reference.url.endsWith('.gssh.html') || mediaType === 'text/html') && content.source !== null) return <MiniAppArtifact source={content.source} dataReferences={artifactReferences.filter((candidate) => candidate.url.endsWith('.data.json'))} content={artifactContent} onLoad={onRequest} />;
@@ -636,7 +643,7 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
     return <SourceArtifact source={pretty} />;
   }
   if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} documentUrl={reference.url} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequest} />;
-  return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." /></Padded>;
+  return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." action={download} /></Padded>;
 }
 
 function ResourceDocument({ uri, mode, onRequest, artifactReferences, artifactContent, onRequestArtifact }: {

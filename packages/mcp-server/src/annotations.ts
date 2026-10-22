@@ -611,6 +611,10 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
+  "inspector.artifacts.file": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
   "inspector.artifacts.shares.create": {
     "readOnlyHint": false,
     "destructiveHint": false,

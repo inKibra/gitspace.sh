@@ -1,4 +1,4 @@
-import { inspectorReadArtifactPageContract, inspectorReadResourcePageContract, inspectorRepositoryTreePageContract } from '@gitspace/protocol/rpc-contract';
+import { inspectorArtifactFileContract, inspectorReadArtifactPageContract, inspectorReadResourcePageContract, inspectorRepositoryTreePageContract } from '@gitspace/protocol/rpc-contract';
 import { snapshotPage } from '@gitspace/protocol/snapshot-page';
 import { requireDeviceAdministration, type VerifiedDevice } from '@gitspace/protocol/device-grant';
 import {
@@ -424,6 +424,17 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       return err(errors.OperationFailed({ operation: 'Inspector readArtifactPage', message: error instanceof Error ? error.message : 'Unable to read artifact page' }));
     }
   });
+  const artifactFile = server.implement(inspectorArtifactFileContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).file(input.url, input.hash));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
+      return err(errors.OperationFailed({ operation: 'Inspector artifact file', message: error instanceof Error ? error.message : 'Unable to open artifact file' }));
+    }
+  });
   const writeArtifact = server.implement(inspectorWriteArtifactContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
@@ -688,7 +699,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     },
     review: { list: threads, create: createThread, reply: replyThread, resolve: resolveThread },
     artifacts: {
-      read: readArtifact, readPage: readArtifactPage, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
+      read: readArtifact, readPage: readArtifactPage, file: artifactFile, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
       uploadBegin: beginUpload, uploadChunk, uploadCommit: commitUpload, uploadAbort: abortUpload,
     },
     resources: { read: readResource, readPage: readResourcePage },

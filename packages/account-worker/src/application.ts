@@ -20,6 +20,7 @@ import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js'
 import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSelectionSchema, type CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
+import { serveArtifactFile } from './artifact-file-url.js';
 import { serveGuideShare } from './guide-shares.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
@@ -2945,6 +2946,7 @@ const worker = {
       return (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(env.ACCOUNT_ID).fetch(request);
     }
     if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
+    if (url.pathname.startsWith('/files/')) return serveArtifactFile(request, env);
     if (url.pathname.startsWith('/v1/shared-guides/')) {
       const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
       return denied ?? serveGuideShare(request, env, url);

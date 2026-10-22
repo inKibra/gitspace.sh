@@ -91,29 +91,55 @@ async function readPart(env: Env, userId: string, hash: string, size: number, ke
   return plaintext;
 }
 
-/** Authenticates one part at a time. Exhaust the iterable to verify the complete object. */
-export async function readArtifactObject(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize?: number): Promise<AsyncIterable<Uint8Array<ArrayBuffer>>> {
+/** An inclusive range of an object's plaintext bytes. */
+export interface ArtifactByteRange { start: number; end: number }
+
+/** Authenticates one part at a time. Exhaust the iterable to verify the complete object. With `range`, only the bytes
+ * in it are yielded: a single sealed envelope is decrypted whole and sliced, and parts of a chunked object outside the
+ * range are never read. */
+export async function readArtifactObject(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize?: number, range?: ArtifactByteRange): Promise<AsyncIterable<Uint8Array<ArrayBuffer>>> {
   if (expectedSize !== undefined && (!Number.isSafeInteger(expectedSize) || expectedSize < 0)) throw new Error('Artifact size is invalid');
+  if (range && (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start < 0 || range.end < range.start)) throw new Error('Artifact byte range is invalid');
   const maximum = expectedSize === undefined ? CHECKPOINT_CHUNK_BYTES + ENCRYPTION_OVERHEAD + 1
     : expectedSize <= CHECKPOINT_CHUNK_BYTES ? expectedSize + ENCRYPTION_OVERHEAD
     : Math.min(64 * 1024 * 1024, 128 + 128 * Math.ceil(expectedSize / CHECKPOINT_CHUNK_BYTES));
   const object = await openSealedArtifact(env, userId, hash);
   if (object.size > maximum) {
     const plaintext = await readLargeLegacyArtifact(env, object, hash, key, expectedSize);
-    return (async function* () { yield plaintext; })();
+    return (async function* () { yield range ? plaintext.subarray(range.start, range.end + 1) : plaintext; })();
   }
   const sealed = await readSealedBytes(object, hash, maximum);
   if (sealed[0] !== CHUNKED_CHECKPOINT_VERSION) {
     const plaintext = await decryptArtifactBytes(sealed, key);
     if (expectedSize !== undefined && plaintext.byteLength !== expectedSize) throw new Error('Artifact size mismatch');
-    return (async function* () { yield plaintext; })();
+    return (async function* () { yield range ? plaintext.subarray(range.start, range.end + 1) : plaintext; })();
   }
   const inventory = await decryptArtifactBytes(sealed.subarray(1), key);
   const manifest = chunkedCheckpointManifestSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(inventory)));
   if (expectedSize !== undefined && manifest.size !== expectedSize) throw new Error('Artifact inventory size mismatch');
   return (async function* () {
-    for (const part of manifest.chunks) yield await readPart(env, userId, part.hash, part.size, key);
+    let offset = 0;
+    for (const part of manifest.chunks) {
+      const start = offset;
+      offset += part.size;
+      if (range && (offset <= range.start || start > range.end)) continue;
+      const plaintext = await readPart(env, userId, part.hash, part.size, key);
+      yield range ? plaintext.subarray(Math.max(0, range.start - start), Math.min(part.size, range.end + 1 - start)) : plaintext;
+    }
   })();
+}
+
+/** An object's plaintext size, without decrypting its payload: a single envelope's size less its overhead, or the
+ * size its chunk inventory records. */
+export async function artifactObjectSize(env: Env, userId: string, hash: string, key: Uint8Array): Promise<number> {
+  if (userId !== env.ACCOUNT_ID) throw new Error('Artifact object identity is invalid');
+  const first = await env.DATA.get(`users/${userId}/${artifactObjectKey(userId, hash)}`, { range: { offset: 0, length: 1 } });
+  if (!first) throw new Error('Artifact object is unavailable');
+  const format = new Uint8Array(await first.arrayBuffer())[0];
+  if (format !== CHUNKED_CHECKPOINT_VERSION) return first.size - ENCRYPTION_OVERHEAD;
+  const sealed = await readSealedBytes(await openSealedArtifact(env, userId, hash), hash, 64 * 1024 * 1024);
+  const inventory = await decryptArtifactBytes(sealed.subarray(1), key);
+  return chunkedCheckpointManifestSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(inventory))).size;
 }
 
 /** Artifact manifests themselves are single encrypted metadata objects. */
