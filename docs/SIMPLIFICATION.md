@@ -280,6 +280,8 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 **Later.** Drive files over 16 MiB: stream uploads through the worker instead of assembling them, encrypting each chunk as it arrives into the chunked format large checkpoints use, so no file is held whole; `toMachine`/`fromMachine` move to the same format. Considered and not taken: presigned R2 uploads from the browser, which need an R2 S3 API token and bucket CORS, and either stage plaintext (the worker still re-reads and encrypts it) or hand the browser the workspace's artifact key.
 
+**Later.** Workspace relations on the Projects page: its stack graph (`WorkspaceGraph`) and the "stacked on" / "blocked" badges and count (`AccountWorkPages.tsx`) read `relations` and `stack`, which only the sidebar's per-machine reads ever supplied (removed in entry 64), so cloud workspaces never showed them. Push each workspace's relations and stack findings to the account directory on change (the project object already holds relations; the stack is derived from them), and feed the page from there with no workspace read.
+
 **Parked.** Cloud browser: its CDP socket keeps the workspace object awake while a browser is open. Planned in `docs/APERTURE-DESIGN.md` (B0): one `BrowserSessionDO` per cloud session holds the socket.
 
 ## Needs a decision
