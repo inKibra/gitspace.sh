@@ -38,7 +38,7 @@ Placement: Aperture is built in the GitSpace monorepo as its own packages (exten
 |---|---|---|
 | Extension transport | `browser-extension/src/background.js` (bundled by `browser-extension/src/build.ts`) | Extension connects outbound to `wss://<account>/api/browser-relay/extension`; pairing with a code and an extension key, confirmed by fingerprint; `chrome.debugger` with a CDP allowlist (`relayCommandAllowed`). |
 | Signed authority | `browser-extension/src/authorization.ts`, `account-worker/src/browser-relay.ts` | Account root signs a workspace browser certificate; the workspace signs a group grant and each dispatch; the extension verifies all of it, plus origins, pairing generation and replay. |
-| Workspace tab group | `account-worker/src/runtime-browser-account.ts:20-34` | One group per workspace, named after it; the grant lasts 30 minutes and an expired group is replaced by a new one. |
+| Workspace tab group | `account-worker/src/runtime-browser-account.ts` (`prepare`), `browser-extension/src/background.js` (`join`, `report`) | One stable group per workspace and Chrome, named after it, one colour per workspace; each use renews its 30-minute grant; dragged-in tabs are granted and reported to the workspace's `gitspace.browsers` document (§4.1, B0 step 1). |
 | Cloud browser | `account-worker/src/browser-cdp.ts`, `browser-runtime.ts` | Browser Run session held by the workspace object's runtime as an outbound CDP socket. It cannot hibernate, so an open cloud browser keeps the workspace object awake ("parked"). |
 | Account relay | `account-worker/src/index.ts` (`UserRelayDO`), `account-machine/src/relay-connector.ts` | One relay object per account; machines connect outbound; sockets hibernate; tool calls, service HTTP and WebSockets travel as chunked tunnel frames. |
 | Hosted services | `account-machine/src/workspace-services.ts`, `account-worker/src/service-access.ts`, `service-sessions.ts` | `https://<service>--<workspace>--<account>-srv.gssh.dev` → route lease → `127.0.0.1:<port>` on the owning machine; HTTP and WebSocket streaming; device-approved 15-minute browser sessions; machines reach other machines' services through `/api/services/fetch`. |
@@ -69,28 +69,24 @@ Workspace (Workspace DO)
 
 ### 4.1 The workspace group
 
-- Stable: same Chrome group across grant renewals and reconnects; a reconnect re-binds by stored group identity.
-- **Drag a tab into the workspace group to grant it; drag it out or close it to revoke.** The extension reports group membership changes; the grant follows.
-- Subagents share the workspace's group (Chrome groups do not nest). The UI shows which agent opened or holds each tab; the lease decides who may type.
-- Idle agent: the group collapses. Archive or delete: tabs the agent opened close; tabs you added are ungrouped, not closed.
+- **Stable:** one group per workspace and Chrome. Each use renews its 30-minute grant in the same group; renewals may change the approved origins and the group's name, never the workspace, Chrome or source. An expired grant lets its tabs go (they stay open in the group) instead of closing them. A new group starts only after a revocation, an archive, or a changed pairing or approval. Chrome renumbers groups on restart, so the first use after a restart makes a new Chrome group under the same identity; re-binding by name is not done.
+- **Drag a tab into the workspace group to grant it; drag it out or close it to revoke.** Dragging a tab in also consents to the site it shows then, for that tab only. A tab you create inside the group, or one a group page opens (a popup, a `target=_blank` link), gets the approved origins only, so a page cannot widen the grant. The extension reports membership, URL and title changes (coalesced over 300 ms); the relay marks each tab usable or not and writes the workspace's row.
+- **Your Chrome is main-agent-only** (decided 2026-10-21). Subagents, the Tester included, use the cloud browser. The document shows which tabs the agent opened (`addedBy`).
+- **Idle and end:** a group collapses once after 2 minutes without agent commands, unless you are looking at one of its tabs. Archiving or deleting the workspace, or archiving its project, closes the tabs the agent or its pages opened and ungroups yours; a Chrome that is offline does it on its next connect. Each workspace keeps one colour.
 
 ### 4.2 `gitspace.browsers` document
 
 ```ts
-type WorkspaceBrowsers = {
+type WorkspaceBrowsers = {           // B0: Chrome groups; cloud sessions and shares join in later steps
   chrome: Array<{
-    pairingId: PairingId;
-    chromeGroupId: number;            // reported by the extension; re-bound on reconnect
-    grant: { id: GrantId; origins: string[]; capabilities: Capability[]; expiresAt: string };
-    tabs: Array<{ tabId: number; url: string; openedBy: Actor; lease: Lease | null }>;
+    pairingId: PairingId; browser: string;   // the name you gave this Chrome in project Settings
+    groupId: GroupId; groupName: string; origins: string[]; expiresAt: string; reportedAt: string;
+    tabs: Array<{ targetId: string; url: string; title: string; addedBy: 'agent' | 'page' | 'you'; site: string | null; usable: boolean }>;
   }>;
-  cloud: Array<{ sessionId: BrowserSessionId; profile: AgentProfileId | null; lease: Lease | null }>;
-  shares: Array<{ id: ShareId; session: SessionRef; capabilities: ShareCapability[]; expiresAt: string; revokedAt: string | null }>;
 };
-type Lease = { holder: { agent: string } | { userId: UserId; device: DeviceId }; since: string };
 ```
 
-Rows change through small messages from the extension and the runtime; the UI reads the document (no replay streams, per `docs/SIMPLIFICATION.md`).
+Rows are stored where they arrive: the extension reports a group, the relay checks it belongs to that Chrome's live grant and calls the workspace's `browserGroupReported`, which stores the row and republishes a running runtime; a sleeping one reads the rows when it next opens. The UI reads the document (no replay streams, per `docs/SIMPLIFICATION.md`). Leases (B1) add a `lease` per tab.
 
 ## 5. Sources
 
@@ -283,7 +279,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
-| **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.run` as the main agent surface on both sources (session state, `aria-ref` locators, CDP allowlist widened for Playwright); `browser.observe`/`act` with freshness; the ghost cursor (§6.4); per-grant CDP endpoint used by Playwright from a machine; the Tester uses your Chrome through a grant; cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
+| **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.run` as the main agent surface on both sources (session state, `aria-ref` locators, CDP allowlist widened for Playwright); `browser.observe`/`act` with freshness; the ghost cursor (§6.4); per-grant CDP endpoint used by Playwright from a machine; the Tester uses the cloud browser (your Chrome stays main-agent-only, §4.1); cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
 | **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view/control/comment, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
 | **B2** | Comments | Comment mode, threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
 | **B3** | Skill recording | Recorder, timeline and frames; agent writes `SKILL.md` plus replay script and replays it successfully; recordings in `drive://`. |

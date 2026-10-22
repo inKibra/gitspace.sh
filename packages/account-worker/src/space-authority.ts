@@ -5,6 +5,8 @@ import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeBrowsersDocumentSchema, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
+import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -488,10 +490,12 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async hasCloudRuntime(): Promise<boolean> {
     return await this.ctx.storage.get('runtime.identity') !== undefined || await readCurrentCheckpoint(this.ctx.storage) !== null;
   }
-  /** A workspace leaving active use: its working conversations stop and every live attachment is asked to drain and detach.
-   * Draining is recorded here; a machine finishes it when it next reports, or its lease expires. Never opens a runtime that has no state. */
+  /** A workspace leaving active use: its working conversations stop, every live attachment is asked to drain and detach,
+   * and its Chrome groups end. Draining is recorded here; a machine finishes it when it next reports, or its lease
+   * expires. Never opens a runtime that has no state. */
   private async stopRuntime(identity: RuntimeIdentity): Promise<void> {
     if (await this.ctx.storage.get('runtime.identity') === undefined) return;
+    await this.retireBrowsers(identity);
     const runtime = await this.getRuntime(identity);
     for (const conversation of (await runtime.snapshot()).conversations) {
       if (conversation.status === 'running' || conversation.status === 'waiting') await runtime.cancel({ ...identity, conversationId: conversation.id });
@@ -506,10 +510,27 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     await this.releaseMachines(identity.workspaceId, detached);
   }
 
+  /** Ends this workspace's Chrome groups. A relay that cannot be reached leaves the tabs in their group; the
+   * workspace's own revocation already ends their authority, so this never blocks leaving active use. */
+  private async retireBrowsers(identity: RuntimeIdentity): Promise<void> {
+    await retireWorkspaceBrowsers(this.ctx.storage, this.env.RELAY.getByName(this.env.RELAY_NAME), identity).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_retire_failed', workspaceId: identity.workspaceId, error: String(error) })));
+  }
+
+  /** The relay's report of one of this workspace's Chrome groups, kept as a row for `gitspace.browsers`. A running
+   * runtime republishes; one asleep reads the row when it next opens. */
+  async browserGroupReported(raw: unknown, group: RuntimeBrowsersDocumentGroup): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const current = await this.metadata(identity);
+    if (current.lifecycle !== 'active' || await this.ctx.storage.get(`runtime.browser.revoked:${group.groupId}`)) return;
+    await this.ctx.storage.put(`${BROWSER_GROUP_ROWS}${group.groupId}`, RuntimeBrowsersDocumentSchema.shape.chrome.element.parse(group));
+    (await this.runtime?.catch(() => undefined))?.publish();
+  }
+
   /** Permanent deletion of this workspace's runtime, attachments and placement. The tombstone is written before and
    * survives the erase, so nothing reopens what this removes and an interrupted deletion resumes. */
   private async erase(tombstone: WorkspaceMetadata): Promise<void> {
     writeWorkspaceMetadata(this.ctx.storage, tombstone);
+    await this.retireBrowsers({ projectId: tombstone.projectId, workspaceId: tombstone.workspaceId });
     // A runtime that never opened has no conversation to stop.
     const loaded = await this.runtime?.catch(() => undefined);
     this.runtime = undefined;

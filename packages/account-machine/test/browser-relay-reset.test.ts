@@ -39,7 +39,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
     runtime: { id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, onMessage: { addListener: (value: Listener) => { listener = value; } } },
     storage: { local: { remove: vi.fn(async () => {}), get: vi.fn(async () => ({})), set: vi.fn(async () => {}) } },
     debugger: { detach, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
-    tabs: { onUpdated: { addListener() {} } },
+    tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated: { addListener() {} } },
     tabGroups: { onRemoved: { addListener() {} } },
     alarms: { create() {}, onAlarm: { addListener() {} } },
   };
@@ -149,7 +149,7 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
       runtime:{onMessage:{addListener(){}}},
       storage:{local:{remove:async()=>{}}},
       debugger:{getTargets:async()=>[...tabs].map(([id,tab])=>({id:String(id),tabId:id,type:'page',title:'Page',url:tab.url})),onEvent:{addListener(){}},onDetach:{addListener(){}}},
-      tabs:{get:async(id:number)=>tabs.get(id),onUpdated:{addListener(){}}},
+      tabs:{onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get:async(id:number)=>tabs.get(id),onUpdated:{addListener(){}}},
       tabGroups:{onRemoved:{addListener(){}}},
       alarms:{create(){},onAlarm:{addListener(){}}},
     },grant,expiresAt,
@@ -160,15 +160,15 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
     runInContext("authorizations.set('group',{body:{expiresAt,dispatch:{deadlineAt:expiresAt},command:{type:'execute',args:{action:'tabs',source:'relay'},grant:{body:grant}}},used:new Set()});",context);
     return runInContext("execute({operation:'tabs',groupId:'group'})",context);
   };
-  expect(await list()).toEqual([{targetId:'1',title:'Page',url:'https://approved.example/'}]);
+  expect(await list()).toEqual([{targetId:'1',title:'Page',url:'https://approved.example/',addedBy:'you'}]);
   tabs.set(2,{groupId:7,url:'https://approved.example/'});
-  expect(await list()).toEqual([{targetId:'1',title:'Page',url:'https://approved.example/'},{targetId:'2',title:'Page',url:'https://approved.example/'}]);
+  expect(await list()).toEqual([{targetId:'1',title:'Page',url:'https://approved.example/',addedBy:'you'},{targetId:'2',title:'Page',url:'https://approved.example/',addedBy:'you'}]);
   tabs.set(1,{groupId:-1,url:'https://approved.example/'});
   await expect(runInContext("member(grant,'1')",context)).rejects.toThrow('outside workspace group');
   tabs.set(2,{groupId:7,url:'https://attacker.example/'});
   expect(await list()).toEqual([]);
   tabs.set(2,{groupId:7,url:'https://approved.example/returned'});
-  expect(await list()).toEqual([{targetId:'2',title:'Page',url:'https://approved.example/returned'}]);
+  expect(await list()).toEqual([{targetId:'2',title:'Page',url:'https://approved.example/returned',addedBy:'you'}]);
 });
 
 it('invalidates persisted Chrome IDs after group deletion or a browser session change', async () => {
@@ -192,7 +192,7 @@ it('invalidates persisted Chrome IDs after group deletion or a browser session c
       runtime:{onMessage:{addListener(){}}},
       storage:{local:{remove:async()=>{}},session:{get:async()=>({browserEpoch:epoch}),set:async()=>{}}},
       debugger:{onEvent:{addListener(){}},onDetach:{addListener(){}}},
-      tabs:{onUpdated:{addListener(){}}},
+      tabs:{onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated:{addListener(){}}},
       tabGroups:{get:async()=>{if(!exists) throw new Error('Deleted');return {id:7};},onRemoved:{addListener(){}}},
       alarms:{create(){},onAlarm:{addListener(){}}},
     },

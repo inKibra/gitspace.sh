@@ -10,7 +10,7 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
     const identityKey = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
     const state = new Map<string, unknown>([
       ['identity', { trust: { accountId: 'account' }, pairingId: 'machine', generation: 1, privateKey: identityKey.privateKey }],
-      [key, { groupId: 'old', chromeGroupId: 7, browserEpoch: 'epoch' }],
+      [key, { groupId: 'old', chromeGroupId: 7, browserEpoch: 'epoch', members: { 71: { by: 'agent', site: null } } }],
     ]);
     let detached = 0;
     const tabs = new Map([[71, 7], [72, 7], [81, 8], [91, 9]]);
@@ -31,7 +31,7 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
         runtime: { onMessage: { addListener() {} } },
         storage: { local: { remove: async () => {} }, session: { get: async () => ({ browserEpoch: 'epoch' }) } },
         debugger: { detach: async () => { detached++; }, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
-        tabs: { query: async ({ groupId }: { groupId: number }) => [...tabs].filter(([, group]) => group === groupId).map(([id, groupId]) => ({ id, groupId })), remove: async (ids: number[]) => { for (const id of ids) tabs.delete(id); }, onUpdated: { addListener() {} } },
+        tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, query: async ({ groupId }: { groupId: number }) => [...tabs].filter(([, group]) => group === groupId).map(([id, groupId]) => ({ id, groupId })), remove: async (ids: number[]) => { for (const id of ids) tabs.delete(id); }, ungroup: async (ids: number[]) => { for (const id of ids) tabs.set(id, -1); }, onUpdated: { addListener() {} } },
         tabGroups: { get: async () => ({ id: 7 }), onRemoved: { addListener() {} } },
         alarms: { create() {}, onAlarm: { addListener() {} } },
       },
@@ -43,7 +43,8 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
     if (transition === 'replacement after native group loss') state.set(key, null);
     if (transition === 'revoke') {
       await runInContext("execute({operation:'revoke',groupId:'old'})", context);
-      expect([...tabs.keys()]).toEqual([81, 91]);
+      // The agent's tab closes; the tab you added leaves the group and stays open.
+      expect([...tabs]).toEqual([[72, -1], [81, 8], [91, 9]]);
     }
     expect(await runInContext('groupRecord(nextGrant,true)', context)).toMatchObject({ key, browserEpoch: 'epoch' });
     expect(detached).toBe(1);
@@ -58,7 +59,7 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
 
 it('group closure retries failures without closing stale-epoch or sibling groups', async () => {
   const state = new Map<string, unknown>([
-    ['group:affected', { groupId: 'affected', chromeGroupId: 7, browserEpoch: 'epoch' }],
+    ['group:affected', { groupId: 'affected', chromeGroupId: 7, browserEpoch: 'epoch', members: { 71: { by: 'agent', site: null } } }],
     ['group:stale', { groupId: 'stale', chromeGroupId: 8, browserEpoch: 'old-epoch' }],
     ['group:sibling', { groupId: 'sibling', chromeGroupId: 9, browserEpoch: 'epoch' }],
   ]);
@@ -79,7 +80,7 @@ it('group closure retries failures without closing stale-epoch or sibling groups
       runtime: { onMessage: { addListener() {} } },
       storage: { local: { remove: async () => {} }, session: { get: async () => ({ browserEpoch: 'epoch' }) } },
       debugger: { detach: async () => {}, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
-      tabs: { query: async ({ groupId }: { groupId: number }) => [...tabs].filter(([, group]) => group === groupId).map(([id, groupId]) => ({ id, groupId })), remove: async (ids: number[]) => { if (failRemoval) throw new Error('Tab closure failed'); for (const id of ids) tabs.delete(id); }, onUpdated: { addListener() {} } },
+      tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, query: async ({ groupId }: { groupId: number }) => [...tabs].filter(([, group]) => group === groupId).map(([id, groupId]) => ({ id, groupId })), remove: async (ids: number[]) => { if (failRemoval) throw new Error('Tab closure failed'); for (const id of ids) tabs.delete(id); }, ungroup: async (ids: number[]) => { for (const id of ids) tabs.set(id, -1); }, onUpdated: { addListener() {} } },
       tabGroups: { get: async (id: number) => ({ id }), onRemoved: { addListener() {} } },
       alarms: { create() {}, onAlarm: { addListener() {} } },
     },
@@ -94,5 +95,5 @@ it('group closure retries failures without closing stale-epoch or sibling groups
   runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], restarted);
   await runInContext("execute({operation:'revoke',groupId:'affected'})", restarted);
   await runInContext("execute({operation:'revoke',groupId:'stale'})", restarted);
-  expect([...tabs.keys()]).toEqual([81, 91]);
+  expect([...tabs]).toEqual([[72, -1], [81, 8], [91, 9]]);
 });

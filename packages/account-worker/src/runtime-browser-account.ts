@@ -22,15 +22,17 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const prior = await storage.get(key);
     if (prior) { const saved = savedSchema.parse(prior); if (saved.fingerprint !== fingerprint) throw new Error('Browser attempt identity reused'); if (await storage.get(`runtime.browser.revoked:${saved.card.groupId}`)) throw new Error('Browser group revoked'); if (canonicalBrowserAuthorization(saved.card.placement) !== canonicalBrowserAuthorization(current)) throw new Error('Browser placement changed'); return saved.card; }
     const groupKey = `runtime.browser.account.group:${current.kind === 'account-relay' ? current.pairingId : 'cloud'}`;
+    // One group per workspace and browser: each use renews its grant; only a revocation or a changed pairing or
+    // approval starts a new one.
     const group = await storage.transaction(async tx => {
       const groupId = z.string().uuid().optional().parse(await tx.get(groupKey));
       const stored = groupId ? await tx.get(`runtime.browser.account.grant:${groupId}`) : undefined;
       const grant = stored ? RuntimeAccountBrowserSignedGrantSchema.parse(stored).body : undefined;
-      if (groupId && !await tx.get(`runtime.browser.revoked:${groupId}`) && (!grant || Date.parse(grant.expiresAt) > Date.now() && canonicalBrowserAuthorization(grant.placement) === canonicalBrowserAuthorization(current))) return { groupId, grant };
+      if (groupId && !await tx.get(`runtime.browser.revoked:${groupId}`) && (!grant || canonicalBrowserAuthorization(grant.placement) === canonicalBrowserAuthorization(current))) return groupId;
       if (groupId) await tx.put(`runtime.browser.revoked:${groupId}`, true);
-      const created = crypto.randomUUID(); await tx.put(groupKey, created); return { groupId: created, grant: undefined };
+      const created = crypto.randomUUID(); await tx.put(groupKey, created); return created;
     });
-    const card = RuntimeAccountBrowserPreparationSchema.parse({ ...identity, placement: current, groupId: group.groupId, groupName: await options.groupName(), source: args.source, origins, expiresAt: group.grant?.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action });
+    const card = RuntimeAccountBrowserPreparationSchema.parse({ ...identity, placement: current, groupId: group, groupName: await options.groupName(), source: args.source, origins, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), id: crypto.randomUUID(), action: args.action });
     return storage.transaction(async tx => { const prior = await tx.get(key); if (prior) { const saved = savedSchema.parse(prior); if (saved.fingerprint !== fingerprint) throw new Error('Browser attempt identity reused'); return saved.card; } await tx.put(key, { fingerprint, card }); return card; });
   }
   async function execute(input: Input, args: RuntimeBrowserArguments, origins: string[]): Promise<RuntimeToolResult> {

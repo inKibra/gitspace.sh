@@ -116,6 +116,26 @@ export const RuntimeBrowserStatusSchema = z.strictObject({
   records: z.array(z.strictObject({ id, groupId: z.string().uuid().optional(), projectId: id, workspaceId: id, state: z.enum(['uncertain', 'fenced', 'stopped']), reason: z.string().max(1024), expiresAt: z.iso.datetime().optional(), actions: z.array(z.enum(['reconcile', 'discard'])).max(2) })).max(200),
 });
 export type RuntimeBrowserStatus = z.infer<typeof RuntimeBrowserStatusSchema>;
+/** Who put a tab in a workspace's Chrome group: the agent opened it, a tab already in the group opened it, or you
+ * added it (dragged it in or opened it there). */
+export const RuntimeBrowserTabOriginSchema = z.enum(['agent', 'page', 'you']);
+/** A tab in a workspace's Chrome group as the extension reports it. `site` is the host a tab you dragged in showed
+ * at that moment: dragging it in consents to that site for that tab. */
+export const RuntimeBrowserGroupTabSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema, site: z.string().max(253).nullable() });
+/** The extension's report of one workspace group's tabs, sent whenever membership, a URL or a title changes. */
+export const RuntimeBrowserGroupReportSchema = z.strictObject({ groupId: z.string().uuid(), tabs: z.array(RuntimeBrowserGroupTabSchema).max(200) });
+export type RuntimeBrowserGroupReport = z.infer<typeof RuntimeBrowserGroupReportSchema>;
+/** The `gitspace.browsers` workspace document (docs/APERTURE-DESIGN.md §4.2): each Chrome group with the tabs the
+ * workspace may use (`usable`: on the grant's origins or the site you consented to). */
+export const RuntimeBrowsersDocumentSchema = z.strictObject({
+  chrome: z.array(z.strictObject({
+    pairingId: z.string().uuid(), browser: z.string().max(128), groupId: z.string().uuid(), groupName: id,
+    origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime(), reportedAt: z.iso.datetime(),
+    tabs: z.array(RuntimeBrowserGroupTabSchema.extend({ usable: z.boolean() })).max(200),
+  })).max(32),
+});
+export type RuntimeBrowsersDocument = z.infer<typeof RuntimeBrowsersDocumentSchema>;
+export type RuntimeBrowsersDocumentGroup = RuntimeBrowsersDocument['chrome'][number];
 
 /** Domain-separated canonical JSON: signatures never accept a key supplied by the command. */
 export function canonicalBrowserAuthorization(value: unknown): string {

@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
 import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
-import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
+import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
 import { extensionFiles } from '@gitspace/browser-extension';
@@ -19,7 +20,9 @@ const Pairing = z.discriminatedUnion('state', [
 const Registry = z.object({ pairings: z.array(Pairing) });
 const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), approvals: z.array(RuntimeProjectBrowserPreferencesSchema.shape.approvals.element.extend({ generation: z.number().int().nonnegative(), approvalId: z.string().uuid() })) });
 const Proof = z.object({ pairing: z.literal('client'), pairingId: z.string().uuid(), clientNonce: z.string().regex(/^[a-f0-9]{64}$/), publicKey: z.string().max(128), proof: z.string().max(128), code: z.string().max(256).optional() });
-const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional() });
+const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), group: RuntimeBrowserGroupReportSchema.optional() });
+/** Where a workspace's groups are kept for its `gitspace.browsers` document. */
+export type BrowserWorkspaces = { getByName(name: string): { browserGroupReported(identity: { projectId: string; workspaceId: string }, group: RuntimeBrowsersDocumentGroup): Promise<void> } };
 type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
 /** Every Chrome extension socket. Its attachment holds the socket's whole pairing state, so the relay hibernates between frames. */
 const BROWSER_SOCKET_TAG = 'browser';
@@ -64,7 +67,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   /** Sockets whose single pairing proof is being verified. */
   private readonly verifying = new WeakSet<WebSocket>();
   private readonly runtime: AccountBrowserRuntime;
-  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string }) { this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this }); }
+  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces }) { this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this }); }
   /** Whether the host's socket is a Chrome extension socket. */
   owns(socket: WebSocket) { return this.ctx.getTags(socket).includes(BROWSER_SOCKET_TAG); }
   private sockets() {
@@ -334,6 +337,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (!state.product) throw new Error('Browser hello required');
     const connection = this.connection(state.pairingId);
     if (connection?.socket !== socket) throw new Error('Stale browser connection');
+    if (message.group) { const report = message.group; this.ctx.waitUntil(this.groupReported(state.pairingId, report).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_group_report_failed', groupId: report.groupId, error: String(error) })))); return; }
     if (message.id !== undefined) { const pending = connection.pending.get(message.id); if (!pending) return; connection.pending.delete(message.id); pending.cancelTimer(); if (message.error) pending.reject(new Error(message.error.message)); else pending.resolve(message.result); }
     else if (message.targetId) for (const listener of connection.listeners.get(message.targetId) ?? []) listener(message.fenced ? { method: 'disconnected' } : { method: message.method, params: message.params, sessionId: message.sessionId });
   }
@@ -345,6 +349,36 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       pairing.extension = extension;
       await this.ctx.storage.put('browser.relay.pairings', registry);
     });
+  }
+  /** A paired Chrome reported one of its workspace groups. The workspace keeps the tabs, each marked usable when it is
+   * on the grant's origins or on the site you consented to by dragging it in. */
+  private async groupReported(pairingId: string, report: RuntimeBrowserGroupReport) {
+    const stored = await this.ctx.storage.get(`browser.account.group:${report.groupId}`);
+    if (!stored || await this.ctx.storage.get(`browser.account.revoked:${report.groupId}`)) return;
+    const grant = RuntimeAccountBrowserGrantSchema.parse(stored), placement = grant.placement;
+    if (placement.kind !== 'account-relay' || placement.pairingId !== pairingId) return;
+    const approval = (await this.projectPreferences(grant.projectId)).approvals.find(item => item.pairingId === pairingId);
+    const usable = (url: string, site: string | null) => {
+      if (url === 'about:blank') return true;
+      try { const { protocol, hostname } = new URL(url); return ['http:', 'https:'].includes(protocol) && [...grant.origins, ...(site ? [site] : [])].some(origin => browserOriginMatches(origin, hostname)); } catch { return false; }
+    };
+    await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${grant.workspaceId}`).browserGroupReported({ projectId: grant.projectId, workspaceId: grant.workspaceId }, {
+      pairingId, browser: approval?.name ?? `Chrome ${pairingId.slice(0, 8)}`, groupId: grant.groupId, groupName: grant.groupName, origins: grant.origins, expiresAt: grant.expiresAt, reportedAt: new Date().toISOString(),
+      tabs: report.tabs.map(tab => ({ ...tab, usable: usable(tab.url, tab.site) })),
+    });
+  }
+  /** An archived or deleted workspace's groups lose their authority now; each Chrome closes the agent's tabs and lets
+   * yours go now or when it next connects. */
+  async retireWorkspace(projectId: string, workspaceId: string) {
+    await this.ctx.storage.transaction(async tx => {
+      for (const stored of (await tx.list({ prefix: 'browser.account.group:' })).values()) {
+        const group = RuntimeAccountBrowserGrantSchema.parse(stored), placement = group.placement;
+        if (group.projectId !== projectId || group.workspaceId !== workspaceId || placement.kind !== 'account-relay' || await tx.get(`browser.account.revoked:${group.groupId}`)) continue;
+        await tx.put(`browser.account.revoked:${group.groupId}`, true);
+        await tx.put(`browser.relay.revoke:${placement.pairingId}:${group.groupId}`, { pairingId: placement.pairingId, groupId: group.groupId });
+      }
+    });
+    await this.retryRevocations();
   }
   private disconnect(pairingId: string) {
     const connection = this.connections.get(pairingId); if (!connection) return; this.connections.delete(pairingId);

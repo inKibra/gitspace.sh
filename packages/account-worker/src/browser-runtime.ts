@@ -30,9 +30,12 @@ export class AccountBrowserRuntime {
   private async perform(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization, { command, scope } = body;
     signal.throwIfAborted();
-    // Tabs whose group expired close before the next operation; no timer keeps the host object awake for them.
+    // Tabs whose group expired go before the next operation; no timer keeps the host object awake for them. A cloud
+    // tab closes; a tab in your Chrome stays open in its group and is only let go.
     for (const tab of [...this.tabs.values()]) {
-      if (Date.parse(tab.grant.expiresAt) <= Date.now()) await this.closeTab(tab).catch(() => { tab.unsubscribe(); this.tabs.delete(tab.targetId); });
+      if (Date.parse(tab.grant.expiresAt) > Date.now()) continue;
+      if (tab.grant.source === 'relay') { tab.unsubscribe(); this.tabs.delete(tab.targetId); continue; }
+      await this.closeTab(tab).catch(() => { tab.unsubscribe(); this.tabs.delete(tab.targetId); });
     }
     if (Date.parse(body.expiresAt) <= Date.now()) throw new Error('Browser authorization expired');
     if (scope.placement.kind === 'account-relay' && scope.conversationKind !== 'main') throw new Error('Logged-in Chrome relay is main-agent-only');
@@ -74,7 +77,10 @@ export class AccountBrowserRuntime {
     if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Browser group expired');
     const stored = await this.options.storage.get(`browser.account.group:${grant.groupId}`);
     const previous = stored ? RuntimeAccountBrowserGrantSchema.parse(stored) : this.groups.get(grant.groupId);
-    if (previous && canonicalBrowserAuthorization(previous) !== canonicalBrowserAuthorization(grant)) throw new Error('Browser group grant changed');
+    // A renewal may move the expiry, the approved origins and the group's name; the workspace, browser and source make
+    // it the same group, so anything else under the same id is refused.
+    const same = (value: RuntimeAccountBrowserGrant) => canonicalBrowserAuthorization({ projectId: value.projectId, workspaceId: value.workspaceId, placement: value.placement, source: value.source });
+    if (previous && same(previous) !== same(grant)) throw new Error('Browser group grant changed');
     this.groups.set(grant.groupId, grant);
     await this.options.storage.put(`browser.account.group:${grant.groupId}`, grant);
     const indexKey = `browser.account.groups:${scope.projectId}:${scope.workspaceId}`;
@@ -89,6 +95,7 @@ export class AccountBrowserRuntime {
     }
     let tab = args.targetId ? this.tabs.get(args.targetId) : undefined;
     if (tab && (tab.grant.groupId !== grant.groupId || tab.stale)) throw new Error('Browser target stale or outside group');
+    if (tab) tab.grant = grant;
     if (args.action === 'open' || !tab && grant.source === 'relay') {
       if (this.tabs.size >= 200) throw new Error('Browser tab capacity reached');
       let channel: BrowserChannel, targetId: string;

@@ -3,7 +3,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { z } from 'zod';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
-import { AccountBrowserRelay } from '../src/browser-relay.js';
+import { AccountBrowserRelay, type BrowserWorkspaces } from '../src/browser-relay.js';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
 type Identity = { key: CryptoKeyPair; publicKey: string };
@@ -12,7 +12,7 @@ async function keys() { const key = await crypto.subtle.generateKey('Ed25519', t
 function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socket.addEventListener('message', event => resolve(JSON.parse(String(event.data))), { once: true })); }
 /** `restart` swaps in a relay object with no memory over the same storage and sockets; the live relay keeps serving
  * the extension sockets, as a relay woken from hibernation would. */
-async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, hello?: object) => Promise<Chrome>, root: Identity, restart: () => HostedBrowserRelay) => Promise<void>) {
+async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, hello?: object) => Promise<Chrome>, root: Identity, restart: (workspaces?: BrowserWorkspaces) => AccountBrowserRelay, sockets: () => WebSocket[]) => Promise<void>) {
   await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => {
     let relay: HostedBrowserRelay = hostedBrowserRelay(instance);
     const root = await keys(), sockets: WebSocket[] = [];
@@ -56,7 +56,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       listen(socket);
       return browser;
     }
-    try { await run(relay, chrome, root, () => { relay = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID }); return relay; }); } finally { for (const socket of sockets) socket.close(); }
+    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
 async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project') {
@@ -195,4 +195,42 @@ test('the relay records the extension version and protocol each browser reports 
   const extensions = Object.fromEntries((await relay.status()).pairings.map(pairing => [pairing.pairingId, pairing.extension]));
   expect(extensions[legacy.pairingId]).toEqual({ version: null, protocol: 0, updateRequired: false });
   expect(extensions[current.pairingId]).toEqual({ version: '5.1.0', protocol: BROWSER_EXTENSION_PROTOCOL, updateRequired: false });
+}));
+
+test('retiring a workspace closes its Chrome groups and leaves other workspaces their own', () => fixture(async (relay, chrome, root) => {
+  const browser = await chrome('A');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'A', note: '' }] });
+  const archived = await authorization(root, await relay.placement('project'));
+  const kept = await authorization(root, await relay.placement('project'), 'kept');
+  for (const value of [archived, kept]) await relay.execute(value);
+  if (archived.body.command.type !== 'execute' || kept.body.scope.placement.kind !== 'account-relay') throw new Error('Expected relay execution');
+  await relay.retireWorkspace('project', 'workspace');
+  expect(browser.revoked).toEqual([archived.body.command.grant.body.groupId]);
+  await expect(relay.execute(archived)).rejects.toThrow(/revoked/i);
+  expect(JSON.stringify(await relay.execute(await authorization(root, kept.body.scope.placement, 'kept')))).toContain('A');
+}));
+
+test('a Chrome group report reaches its workspace with each tab marked usable or not', () => fixture(async (relay, chrome, root, restart, sockets) => {
+  const browser = await chrome('A');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'Work Chrome', note: '' }] });
+  const value = await authorization(root, await relay.placement('project'));
+  await relay.execute(value);
+  if (value.body.command.type !== 'execute') throw new Error('Expected execution');
+  const groupId = value.body.command.grant.body.groupId;
+  const reports: unknown[] = [];
+  const reader = restart({ getByName: name => ({ browserGroupReported: async (identity, group) => { reports.push({ name, identity, group }); } }) });
+  const [socket] = sockets();
+  if (!socket) throw new Error('Missing extension socket');
+  const tab = (targetId: string, url: string, addedBy: 'agent' | 'page' | 'you', site: string | null) => ({ targetId, url, title: 'Page', addedBy, site });
+  await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId: crypto.randomUUID(), tabs: [] } }));
+  await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId, tabs: [
+    tab('agent-tab', 'https://example.com/pricing', 'agent', null),
+    tab('your-tab', 'https://news.example/story', 'you', 'news.example'),
+    tab('popup', 'https://elsewhere.example/', 'page', null),
+  ] } }));
+  await expect.poll(() => reports.length).toBe(1);
+  expect(reports[0]).toMatchObject({ name: `${env.ACCOUNT_ID}:workspace`, identity: { projectId: 'project', workspaceId: 'workspace' }, group: {
+    groupId, pairingId: browser.pairingId, browser: 'Work Chrome', origins: ['example.com'],
+    tabs: [{ targetId: 'agent-tab', usable: true }, { targetId: 'your-tab', usable: true }, { targetId: 'popup', usable: false }],
+  } });
 }));

@@ -7,7 +7,8 @@ import { extensionFiles } from '@gitspace/browser-extension';
 type EventListener = (source: { targetId: string; sessionId?: string }, method: string, params: object) => void;
 function harness(timeout = 60_000, sameDocument = false, destination = 'https://approved.example/next') {
   const listeners = new Set<EventListener>();
-  let updated = () => {};
+  type Updated = (tabId: number, change: { groupId?: number }, tab: { id: number; groupId: number; url: string }) => void;
+  let updated: Updated = () => {};
   let groupId = 7;
   let url = 'https://approved.example/start';
   let detached = 0;
@@ -32,7 +33,7 @@ function harness(timeout = 60_000, sameDocument = false, destination = 'https://
         sendCommand: async (_source: object, method: string) => { if (method === 'Page.navigate') { navigation.resolve(); return { frameId: 'main', ...(sameDocument ? {} : { loaderId: 'new' }) }; } return {}; },
         onEvent: { addListener: (listener: EventListener) => listeners.add(listener), removeListener: (listener: EventListener) => listeners.delete(listener) }, onDetach: { addListener() {} },
       },
-      tabs: { get: async () => ({ groupId, url }), onUpdated: { addListener: (listener: () => void) => { updated = listener; } } },
+      tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get: async () => ({ groupId, url }), onUpdated: { addListener: (listener: Updated) => { updated = listener; } } },
       tabGroups: { onRemoved: { addListener() {} } }, alarms: { create() {}, onAlarm: { addListener() {} } },
     },
   });
@@ -47,7 +48,7 @@ function harness(timeout = 60_000, sameDocument = false, destination = 'https://
     advance(milliseconds: number) { monotonic += milliseconds; for (const [id, timer] of [...timers]) if (timer.at <= monotonic) { timers.delete(id); timer.callback(); } },
     rewindWallClock() { wall = 0; },
     emit(method: string, params: object, source: Parameters<EventListener>[0] = { targetId: 'target' }) { for (const listener of listeners) listener(source, method, params); },
-    move(next: number, notify = true) { groupId = next; if (notify) updated(); },
+    move(next: number, notify = true) { groupId = next; if (notify) updated(1, { groupId: next }, { id: 1, groupId: next, url }); },
     redirect(next: string) { url = next; },
     get detached() { return detached; },
     get timers() { return timers.size; },

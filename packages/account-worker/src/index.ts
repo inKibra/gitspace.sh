@@ -410,6 +410,7 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayUnpair(pairingId: string) { return this.browserRelay.unpair(pairingId); }
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
+  browserRelayRetireWorkspace(projectId: string, workspaceId: string) { return this.browserRelay.retireWorkspace(projectId, workspaceId); }
 
   private presenceLine: Promise<void> = Promise.resolve();
   /** When machine presence is next reconciled against the live sockets. */

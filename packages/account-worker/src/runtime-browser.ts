@@ -2,7 +2,7 @@ import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/
 import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
-import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
@@ -45,6 +45,24 @@ export async function runtimeBrowserKey(storage: BrowserStorage) {
 export async function runtimeBrowserPublicKey(storage: DurableObjectStorage) {
   const pair = await runtimeBrowserKey(storage);
   return { algorithm: 'Ed25519' as const, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))) };
+}
+/** Prefix of this workspace's stored Chrome group rows, written from the relay's reports. */
+export const BROWSER_GROUP_ROWS = 'runtime.browser.chrome:';
+/** `gitspace.browsers` from stored rows: the groups still in force, newest report first. */
+export async function workspaceBrowsersDocument(storage: { list(options: { prefix: string }): Promise<Map<string, unknown>>; get(key: string): Promise<unknown> }): Promise<RuntimeBrowsersDocument> {
+  const chrome: RuntimeBrowsersDocumentGroup[] = [];
+  for (const row of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).values()) {
+    const group = RuntimeBrowsersDocumentSchema.shape.chrome.element.parse(row);
+    if (!await storage.get(`runtime.browser.revoked:${group.groupId}`)) chrome.push(group);
+  }
+  return { chrome: chrome.sort((left, right) => right.reportedAt.localeCompare(left.reportedAt)).slice(0, 32) };
+}
+/** Ends this workspace's Chrome groups: revoked here, so a later use starts a new group; its rows go; the relay has
+ * each Chrome close the agent's tabs and let yours go. */
+export async function retireWorkspaceBrowsers(storage: { list(options: { prefix: string }): Promise<Map<string, unknown>>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }, relay: { browserRelayRetireWorkspace(projectId: string, workspaceId: string): Promise<void> }, identity: { projectId: string; workspaceId: string }) {
+  for (const groupId of (await storage.list({ prefix: 'runtime.browser.account.group:' })).values()) await storage.put(`runtime.browser.revoked:${z.string().uuid().parse(groupId)}`, true);
+  for (const key of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).keys()) await storage.delete(key);
+  await relay.browserRelayRetireWorkspace(identity.projectId, identity.workspaceId);
 }
 export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
 export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {

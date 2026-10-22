@@ -4,6 +4,7 @@ import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntim
 import type { RuntimeAttachment, RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
+import { workspaceBrowsersDocument } from './runtime-browser.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
 import { z } from 'zod';
 import { parseRuntimeSettings, type CloudProjectSummary } from '@gitspace/protocol';
@@ -160,6 +161,7 @@ export async function createAccountWorkspaceRuntime(
     waitUntil: promise => waitUntil('runtime', promise),
     schedule,
     qa,
+    browsers: () => workspaceBrowsersDocument(ctx.storage),
     onReport: error => { waitUntil('qa report', qa.report(error instanceof Error ? error.message : String(error))); },
     attachments: {
       seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),

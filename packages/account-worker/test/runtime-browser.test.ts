@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { createModels } from '@earendil-works/pi-ai';
-import { createRuntimeBrowserAuthority } from '../src/runtime-browser.js';
+import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowsersDocument } from '../src/runtime-browser.js';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
@@ -11,7 +11,7 @@ afterEach(async () => { vi.useRealTimers(); await Promise.all(harnesses.splice(0
 async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRelayRuntime = false) {
   const data = new Map<string, unknown>();
   let transaction = Promise.resolve();
-  const storage = { async get(key: string) { return data.get(key); }, async put(key: string, value: unknown) { data.set(key, value); }, async delete(key: string) { return data.delete(key); }, async transaction<T>(fn: (value: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> }) => Promise<T>): Promise<T> {
+  const storage = { async get(key: string) { return data.get(key); }, async list({ prefix }: { prefix: string }) { return new Map([...data].filter(([key]) => key.startsWith(prefix))); }, async put(key: string, value: unknown) { data.set(key, value); }, async delete(key: string) { return data.delete(key); }, async transaction<T>(fn: (value: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> }) => Promise<T>): Promise<T> {
     const result = transaction.then(() => fn(storage));
     transaction = result.then(() => {}, () => {});
     return result;
@@ -55,7 +55,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     return selected;
   }, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings };
+  return { authority, input, state, dispatches, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings, storage };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -87,10 +87,35 @@ test('origin narrowing invalidates prepared grants and renews with only current 
   expect((await f.authority.prepare(next)).origins).toEqual(['example.com']);
   await f.authority.execute(next);
 });
+test('a retired workspace drops its group rows and starts a new Chrome group on its next use', async () => {
+  const f = await fixture();
+  const first = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  await f.storage.put(`runtime.browser.chrome:${first.groupId}`, { pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId: first.groupId, groupName: 'Workspace', origins: first.origins, expiresAt: first.expiresAt, reportedAt: new Date().toISOString(), tabs: [] });
+  expect((await workspaceBrowsersDocument(f.storage)).chrome.map(group => group.groupId)).toEqual([first.groupId]);
+  const retired: string[] = [];
+  await retireWorkspaceBrowsers(f.storage, { browserRelayRetireWorkspace: async (projectId, workspaceId) => { retired.push(`${projectId}/${workspaceId}`); } }, { projectId: 'project', workspaceId: 'workspace' });
+  expect(retired).toEqual(['project/workspace']);
+  expect(await workspaceBrowsersDocument(f.storage)).toEqual({ chrome: [] });
+  const next = await f.authority.prepare({ ...f.input, attemptId: 'restored', requestId: 'restored' });
+  expect(next.groupId).not.toBe(first.groupId);
+});
 test('expired prepared group grant cannot dispatch', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
   vi.spyOn(Date, 'now').mockReturnValue(Date.parse(card.expiresAt) + 1);
   try { await expect(f.authority.execute(f.input)).rejects.toThrow('expired'); expect(f.dispatches).toEqual([]); } finally { vi.restoreAllMocks(); }
+});
+test('an expired grant renews in the same group, so the Chrome group outlives it', async () => {
+  const f = await fixture('physical', true);
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
+  const first = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse(first.expiresAt) + 1);
+  try {
+    const next = { ...f.input, attemptId: 'renewed', requestId: 'renewed' };
+    const renewed = await f.authority.prepare(next);
+    expect(renewed.groupId).toBe(first.groupId);
+    expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(first.expiresAt));
+    expect((await f.authority.execute(next)).status).toBe('completed');
+  } finally { vi.restoreAllMocks(); }
 });
 
 
