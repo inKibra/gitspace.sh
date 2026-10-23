@@ -61,7 +61,13 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     }
     const secrets = Object.values(headers);
     const client = new Client({ name: 'gitspace-cloud', version: '1.0.0' }, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
-    const transport = type === 'http' ? new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }) : new SSEClientTransport(new URL(url), { requestInit: { headers }, eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }) } });
+    const transport = type === 'http'
+      ? new StreamableHTTPClientTransport(new URL(url), { redirectPolicy: 'same-origin', requestInit: { headers } })
+      : new SSEClientTransport(new URL(url), {
+          redirectPolicy: 'same-origin',
+          requestInit: { headers },
+          eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }) },
+        });
     const audit = async (outcome: 'started' | 'succeeded' | 'failed' | 'canceled') => {
       await connections().appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: invocation?.name ?? null, outcome, message: null });
     };
