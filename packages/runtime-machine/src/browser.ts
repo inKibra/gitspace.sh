@@ -335,6 +335,7 @@ export class MachineBrowser {
       const tabs = grant.source === 'relay' ? await this.options.relay!.tabs(grant.groupId, signal) : await Promise.all([...this.tabs.values()].filter(tab => tab.grant.groupId === grant.groupId && !tab.stale).map(async tab => TargetInfo.parse(await tab.channel.send('Target.getTargetInfo', { targetId: tab.targetId })).targetInfo));
       return [{ type: 'text', text: JSON.stringify(tabs) }];
     }
+    if (args.action === 'run') throw new Error('Browser scripts run in the cloud browser session');
     if ([...this.records.values()].some(record => record.groupId === grant.groupId && record.state === 'fenced')) throw new Error('Browser group has unresolved effect');
     let tab = args.targetId ? this.tabs.get(args.targetId) : undefined;
     if (tab && (tab.grant.groupId !== grant.groupId || tab.scope !== this.scope(dispatch))) throw new Error('Browser target outside group');

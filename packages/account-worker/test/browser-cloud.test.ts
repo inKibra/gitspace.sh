@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
+import { launchCloudBrowser } from '../src/browser-cdp.js';
 import { RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
@@ -33,7 +34,7 @@ test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud permits 
     return new Response(null, { status: 101, webSocket: pair[0] });
   } };
   const serviceRequests: Request[] = [];
-  const runtime = new AccountBrowserRuntime({ storage, binding, serviceHostname: hostname => hostname === 'app--tenant-srv.gssh.dev', workspaceServiceHostname: hostname => hostname === 'app--tenant-srv.gssh.dev', serviceFetch: async request => { serviceRequests.push(request); return new Response('private account service', { status: 201 }); } });
+  const runtime = new AccountBrowserRuntime({ storage, cloud: signal => launchCloudBrowser(binding, signal), serviceHostname: hostname => hostname === 'app--tenant-srv.gssh.dev', workspaceServiceHostname: hostname => hostname === 'app--tenant-srv.gssh.dev', serviceFetch: async request => { serviceRequests.push(request); return new Response('private account service', { status: 201 }); } });
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
   const placement = { kind: 'cloud', accountId: 'account' };
   const authority = { body: { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: 'AA==', issuedAt: new Date().toISOString(), expiresAt }, signature: 'AA==' };
@@ -72,7 +73,7 @@ test('an expired cloud tab and its browser close before the next operation', asy
   const binding = { async fetch(input: RequestInfo | URL, init?: RequestInit) {
     return new Request(input, init).method === 'POST' ? Response.json({ sessionId: 'binding-session' }) : new Response(null, { status: 101, webSocket: pair[0] });
   } };
-  const runtime = new AccountBrowserRuntime({ storage, binding });
+  const runtime = new AccountBrowserRuntime({ storage, cloud: signal => launchCloudBrowser(binding, signal) });
   const now = Date.now(), groupExpiresAt = new Date(now + 60_000).toISOString(), laterExpiresAt = new Date(now + 600_000).toISOString();
   const placement = { kind: 'cloud', accountId: 'account' };
   const authority = { body: { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: 'AA==', issuedAt: new Date(now).toISOString(), expiresAt: laterExpiresAt }, signature: 'AA==' };

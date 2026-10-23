@@ -19,6 +19,7 @@ interface Env {
   HOSTED_ROUTES: DurableObjectNamespace<import('./src/index').HostedRouteRegistryDO>;
   ACCOUNT_STATE: DurableObjectNamespace<import('./src/index').AccountStateDO>;
   GITHUB_APP: DurableObjectNamespace<import('./src/index').GitHubAppDO>;
+  BROWSER_SESSION: DurableObjectNamespace<import('./src/index').BrowserSessionDO>;
   DATA: R2Bucket;
   BLOBS: R2Bucket;
   ARTIFACTS: Artifacts;

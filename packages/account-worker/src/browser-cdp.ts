@@ -50,7 +50,10 @@ export async function launchCloudBrowser(binding: BrowserRenderingBinding, signa
   const acquired = await binding.fetch('https://browser.internal/v1/devtools/browser?keep_alive=600000', { method: 'POST', signal });
   if (!acquired.ok) throw new Error(`BrowserRendering acquisition failed (${acquired.status})`);
   const { sessionId } = z.object({ sessionId: z.string().min(1) }).parse(await acquired.json());
-  const upgraded = await binding.fetch(`https://browser.internal/v1/devtools/browser/${encodeURIComponent(sessionId)}`, { headers: { Upgrade: 'websocket' }, signal });
+  // `signal` bounds the acquisition only: on the upgrade it would also end the WebSocket when it fires, cutting the
+  // browser off mid-use.
+  signal.throwIfAborted();
+  const upgraded = await binding.fetch(`https://browser.internal/v1/devtools/browser/${encodeURIComponent(sessionId)}`, { headers: { Upgrade: 'websocket' } });
   if (!upgraded.webSocket) throw new Error('BrowserRendering did not provide a CDP websocket');
   upgraded.webSocket.accept();
   return new WorkerBrowserConnection(upgraded.webSocket);

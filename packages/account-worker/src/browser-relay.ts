@@ -419,7 +419,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const command = authorization.body.command; if (command.type !== 'execute') throw new Error('Browser execution authorization required');
     await this.dispatchApproval(authorization);
     const opened = z.object({ targetId: z.string(), sessionId: z.string() }).parse(await this.request(pairingId, { operation: 'open', grant: command.grant }));
-    if (command.args.action !== 'tabs' && command.args.targetId && opened.targetId !== command.args.targetId) throw new Error('Browser target mismatch');
+    if (command.args.action !== 'tabs' && command.args.action !== 'run' && command.args.targetId && opened.targetId !== command.args.targetId) throw new Error('Browser target mismatch');
     let listeners = connection.listeners.get(opened.targetId); if (!listeners) { listeners = new Set(); connection.listeners.set(opened.targetId, listeners); }
     const registered = listeners;
     const channel: BrowserChannel = { send: async (method, params = {}, sessionId) => { if (Date.parse(command.grant.body.expiresAt) <= Date.now() || sessionId && sessionId !== opened.sessionId || this.connection(pairingId) !== connection) throw new Error('Browser channel expired or outside session'); await this.dispatchApproval(authorization); return this.request(pairingId, { operation: 'command', targetId: opened.targetId, sessionId: opened.sessionId, method, params }); }, subscribe: listener => { registered.add(listener); return () => { registered.delete(listener); }; }, close: async () => { registered.clear(); } };

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { packageMachineNativeRuntime } from './native-build.js';
 import { encodeWorkerBundle, type WorkerModule } from '@gitspace/protocol/worker-bundle';
+import { writeBrowserRunner } from '@gitspace/browser-runner';
 
 /**
  * Builders for the three account-owned GitSpace release targets. The
@@ -98,7 +99,9 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
   return { path, hash: await hashArtifactPath(path) };
 }
 /** Account tenant Worker bundle stamped with its release sha (`GITSPACE_WORKER_SHA`, served at `/healthz`). */
-export function buildWorkerBundle(root: string, sha: string, outDir: string): Promise<BuiltArtifact> {
+export async function buildWorkerBundle(root: string, sha: string, outDir: string): Promise<BuiltArtifact> {
+  // Generated for each build, never committed: the browser runner module the session object loads for scripts.
+  await writeBrowserRunner(join(root, 'packages/account-worker/src/generated/browser-runner.js'));
   return buildWorkerEntrypoint(join(root, 'packages/account-worker/src/index.ts'), sha, outDir);
 }
 

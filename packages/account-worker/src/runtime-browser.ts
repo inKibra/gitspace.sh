@@ -10,7 +10,6 @@ import type { FleetMachineDefinition } from '@gitspace/protocol/account-director
 import type { AccountStateDO } from './account-state.js';
 import { createAccountBrowserAuthority } from './runtime-browser-account.js';
 import type { SessionControlServices } from '@gitspace/runtime-core/session-controls';
-import type { BrowserRenderingBinding } from './browser-cdp.js';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
   prepare: ToolServices['prepareBrowser'];
@@ -26,7 +25,8 @@ type BrowserEnvironment = {
   RELAY_NAME: Env['RELAY_NAME'];
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
-  BROWSER?: BrowserRenderingBinding;
+  /** Each workspace's cloud browser lives in its own object (`BrowserSessionDO`), named `<account>:<project>:<workspace>`. */
+  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
   RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
 type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
@@ -64,7 +64,7 @@ export async function retireWorkspaceBrowsers(storage: { list(options: { prefix:
   for (const key of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).keys()) await storage.delete(key);
   await relay.browserRelayRetireWorkspace(identity.projectId, identity.workspaceId);
 }
-export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string>; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname };
+export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string> };
 export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
@@ -95,7 +95,8 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   }
   const account = createAccountBrowserAuthority(options, signing);
   function accountPlacement(args: RuntimeBrowserArguments) {
-    return args.source === 'relay' || !args.on && !options.runtime().attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('browser.headless'));
+    // Scripts always run in the cloud browser session: no machine browser runs them.
+    return args.source === 'relay' || args.action === 'run' || !args.on && !options.runtime().attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('browser.headless'));
   }
   async function signed(input: Input, placement: { machineId: string; attachmentId: string; generation: number }, command: RuntimeBrowserAuthorizationBody['command'], expiresAt: string): Promise<RuntimeToolDispatch> {
     const scope = { ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId };

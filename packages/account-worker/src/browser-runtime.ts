@@ -3,7 +3,7 @@ import { RuntimeAccountBrowserGrantSchema, canonicalBrowserAuthorization, type R
 import { performBrowserAction, type BrowserSemanticTab } from '@gitspace/runtime-machine/browser-semantic';
 import { BrowserOutputStore } from '@gitspace/runtime-machine/browser-output';
 import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
-import { launchCloudBrowser, type BrowserChannel, type BrowserRenderingBinding } from './browser-cdp.js';
+import type { BrowserChannel } from './browser-cdp.js';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 
 type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: BrowserChannel; sessionId: string; stale: boolean; servicePolicy?: BrowserServicePolicy; unsubscribeServices?: () => void; unsubscribe(): void };
@@ -18,7 +18,8 @@ export class AccountBrowserRuntime {
   private queues = new Map<string, Promise<void>>();
   private outputs = new BrowserOutputStore();
   private cloud = new Map<string, Promise<BrowserChannel>>();
-  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; binding?: BrowserRenderingBinding; relay?: AccountBrowserTransport; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname }) {}
+  /** `cloud` opens this workspace's view of its cloud browser (a client of the browser session object). */
+  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname }) {}
   async execute(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization;
     const scope = JSON.stringify([body.scope.projectId, body.scope.workspaceId]);
@@ -93,6 +94,8 @@ export class AccountBrowserRuntime {
       }
       return json(await Promise.all([...this.tabs.values()].filter(tab => tab.grant.groupId === grant.groupId && !tab.stale).map(async tab => z.object({ targetInfo: z.unknown() }).parse(await tab.channel.send('Target.getTargetInfo', { targetId: tab.targetId })).targetInfo)));
     }
+    // Scripts never reach the tool runtime: the cloud browser's session object runs them, and your Chrome refuses them.
+    if (args.action === 'run') throw new Error('Browser scripts run in the cloud browser session');
     let tab = args.targetId ? this.tabs.get(args.targetId) : undefined;
     if (tab && (tab.grant.groupId !== grant.groupId || tab.stale)) throw new Error('Browser target stale or outside group');
     if (tab) tab.grant = grant;
@@ -153,8 +156,8 @@ export class AccountBrowserRuntime {
     const key = JSON.stringify([grant.projectId, grant.workspaceId]);
     let current = this.cloud.get(key);
     if (!current) {
-      if (!this.options.binding) throw new Error('BrowserRendering binding unavailable');
-      current = launchCloudBrowser(this.options.binding, signal); this.cloud.set(key, current);
+      if (!this.options.cloud) throw new Error('Cloud browser unavailable');
+      current = this.options.cloud(signal); this.cloud.set(key, current);
       void current.catch(() => { if (this.cloud.get(key) === current) this.cloud.delete(key); });
     }
     return current;

@@ -7,6 +7,14 @@ export function isHostedServiceHostname(env: Pick<Env, 'TENANT_ID'>, hostname: s
   return hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`);
 }
 
+/** Whether `hostname` is a hosted service of `workspace` with a live route: the services its cloud browser may reach.
+ * `scope` is the browser group's workspace, which must be that workspace. */
+export async function isWorkspaceServiceHostname(env: Env, workspace: { projectId: string; workspaceId: string }, hostname: string, scope: { projectId: string; workspaceId: string }): Promise<boolean> {
+  if (!isHostedServiceHostname(env, hostname) || scope.projectId !== workspace.projectId || scope.workspaceId !== workspace.workspaceId) return false;
+  const route = await env.HOSTED_ROUTES.getByName(hostname).get();
+  return !!route && route.tenant === env.ACCOUNT_ID && route.workspaceId === scope.workspaceId && Date.parse(route.leaseExpiresAt) > Date.now();
+}
+
 /** Internal callers supply identity established by their owner, never request headers. A caller that already resolved the hostname passes its target. */
 export async function fetchInternalService(env: Env, rawCaller: ServiceCaller, request: Request, session?: ServiceSession, resolved?: HostedRouteTarget): Promise<Response> {
   const caller = ServiceCallerSchema.parse(rawCaller);

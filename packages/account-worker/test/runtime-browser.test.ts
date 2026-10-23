@@ -47,7 +47,13 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     dispatches.push(dispatch);
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
-  const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: {getByName:()=>relay}, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
+  const sessions: Array<{ name: string; authorization: RuntimeAccountBrowserAuthorization }> = [];
+  const BROWSER_SESSION = { getByName: (name: string) => ({ async execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> {
+    sessions.push({ name, authorization });
+    const text = authorization.body.command.type === 'manage' ? JSON.stringify(RuntimeBrowserStatusSchema.parse({ groups: [], records: [] })) : '{"ok":true,"value":1}';
+    return { status: 'completed', requestId: authorization.body.scope.requestId, attemptId: authorization.body.scope.attemptId, content: [{ type: 'text', text }] };
+  } }) };
+  const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: {getByName:()=>relay}, BROWSER_SESSION, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
   const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
     const machineId = args.on ?? state.defaultMachineId;
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
@@ -55,7 +61,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     return selected;
   }, approvedOrigins: async () => state.origins, groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings, storage };
+  return { authority, input, state, dispatches, sessions, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings, storage };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -119,6 +125,19 @@ test('an expired grant renews in the same group, so the Chrome group outlives it
 });
 
 
+test('a script for the user’s Chrome is refused before approval; a cloud script runs in the workspace’s browser session', async () => {
+  const f = await fixture();
+  const relay = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'relay', script: 'return 1;' }), requestId: 'relay-script', attemptId: 'relay-script' };
+  await expect(f.authority.prepare(relay)).rejects.toThrow('next extension update');
+  const cloud = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'headless', script: 'return 1;' }), requestId: 'cloud-script', attemptId: 'cloud-script' };
+  await f.authority.prepare(cloud);
+  await f.authority.execute(cloud);
+  // The fixture's machine offers a headless browser; scripts still go to the cloud session.
+  expect(f.sessions.map(({ name, authorization }) => [name, authorization.body.command.type === 'execute' && authorization.body.command.args.action])).toEqual([['account:project:workspace', 'run']]);
+  expect(f.dispatches).toHaveLength(0);
+  const pinned = { ...cloud, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'headless', on: 'machine', script: 'return 1;' }), requestId: 'pinned-script', attemptId: 'pinned-script' };
+  await expect(f.authority.prepare(pinned)).rejects.toThrow('remove "on"');
+});
 test('relay works without any machine and rejects subagents before dispatch', async () => {
  const f=await fixture(); f.attachments.splice(0); f.machines.clear();
  const card=await f.authority.prepare(f.input); expect('placement' in card && card.placement.kind).toBe('account-relay');

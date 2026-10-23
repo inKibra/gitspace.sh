@@ -70,3 +70,4 @@ local/
 
 # Self-develop sandboxes (machine db, miniflare, rustfs, managed worktrees)
 .gitspace/environments/
+packages/account-worker/src/generated/browser-runner.js

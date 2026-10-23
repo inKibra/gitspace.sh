@@ -1,0 +1,16 @@
+{
+  "name": "@gitspace/browser-runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@cloudflare/playwright": "1.3.6",
+    "esbuild": "^0.28.1"
+  }
+}

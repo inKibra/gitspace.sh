@@ -24,7 +24,7 @@ class Relay implements RuntimeBrowserRelay {
   async status() { return { connected: true }; }
   async prepare() {}
   async open(signed: RuntimeBrowserSignedGrant, args: RuntimeBrowserArguments): Promise<RuntimeBrowserRelayChannel & { targetId: string }> {
-    if (args.action === 'tabs') throw new Error('Tabs has no target');
+    if (args.action === 'tabs' || args.action === 'run') throw new Error(`${args.action} has no target`);
     const targetId = args.targetId ?? crypto.randomUUID(), grant = signed.body;
     let entry = this.channels.get(targetId);
     if (!entry) { entry = { grant: signed }; this.channels.set(targetId, entry); }

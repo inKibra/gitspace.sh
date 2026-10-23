@@ -15,12 +15,14 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('evaluate'), ...tab, expression: z.string().min(1).max(32768) }),
   z.strictObject({ action: z.literal('screenshot'), ...tab }),
   z.strictObject({ action: z.literal('close'), ...tab }),
+  /** A Playwright script, the body of an async function of `{ page, context, browser, state }` (docs/APERTURE-DESIGN.md §6.1). */
+  z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536) }),
 ]);
 export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSchema>;
 const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
 export const RuntimeBrowserGrantSchema = z.strictObject({ ...executionScope, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
 export type RuntimeBrowserGrant = z.infer<typeof RuntimeBrowserGrantSchema>;
-export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close']) });
+export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close', 'run']) });
 export type RuntimeBrowserPreparation = z.infer<typeof RuntimeBrowserPreparationSchema>;
 export const RuntimeAccountBrowserPlacementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('cloud'), accountId: id }),

@@ -238,13 +238,6 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
-    serviceFetch: request => fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, ...identity }, request),
-    serviceHostname: hostname => isHostedServiceHostname(env, hostname),
-    workspaceServiceHostname: async (hostname, scope) => {
-      if (!isHostedServiceHostname(env, hostname) || scope.projectId !== identity.projectId || scope.workspaceId !== identity.workspaceId) return false;
-      const route = await env.HOSTED_ROUTES.getByName(hostname).get();
-      return !!route && route.tenant === env.ACCOUNT_ID && route.workspaceId === scope.workspaceId && Date.parse(route.leaseExpiresAt) > Date.now();
-    },
     selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedOrigins: async () => approvedBrowserOrigins(await options.environment.refreshBrowserOrigins(identity)),
     groupName: async () => {

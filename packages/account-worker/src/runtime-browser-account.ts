@@ -2,20 +2,20 @@ import { z } from 'zod';
 import { RuntimeAccountBrowserPreparationSchema, RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeAccountBrowserAuthorizationSchema, canonicalBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPlacement, type RuntimeBrowserAuthorityCertificate, type RuntimeBrowserArguments, type RuntimeAccountBrowserAuthorization, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { ToolServices } from '@gitspace/runtime-core';
 import type { RuntimeBrowserAuthorityOptions } from './runtime-browser.js';
-import { AccountBrowserRuntime } from './browser-runtime.js';
 
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserManagement } from '@gitspace/protocol-runtime';
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOptions, signing: () => Promise<{ privateKey: CryptoKey; authority: RuntimeBrowserAuthorityCertificate; issuedAt: string }>) {
   const { storage, env, identity } = options;
   const savedSchema = z.object({ fingerprint: z.string(), card: RuntimeAccountBrowserPreparationSchema });
-  const cloud = new AccountBrowserRuntime({ storage, binding: env.BROWSER, serviceFetch: options.serviceFetch, serviceHostname: options.serviceHostname, workspaceServiceHostname: options.workspaceServiceHostname });
   async function placement(args: RuntimeBrowserArguments): Promise<RuntimeAccountBrowserPlacement> {
     if (args.source === 'headless') { if (args.pairingId) throw new Error('Chrome pairing requires relay source'); return { kind: 'cloud', accountId: env.ACCOUNT_ID }; }
     if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
     return env.RELAY.getByName(env.RELAY_NAME).browserRelayPlacement(identity.projectId, args.pairingId);
   }
   async function prepare(input: Input, args: RuntimeBrowserArguments, origins: string[]) {
+    if (args.action === 'run' && args.source === 'relay') throw new Error('Scripts on your Chrome arrive with the next extension update; run this script in the cloud browser (source "headless").');
+    if (args.action === 'run' && args.on) throw new Error('Scripts run in the cloud browser; remove "on".');
     const fingerprint = canonicalBrowserAuthorization({ ...input, signal: undefined, args });
     const key = `runtime.browser.prepare:${input.attemptId}`;
     const current = await placement(args);
@@ -54,10 +54,13 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const stored = await storage.get(dispatchKey);
     const authorization = stored ? RuntimeAccountBrowserAuthorizationSchema.parse(stored) : await signRuntimeAccountBrowserAuthorization({ scope: { ...identity, placement: body.placement, conversationId: input.conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId }, issuedAt: signingKey.issuedAt, expiresAt: deadlineAt, dispatch: { version: 1, tool: 'browser', deadlineAt, replay: input.replay, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}) }, command: { type: 'execute', args, grant } }, signingKey.privateKey, signingKey.authority);
     if (!stored) await storage.put(dispatchKey, authorization);
-    return dispatch(authorization, input.signal);
+    return dispatch(authorization);
   }
-  async function dispatch(authorization: RuntimeAccountBrowserAuthorization, signal?: AbortSignal) {
-    if (authorization.body.scope.placement.kind === 'cloud') return cloud.execute(authorization, signal ?? AbortSignal.timeout(Math.max(1, Date.parse(authorization.body.expiresAt) - Date.now())));
+  async function dispatch(authorization: RuntimeAccountBrowserAuthorization) {
+    if (authorization.body.scope.placement.kind === 'cloud') {
+      if (!env.BROWSER_SESSION) throw new Error('Cloud browser unavailable');
+      return env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).execute(authorization);
+    }
     if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
     return env.RELAY.getByName(env.RELAY_NAME).browserRelayExecute(authorization);
   }
