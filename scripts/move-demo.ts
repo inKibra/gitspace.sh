@@ -14,7 +14,7 @@ const gitEndpoint = 'http://127.0.0.1:4513';
 const controlUrl = 'http://127.0.0.1:4512';
 const accessKeyId = 'GITSPACEDEMO';
 const secretAccessKey = new Bun.CryptoHasher('sha256').update(`${root}:git-secret`).digest('hex');
-const artifactKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${root}:artifact-key`).digest());
+const vaultKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${root}:artifact-key`).digest());
 const rootPrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${root}:root`).digest());
 const bootstrapToken = crypto.randomUUID();
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
@@ -62,7 +62,7 @@ async function registerMachine(id: string): Promise<void> {
       userId: 'demo-user',
       handle: 'demo-user',
       rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)),
-      vaultKey: credentialProtocolBase64.encode(artifactKey),
+      vaultKey: credentialProtocolBase64.encode(vaultKey),
       deviceGrant,
     }),
   });
@@ -111,7 +111,6 @@ async function startMachine(input: { id: string; port: number; artifact: string;
       GITSPACE_MACHINE_ID: input.id,
       GITSPACE_MACHINE_LABEL: input.id === 'machine-a' ? 'Machine A' : 'Machine B',
       GITSPACE_PUBLIC_RPC_URL: `/${input.id}/rpc`,
-      GITSPACE_ARTIFACT_KEY: Buffer.from(artifactKey).toString('base64'),
       GITSPACE_MIGRATIONS_FOLDER: join(input.artifact, 'drizzle'),
       GITSPACE_RPC_PORT: String(input.port),
       GITSPACE_CONTROL_URL: controlUrl,

@@ -1,10 +1,11 @@
 import { lfsBytes, readLfs } from './git-lfs-fixture.js';
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { createSignedControlRequest, credentialProtocolBase64, deriveArtifactScopeKey } from '@gitspace/protocol';
+import { createSignedControlRequest, credentialProtocolBase64 } from '@gitspace/protocol';
 import { GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { describe, expect, it } from 'vitest';
 import { AccountGitLfsStore } from '../src/git-lfs-store.js';
+import { tenantStore } from '../src/tenant-store.js';
 
 async function fixture() {
   const userId = env.ACCOUNT_ID;
@@ -29,22 +30,25 @@ describe('authenticated LFS publication controls', () => {
     expect((await request('storage-only', 'lfs.pin', pin)).ok).toBe(false);
     expect((await request('writer', 'lfs.pin', { ...pin, projectId: 'missing-project' })).ok).toBe(false);
     expect((await request('writer', 'lfs.pin', pin)).ok).toBe(true);
-    const key = await deriveArtifactScopeKey(new Uint8Array(32).fill(17), `lfs:${projectId}`);
-    const store = new AccountGitLfsStore(env.DATA, userId, projectId, key, object => authority.lfsPin({ publicationId: 'writer:capture', objects: [object] }));
+    const store = new AccountGitLfsStore(tenantStore(env), projectId, object => authority.lfsPin({ publicationId: 'writer:capture', objects: [object] }));
     await store.put(object, lfsBytes(bytes));
     expect((await request('other-writer', 'lfs.release', { projectId, publicationId: 'capture' })).ok).toBe(true);
     expect(await readLfs(store, object)).toEqual(bytes);
     expect((await request('writer', 'lfs.release', { projectId, publicationId: 'capture' })).ok).toBe(true);
   });
 
-  it('rejects raw encrypted uploads without a prior durable publication pin and cross-project reads', async () => {
+  it('rejects uploads without a prior durable publication pin or under another digest, and cross-project reads', async () => {
     const { userId, signingPrivateKey, projectId } = await fixture();
     const oid = 'a'.repeat(64);
     const key = `lfs/projects/${projectId}/objects/${oid}`;
-    const hash = `sha256:${'b'.repeat(64)}`;
-    const put = createSignedControlRequest({ userId, machineId: 'writer', operation: 'data.put', payload: { key, hash, size: 1 }, signingPrivateKey });
-    const headers = { 'x-gitspace-control': btoa(JSON.stringify(put)), 'content-length': '1' };
-    expect((await SELF.fetch(`https://auth.test/v1/data/${key}`, { method: 'PUT', headers, body: new Uint8Array([1]) })).status).toBe(409);
+    const upload = (hash: string) => {
+      const put = createSignedControlRequest({ userId, machineId: 'writer', operation: 'data.put', payload: { key, hash, size: 1 }, signingPrivateKey });
+      return SELF.fetch(`https://auth.test/v1/data/${key}`, { method: 'PUT', headers: { 'x-gitspace-control': btoa(JSON.stringify(put)), 'content-length': '1' }, body: new Uint8Array([1]) });
+    };
+    const unpinned = await upload(`sha256:${oid}`);
+    expect(unpinned.status).toBe(409);
+    expect(await unpinned.json()).toMatchObject({ error: { code: 'LFS_PUBLICATION_REQUIRED' } });
+    expect(await (await upload(`sha256:${'b'.repeat(64)}`)).json()).toMatchObject({ error: { code: 'INVALID_OBJECT_METADATA' } });
     const missingKey = `lfs/projects/missing-project/objects/${oid}`;
     const get = createSignedControlRequest({ userId, machineId: 'writer', operation: 'data.get', payload: { key: missingKey }, signingPrivateKey });
     expect((await SELF.fetch(`https://auth.test/v1/data/${missingKey}`, { headers: { 'x-gitspace-control': btoa(JSON.stringify(get)) } })).status).toBe(403);

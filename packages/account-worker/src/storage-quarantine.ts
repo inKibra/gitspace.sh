@@ -42,7 +42,7 @@ export abstract class BudgetedDurableObject extends DurableObject<Env> {
 
 /** The stub of the object `objectId` names, in whichever of the account's namespaces issued it. */
 export function budgetedObject(env: Env, objectId: string): DurableObjectStub<BudgetedDurableObject> | null {
-  const namespaces: DurableObjectNamespace<BudgetedDurableObject>[] = [env.RELAY, env.CREDENTIALS, env.USER_STORAGE, env.SPACE_AUTHORITY, env.FLEET_CATALOG, env.USER_SETTINGS, env.PROJECT_SECRETS, env.PROJECT_CRONS, env.SPACE_CONTEXT, env.USER_SKILLS, env.USER_PROJECTS, env.PROJECT_AUTHORITY, env.USER_MCP_CONNECTIONS, env.TENANT_RELEASES, env.HOSTED_ROUTES, env.ACCOUNT_STATE, env.GITHUB_APP, env.BROWSER_SESSION];
+  const namespaces: DurableObjectNamespace<BudgetedDurableObject>[] = [env.RELAY, env.CREDENTIALS, env.USER_STORAGE, env.SPACE_AUTHORITY, env.FLEET_CATALOG, env.USER_SETTINGS, env.PROJECT_SECRETS, env.PROJECT_CRONS, env.SPACE_CONTEXT, env.USER_SKILLS, env.USER_PROJECTS, env.PROJECT_AUTHORITY, env.USER_MCP_CONNECTIONS, env.TENANT_RELEASES, env.HOSTED_ROUTES, env.ACCOUNT_STATE, env.GITHUB_APP, env.BROWSER_SESSION, env.STORAGE_MIGRATION];
   for (const namespace of namespaces) {
     try { return namespace.get(namespace.idFromString(objectId)); }
     catch { /* Another namespace's id. */ }

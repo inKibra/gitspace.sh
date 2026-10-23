@@ -24,7 +24,6 @@ beforeAll(() => {
     hostname: '127.0.0.1',
     fetch(request) {
       const url = new URL(request.url);
-      if (url.pathname === '/v1/control') return Response.json({ status: 'ok', value: { key: Buffer.alloc(32, 7).toString('base64') } });
       if (url.pathname.startsWith('/tunnel/')) {
         const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: machinePublicKey, target: `${url.pathname}${url.search}`, maxSkewMs: 30_000 });
         if (verified.status !== 'ok' || request.headers.get('x-gitspace-machine-grant') !== encodedGrant) return new Response(null, { status: 401 });

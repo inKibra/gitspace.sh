@@ -53,7 +53,6 @@ export interface ReplacementEnvironmentOptions {
   rpcHost?: string;
   webPort: number;
   machineId: string;
-  artifactKey: Uint8Array;
   controlToken: string;
   bootstrap?: ReplacementEnvironmentBootstrap;
   environment?: Record<string, string>;
@@ -137,6 +136,8 @@ function processEnvironment(extra: Record<string, string>, releaseSha: string | 
   };
   delete environment.GITSPACE_MACHINE_RELEASE_SHA;
   delete environment.GITSPACE_RELEASE_SHA;
+  // Machines hold no storage key; a host started by an older CLI must not hand its retired key to generations.
+  delete environment.GITSPACE_ARTIFACT_KEY;
   if (releaseSha !== null) environment.GITSPACE_MACHINE_RELEASE_SHA = releaseSha;
   return environment;
 }
@@ -496,7 +497,6 @@ class MachineHost implements MachineReplacementHost {
         GITSPACE_ENVIRONMENT_ID: this.options.id,
         GITSPACE_ENVIRONMENT_ROOT: this.options.root,
         GITSPACE_MACHINE_ID: this.options.machineId,
-        GITSPACE_ARTIFACT_KEY: Buffer.from(this.options.artifactKey).toString('base64'),
         GITSPACE_GENERATION_HASH: pointer.hash,
         GITSPACE_MACHINE_RUNTIME_PATH: pointer.artifactPath,
         GITSPACE_CONTROL_TOKEN: this.options.controlToken,
@@ -631,7 +631,6 @@ export class ReplacementEnvironment {
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(readonly options: ReplacementEnvironmentOptions) {
-    if (options.artifactKey.byteLength !== 32) throw new RangeError('Environment artifact key must be 32 bytes');
     this.journal = openHostDeploymentJournal(options.root);
     this.frontend = new FrontendHost(options, {
       launch: (input) => this.launch(input),

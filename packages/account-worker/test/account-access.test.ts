@@ -9,7 +9,6 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { HttpResponse, http } from 'msw';
-import { CredentialVaultDO } from '../src/index.js';
 import { AccountStateDO } from '../src/account-state.js';
 import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { network } from './network.js';
@@ -37,7 +36,7 @@ async function account() {
   await vault.registerDevice(grant);
   await vault.putCredential({ id: 'primary', credential: { provider: 'openai-codex', access: `secret-${handle}`, refresh: 'refresh-secret', expires: Date.now() + 3_600_000 } });
   await env.USER_SETTINGS.getByName(userId).setHandle('fixture', 0, handle);
-  await env.DATA.put(`users/${userId}/private`, `data-${handle}`);
+  await env.DATA.put(`users/${userId}/releases/fixture/private.json`, `data-${handle}`);
   function signed(operation: ControlOperation, payload: Record<string, unknown> = {}) {
     return createSignedControlRequest({ userId, machineId: 'machine', operation, payload, signingPrivateKey: signing });
   }
@@ -61,8 +60,7 @@ async function account() {
     const json = (path: string, body: unknown, headers: Record<string, string> = {}) => SELF.fetch(`https://auth.test${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
     return Promise.all([
       json('/v1/control', signed('settings.get')),
-      json('/v1/control', signed('artifacts.key.get')),
-      SELF.fetch('https://auth.test/v1/data/private', { headers: { 'x-gitspace-control': btoa(JSON.stringify(signed('data.get', { key: 'private' }))) } }),
+      SELF.fetch('https://auth.test/v1/data/releases/fixture/private.json', { headers: { 'x-gitspace-control': btoa(JSON.stringify(signed('data.get', { key: 'releases/fixture/private.json' }))) } }),
       json(`/v1/users/${userId}/credentials/primary/access`, createCredentialAccessRequest({ userId, machineId: 'machine', credentialId: 'primary', signingPrivateKey: signing })),
       json('/v1/devices/enroll', { invite, binding }),
       json('/v1/machines/enroll', { userId, label: 'Machine', deviceGrant: grant }, { authorization: createRelayAuthorization(root, '/v1/machines/enroll') }),
@@ -211,7 +209,7 @@ describe('account lifecycle authorization', () => {
 
   it.each(['suspended', 'quarantined'] as const)('blocks %s tenant access on direct APIs', async status => {
     const a = await account();
-    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
+    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 401, 200, 200]);
     platformState(status);
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_001);
     invalidateDeviceAuthority();
@@ -231,7 +229,7 @@ describe('account lifecycle authorization', () => {
     });
     expect(credential.status).toBe(403);
     expect(await credential.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
-    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200]);
+    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 401, 200, 200]);
   });
 
   it('resolves an assigned profile credential only for that profile, after the machine is gone', async () => {
@@ -262,7 +260,8 @@ describe('account lifecycle authorization', () => {
   });
 
 
-  it.each(['settings.get', 'artifacts.key.get'] as const)('allows active tenant control but still denies revoked devices for %s', async operation => {
+  it('allows active tenant control but still denies revoked devices', async () => {
+    const operation = 'settings.get';
     const a = await account();
     const response = await SELF.fetch('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)),
@@ -277,7 +276,8 @@ describe('account lifecycle authorization', () => {
     expect(await revoked.json()).toMatchObject({ status: 'error' });
   });
 
-  it.each(['settings.get', 'artifacts.key.get'] as const)('fails closed on missing, unavailable, or malformed platform access authority for %s', async operation => {
+  it('fails closed on missing, unavailable, or malformed platform access authority', async () => {
+    const operation = 'settings.get';
     const a = await account();
     let now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
@@ -329,39 +329,6 @@ describe('account lifecycle authorization', () => {
     socket.close();
   });
 
-  it('serves one private artifact key across enrolled machines and vault reconstruction, rejecting foreign identities', async () => {
-    const a = await account();
-    const otherSigning = ed25519.utils.randomSecretKey();
-    await a.vault.registerDevice(signCredentialAuthorityGrant({
-      ...a.grant.grant,
-      machineId: 'other-machine',
-      signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(otherSigning)),
-      capabilities: ['space.control'],
-    }, a.root));
-    const keyRequest = (signed: SignedControlRequest) => SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(signed),
-    });
-    const [first, second, foreign] = await Promise.all([
-      keyRequest(a.signed('artifacts.key.get')),
-      keyRequest(createSignedControlRequest({
-        userId: a.userId, machineId: 'other-machine', operation: 'artifacts.key.get', payload: {}, signingPrivateKey: otherSigning,
-      })),
-      keyRequest(createSignedControlRequest({
-        userId: `u-${'0'.repeat(32)}`, machineId: 'machine', operation: 'artifacts.key.get', payload: {}, signingPrivateKey: a.signing,
-      })),
-    ]);
-    expect([first.status, second.status, foreign.status]).toEqual([200, 200, 401]);
-    const firstBody = await first.json() as { status: string; value: { key: string } };
-    const { key } = firstBody.value;
-    expect(firstBody).toEqual({ status: 'ok', value: { key } });
-    expect(atob(key).length).toBe(32);
-    expect(btoa(atob(key))).toBe(key);
-    expect(await second.json()).toEqual(firstBody);
-    expect(await foreign.text()).not.toContain(key);
-    expect(await (await keyRequest(a.signed('artifacts.key.get'))).json()).toEqual(firstBody);
-    expect(await runInDurableObject(a.vault, (_vault, state) => new CredentialVaultDO(state, env).artifactKey(a.userId))).toBe(key);
-  });
-
   it('does not turn storage access into plaintext secret access', async () => {
     const a = await account();
     await a.vault.registerDevice(signCredentialAuthorityGrant({
@@ -376,48 +343,6 @@ describe('account lifecycle authorization', () => {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(proof),
     });
     expect(response.status).toBe(401);
-    expect(await response.json()).toMatchObject({ status: 'error' });
-  });
-
-  it('requires space.control and a valid machine signature for artifact keys', async () => {
-    const a = await account();
-    await a.vault.registerDevice(signCredentialAuthorityGrant({
-      ...a.grant.grant, machineId: 'storage-only', capabilities: ['storage.access'],
-    }, a.root));
-    const keyRequest = (signed: SignedControlRequest) => SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(signed),
-    });
-    const storageOnly = createSignedControlRequest({
-      userId: a.userId, machineId: 'storage-only', operation: 'artifacts.key.get', payload: {}, signingPrivateKey: a.signing,
-    });
-    const denied = await keyRequest(storageOnly);
-    expect(denied.status).toBe(401);
-    expect(await denied.json()).toMatchObject({ status: 'error' });
-    const proof = a.signed('artifacts.key.get');
-    const tampered = await keyRequest({ ...proof, signature: credentialProtocolBase64.encode(new Uint8Array(64)) });
-    expect(tampered.status).toBe(401);
-    const accepted = await keyRequest(proof);
-    expect(accepted.status).toBe(200);
-    await a.vault.removeManagedDevice('machine');
-    expect((await keyRequest(a.signed('artifacts.key.get'))).status).toBe(401);
-  });
-
-  it.each(['provisioning', 'failed', 'unknown'] as const)('withholds artifact keys when platform control is %s despite a valid machine grant', async status => {
-    const a = await account();
-    platformState(status);
-    const response = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('artifacts.key.get')),
-    });
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE' } });
-  });
-
-  it('rejects nonempty artifact key payloads rather than honoring caller-selected account identity', async () => {
-    const a = await account();
-    const response = await SELF.fetch('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('artifacts.key.get', { userId: `u-${'0'.repeat(32)}` })),
-    });
-    expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ status: 'error' });
   });
 });

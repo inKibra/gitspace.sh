@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** Canonical encrypted artifact manifest, shared by machine and cloud readers. */
+/** Canonical drive manifest, shared by machine and cloud readers. */
 export const artifactManifestSchema = z.object({
   version: z.literal(1),
   scopeId: z.string().min(1),
@@ -44,21 +44,30 @@ export interface ArtifactShareRecord {
   revokedAt: string | null;
 }
 
-/** Where a sealed artifact object lives under its account's storage prefix (`users/<account>/`): one flat
- * content-addressed namespace, keyed by the hash of the sealed bytes. The worker and machines both read and write it. */
-export function artifactObjectKey(accountId: string, hash: string): string {
+/** Plaintext bytes one `data.put` may carry, and the uniform part size of a multipart tenant object (the last part may be
+ * smaller). Larger objects use the `data.multipart.*` operations. */
+export const TENANT_OBJECT_PART_BYTES = 32 * 1024 * 1024;
+export const DATA_PUT_MAX_BYTES = TENANT_OBJECT_PART_BYTES;
+
+/** Where a drive object lives under its account's storage prefix (`users/<account>/`). Names are content addressed per
+ * scope: `hash` is the reference a drive manifest records (the plaintext SHA-256 of objects written since storage moved
+ * to R2 SSE-C), and the scope segment keeps one plaintext stored in two scopes at two names, each under its own key. */
+export function artifactObjectKey(accountId: string, scopeId: string, hash: string): string {
   if (!/^sha256:[a-f0-9]{64}$/u.test(hash)) throw new Error('Artifact hash is invalid');
+  if (!/^space:[A-Za-z0-9._-]{1,128}$/u.test(scopeId)) throw new Error('Artifact scope is invalid');
   const account = btoa(String.fromCharCode(...new TextEncoder().encode(accountId))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-  return `accounts/${account}/artifacts/sha256/${hash.slice(7)}`;
+  return `accounts/${account}/artifacts/${scopeId}/sha256/${hash.slice(7)}`;
 }
 
-export async function deriveArtifactScopeKey(projectKey: Uint8Array, scopeId: string): Promise<Uint8Array> {
-  const material = await crypto.subtle.importKey('raw', new Uint8Array(projectKey).buffer, 'HKDF', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({
-    name: 'HKDF',
-    hash: 'SHA-256',
-    salt: new TextEncoder().encode('gitspace-artifacts-v1'),
-    info: new TextEncoder().encode(scopeId),
-  }, material, 256);
-  return new Uint8Array(bits);
-}
+/** Signed payloads of the data endpoint (`/v1/data/<key>`) beyond `key`. Objects carry plaintext; the account encrypts
+ * them at rest under their scope's key. Drive objects also name the workspace (`projectId`, `workspaceId`) the machine is
+ * attached to: its drive is writable, and the drives its sessions read are readable. */
+const sha256Schema = z.templateLiteral(['sha256:', z.string().regex(/^[a-f0-9]{64}$/u)]);
+const uploadIdSchema = z.string().min(1).max(1_024);
+const partNumberSchema = z.number().int().min(1).max(10_000);
+/** `data.put` (size at most `DATA_PUT_MAX_BYTES`) and `data.multipart.create` (the whole object). */
+export const dataObjectWriteSchema = z.object({ hash: sha256Schema, size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) });
+/** `data.multipart.part`: the digest and size of this part's bytes. */
+export const dataMultipartPartSchema = z.object({ uploadId: uploadIdSchema, partNumber: partNumberSchema, hash: sha256Schema, size: z.number().int().min(1).max(TENANT_OBJECT_PART_BYTES) });
+export const dataMultipartCompleteSchema = z.object({ uploadId: uploadIdSchema, parts: z.array(z.object({ partNumber: partNumberSchema, etag: z.string().min(1).max(256) })).min(1).max(10_000) });
+export const dataMultipartAbortSchema = z.object({ uploadId: uploadIdSchema });

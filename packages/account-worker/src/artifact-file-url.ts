@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { credentialProtocolBase64, deriveArtifactScopeKey } from '@gitspace/protocol';
-import { readArtifactObject, type ArtifactByteRange } from './artifact-object-reader.js';
+import { artifactObjectKey } from '@gitspace/protocol';
+import { tenantStore, type TenantRange } from './tenant-store.js';
 
 /** How long a minted file URL serves its file. A media element keeps requesting ranges while it plays, so a URL
  * outlasts a viewing; the inspector mints a new one each time a file is opened. */
@@ -21,11 +21,11 @@ export type ArtifactFileGrant = Omit<z.infer<typeof FileGrantSchema>, 'version' 
 
 const GRANT_CONTEXT = new TextEncoder().encode('gitspace-artifact-file-url-v1');
 
-/** Sealing key for file URLs, derived under a label no artifact scope can take (scopes are `space:<id>`), so a URL
- * shares no key with stored bytes. */
+/** Sealing key for file URLs: the vault's key for a scope no stored object takes (objects' scopes are `space:<id>` and
+ * `lfs:<id>`), so a URL shares no key with stored bytes. */
 async function grantKey(env: Env): Promise<CryptoKey> {
-  const projectKey = credentialProtocolBase64.decode(await env.CREDENTIALS.getByName(env.ACCOUNT_ID).artifactKey(env.ACCOUNT_ID));
-  return crypto.subtle.importKey('raw', new Uint8Array(await deriveArtifactScopeKey(projectKey, 'file-url:v1')), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  const key = new Uint8Array(await env.CREDENTIALS.getByName(env.ACCOUNT_ID).scopeKey('file-url:v1'));
+  return crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
 /** A sealed URL for one file version: it names nothing readable and cannot be altered or extended. */
@@ -47,14 +47,14 @@ async function openFileGrant(env: Env, token: string): Promise<z.infer<typeof Fi
 
 /** One `bytes=` range of a file of `size` bytes; null serves the whole file (no range, or several, which HTTP lets a
  * server answer in full). */
-function requestedRange(header: string | null, size: number): ArtifactByteRange | null | 'unsatisfiable' {
+function requestedRange(header: string | null, size: number): TenantRange | null | 'unsatisfiable' {
   const match = header ? /^bytes=(\d*)-(\d*)$/u.exec(header.trim()) : null;
   if (!match || (!match[1] && !match[2])) return null;
   if (size === 0) return 'unsatisfiable';
   const start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
   const end = match[1] && match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
   if (!Number.isSafeInteger(start) || start >= size || end < start) return 'unsatisfiable';
-  return { start, end };
+  return { offset: start, length: end - start + 1 };
 }
 
 /** `GET /files/<token>`: the granted file's bytes with byte ranges, for media elements and downloads. The response
@@ -89,30 +89,21 @@ export async function serveArtifactFile(request: Request, env: Env): Promise<Res
     headers.set('content-range', `bytes */${grant.size}`);
     return new Response('Requested range not satisfiable', { status: 416, headers });
   }
-  headers.set('content-length', String(range ? range.end - range.start + 1 : grant.size));
-  if (range) headers.set('content-range', `bytes ${range.start}-${range.end}/${grant.size}`);
+  headers.set('content-length', String(range ? range.length : grant.size));
+  if (range) headers.set('content-range', `bytes ${range.offset}-${range.offset + range.length - 1}/${grant.size}`);
   const status = range ? 206 : 200;
   if (request.method === 'HEAD') return new Response(null, { status, headers });
-  let parts: AsyncIterable<Uint8Array<ArrayBuffer>>;
+  let body: ReadableStream<Uint8Array>;
   try {
-    const projectKey = credentialProtocolBase64.decode(await env.CREDENTIALS.getByName(env.ACCOUNT_ID).artifactKey(env.ACCOUNT_ID));
-    parts = await readArtifactObject(env, env.ACCOUNT_ID, grant.hash, await deriveArtifactScopeKey(projectKey, grant.scopeId), grant.size, range ?? undefined);
+    const object = await tenantStore(env).get(artifactObjectKey(env.ACCOUNT_ID, grant.scopeId, grant.hash), grant.scopeId, range ? { range } : {});
+    if (object?.size !== grant.size) {
+      await object?.body.cancel();
+      throw new Error('File is unavailable');
+    }
+    body = object.body;
   } catch {
     headers.delete('content-length'); headers.delete('content-range');
     return new Response('File is unavailable', { status: 404, headers });
   }
-  const iterator = parts[Symbol.asyncIterator]();
-  return new Response(new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const next = await iterator.next();
-        if (next.done) controller.close();
-        else controller.enqueue(next.value);
-      } catch (error) {
-        await iterator.return?.();
-        controller.error(error);
-      }
-    },
-    async cancel() { await iterator.return?.(); },
-  }, { highWaterMark: 0 }), { status, headers });
+  return new Response(body, { status, headers });
 }

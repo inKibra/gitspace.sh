@@ -158,16 +158,18 @@ export const RuntimeSpaceArtifactsArgumentsSchema = z.discriminatedUnion('method
   RuntimeDispatchSelectionSchema.extend({ method: z.literal('toMachine'), url: path, path }),
   RuntimeDispatchSelectionSchema.extend({ method: z.literal('fromMachine'), path, url: path }),
 ]);
-const sealedHash = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
-/** `drive_transfer` moves one drive file between the account's storage and the attached machine, which holds the
- * account's artifact key: the machine fetches or stores the sealed object itself, so no file bytes pass through the
- * workspace object or the model. Paths follow the file tools: relative to the checkout, or absolute inside /tmp. */
+const sha256Hash = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
+/** `drive_transfer` moves one drive file between the account's storage and the attached machine through the account's
+ * data endpoint, which keeps every key: the machine fetches or stores the plain bytes itself, so no file bytes pass
+ * through the workspace object or the model. `blobHash` is the reference the drive manifest records. Paths follow the
+ * file tools: relative to the checkout, or absolute inside /tmp. */
 export const RuntimeDriveTransferArgumentsSchema = z.discriminatedUnion('direction', [
-  RuntimeDispatchSelectionSchema.extend({ direction: z.literal('toMachine'), path, scopeId: path, blobHash: sealedHash, size: z.number().int().nonnegative() }),
+  RuntimeDispatchSelectionSchema.extend({ direction: z.literal('toMachine'), path, scopeId: path, blobHash: sha256Hash, size: z.number().int().nonnegative() }),
   RuntimeDispatchSelectionSchema.extend({ direction: z.literal('fromMachine'), path, scopeId: path }),
 ]);
-/** What `fromMachine` stored: the sealed object, for the cloud to authenticate and name in the scope's manifest. */
-export const RuntimeDriveTransferStoredSchema = z.object({ blobHash: sealedHash, size: z.number().int().nonnegative() }).strict();
+/** What `fromMachine` stored in the scope: the plaintext digest naming the object, for the cloud to check and name in the
+ * scope's manifest. */
+export const RuntimeDriveTransferStoredSchema = z.object({ blobHash: sha256Hash, size: z.number().int().nonnegative() }).strict();
 export const RuntimeAgentLifecycleRunArgumentsSchema = LifecycleRunRequestSchema.omit({ interactive: true }).extend({ ...RuntimeDispatchSelectionSchema.shape, phase: LifecycleRunRequestSchema.shape.phase.exclude(['cloud/destroy']) });
 /** A lifecycle run as its cache machine receives it. Agents enter through the narrower schema above; a human run,
  * authorized by the account before dispatch, may also run interactively or destroy cloud resources. */

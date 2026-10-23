@@ -1,13 +1,12 @@
-import { createSignedControlRequest, deriveArtifactScopeKey, sendSigned } from '@gitspace/protocol';
-import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot, type GitLfsObject, type GitLfsSnapshot, type GitLfsStore } from '@gitspace/protocol-workspace';
-import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from './checkpoint-blobs.js';
+import { createSignedControlRequest, sendSigned } from '@gitspace/protocol';
+import { collectBytes, streamBytes, GitLfsObjectSchema, GitLfsProtectionSchema, projectStorageRoot, type GitLfsObject, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { verifiedBytes, type StreamingBlobStore } from './checkpoint-blobs.js';
 import { cloudControlOptions, type SignedCloudRequestOptions } from './cloud-space-authority.js';
 import { z } from 'zod';
 
 export type CloudGitLfsStoreOptions = {
   projectId: string;
-  blobs: CheckpointBlobStore;
-  encryptionKey: Uint8Array;
+  blobs: StreamingBlobStore;
   controlOptions: SignedCloudRequestOptions;
 };
 /** Restores read verified objects; they hold no publication and so can neither pin nor upload. */
@@ -16,9 +15,8 @@ export type CloudGitLfsReader = Pick<GitLfsStore, 'has' | 'get'> & {
 /** Every pin and upload belongs to the publication identity fixed at construction until it is released. */
 export type CloudGitLfsPublisher = CloudGitLfsReader & Required<GitLfsStore> & { releasePublication(): Promise<void> };
 
-async function cloudGitLfs(options: CloudGitLfsStoreOptions) {
+function cloudGitLfs(options: CloudGitLfsStoreOptions) {
   const root = `lfs/${projectStorageRoot(options.projectId)}/objects`;
-  const encrypted = new EncryptedCheckpointBlobStore(options.blobs, await deriveArtifactScopeKey(options.encryptionKey, `lfs:${options.projectId}`));
   const objectKey = (object: GitLfsObject) => `${root}/${GitLfsObjectSchema.parse(object).oid}`;
   const controlOptions = cloudControlOptions(options.controlOptions);
   const control = async <S extends z.ZodType>(operation: Extract<Parameters<typeof createSignedControlRequest>[0]['operation'], `lfs.${string}`>, payload: Record<string, unknown>, schema: S): Promise<z.output<S>> => {
@@ -34,22 +32,8 @@ async function cloudGitLfs(options: CloudGitLfsStoreOptions) {
     const envelope = z.object({ status: z.literal('ok'), value: z.unknown() }).parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
     return schema.parse(envelope.value);
   };
-  const verify = async function* (object: GitLfsObject, source: AsyncIterable<Uint8Array>) {
-    const hash = new Bun.CryptoHasher('sha256');
-    let size = 0;
-    for await (const bytes of source) {
-      size += bytes.byteLength;
-      if (size > object.size) throw new Error('LFS object failed oid/size verification');
-      hash.update(bytes);
-      yield bytes;
-    }
-    if (size !== object.size || hash.digest('hex') !== object.oid) throw new Error('LFS object failed oid/size verification');
-  };
-  const get = async (object: GitLfsObject) => {
-    GitLfsObjectSchema.parse(object);
-    const source = await encrypted.getStream(objectKey(object), undefined, object.size);
-    return source === null ? null : verify(object, source);
-  };
+  // The oid is the plaintext SHA-256: the store's read verification is the LFS oid/size check.
+  const get = async (object: GitLfsObject) => options.blobs.getStream(objectKey(object), { hash: `sha256:${object.oid}`, size: object.size });
   const has = async (object: GitLfsObject) => {
     const source = await get(object);
     if (source === null) return false;
@@ -60,15 +44,15 @@ async function cloudGitLfs(options: CloudGitLfsStoreOptions) {
     get,
     has,
   };
-  return { reader, control, verify, encrypted, objectKey };
+  return { reader, control, objectKey };
 }
 
-export async function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): Promise<CloudGitLfsReader> {
-  return (await cloudGitLfs(options)).reader;
+export function createCloudGitLfsStore(options: CloudGitLfsStoreOptions): CloudGitLfsReader {
+  return cloudGitLfs(options).reader;
 }
 
-export async function createCloudGitLfsPublisher(options: CloudGitLfsStoreOptions & { publicationId: string }): Promise<CloudGitLfsPublisher> {
-  const { reader, control, verify, encrypted, objectKey } = await cloudGitLfs(options);
+export function createCloudGitLfsPublisher(options: CloudGitLfsStoreOptions & { publicationId: string }): CloudGitLfsPublisher {
+  const { reader, control, objectKey } = cloudGitLfs(options);
   const { publicationId } = options;
   const pinned = new Set<string>();
   const pin = async (object: GitLfsObject) => {
@@ -90,18 +74,20 @@ export async function createCloudGitLfsPublisher(options: CloudGitLfsStoreOption
     async has(object) { await pin(object); return reader.has(object); },
     async put(object, source) {
       await pin(object);
+      const expected = { hash: `sha256:${object.oid}`, size: object.size };
+      const label = `LFS object ${object.oid}`;
       if (await reader.has(object)) {
-        for await (const _chunk of verify(object, source)) { /* Verify even a deduplicated source. */ }
+        for await (const _chunk of verifiedBytes(source, expected, label)) { /* Verify even a deduplicated source. */ }
         return;
       }
       let sourceVerified = false;
       const verified = (async function* () {
-        yield* verify(object, source);
+        yield* verifiedBytes(source, expected, label);
         sourceVerified = true;
       })();
-      try { await encrypted.putStream(objectKey(object), verified, object.size); }
+      try { await options.blobs.putStream(objectKey(object), verified, expected); }
       catch (error) {
-        // Only a fully verified upload may accept independently encrypted winning bytes.
+        // A concurrent publication of the same oid stores the same bytes; only a fully verified upload may accept it.
         if (!sourceVerified || !await reader.has(object)) throw error;
       }
     },

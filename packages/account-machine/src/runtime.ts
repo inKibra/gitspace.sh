@@ -46,12 +46,6 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-function artifactKey(): Uint8Array {
-  const key = Uint8Array.from(Buffer.from(requiredEnvironment('GITSPACE_ARTIFACT_KEY'), 'base64'));
-  if (key.byteLength !== 32) throw new Error('GITSPACE_ARTIFACT_KEY must decode to 32 bytes');
-  return key;
-}
-
 function signingKey(): Uint8Array {
   const key = Uint8Array.from(Buffer.from(requiredEnvironment('GITSPACE_MACHINE_SIGNING_PRIVATE_KEY'), 'base64'));
   if (key.byteLength !== 32) throw new Error('GITSPACE_MACHINE_SIGNING_PRIVATE_KEY must decode to 32 bytes');
@@ -83,7 +77,6 @@ export async function startMachineRuntime() {
   }
   const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
   const machineId = requiredEnvironment('GITSPACE_MACHINE_ID');
-  const encryptionKey = artifactKey();
   const controlOptions = {
     baseUrl: requiredEnvironment('GITSPACE_CONTROL_URL'),
     userId: requiredEnvironment('GITSPACE_USER_ID'),
@@ -157,12 +150,12 @@ export async function startMachineRuntime() {
   const lfs: MachineGitLfsAccess = {
     read: async checkout => {
       const origin = await lfsOrigin(checkout);
-      const store = await createCloudGitLfsStore({ projectId: checkout.attachment.projectId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+      const store = createCloudGitLfsStore({ projectId: checkout.attachment.projectId, blobs: checkpointBlobs, controlOptions });
       return { ...origin, store };
     },
     publish: async (checkout, publicationId) => {
       const origin = await lfsOrigin(checkout);
-      const store = await createCloudGitLfsPublisher({ projectId: checkout.attachment.projectId, publicationId, blobs: checkpointBlobs, encryptionKey, controlOptions });
+      const store = createCloudGitLfsPublisher({ projectId: checkout.attachment.projectId, publicationId, blobs: checkpointBlobs, controlOptions });
       return {
         ...origin, store,
         releasePublication: () => store.releasePublication(),
@@ -366,7 +359,7 @@ export async function startMachineRuntime() {
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
     operations: {
       ...machineOperationalTools({ environments, services: serviceManager, reportProcessExit: async input => { await cloudRuntime.call('runtime.process.exited', input, z.null()); }, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
-      drive_transfer: driveTransferOperation({ blobs: checkpointBlobs, artifactKey: encryptionKey, accountId: controlOptions.userId }),
+      drive_transfer: driveTransferOperation({ blobs: checkpointBlobs, accountId: controlOptions.userId }),
     },
     originEnvironment: checkout => gitIdentity.originEnvironment(checkout),
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {

@@ -1,3 +1,4 @@
+/// <reference path="./global-props.d.ts" />
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
 import { BROWSER_RUN_LIMIT_MS, type RuntimeAccountBrowserAuthorization, type RuntimeToolResult } from '@gitspace/protocol-runtime';

@@ -9,7 +9,7 @@ export * from '../packages/account-worker/src/index';
 
 // Private, local-only fixture entrypoint. Production Wrangler never imports this file.
 const methods: Record<string, readonly string[]> = {
-  CREDENTIALS: ['bootstrap', 'registerDevice', 'artifactKey', 'ensureInference', 'updateInferenceProfile', 'createInferenceProfile', 'assignInferenceProfile', 'cloudSetApiKey', 'cloudCredentialAccounts'],
+  CREDENTIALS: ['bootstrap', 'registerDevice', 'ensureInference', 'updateInferenceProfile', 'createInferenceProfile', 'assignInferenceProfile', 'cloudSetApiKey', 'cloudCredentialAccounts'],
   USER_SETTINGS: ['get', 'setHandle', 'snapshot'],
   USER_PROJECTS: ['put', 'list'],
   PROJECT_AUTHORITY: ['bootstrap', 'ensureGitSpaceProject', 'getProject', 'setProjectLifecycle', 'listWorkspaces', 'putWorkspace', 'getWorkspace', 'putCanonicalSession', 'putArtifactScope', 'getArtifactScope', 'listCanonicalSessions'],

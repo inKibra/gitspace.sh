@@ -7,25 +7,6 @@ const storageIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/u).r
 const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const gitObjectIdSchema = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u);
 
-/** Plaintext chunks leave room for encryption below the 64 MiB application-object limit. */
-export const CHECKPOINT_CHUNK_BYTES = 32 * 1024 * 1024;
-/** Distinguishes an encrypted chunk inventory from a single encrypted artifact. */
-export const CHUNKED_CHECKPOINT_VERSION = 2;
-
-export const chunkedCheckpointManifestSchema = z.object({
-  version: z.literal(1),
-  size: z.number().int().min(CHECKPOINT_CHUNK_BYTES + 1),
-  chunks: z.array(z.object({
-    hash: hashSchema,
-    size: z.number().int().positive().max(CHECKPOINT_CHUNK_BYTES),
-  }).strict()).min(2),
-}).strict().superRefine((manifest, context) => {
-  if (manifest.chunks.length !== Math.ceil(manifest.size / CHECKPOINT_CHUNK_BYTES)
-    || manifest.chunks.some((chunk, index) => chunk.size !== Math.min(CHECKPOINT_CHUNK_BYTES, manifest.size - index * CHECKPOINT_CHUNK_BYTES))) {
-    context.addIssue({ code: 'custom', message: 'Checkpoint chunks do not cover the declared size with canonical boundaries' });
-  }
-});
-
 export const spaceCheckpointManifestSchema = z.object({
   version: z.literal(SPACE_CHECKPOINT_VERSION),
   projectId: storageIdSchema,

@@ -24,7 +24,7 @@ async function sha256(bytes: Uint8Array): Promise<`sha256:${string}`> {
 }
 
 describe('signed control transport', () => {
-  it('stores signed application data in the dedicated R2 binding', async () => {
+  it('stores signed release objects in the dedicated R2 binding', async () => {
     const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);
     await vault.bootstrap({
@@ -43,7 +43,7 @@ describe('signed control transport', () => {
     }, rootPrivateKey));
     const bytes = new TextEncoder().encode('portable-agent-state');
     const hash = await sha256(bytes);
-    const key = 'projects/project-a/spaces/space-a/session.bin';
+    const key = 'releases/release-a/frontend/index.html';
     const put = createSignedControlRequest({
       userId,
       machineId: 'machine-a',
@@ -76,22 +76,19 @@ describe('signed control transport', () => {
     expect(downloaded.status).toBe(200);
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
   });
-  it('serves a drive file stored without a recorded hash to a machine naming its hash, and refuses one recorded under another', async () => {
+  it('serves a release object only under the hash it was recorded with', async () => {
     const userId = env.ACCOUNT_ID;
     const vault = env.CREDENTIALS.getByName(userId);
     await vault.bootstrap({ userId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)), vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)) });
     await vault.registerDevice(signCredentialAuthorityGrant({ version: 1, userId, machineId: 'machine-a', signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)), exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)), capabilities: ['storage.access'], generation: 1 }, rootPrivateKey));
-    const bytes = new TextEncoder().encode('sealed drive file');
+    const bytes = new TextEncoder().encode('release file');
     const hash = await sha256(bytes);
     const download = (key: string, named: string) => SELF.fetch(`https://auth.test/v1/data/${key}`, { headers: { 'x-gitspace-control': signedHeader(createSignedControlRequest({ userId, machineId: 'machine-a', operation: 'data.get', payload: { key, hash: named }, signingPrivateKey: machineSigningPrivateKey })) } });
-    // Stored as the worker stored drive files: no recorded hash.
-    const unrecorded = `accounts/a/artifacts/sha256/${hash.slice(7)}`;
-    await env.DATA.put(`users/${userId}/${unrecorded}`, bytes);
-    const served = await download(unrecorded, hash);
-    expect(served.status).toBe(200);
-    expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes);
-    const recorded = 'accounts/a/artifacts/sha256/recorded';
+    const recorded = 'releases/release-a/recorded.bin';
     await env.DATA.put(`users/${userId}/${recorded}`, bytes, { customMetadata: { sha256: hash } });
+    const served = await download(recorded, hash);
+    expect([served.status, served.headers.get('x-gitspace-sha256')]).toEqual([200, hash]);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes);
     expect((await download(recorded, `sha256:${'0'.repeat(64)}`)).status).toBe(409);
   });
   it('rejects oversized signed objects after authorization and preserves upload validation and immutability', async () => {
@@ -111,7 +108,7 @@ describe('signed control transport', () => {
       capabilities: ['storage.access'],
       generation: 1,
     }, rootPrivateKey));
-    const key = 'projects/project-a/spaces/space-a/checkpoint.bin';
+    const key = 'releases/release-a/machine.bin';
     const bytes = new Uint8Array([1]);
     const hash = await sha256(bytes);
     const maxBytes = 64 * 1024 * 1024;
@@ -276,11 +273,11 @@ describe('signed request windows', () => {
 
   it('accepts a data.put whose body arrives long after signing, up to the upload window', async () => {
     const { userId } = await enroll();
-    expect((await (await signedUpload(userId, 'projects/p/spaces/s/buffered.bin', 10 * minutes))()).status).toBe(201);
-    const expired = await (await signedUpload(userId, 'projects/p/spaces/s/expired.bin', 31 * minutes))();
+    expect((await (await signedUpload(userId, 'releases/p/buffered.bin', 10 * minutes))()).status).toBe(201);
+    const expired = await (await signedUpload(userId, 'releases/p/expired.bin', 31 * minutes))();
     expect(expired.status).toBe(401);
     expect(await expired.json()).toMatchObject({ status: 'error', error: { code: 'REQUEST_EXPIRED', message: 'Signed request expired' } });
-    expect(await env.DATA.head(`users/${userId}/projects/p/spaces/s/expired.bin`)).toBeNull();
+    expect(await env.DATA.head(`users/${userId}/releases/p/expired.bin`)).toBeNull();
   });
 
   it('keeps the upload window to data.put and accepts other requests only within 60 seconds of the account clock', async () => {
@@ -304,10 +301,10 @@ describe('signed request windows', () => {
     // A validly signed proof for another account is invalid, not merely late.
     expect(await (await control(-90_000, 'another-user')).json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
     const read = createSignedControlRequest({
-      userId, machineId: 'machine-a', operation: 'data.head', payload: { key: 'projects/p/spaces/s/missing.bin', hash: await sha256(new Uint8Array([1])) },
+      userId, machineId: 'machine-a', operation: 'data.head', payload: { key: 'releases/p/missing.bin', hash: await sha256(new Uint8Array([1])) },
       signingPrivateKey: machineSigningPrivateKey, timestamp: Date.now() - 90_000,
     });
-    const staleRead = await SELF.fetch('https://auth.test/v1/data/projects/p/spaces/s/missing.bin', { method: 'HEAD', headers: { 'x-gitspace-control': signedHeader(read) } });
+    const staleRead = await SELF.fetch('https://auth.test/v1/data/releases/p/missing.bin', { method: 'HEAD', headers: { 'x-gitspace-control': signedHeader(read) } });
     expect(staleRead.status).toBe(401);
   });
 });

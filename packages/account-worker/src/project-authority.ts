@@ -34,7 +34,8 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import { WorkspaceDomainError, WorkspaceRelationsSchema, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
-import { deleteGitLfsObject, gitLfsObjectKey } from './git-lfs-store.js';
+import { gitLfsObjectKey } from './git-lfs-store.js';
+import { tenantStore } from './tenant-store.js';
 import { behindOrigin } from './cloud-stack-status.js';
 import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } from './guide-shares.js';
 import { z } from 'zod';
@@ -1003,8 +1004,12 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   async lfsProtect(input: { publicationId: string; objects: GitLfsObject[] }): Promise<GitLfsObject[]> {
     this.lfsPin(input);
     const project = this.requireProject();
+    const store = tenantStore(this.env);
     const present: GitLfsObject[] = [];
-    for (const object of input.objects) if (await this.env.DATA.head(`users/${this.env.ACCOUNT_ID}/${gitLfsObjectKey(project.id, object.oid)}`)) present.push(object);
+    for (const object of input.objects) {
+      const stored = await store.head(gitLfsObjectKey(project.id, object.oid), `lfs:${project.id}`);
+      if (stored?.sha256 === `sha256:${object.oid}` && stored.size === object.size) present.push(object);
+    }
     return present;
   }
 

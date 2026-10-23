@@ -5,9 +5,7 @@ import {
   TUNNEL_CHUNK_BYTES,
   createRelayAuthorization,
   decodeTunnelChunk,
-  decryptArtifactBytes,
   encodeTunnelChunk,
-  encryptArtifactBytes,
   parseRelaySocketMessage,
   verifyRelayAuthorization,
 } from '../src/index.js';
@@ -61,35 +59,5 @@ describe('relay messages', () => {
     const bytes = Uint8Array.from({ length: TUNNEL_CHUNK_BYTES }, (_, index) => index % 251);
     expect(decodeTunnelChunk(encodeTunnelChunk(bytes))).toEqual(bytes);
     expect(() => encodeTunnelChunk(new Uint8Array(TUNNEL_CHUNK_BYTES + 1))).toThrow(/exceeds/);
-  });
-});
-
-describe('artifact encryption', () => {
-  it('stores authenticated ciphertext and round-trips only with the client key', async () => {
-    const key = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
-    const plaintext = new TextEncoder().encode('private artifact payload');
-    const sealed = await encryptArtifactBytes(
-      plaintext,
-      key,
-      Uint8Array.from({ length: 12 }, (_, index) => index),
-    );
-    expect(new TextDecoder().decode(sealed)).not.toContain('private artifact payload');
-    expect(await decryptArtifactBytes(sealed, key)).toEqual(plaintext);
-    await expect(decryptArtifactBytes(sealed, new Uint8Array(32))).rejects.toThrow();
-  });
-
-  it('respects subarray boundaries and authenticates sliced or shared-backed ciphertext', async () => {
-    const key = new Uint8Array(40).fill(7).subarray(4, 36);
-    const plaintext = new TextEncoder().encode('prefix:preserved:suffix').subarray(7, 16);
-    const nonce = new Uint8Array(20).fill(9).subarray(3, 15);
-    const sealed = await encryptArtifactBytes(plaintext, key, nonce);
-    const backing = new Uint8Array(sealed.byteLength + 12).fill(255);
-    backing.set(sealed, 5);
-    expect(await decryptArtifactBytes(backing.subarray(5, 5 + sealed.byteLength), key)).toEqual(plaintext);
-    const shared = new Uint8Array(new SharedArrayBuffer(sealed.byteLength + 8));
-    shared.set(sealed, 4);
-    expect(await decryptArtifactBytes(shared.subarray(4, 4 + sealed.byteLength), key)).toEqual(plaintext);
-    shared[shared.byteLength - 5] = shared[shared.byteLength - 5]! ^ 1;
-    await expect(decryptArtifactBytes(shared.subarray(4, 4 + sealed.byteLength), key)).rejects.toThrow();
   });
 });

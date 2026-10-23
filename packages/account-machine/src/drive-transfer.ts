@@ -1,30 +1,28 @@
 import { mkdir, open, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { artifactObjectKey, decryptArtifactBytes, deriveArtifactScopeKey, encryptArtifactBytes } from '@gitspace/protocol';
+import { artifactObjectKey } from '@gitspace/protocol';
 import { ARTIFACT_UPLOAD_MAX_BYTES } from '@gitspace/protocol/rpc-contract';
 import { RuntimeDriveTransferArgumentsSchema } from '@gitspace/protocol-runtime';
 import { machineFilePath, type ExecutorOperationHandler } from '@gitspace/runtime-machine';
-import type { CheckpointBlobStore } from './checkpoint-blobs.js';
+import { hashBytes, type CheckpointBlobStore } from './checkpoint-blobs.js';
 
-/** AES-GCM envelope: version byte, nonce and tag. */
-const SEALED_OVERHEAD = 29;
 const limit = `Drive files are limited to ${ARTIFACT_UPLOAD_MAX_BYTES / 1024 / 1024} MiB`;
 
 /**
- * Moves one drive file between the account's storage and this machine. Drive objects are single envelopes sealed with
- * the scope's key (derived from the account artifact key this machine holds) and stored under the hash of the sealed
- * bytes, so the machine reads and writes them as the worker does.
+ * Moves one drive file between the account's storage and this machine. A drive object is the file's plaintext, named
+ * within its drive scope by its SHA-256; the account encrypts it at rest and authorizes the scope from the attached
+ * workspace the request names, so the machine holds no key. The recorded `blobHash` may name an object stored before
+ * plaintext naming, so reads verify the bytes against the object's recorded hash and the drive's recorded size.
  */
-export function driveTransferOperation(options: { blobs: CheckpointBlobStore; artifactKey: Uint8Array; accountId: string }): ExecutorOperationHandler {
+export function driveTransferOperation(options: { blobs: CheckpointBlobStore; accountId: string }): ExecutorOperationHandler {
   return async (dispatch, local) => {
     const args = RuntimeDriveTransferArgumentsSchema.parse(dispatch.args);
     const path = await machineFilePath(local.rootPath, args.path);
-    const scopeKey = await deriveArtifactScopeKey(options.artifactKey, args.scopeId);
+    const workspace = { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId };
     if (args.direction === 'toMachine') {
       if (args.size > ARTIFACT_UPLOAD_MAX_BYTES) throw new Error(limit);
-      const sealed = await options.blobs.get(artifactObjectKey(options.accountId, args.blobHash), args.blobHash, args.size + SEALED_OVERHEAD);
-      if (!sealed) throw new Error('The drive file is missing from storage');
-      const bytes = await decryptArtifactBytes(sealed, scopeKey);
+      const bytes = await options.blobs.get(artifactObjectKey(options.accountId, args.scopeId, args.blobHash), undefined, args.size, workspace);
+      if (!bytes) throw new Error('The drive file is missing from storage');
       if (bytes.byteLength !== args.size) throw new Error('The drive file does not match its recorded size');
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, bytes);
@@ -39,9 +37,8 @@ export function driveTransferOperation(options: { blobs: CheckpointBlobStore; ar
       bytes = await file.readFile();
     } finally { await file.close(); }
     if (bytes.byteLength > ARTIFACT_UPLOAD_MAX_BYTES) throw new Error(limit);
-    const sealed = await encryptArtifactBytes(bytes, scopeKey);
-    const blobHash = `sha256:${new Bun.CryptoHasher('sha256').update(sealed).digest('hex')}`;
-    await options.blobs.put(artifactObjectKey(options.accountId, blobHash), sealed);
+    const blobHash = hashBytes(bytes);
+    await options.blobs.put(artifactObjectKey(options.accountId, args.scopeId, blobHash), bytes, workspace);
     return [{ type: 'text', text: JSON.stringify({ blobHash, size: bytes.byteLength }) }];
   };
 }

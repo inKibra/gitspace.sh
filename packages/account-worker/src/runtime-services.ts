@@ -718,8 +718,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             if (result.status !== 'completed') return result;
             const text = result.content.find(item => item.type === 'text');
             if (text?.type !== 'text') throw new Error('The machine did not report the file it stored');
-            const sealed = RuntimeDriveTransferStoredSchema.parse(JSON.parse(text.text));
-            return completed(input, await artifacts.write(args.url, { sealed, mediaType: resourceMediaType(target.path) }));
+            const stored = RuntimeDriveTransferStoredSchema.parse(JSON.parse(text.text));
+            return completed(input, await artifacts.write(args.url, { stored, mediaType: resourceMediaType(target.path) }));
           }
           default: throw new Error('Artifact sharing requires an explicit human action');
         }

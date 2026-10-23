@@ -5,6 +5,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { storageMigrationStatusInputSchema } from '@gitspace/protocol/storage-migration';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { GITSPACE_SOURCE_REPOSITORY, hostedServiceRouteSchema, hostedServiceUrlKind } from '@gitspace/protocol/project-authority';
@@ -64,6 +65,12 @@ import {
   type DeviceCapability,
   type VerifiedDevice,
   runtimeSettingValueSchema,
+  dataObjectWriteSchema,
+  dataMultipartPartSchema,
+  dataMultipartCompleteSchema,
+  dataMultipartAbortSchema,
+  DATA_PUT_MAX_BYTES,
+  TENANT_OBJECT_PART_BYTES,
 } from '@gitspace/protocol';
 import {
   DEFAULT_INFERENCE_PROFILE_ID, inferenceCreateInputSchema, inferenceUpdateInputSchema,
@@ -72,6 +79,9 @@ import {
 } from '@gitspace/protocol/inference';
 import { HostedIngressRegistrationSchema, LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, executionHash, parseServiceIngressContent, type LifecycleState } from '@gitspace/protocol-environment';
 import { LiveChanges } from './live-changes.js';
+import { tenantNamespace, tenantStore, TenantObjectIntegrityError, type TenantNamespace } from './tenant-store.js';
+import { requireWorkspaceAccess } from './runtime-access.js';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { migratedRoleSettings } from './inference-role-migration.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
@@ -157,7 +167,11 @@ setBedrockProviderModule(bedrockProviderModule);
  */
 const ENROLLMENT_CLOCK_SKEW_MS = 60_000;
 export const REQUEST_MAX_BYTES = 512 * 1024;
+/** Release objects (plaintext, outside tenant storage) keep their whole-object limit. */
 const DATA_OBJECT_MAX_BYTES = 64 * 1024 * 1024;
+/** Root wrap key per version: HMAC(vault_key, label). New scope keys are wrapped under the current version. */
+const SCOPE_KEY_ROOT_VERSION = 1;
+const SCOPE_KEY_ROOT_LABELS: Record<number, string> = { 1: 'gitspace/scope-key-wrap/v1' };
 const DATA_REQUEST_HEADER_MAX_BYTES = 8 * 1024;
 const ACCESS_REFRESH_SKEW_MS = 60_000;
 const SUPPORTED_PROVIDERS = new Set<string>(workerOAuthProviderSchema.options);
@@ -229,7 +243,7 @@ type MachinePairingValue =
   | { pairingId: string; state: PairingRow['state'] }
   | { pairingId: string; state: PairingRow['state']; expiresAt: number; machine: z.infer<typeof pairingMachineSchema> | null; grant: CredentialAuthorityGrant | null; issuerChain: DeviceGrantRecord[] }
   | { state: 'pending' }
-  | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; artifactKey: string };
+  | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; apiUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant };
 const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
 
 const SignedInAccountSchema = z.object({ type: z.enum(['api_key', 'oauth']), identity: z.string().nullable(), email: z.string().nullable() });
@@ -541,6 +555,9 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         CREATE TABLE IF NOT EXISTS inference_migration (
           id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL,
           revision INTEGER NOT NULL, settings_generation INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS scope_keys (
+          scope TEXT PRIMARY KEY, wrapped BLOB NOT NULL, root_version INTEGER NOT NULL, created_at TEXT NOT NULL
         );
         INSERT OR IGNORE INTO inference_migration(id, version, revision) VALUES (1, 0, 0);
       `);
@@ -1174,8 +1191,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       id: machine.machineId, label: machine.label, state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/${encodeURIComponent(machine.machineId)}/rpc`,
       kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: signed.grant.generation, operationId: null, error: null,
     });
-    const artifactKey = await this.artifactKey(config.user_id);
-    // Retrieval is retryable for the same proof-bound key until the original
+    // Retrieval is retryable for the same proof-bound grant until the original
     // short expiry; a lost HTTP response never strands a newly enrolled CLI.
     // The pairing may have been cancelled while this poll waited on the settings and fleet objects.
     const latest = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
@@ -1185,7 +1201,6 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return { status: 'ok', value: {
       state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
       apiUrl: input.apiUrl, rootPublicKey: config.root_public_key, machineId: machine.machineId, grant: signed,
-      artifactKey,
     } };
   }
   removeManagedDevice(machineId: string): void {
@@ -2122,22 +2137,59 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return { status: 'ok', value: { credentialId: row.id, provider: credential.provider, expiresAt: credential.expires, revision: row.revision, envelope } };
   }
 
-  async artifactKey(userId: string): Promise<string> {
+  /** The 32-byte key that encrypts one storage scope's objects at rest (R2 SSE-C). Created on first use, stored only
+   * wrapped under this vault's root wrap key and bound to its scope; every caller gets the stored row's key. */
+  async scopeKey(scope: string): Promise<Uint8Array> {
+    if (!scope || scope.length > 256) throw new Error('Storage scope is invalid');
+    if (!this.scopeKeyRow(scope)) {
+      const nonce = crypto.getRandomValues(new Uint8Array(12));
+      const sealed = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: nonce, additionalData: new TextEncoder().encode(scope) },
+        await this.scopeWrapKey(SCOPE_KEY_ROOT_VERSION),
+        crypto.getRandomValues(new Uint8Array(32)),
+      );
+      const wrapped = new Uint8Array(nonce.byteLength + sealed.byteLength);
+      wrapped.set(nonce);
+      wrapped.set(new Uint8Array(sealed), nonce.byteLength);
+      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO scope_keys(scope, wrapped, root_version, created_at) VALUES (?, ?, ?, ?)', scope, wrapped.buffer, SCOPE_KEY_ROOT_VERSION, new Date().toISOString());
+    }
+    const row = this.scopeKeyRow(scope);
+    if (!row) throw new Error('Storage scope key is unavailable');
+    const wrapped = new Uint8Array(row.wrapped);
+    const key = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: wrapped.subarray(0, 12), additionalData: new TextEncoder().encode(scope) },
+      await this.scopeWrapKey(row.root_version),
+      wrapped.subarray(12),
+    );
+    return new Uint8Array(key);
+  }
+
+  /** Deleting a workspace or project forgets its scopes' keys: whatever their objects still hold is unreadable. */
+  forgetScope(scope: string): void {
+    this.ctx.storage.sql.exec('DELETE FROM scope_keys WHERE scope = ?', scope);
+  }
+
+  private scopeKeyRow(scope: string): { wrapped: ArrayBuffer; root_version: number } | undefined {
+    return this.ctx.storage.sql.exec<{ wrapped: ArrayBuffer; root_version: number }>('SELECT wrapped, root_version FROM scope_keys WHERE scope = ?', scope).toArray()[0];
+  }
+
+  /** Root wrap keys never leave this object; rotating one is a new version and a rewrap of every row. */
+  private async scopeWrapKey(version: number): Promise<CryptoKey> {
+    const config = this.config();
+    const label = SCOPE_KEY_ROOT_LABELS[version];
+    if (!config || !label) throw new Error('Account credential vault is unavailable');
+    const root = await crypto.subtle.importKey('raw', ownedBuffer(credentialProtocolBase64.decode(config.vault_key)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const material = await crypto.subtle.sign('HMAC', root, new TextEncoder().encode(label));
+    return crypto.subtle.importKey('raw', material, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  }
+
+  /** The tenant key every object was sealed under before storage moved to R2 SSE-C. Only the storage migration reads it;
+   * it is deleted with the migration. */
+  async legacyArtifactKey(userId: string): Promise<Uint8Array> {
     const config = this.config();
     if (!config || config.user_id !== userId) throw new Error('Account credential vault is unavailable');
-    const key = await crypto.subtle.importKey(
-      'raw',
-      ownedBuffer(credentialProtocolBase64.decode(config.vault_key)),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign'],
-    );
-    const derived = await crypto.subtle.sign(
-      'HMAC',
-      key,
-      new TextEncoder().encode(`gitspace/artifact-encryption/v1\n${userId}`),
-    );
-    return credentialProtocolBase64.encode(new Uint8Array(derived));
+    const key = await crypto.subtle.importKey('raw', ownedBuffer(credentialProtocolBase64.decode(config.vault_key)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`gitspace/artifact-encryption/v1\n${userId}`)));
   }
 
   private config(): { user_id: string; root_public_key: string; vault_key: string } | undefined {
@@ -2525,73 +2577,190 @@ function dataObjectKey(userId: string, key: unknown): string {
   return `users/${userId}/${key}`;
 }
 
-function expectedDataOperation(method: string): 'data.head' | 'data.get' | 'data.put' {
-  if (method === 'HEAD') return 'data.head';
-  if (method === 'GET') return 'data.get';
-  if (method === 'PUT') return 'data.put';
-  throw new Error('Application object method is invalid');
+/** Which signed operations each method of the data endpoint carries. */
+const DATA_OPERATIONS: Record<string, readonly string[]> = {
+  HEAD: ['data.head'],
+  GET: ['data.get'],
+  PUT: ['data.put', 'data.multipart.part'],
+  POST: ['data.multipart.create', 'data.multipart.complete'],
+  DELETE: ['data.multipart.abort'],
+};
+/** Body uploads may arrive long after signing: edges buffer whole bodies before the Worker runs. */
+const DATA_UPLOAD_OPERATIONS: Record<string, true> = { 'data.put': true, 'data.multipart.part': true };
+const DATA_WRITE_OPERATIONS: Record<string, true> = {
+  'data.put': true, 'data.multipart.create': true, 'data.multipart.part': true, 'data.multipart.complete': true, 'data.multipart.abort': true,
+};
+
+function dataError(status: number, code: string, message: string, details: Record<string, unknown> = {}): Response {
+  return Response.json({ status: 'error', error: { code, message, ...details } }, { status });
+}
+
+/** An upload's body, when it has one whose Content-Length is its signed size, at most `maxBytes`. */
+function dataUploadBody(request: Request, size: number, maxBytes: number): ReadableStream<Uint8Array> | Response {
+  if (size > maxBytes) return dataError(413, 'OBJECT_TOO_LARGE', `Application object size ${size} bytes exceeds the maximum ${maxBytes} bytes`, { size, maxBytes });
+  const contentLength = request.headers.get('content-length');
+  const declared = contentLength === null ? null : Number(contentLength);
+  if (!Number.isSafeInteger(declared) || declared !== size || !request.body) {
+    return dataError(400, 'OBJECT_BODY_LENGTH_MISMATCH', `Application object body requires Content-Length matching the signed size of ${size} bytes and a request body`, {
+      size, declaredSize: Number.isSafeInteger(declared) && declared !== null && declared >= 0 ? declared : null,
+    });
+  }
+  return request.body;
 }
 
 async function dataObjectResponse(request: Request, env: Env, keyFromPath: string, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
   const signed = decodeSignedHeader(request.headers.get('x-gitspace-control'));
   recordSyncRequestParsed(diagnostics, signed);
-  const operation = expectedDataOperation(request.method);
-  if (signed.operation !== operation || signed.payload.key !== keyFromPath) throw new Error('Signed data request does not match the request');
+  if (!DATA_OPERATIONS[request.method]?.includes(signed.operation) || signed.payload.key !== keyFromPath) throw new Error('Signed data request does not match the request');
+  const objectKey = dataObjectKey(signed.userId, keyFromPath);
   if (diagnostics) diagnostics.stage = 'authorize';
-  const authorized = await authorizeControl(env, signed, 'storage.access', operation === 'data.put' ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
+  const authorized = await authorizeControl(env, signed, 'storage.access', DATA_UPLOAD_OPERATIONS[signed.operation] ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
   if (authorized.status === 'error') return accountAccessResponse(authorized)!;
   if (diagnostics) diagnostics.stage = 'validate';
-  const objectKey = dataObjectKey(signed.userId, signed.payload.key);
-  if (keyFromPath.startsWith('lfs/')) {
-    const lfs = /^lfs\/projects\/([^/\\]+)\/objects\/([a-f0-9]{64})(?:\.chunks\/[a-f0-9]{64})?$/u.exec(keyFromPath);
-    if (!lfs || signed.userId !== env.ACCOUNT_ID) throw new Error('LFS object scope is invalid');
-    projectStorageRoot(lfs[1]!);
-    const authority = env.PROJECT_AUTHORITY.getByName(`${signed.userId}:${lfs[1]}`);
+  if (keyFromPath.startsWith('releases/') || keyFromPath.startsWith('distribution/v1/releases/') || /^objects\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
+    return releaseDataObjectResponse(request, env, signed, keyFromPath, objectKey, diagnostics);
+  }
+  const namespace = tenantNamespace(keyFromPath);
+  if (!namespace || signed.userId !== env.ACCOUNT_ID) return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'The object name is outside every storage namespace');
+  const denied = await dataScopeDenied(env, signed, namespace);
+  if (denied) return denied;
+  try {
+    return await tenantDataObjectResponse(request, env, signed, keyFromPath, namespace.scope, diagnostics);
+  } catch (error) {
+    if (error instanceof TenantObjectIntegrityError) return dataError(409, 'OBJECT_INTEGRITY', error.message);
+    throw error;
+  }
+}
+
+/** Whether this machine may touch the scope a name's namespace maps to. LFS objects belong to a live project and are
+ * written only under a durable publication pin; workspace objects need this machine's live checkout of the workspace.
+ * A drive request names the workspace its machine is attached to: that workspace's own drive is writable, and it reads
+ * the drives its sessions read (a worktree its project's base drive, the base its worktrees' drives). */
+async function dataScopeDenied(env: Env, signed: SignedControlRequest, namespace: TenantNamespace): Promise<Response | null> {
+  const write = DATA_WRITE_OPERATIONS[signed.operation] === true;
+  if (namespace.kind === 'lfs') {
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${namespace.projectId}`);
     const project = await authority.getProject();
-    if (!project || project.id !== lfs[1] || project.lifecycle === 'deleting') return new Response(null, { status: 403 });
-    if (operation === 'data.put' && !await authority.lfsObjectAccess(lfs[2]!)) {
+    if (!project || project.id !== namespace.projectId || project.lifecycle === 'deleting') return dataError(403, 'DATA_SCOPE_DENIED', 'LFS project is unavailable');
+    const publishes = signed.operation === 'data.put' || signed.operation === 'data.multipart.create';
+    if (publishes && signed.payload.hash !== `sha256:${namespace.oid}`) return dataError(400, 'INVALID_OBJECT_METADATA', 'An LFS object is named by the SHA-256 of its bytes');
+    if ((publishes || signed.operation === 'data.multipart.complete') && !await authority.lfsObjectAccess(namespace.oid)) {
       return Response.json(publicError('LFS_PUBLICATION_REQUIRED', 'LFS upload requires a durable publication pin'), { status: 409 });
     }
+    return null;
   }
+  const workspace = RuntimeIdentitySchema.safeParse(namespace.kind === 'space' ? { projectId: namespace.projectId, workspaceId: namespace.spaceId } : signed.payload).data;
+  if (!workspace) return dataError(400, 'INVALID_OBJECT_METADATA', 'Drive objects name the workspace the machine is attached to');
+  try {
+    const access = await requireWorkspaceAccess(env, env.ACCOUNT_ID, workspace, write);
+    const attachments = await access.authority.runtimeAttachmentRecords(workspace);
+    if (!attachments.some(item => item.machineId === signed.machineId && item.state !== 'detached')) return dataError(403, 'DATA_SCOPE_DENIED', 'This machine has no checkout of the workspace');
+  } catch {
+    return dataError(403, 'DATA_SCOPE_DENIED', 'The workspace is unavailable to this machine');
+  }
+  const { projectId, workspaceId }: { projectId: string; workspaceId: string } = workspace;
+  if (namespace.kind === 'space' || namespace.workspaceId === workspaceId) return null;
+  if (!write && namespace.workspaceId === projectId) return null;
+  if (!write && workspaceId === projectId) {
+    const definition = await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).getWorkspace(namespace.workspaceId);
+    if (definition?.projectId === projectId) return null;
+  }
+  return dataError(403, 'DATA_SCOPE_DENIED', 'This workspace cannot reach that drive');
+}
+
+/** Tenant objects carry plaintext both ways; the store encrypts them at rest under `scope`'s key and verifies whole reads. */
+async function tenantDataObjectResponse(request: Request, env: Env, signed: SignedControlRequest, name: string, scope: string, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
+  const store = tenantStore(env);
+  const noStore = { 'cache-control': 'private, no-store' };
+  switch (signed.operation) {
+    case 'data.head':
+    case 'data.get': {
+      if (diagnostics) diagnostics.stage = signed.operation === 'data.head' ? 'r2.head' : 'r2.get';
+      const object = signed.operation === 'data.get' ? await store.get(name, scope) : null;
+      const metadata = signed.operation === 'data.get' ? object : await store.head(name, scope);
+      if (!metadata) return new Response(null, { status: 404 });
+      if (signed.payload.hash !== undefined && signed.payload.hash !== metadata.sha256) {
+        await object?.body.cancel();
+        return dataError(409, 'HASH_MISMATCH', 'Application object hash does not match');
+      }
+      const headers = new Headers({
+        ...noStore, 'content-length': String(metadata.size), 'content-type': 'application/octet-stream',
+        'x-gitspace-sha256': metadata.sha256, 'x-gitspace-size': String(metadata.size),
+      });
+      return new Response(object?.body ?? null, { headers });
+    }
+    case 'data.put': {
+      const declared = dataObjectWriteSchema.safeParse(signed.payload);
+      if (!declared.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'Application object metadata requires a SHA-256 hash and a non-negative safe integer size in bytes');
+      const { hash, size } = declared.data;
+      const body = dataUploadBody(request, size, DATA_PUT_MAX_BYTES);
+      if (body instanceof Response) return body;
+      if (diagnostics) diagnostics.stage = 'r2.head';
+      const existing = await store.head(name, scope);
+      if (existing) {
+        await body.cancel();
+        return existing.size === size && existing.sha256 === hash
+          ? new Response(null, { status: 204 })
+          : dataError(409, 'OBJECT_CONFLICT', 'Application object key already has different content');
+      }
+      if (diagnostics) diagnostics.stage = 'r2.put';
+      if (!await store.put(name, scope, { stream: body, size, sha256: hash }, { onlyIfAbsent: true })) {
+        if (diagnostics) diagnostics.stage = 'r2.head';
+        const raced = await store.head(name, scope);
+        if (raced?.size !== size || raced.sha256 !== hash) return dataError(409, 'OBJECT_CONFLICT', 'Application object publication raced with different content');
+      }
+      return new Response(null, { status: 201 });
+    }
+    case 'data.multipart.create': {
+      const declared = dataObjectWriteSchema.safeParse(signed.payload);
+      if (!declared.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'A multipart object declares its SHA-256 hash and size in bytes');
+      const uploadId = await store.createMultipart(name, scope, { sha256: declared.data.hash, size: declared.data.size });
+      return Response.json({ status: 'ok', value: { uploadId, partBytes: TENANT_OBJECT_PART_BYTES } }, { headers: noStore });
+    }
+    case 'data.multipart.part': {
+      const part = dataMultipartPartSchema.safeParse(signed.payload);
+      if (!part.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'A part names its upload, number, SHA-256 hash and size in bytes');
+      const body = dataUploadBody(request, part.data.size, TENANT_OBJECT_PART_BYTES);
+      if (body instanceof Response) return body;
+      const uploaded = await store.uploadPart(name, scope, part.data.uploadId, part.data.partNumber, { stream: body, size: part.data.size, sha256: part.data.hash });
+      return Response.json({ status: 'ok', value: { partNumber: uploaded.partNumber, etag: uploaded.etag } }, { headers: noStore });
+    }
+    case 'data.multipart.complete': {
+      const completion = dataMultipartCompleteSchema.safeParse(signed.payload);
+      if (!completion.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'Completion names its upload and parts');
+      const completed = await store.completeMultipart(name, scope, completion.data.uploadId, completion.data.parts);
+      return Response.json({ status: 'ok', value: { hash: completed.sha256, size: completed.size } }, { status: 201, headers: noStore });
+    }
+    case 'data.multipart.abort': {
+      const abort = dataMultipartAbortSchema.safeParse(signed.payload);
+      if (!abort.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'Abort names its upload');
+      await store.abortMultipart(name, scope, abort.data.uploadId);
+      return new Response(null, { status: 204 });
+    }
+    default: throw new Error('Application object operation is invalid');
+  }
+}
+
+/** Release objects machines publish and read in plain text (release trees, executable chunks, platform fallbacks): not
+ * tenant storage, so neither scoped nor encrypted at rest, and written whole. */
+async function releaseDataObjectResponse(request: Request, env: Env, signed: SignedControlRequest, keyFromPath: string, objectKey: string, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
+  const operation = signed.operation;
   if (operation === 'data.put') {
-    const hash = signed.payload.hash;
-    const size = signed.payload.size;
-    if (typeof hash !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(hash) || typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0) {
-      return Response.json({ status: 'error', error: { code: 'INVALID_OBJECT_METADATA', message: 'Application object metadata requires a SHA-256 hash and a non-negative safe integer size in bytes' } }, { status: 400 });
-    }
-    if (size > DATA_OBJECT_MAX_BYTES) {
-      return Response.json({
-        status: 'error',
-        error: {
-          code: 'OBJECT_TOO_LARGE',
-          message: `Application object size ${size} bytes exceeds the maximum ${DATA_OBJECT_MAX_BYTES} bytes`,
-          size,
-          maxBytes: DATA_OBJECT_MAX_BYTES,
-        },
-      }, { status: 413 });
-    }
-    const contentLength = request.headers.get('content-length');
-    const declared = contentLength === null ? null : Number(contentLength);
-    if (!Number.isSafeInteger(declared) || declared !== size || !request.body) {
-      return Response.json({
-        status: 'error',
-        error: {
-          code: 'OBJECT_BODY_LENGTH_MISMATCH',
-          message: `Application object body requires Content-Length matching the signed size of ${size} bytes and a request body`,
-          size,
-          declaredSize: Number.isSafeInteger(declared) && declared !== null && declared >= 0 ? declared : null,
-        },
-      }, { status: 400 });
-    }
+    const declared = dataObjectWriteSchema.safeParse(signed.payload);
+    if (!declared.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'Application object metadata requires a SHA-256 hash and a non-negative safe integer size in bytes');
+    const { hash, size } = declared.data;
+    const body = dataUploadBody(request, size, DATA_OBJECT_MAX_BYTES);
+    if (body instanceof Response) return body;
     if (diagnostics) diagnostics.stage = 'r2.head';
     const existing = await env.DATA.head(objectKey);
     if (existing) {
+      await body.cancel();
       return existing.size === size && existing.customMetadata?.sha256 === hash
         ? new Response(null, { status: 204 })
-        : Response.json({ status: 'error', error: { code: 'OBJECT_CONFLICT', message: 'Application object key already has different content' } }, { status: 409 });
+        : dataError(409, 'OBJECT_CONFLICT', 'Application object key already has different content');
     }
     if (diagnostics) diagnostics.stage = 'r2.put';
-    const stored = await env.DATA.put(objectKey, request.body, {
+    const stored = await env.DATA.put(objectKey, body, {
       onlyIf: { etagDoesNotMatch: '*' },
       customMetadata: { sha256: hash },
       sha256: hash.slice('sha256:'.length),
@@ -2599,12 +2768,11 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
     if (!stored) {
       if (diagnostics) diagnostics.stage = 'r2.head';
       const raced = await env.DATA.head(objectKey);
-      if (!raced || raced.size !== size || raced.customMetadata?.sha256 !== hash) {
-        return Response.json({ status: 'error', error: { code: 'OBJECT_CONFLICT', message: 'Application object publication raced with different content' } }, { status: 409 });
-      }
+      if (!raced || raced.size !== size || raced.customMetadata?.sha256 !== hash) return dataError(409, 'OBJECT_CONFLICT', 'Application object publication raced with different content');
     }
     return new Response(null, { status: 201 });
   }
+  if (operation !== 'data.head' && operation !== 'data.get') return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Release objects are written whole');
   if (diagnostics) diagnostics.stage = operation === 'data.head' ? 'r2.head' : 'r2.get';
   const object = operation === 'data.head' ? await env.DATA.head(objectKey) : await env.DATA.get(objectKey);
   if (!object) {
@@ -2617,7 +2785,7 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
       const expectedHash = signed.payload.hash;
       if (response.ok && expectedHash !== undefined && expectedHash !== response.headers.get('x-gitspace-sha256')) {
         await response.body?.cancel();
-        return Response.json({ status: 'error', error: { code: 'HASH_MISMATCH', message: 'Machine release object hash does not match' } }, { status: 409 });
+        return dataError(409, 'HASH_MISMATCH', 'Machine release object hash does not match');
       }
       if (operation === 'data.head') {
         await response.body?.cancel();
@@ -2627,12 +2795,11 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
     }
     return new Response(null, { status: 404 });
   }
-  // An object stored with its hash is served only under that hash. Drive files the worker stored before it recorded
-  // their hash carry none: the caller checks the bytes against the hash it named (every machine reader does).
+  // An object stored with its hash is served only under that hash.
   const expectedHash = signed.payload.hash;
   const recordedHash = object.customMetadata?.sha256;
   if (expectedHash !== undefined && recordedHash !== undefined && expectedHash !== recordedHash) {
-    return Response.json({ status: 'error', error: { code: 'HASH_MISMATCH', message: 'Application object hash does not match' } }, { status: 409 });
+    return dataError(409, 'HASH_MISMATCH', 'Application object hash does not match');
   }
   const headers = new Headers({
     'cache-control': 'private, no-store',
@@ -2640,8 +2807,7 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
     'content-type': 'application/octet-stream',
     etag: object.httpEtag,
   });
-  const storedHash = object.customMetadata?.sha256;
-  if (storedHash) headers.set('x-gitspace-sha256', storedHash);
+  if (recordedHash) headers.set('x-gitspace-sha256', recordedHash);
   if (operation === 'data.head') return new Response(null, { headers });
   if (!('body' in object) || !(object.body instanceof ReadableStream)) throw new Error('Application object body is missing');
   return new Response(object.body, { headers });
@@ -2888,7 +3054,6 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
   const machineId = `sandbox-${crypto.randomUUID().slice(0, 8)}`;
   const accountSettings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get(machineId);
   if (!accountSettings.profile.handle) throw new Error('Account tenant is not provisioned');
-  const artifactKey = await vault.artifactKey(userId);
   const signingPrivateKey = crypto.getRandomValues(new Uint8Array(32));
   const exchangePrivateKey = crypto.getRandomValues(new Uint8Array(32));
   const device = {
@@ -2918,7 +3083,6 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
       // Every machine executes through the tenant relay, exactly like paired computers.
       GITSPACE_RELAY_URL: env.RELAY_URL,
       GITSPACE_MACHINE_GRANT: JSON.stringify(machineGrant),
-      GITSPACE_ARTIFACT_KEY: artifactKey,
       GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
       GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
       GITSPACE_SERVICE_NAMESPACE: accountSettings.profile.handle,
@@ -3462,7 +3626,6 @@ const worker = {
             || body.operation.startsWith('devices.')
             || body.operation.startsWith('account.issues.')
             || body.operation.startsWith('deploy.')
-            || body.operation === 'artifacts.key.get'
             || body.operation.startsWith('lfs.')
             || body.operation.startsWith('project.environment.')
             || body.operation.startsWith('project.mcp.') ? 'space.control'
@@ -3499,10 +3662,30 @@ const worker = {
           await authority.lfsReleasePublication(publicationId);
           return Response.json({ status: 'ok', value: null }, { headers: { 'cache-control': 'private, no-store' } });
         }
-        if (body.operation === 'artifacts.key.get') {
-          if (Object.keys(body.payload).length !== 0) throw new Error('Artifact key request must have an empty payload');
-          const key = await credentialVault(env, body.userId).artifactKey(body.userId);
-          return Response.json({ status: 'ok', value: { key } }, { headers: { 'cache-control': 'private, no-store' } });
+        if (body.operation.startsWith('storage.migration.')) {
+          if (body.userId !== env.ACCOUNT_ID) throw new Error('Storage migration account identity mismatch');
+          const migration = env.STORAGE_MIGRATION.getByName(body.userId);
+          let value: unknown;
+          switch (body.operation) {
+            case 'storage.migration.status':
+              value = storageMigrationStatusInputSchema.parse(body.payload).dryRun ? { dryRun: true, inventory: await migration.inventory() } : await migration.status();
+              break;
+            case 'storage.migration.start':
+              z.object({}).strict().parse(body.payload);
+              value = await migration.start();
+              break;
+            case 'storage.migration.verify':
+              z.object({}).strict().parse(body.payload);
+              value = await migration.verify();
+              break;
+            case 'storage.migration.purge':
+              z.object({}).strict().parse(body.payload);
+              value = await migration.purge();
+              break;
+            default:
+              throw new Error(`Unknown storage migration operation ${body.operation}`);
+          }
+          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
         if (body.operation.startsWith('deploy.')) {
           const releases = tenantReleases(env, body.userId);

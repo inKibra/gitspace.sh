@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { posix } from 'node:path';
 import {
-  artifactManifestSchema, artifactObjectKey, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes,
+  artifactManifestSchema, artifactObjectKey, credentialProtocolBase64,
   type ArtifactCopyRecord, type ArtifactManifest, type ArtifactShareRecord, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
   type InspectorView, type InspectorIdentity,
 } from '@gitspace/protocol';
 import type { TranscriptEvent } from '@gitspace/protocol/transcript';
 import { createResourcePreview, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
-import type { CredentialVaultDO } from './application.js';
+import { streamBytes } from '@gitspace/protocol-workspace';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
@@ -15,7 +15,7 @@ import type { SpaceContextDO } from './space-context.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
 import { applyTextEdits, RuntimeSnapshotSchema, RuntimeSessionResultSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
-import { artifactObjectSize, readArtifactObject, readArtifactManifestObject } from './artifact-object-reader.js';
+import { tenantStore, type TenantStore } from './tenant-store.js';
 import { mintArtifactFileUrl } from './artifact-file-url.js';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES } from '@gitspace/protocol/rpc-contract';
 
@@ -27,8 +27,8 @@ export class InspectorGenerationConflict extends Error {
 }
 
 type ArtifactChange = { bytes: Uint8Array; mediaType?: string | null } | { edits: readonly { oldText: string; newText: string }[] }
-  /** An object a machine already sealed under the scope's key and stored. */
-  | { sealed: { blobHash: string; size: number }; mediaType: string | null };
+  /** An object a machine already stored in the scope through the data endpoint, named by its plaintext digest. */
+  | { stored: { blobHash: string; size: number }; mediaType: string | null };
 const artifactUploadStateSchema = z.object({
   spaceId: z.string(), generation: z.number().int(), path: z.string(), size: z.number().int().positive(), mediaType: z.string().nullable(),
   received: z.number().int().nonnegative(), last: z.object({ offset: z.number().int().nonnegative(), sha256: z.string() }).nullable(),
@@ -75,36 +75,26 @@ async function digest(bytes: Uint8Array): Promise<`sha256:${string}`> {
   return `sha256:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
-async function boundedArtifactBytes(env: Env, userId: string, hash: string, key: Uint8Array, expectedSize: number | undefined, limit: number): Promise<Uint8Array<ArrayBuffer>> {
-  if (expectedSize !== undefined && expectedSize > limit) throw new Error(`Resource reads are limited to ${limit / 1024 / 1024} MiB`);
-  const parts: Uint8Array<ArrayBuffer>[] = [];
-  let size = 0;
-  for await (const part of await readArtifactObject(env, userId, hash, key, expectedSize)) {
-    size += part.byteLength;
-    if (size > limit) throw new Error(`Resource reads are limited to ${limit / 1024 / 1024} MiB`);
-    parts.push(part);
-  }
-  if (parts.length === 1) return parts[0]!;
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) { bytes.set(part, offset); offset += part.byteLength; }
-  return bytes;
-}
-
 /** A drive URL with each path segment encoded, so names with ':' or '%' read back as written. */
 function driveUrl(mount: string, path: string): string {
   return `drive://${mount}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-/** Reads the same encrypted, content-addressed objects as CloudArtifactObjectStore. */
+/** Drive objects: per-scope content-addressed names in the tenant store, encrypted at rest under the scope's key. */
 export class InspectorCloudArtifacts {
-  private keyRequest: Promise<Uint8Array> | undefined;
-  constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {}
+  private readonly store: TenantStore;
+  constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {
+    this.store = tenantStore(env);
+  }
 
-  /** Fetched on first use: upload staging never needs the key, and an unawaited request outlives the call. */
-  private get key(): Promise<Uint8Array> {
-    this.keyRequest ??= (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.userId).artifactKey(this.userId).then(credentialProtocolBase64.decode);
-    return this.keyRequest;
+  /** One whole drive object of at most `limit` bytes, verified against its recorded digest and the size `expectedSize`
+   * a manifest names. */
+  private async readObject(scopeId: string, hash: string, expectedSize: number | undefined, limit: number): Promise<Uint8Array<ArrayBuffer>> {
+    if (expectedSize !== undefined && expectedSize > limit) throw new Error(`Resource reads are limited to ${limit / 1024 / 1024} MiB`);
+    const bytes = await this.store.bytes(artifactObjectKey(this.userId, scopeId, hash), scopeId, limit);
+    if (!bytes) throw new Error('Artifact object is unavailable');
+    if (expectedSize !== undefined && bytes.byteLength !== expectedSize) throw new Error('Artifact size mismatch');
+    return bytes;
   }
 
   private async entries(scope: CanonicalArtifactScope): Promise<ArtifactManifest['entries']> {
@@ -112,7 +102,7 @@ export class InspectorCloudArtifacts {
       if (scope.generation !== 0) throw new Error('Committed artifact scope is missing its manifest hash');
       return [];
     }
-    const bytes = await readArtifactManifestObject(this.env, this.userId, scope.manifestHash, await deriveArtifactScopeKey(await this.key, scope.id));
+    const bytes = await this.readObject(scope.id, scope.manifestHash, undefined, 64 * 1024 * 1024);
     const manifest = artifactManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
     if (manifest.scopeId !== scope.id || manifest.generation !== scope.generation) throw new Error('Artifact manifest does not match its canonical scope and generation');
     if (new Set(manifest.entries.map((entry) => entry.path)).size !== manifest.entries.length) throw new Error('Artifact manifest contains duplicate paths');
@@ -154,18 +144,16 @@ export class InspectorCloudArtifacts {
     };
   }
 
-  /** Encrypts and stores one content-addressed object under the scope key. */
-  private async seal(bytes: Uint8Array, scopeKey: Uint8Array): Promise<`sha256:${string}`> {
-    const sealed = await encryptArtifactBytes(bytes, scopeKey);
-    const hash = await digest(sealed);
-    // Recorded as machines' uploads are, so the storage endpoint can check the hash a machine reader names.
-    await this.env.DATA.put(`users/${this.userId}/${artifactObjectKey(this.userId, hash)}`, sealed, { customMetadata: { sha256: hash }, sha256: hash.slice('sha256:'.length) });
+  /** Stores one object in the scope, named by its plaintext digest. */
+  private async persist(bytes: Uint8Array, scopeId: string): Promise<`sha256:${string}`> {
+    const hash = await digest(bytes);
+    await this.store.put(artifactObjectKey(this.userId, scopeId, hash), scopeId, bytes);
     return hash;
   }
 
-  private async sealManifest(scope: CanonicalArtifactScope, generation: number, entries: Iterable<ArtifactManifest['entries'][number]>, scopeKey: Uint8Array) {
+  private async persistManifest(scope: CanonicalArtifactScope, generation: number, entries: Iterable<ArtifactManifest['entries'][number]>) {
     const manifest: ArtifactManifest = { version: 1, scopeId: scope.id, generation, entries: [...entries].sort((left, right) => left.path.localeCompare(right.path)) };
-    return this.seal(new TextEncoder().encode(JSON.stringify(manifest)), scopeKey);
+    return this.persist(new TextEncoder().encode(JSON.stringify(manifest)), scope.id);
   }
 
   async list(): Promise<InspectorView['artifacts']> {
@@ -201,14 +189,15 @@ export class InspectorCloudArtifacts {
   /** A drive file's stored bytes, at most 16 MiB, and its media type. */
   async bytes(url: string, hash?: string | null): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
     const { scope, entry, mediaType } = await this.version(url, hash);
-    const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, scope.id), entry.size, 16 * 1024 * 1024);
+    const bytes = await this.readObject(scope.id, entry.blobHash, entry.size, 16 * 1024 * 1024);
     return { bytes, mediaType };
   }
 
   /** A short-lived URL serving a drive file's bytes over HTTP, for media elements and downloads. */
   async file(url: string, hash?: string | null) {
     const { scope, path, entry, mediaType } = await this.version(url, hash);
-    const size = entry.size ?? await artifactObjectSize(this.env, this.userId, entry.blobHash, await deriveArtifactScopeKey(await this.key, scope.id));
+    const size = entry.size ?? (await this.store.head(artifactObjectKey(this.userId, scope.id, entry.blobHash), scope.id))?.size;
+    if (size === undefined) throw new Error('Artifact object is unavailable');
     const minted = await mintArtifactFileUrl(this.env, { scopeId: scope.id, hash: entry.blobHash, size, mediaType, name: (path.split('/').at(-1) || 'file').slice(0, 255) });
     return { ...minted, size, mediaType };
   }
@@ -261,13 +250,12 @@ export class InspectorCloudArtifacts {
       return { entry, target };
     });
     if (selected.reduce((total, { entry }) => total + entry.size, 0) > 32 * 1024 * 1024) throw new Error('Copy batches are limited to 32 MiB');
-    const [sourceKey, destinationKey] = await Promise.all([deriveArtifactScopeKey(await this.key, source.id), deriveArtifactScopeKey(await this.key, destination.id)]);
     const generation = destination.generation + 1;
     const createdAt = new Date().toISOString();
     const copies: ArtifactCopyRecord[] = [];
     for (const { entry, target } of selected) {
-      const bytes = await boundedArtifactBytes(this.env, this.userId, entry.blobHash, sourceKey, entry.size, 32 * 1024 * 1024);
-      const hash = await this.seal(bytes, destinationKey);
+      const bytes = await this.readObject(source.id, entry.blobHash, entry.size, 32 * 1024 * 1024);
+      const hash = await this.persist(bytes, destination.id);
       destinationByPath.set(target, { path: target, blobHash: hash, size: bytes.byteLength, mediaType: entry.mediaType });
       copies.push({
         id: crypto.randomUUID(), sourceScopeId: source.id, sourceWorkspaceId: source.workspaceId,
@@ -275,7 +263,7 @@ export class InspectorCloudArtifacts {
         destinationScopeId: destination.id, destinationPath: target, destinationHash: hash, destinationGeneration: generation, createdAt,
       });
     }
-    const manifestHash = await this.sealManifest(destination, generation, destinationByPath.values(), destinationKey);
+    const manifestHash = await this.persistManifest(destination, generation, destinationByPath.values());
     await this.source.authority.commitArtifactCopies({ id: destination.id, workspaceId: destination.workspaceId, generation, manifestHash, expectedGeneration: destination.generation }, copies);
     return this.catalog();
   }
@@ -293,7 +281,7 @@ export class InspectorCloudArtifacts {
     return this.put(this.writablePath(url), change);
   }
 
-  /** Where a machine seals a file it publishes to `url`: the path, and the writable scope whose key encrypts it. */
+  /** Where a machine stores a file it publishes to `url`: the path, and the writable scope it is stored in. */
   async machineTarget(url: string): Promise<{ scopeId: string; path: string }> {
     const path = this.writablePath(url);
     return { scopeId: this.scopeOf(await this.source.authority.listArtifactScopes(), this.writable().spaceId).id, path };
@@ -315,19 +303,17 @@ export class InspectorCloudArtifacts {
   private async put(path: string, change: ArtifactChange): Promise<InspectorView['artifacts'][number]> {
     const { mount, spaceId } = this.writable();
     const scope = this.scopeOf(await this.source.authority.listArtifactScopes(), spaceId);
-    const scopeKey = await deriveArtifactScopeKey(await this.key, scope.id);
     const entries = new Map((await this.entries(scope)).map((entry) => [entry.path, entry]));
     const conflict = [...entries.keys()].find((other) => other.startsWith(`${path}/`) || path.startsWith(`${other}/`));
     if (conflict) throw new Error(`${path} conflicts with artifact ${conflict}`);
     const current = entries.get(path);
     let entry: ArtifactManifest['entries'][number];
-    if ('sealed' in change) {
-      if (change.sealed.size > ARTIFACT_UPLOAD_MAX_BYTES) throw new Error(`Drive files are limited to ${ARTIFACT_UPLOAD_MAX_BYTES / 1024 / 1024} MiB`);
-      // Sealed elsewhere: the manifest names it only once it opens under this scope's key at its stated size.
-      for await (const _part of await readArtifactObject(this.env, this.userId, change.sealed.blobHash, scopeKey, change.sealed.size)) {
-        // Exhaust the authenticated stream without retaining file contents.
-      }
-      entry = { path, blobHash: change.sealed.blobHash, size: change.sealed.size, mediaType: change.mediaType };
+    if ('stored' in change) {
+      if (change.stored.size > ARTIFACT_UPLOAD_MAX_BYTES) throw new Error(`Drive files are limited to ${ARTIFACT_UPLOAD_MAX_BYTES / 1024 / 1024} MiB`);
+      // Stored by a machine: the manifest names it only once this scope holds it with the stated digest and size.
+      const stored = await this.store.head(artifactObjectKey(this.userId, scope.id, change.stored.blobHash), scope.id);
+      if (stored?.sha256 !== change.stored.blobHash || stored.size !== change.stored.size) throw new Error('The stored drive file does not match its digest and size');
+      entry = { path, blobHash: change.stored.blobHash, size: change.stored.size, mediaType: change.mediaType };
     } else {
       let bytes: Uint8Array;
       let mediaType = current?.mediaType ?? null;
@@ -336,35 +322,40 @@ export class InspectorCloudArtifacts {
         if (change.mediaType !== undefined) mediaType = change.mediaType;
       } else {
         if (!current) throw new Error('Artifact does not exist');
-        const original = new TextDecoder('utf-8', { fatal: true }).decode(await boundedArtifactBytes(this.env, this.userId, current.blobHash, scopeKey, current.size, 16 * 1024 * 1024));
+        const original = new TextDecoder('utf-8', { fatal: true }).decode(await this.readObject(scope.id, current.blobHash, current.size, 16 * 1024 * 1024));
         bytes = new TextEncoder().encode(applyTextEdits(original, change.edits));
       }
-      entry = { path, blobHash: await this.seal(bytes, scopeKey), size: bytes.byteLength, mediaType };
+      entry = { path, blobHash: await this.persist(bytes, scope.id), size: bytes.byteLength, mediaType };
     }
     const view = { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType: entry.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
     // A replayed publication of the same object is already committed.
     if (current?.blobHash === entry.blobHash && current.mediaType === entry.mediaType) return view;
     entries.set(path, entry);
     const generation = scope.generation + 1;
-    const manifestHash = await this.sealManifest(scope, generation, entries.values(), scopeKey);
+    const manifestHash = await this.persistManifest(scope, generation, entries.values());
     await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
     return view;
   }
 
-  /** Staged upload objects live under the account prefix until commit or abort removes them. */
+  /** Staged upload objects live under the account prefix until commit or abort removes them, encrypted under the
+   * session's writable scope. */
   private uploadKey(uploadId: string, part: string): string {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(uploadId)) throw new Error('Upload does not exist');
     return `${this.uploadsPrefix()}${uploadId}/${part}`;
   }
 
   private uploadsPrefix(): string {
-    return `users/${this.userId}/accounts/${Buffer.from(this.userId).toString('base64url')}/artifact-uploads/`;
+    return `accounts/${Buffer.from(this.userId).toString('base64url')}/artifact-uploads/`;
+  }
+
+  private get stagingScope(): string {
+    return `space:${this.writable().spaceId}`;
   }
 
   private async uploadState(uploadId: string): Promise<ArtifactUploadState | null> {
-    const object = await this.env.DATA.get(this.uploadKey(uploadId, 'state'));
-    if (!object) return null;
-    const state = artifactUploadStateSchema.parse(await object.json());
+    const bytes = await this.store.bytes(this.uploadKey(uploadId, 'state'), this.stagingScope, 64 * 1024);
+    if (!bytes) return null;
+    const state = artifactUploadStateSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
     if (state.spaceId !== this.source.identity.spaceId || state.generation !== (this.source.placement?.generation ?? 0)) throw new Error('This upload belongs to another workspace');
     return state;
   }
@@ -382,23 +373,23 @@ export class InspectorCloudArtifacts {
     await this.deleteAbandonedUploads();
     const uploadId = crypto.randomUUID();
     const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation: this.source.placement?.generation ?? 0, path: `uploads/${name}`, size, mediaType, received: 0, last: null };
-    await this.env.DATA.put(this.uploadKey(uploadId, 'state'), JSON.stringify(state));
+    await this.store.put(this.uploadKey(uploadId, 'state'), this.stagingScope, new TextEncoder().encode(JSON.stringify(state)));
     return { uploadId, url: driveUrl(this.writable().mount, state.path), chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
   }
 
   /** Staged uploads untouched for a day were abandoned (a closed tab, a failed send); a new upload removes them. */
   private async deleteAbandonedUploads(): Promise<void> {
     const prefix = this.uploadsPrefix();
-    const listed = await this.env.DATA.list({ prefix, limit: 1000 });
+    const listed = await this.store.list(prefix);
     const newest = new Map<string, number>();
     for (const object of listed.objects) {
-      const uploadId = object.key.slice(prefix.length).split('/')[0]!;
+      const uploadId = object.name.slice(prefix.length).split('/')[0]!;
       newest.set(uploadId, Math.max(newest.get(uploadId) ?? 0, object.uploaded.getTime()));
     }
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     const abandoned = new Set([...newest].filter(([, uploaded]) => uploaded < cutoff).map(([uploadId]) => uploadId));
-    const keys = listed.objects.filter(object => abandoned.has(object.key.slice(prefix.length).split('/')[0]!)).map(object => object.key);
-    if (keys.length) await this.env.DATA.delete(keys);
+    const names = listed.objects.filter(object => abandoned.has(object.name.slice(prefix.length).split('/')[0]!)).map(object => object.name);
+    if (names.length) await this.store.delete(names);
   }
 
   /** Stores the chunk at the next offset; resending the last stored chunk is acknowledged without rewriting it. */
@@ -410,9 +401,9 @@ export class InspectorCloudArtifacts {
     if (offset !== state.received) throw new Error(`Expected the chunk at offset ${state.received}`);
     const expected = Math.min(ARTIFACT_UPLOAD_CHUNK_BYTES, state.size - offset);
     if (expected <= 0 || bytes.byteLength !== expected) throw new Error('Chunk length does not match the upload');
-    await this.env.DATA.put(this.uploadKey(uploadId, String(offset)), bytes);
+    await this.store.put(this.uploadKey(uploadId, String(offset)), this.stagingScope, bytes);
     const received = offset + bytes.byteLength;
-    await this.env.DATA.put(this.uploadKey(uploadId, 'state'), JSON.stringify({ ...state, received, last: { offset, sha256 } }));
+    await this.store.put(this.uploadKey(uploadId, 'state'), this.stagingScope, new TextEncoder().encode(JSON.stringify({ ...state, received, last: { offset, sha256 } })));
     return { received };
   }
 
@@ -421,8 +412,7 @@ export class InspectorCloudArtifacts {
     if (state.received !== state.size) throw new Error(`Upload is incomplete: ${state.received} of ${state.size} bytes received`);
     const bytes = new Uint8Array(state.size);
     for (let offset = 0; offset < state.size; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) {
-      const part = await this.env.DATA.get(this.uploadKey(uploadId, String(offset)));
-      const chunk = part ? new Uint8Array(await part.arrayBuffer()) : null;
+      const chunk = await this.store.bytes(this.uploadKey(uploadId, String(offset)), this.stagingScope, ARTIFACT_UPLOAD_CHUNK_BYTES);
       if (chunk?.byteLength !== Math.min(ARTIFACT_UPLOAD_CHUNK_BYTES, state.size - offset)) throw new Error(`Upload chunk at offset ${offset} is missing`);
       bytes.set(chunk, offset);
     }
@@ -438,9 +428,9 @@ export class InspectorCloudArtifacts {
   }
 
   private async deleteUpload(uploadId: string, state: ArtifactUploadState) {
-    const keys = [this.uploadKey(uploadId, 'state')];
-    for (let offset = 0; offset < state.received; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) keys.push(this.uploadKey(uploadId, String(offset)));
-    await this.env.DATA.delete(keys);
+    const names = [this.uploadKey(uploadId, 'state')];
+    for (let offset = 0; offset < state.received; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) names.push(this.uploadKey(uploadId, String(offset)));
+    await this.store.delete(names);
   }
 
   async listShares(url: string) {
@@ -453,9 +443,14 @@ export class InspectorCloudArtifacts {
     const entry = (await this.entries(scope)).find((candidate) => candidate.path === path && candidate.blobHash === hash);
     if (!entry) throw new Error('Selected artifact version changed. Refresh and select it again.');
     if (expiresAt !== null && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) throw new Error('Choose an expiry in the future');
-    // Verify both address and decryption before publishing a bearer capability.
-    for await (const _part of await readArtifactObject(this.env, this.userId, hash, await deriveArtifactScopeKey(await this.key, scope.id), entry.size)) {
-      // Exhaust the authenticated stream without retaining file contents.
+    // Read the whole version back, verified against its recorded digest, before publishing a bearer capability.
+    const object = await this.store.get(artifactObjectKey(this.userId, scope.id, hash), scope.id);
+    if (object?.size !== entry.size) {
+      await object?.body.cancel();
+      throw new Error('Artifact object is unavailable');
+    }
+    for await (const _part of streamBytes(object.body)) {
+      // Exhaust the verified stream without retaining file contents.
     }
     const record = await this.source.authority.createArtifactShare({
       token: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'),
@@ -493,20 +488,26 @@ export async function serveArtifactShare(request: Request, env: Env): Promise<Re
     const authority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${projectId}`);
     const record = await authority.getArtifactShare(match[3]!);
     if (!record) return new Response('Link expired or revoked', { status: 404, headers });
-    const projectKey = credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
-    const chunks = await readArtifactObject(env, userId, record.hash, await deriveArtifactScopeKey(projectKey, record.scopeId), record.size);
+    if (userId !== env.ACCOUNT_ID) return new Response('Shared artifact is unavailable', { status: 404, headers });
+    const store = tenantStore(env);
+    const name = artifactObjectKey(userId, record.scopeId, record.hash);
+    const object = request.method === 'GET' ? await store.get(name, record.scopeId) : null;
+    const metadata = request.method === 'GET' ? object : await store.head(name, record.scopeId);
+    if (metadata?.size !== record.size) {
+      await object?.body.cancel();
+      throw new Error('Shared artifact object is unavailable');
+    }
     // Recheck after the asynchronous storage read so revocation/expiry during delivery cannot issue fresh bytes.
     if (!await authority.getArtifactShare(match[3]!)) return new Response('Link expired or revoked', { status: 404, headers });
     const filename = record.path.split('/').at(-1) ?? 'artifact';
     headers.set('content-type', record.mediaType && /^[\w!#$&^.+-]+\/[\w!#$&^.+-]+(?:;[^\r\n]*)?$/u.test(record.mediaType) ? record.mediaType : 'application/octet-stream');
     headers.set('content-disposition', `attachment; filename="artifact"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`);
     headers.set('content-length', String(record.size));
-    if (request.method === 'HEAD') {
-      for await (const _part of chunks) { /* Verify every part, retaining none. */ }
+    if (!object) {
       if (!await authority.getArtifactShare(match[3]!)) { headers.delete('content-length'); return new Response('Link expired or revoked', { status: 404, headers }); }
       return new Response(null, { headers });
     }
-    const iterator = chunks[Symbol.asyncIterator]();
+    const iterator = streamBytes(object.body);
     return new Response(new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
@@ -515,11 +516,11 @@ export async function serveArtifactShare(request: Request, env: Env): Promise<Re
           if (next.done) controller.close();
           else controller.enqueue(next.value);
         } catch (error) {
-          await iterator.return?.();
+          await iterator.return(undefined);
           controller.error(error);
         }
       },
-      async cancel() { await iterator.return?.(); },
+      async cancel() { await iterator.return(undefined); },
     }, { highWaterMark: 0 }), { headers });
   } catch {
     headers.delete('content-length');

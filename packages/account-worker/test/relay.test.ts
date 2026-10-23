@@ -13,9 +13,7 @@ import {
   signDeviceInvite,
   signRpcDigestRequest,
   decodeTunnelChunk,
-  decryptArtifactBytes,
   encodeTunnelChunk,
-  encryptArtifactBytes,
   tunnelRequestMessageSchema,
   type TunnelRequestMessage,
 } from '@gitspace/protocol';
@@ -490,11 +488,9 @@ describe('portable RelayDO', () => {
     expect(new TextDecoder().decode(requestBody)).toBe('request body');
     machine.close(1000, 'done');
   });
-  it('stores only client-encrypted content-addressed artifact bytes', async () => {
-    const key = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
-    const plaintextText = 'artifact plaintext must not reach R2';
-    const plaintext = new TextEncoder().encode(plaintextText);
-    const sealed = await encryptArtifactBytes(plaintext, key);
+  it('stores client-sealed artifact bytes by their content address', async () => {
+    // The route stores what the client sealed, opaque to the account.
+    const sealed = crypto.getRandomValues(new Uint8Array(96));
     const hash = await ciphertextHash(sealed);
     const path = `/artifacts/${hash}`;
 
@@ -510,14 +506,12 @@ describe('portable RelayDO', () => {
     expect(put.status).toBe(201);
 
     const stored = await env.BLOBS.get(`artifacts/${hash}`);
-    if (!stored) throw new Error('Expected encrypted artifact in R2');
-    const raw = new Uint8Array(await stored.arrayBuffer());
-    expect(new TextDecoder().decode(raw)).not.toContain(plaintextText);
-    expect(raw).toEqual(sealed);
+    if (!stored) throw new Error('Expected the sealed artifact in R2');
+    expect(new Uint8Array(await stored.arrayBuffer())).toEqual(sealed);
 
     const get = await exports.default.fetch(machineAuthorizedRequest(`https://relay.test${path}`));
     expect(get.headers.get('x-gitspace-encryption')).toBe('aes-256-gcm-v1');
-    expect(await decryptArtifactBytes(new Uint8Array(await get.arrayBuffer()), key)).toEqual(plaintext);
+    expect(new Uint8Array(await get.arrayBuffer())).toEqual(sealed);
   });
 
   it('serves host-cookie HTTP, cloud internal fetch, and authenticated second-machine access through signed relay ingress', async () => {

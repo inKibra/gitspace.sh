@@ -327,12 +327,13 @@ before execution; there is no silent legacy alias.
   reader. Failed uploads leave the space open and retain its local files.
   An oversized individual upload returns `413 OBJECT_TOO_LARGE` with its size
   and the limit. The machine includes that reason in the close error.
-- **Managed-beta key custody**: checkpoint and artifact encryption uses one
-  account-scoped key derived by `CredentialVaultDO`. Enrolled machines obtain
-  it through signed `artifacts.key.get` requests with
-  `space.control`; suspended accounts and revoked grants are denied. Random
-  per-machine keys are not a portable checkpoint format. The managed vault is
-  part of the trust boundary; encrypted R2 storage is not zero-knowledge hosting.
+- **Storage key custody**: tenant objects are encrypted at rest by R2 (SSE-C)
+  with one random key per scope (`space:<workspace>`, `lfs:<project>`), created
+  and stored wrapped by `CredentialVaultDO`; the wrap key never leaves the vault.
+  Machines hold no storage key: they move plaintext over TLS through signed
+  `data.*` requests, which the account binds to the object's scope and plaintext
+  SHA-256. Deleting a workspace or project forgets its scope keys. The managed
+  vault is part of the trust boundary; this is not zero-knowledge hosting.
 - **Per-request authentication** never calls `CredentialVaultDO` or
   `AccountStateDO`. Each isolate (Worker or Durable Object) caches one snapshot of
   the vault's device registry (machine keys, capabilities and generations;

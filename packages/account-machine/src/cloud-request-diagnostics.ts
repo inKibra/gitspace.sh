@@ -13,7 +13,7 @@ interface CloudRequestDiagnostics {
   responseHeadersMs?: number;
 }
 
-interface UploadDiagnostics {
+export interface UploadDiagnostics {
   uploadId: string;
   objectKey: string;
   byteCount: number;

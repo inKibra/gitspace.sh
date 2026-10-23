@@ -20,6 +20,7 @@ interface Env {
   ACCOUNT_STATE: DurableObjectNamespace<import('./src/index').AccountStateDO>;
   GITHUB_APP: DurableObjectNamespace<import('./src/index').GitHubAppDO>;
   BROWSER_SESSION: DurableObjectNamespace<import('./src/index').BrowserSessionDO>;
+  STORAGE_MIGRATION: DurableObjectNamespace<import('./src/index').StorageMigrationDO>;
   DATA: R2Bucket;
   BLOBS: R2Bucket;
   ARTIFACTS: Artifacts;

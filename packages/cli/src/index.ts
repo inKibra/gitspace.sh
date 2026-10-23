@@ -4,7 +4,7 @@ import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { createRelayAuthorization, createServerClock, createSignedControlRequest, decodeMachinePairingToken, releaseTargetSchema, sendSigned, signRpcRequest } from '@gitspace/protocol';
+import { createRelayAuthorization, createServerClock, decodeMachinePairingToken, releaseTargetSchema, sendSigned, signRpcRequest } from '@gitspace/protocol';
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
@@ -76,17 +76,6 @@ async function savePrivateJson(path: string, value: unknown): Promise<void> {
 }
 /** The account's clock for every request this process signs. */
 const accountClock = createServerClock();
-async function accountArtifactKey(config: MachineConfig): Promise<string> {
-  const signingPrivateKey = credentialProtocolBase64.decode(config.machine.signingPrivateKey);
-  const response = await sendSigned(accountClock, (timestamp) => {
-    const request = createSignedControlRequest({ userId: config.userId, machineId: config.machine.id, operation: 'artifacts.key.get', payload: {}, signingPrivateKey, timestamp });
-    return fetch(new URL('/v1/control', config.apiUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), signal: AbortSignal.timeout(30_000) });
-  });
-  if (!response.ok) throw new Error(`Account artifact key request failed (HTTP ${response.status})`);
-  const result = await response.json() as { status?: string; value?: { key?: string } };
-  if (result.status !== 'ok' || !result.value?.key || credentialProtocolBase64.decode(result.value.key).byteLength !== 32) throw new Error('Control plane returned an invalid account artifact key');
-  return result.value.key;
-}
 function processIsRunning(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -162,7 +151,6 @@ async function startMachine(): Promise<void> {
   const { path: runtimeRoot } = JSON.parse(await readFile(selectionPath, 'utf8')) as { path: string };
   const bun = join(runtimeRoot, 'bin', 'bun');
   if (!existsSync(bun) || !existsSync(join(await selectedMachineRoot(runtimeRoot), 'machine-native.json'))) throw new Error('The selected machine runtime is incomplete. Run gitspace doctor to inspect the installation; your workspace data has not been changed.');
-  const artifactKey = await accountArtifactKey(config);
   const environmentRoot = join(CONFIG_ROOT, 'machine');
   await mkdir(environmentRoot, { recursive: true, mode: 0o700 });
   await rm(PID_PATH, { force: true });
@@ -181,7 +169,6 @@ async function startMachine(): Promise<void> {
       GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: config.machine.signingPrivateKey,
       GITSPACE_MACHINE_GRANT: JSON.stringify(config.machine.grant),
       GITSPACE_ROOT_PUBLIC_KEY: config.rootPublicKey,
-      GITSPACE_ARTIFACT_KEY: artifactKey,
       GITSPACE_CONTROL_URL: config.apiUrl,
       GITSPACE_USER_ID: config.userId,
       GITSPACE_RELAY_URL: config.relayUrl,

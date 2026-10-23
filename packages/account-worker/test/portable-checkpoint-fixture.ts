@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:test';
-import { credentialProtocolBase64, encryptArtifactBytes } from '@gitspace/protocol';
+import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { spaceCheckpointManifestKey, spaceGitCheckpointRef, type GitLfsSnapshot, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { tenantStore } from '../src/tenant-store.js';
 
 export async function persistPortableCheckpoint(projectId: string, spaceId: string, revision: number, lfs?: GitLfsSnapshot) {
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
@@ -14,10 +15,8 @@ export async function persistPortableCheckpoint(projectId: string, spaceId: stri
     artifacts: { manifestHash: `sha256:${'a'.repeat(64)}`, generation: 0 },
     createdAt: new Date().toISOString(),
   };
-  const key = credentialProtocolBase64.decode(await vault.artifactKey(env.ACCOUNT_ID));
-  const sealed = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify(manifest)), key);
-  const manifestHash = `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(sealed))), byte => byte.toString(16).padStart(2, '0')).join('')}` as const;
   const manifestKey = spaceCheckpointManifestKey(projectId, spaceId, revision);
-  await env.DATA.put(`users/${env.ACCOUNT_ID}/${manifestKey}`, sealed, { customMetadata: { sha256: manifestHash } });
-  return { manifestKey, manifestHash };
+  const stored = await tenantStore(env).put(manifestKey, `space:${spaceId}`, new TextEncoder().encode(JSON.stringify(manifest)));
+  if (!stored) throw new Error('The checkpoint manifest was not stored');
+  return { manifestKey, manifestHash: stored.sha256 };
 }

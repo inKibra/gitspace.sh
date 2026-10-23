@@ -88,6 +88,10 @@
       {
         "name": "BROWSER_SESSION",
         "class_name": "BrowserSessionDO"
+      },
+      {
+        "name": "STORAGE_MIGRATION",
+        "class_name": "StorageMigrationDO"
       }
     ]
   },
@@ -138,6 +142,10 @@
     {
       "tag": "account-v5-browser-session",
       "new_sqlite_classes": ["BrowserSessionDO"]
+    },
+    {
+      "tag": "account-v6-storage-migration",
+      "new_sqlite_classes": ["StorageMigrationDO"]
     }
   ],
   "vars": {

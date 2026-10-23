@@ -18,7 +18,7 @@ import { executableManifestPath } from '../packages/deployment/src/executable-ma
 const repositoryRoot = dirname(import.meta.dir);
 const environmentRoot = process.env.GITSPACE_SANDBOX_ROOT
   ?? join(repositoryRoot, '.gitspace', 'environments', 'self-sandbox');
-const artifactKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(environmentRoot).digest());
+const vaultKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(environmentRoot).digest());
 const rootSigningPrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${environmentRoot}:root-signing`).digest());
 const machineSigningPrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${environmentRoot}:machine-signing`).digest());
 const machineExchangePrivateKey = new Uint8Array(new Bun.CryptoHasher('sha256').update(`${environmentRoot}:machine-exchange`).digest());
@@ -37,7 +37,6 @@ const environment = new ReplacementEnvironment({
   rpcPort: 4511,
   webPort: 4510,
   machineId: 'local-machine',
-  artifactKey,
   controlToken,
   environment: {
     GITSPACE_CONTROL_URL: controlUrl,
@@ -133,7 +132,7 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
       userId: 'local-user',
       handle: 'local-user',
       rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootSigningPrivateKey)),
-      vaultKey: credentialProtocolBase64.encode(artifactKey),
+      vaultKey: credentialProtocolBase64.encode(vaultKey),
       gitBucketName,
       deviceGrant,
     }),

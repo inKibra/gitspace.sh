@@ -56,7 +56,6 @@ describe('replacement environment host routes', () => {
       rpcPort: 0,
       webPort: 0,
       machineId: 'machine-a',
-      artifactKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1),
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -109,7 +108,6 @@ describe('replacement environment host routes', () => {
       rpcPort: 0,
       webPort: 0,
       machineId: 'machine-a',
-      artifactKey: new Uint8Array(32).fill(1),
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -160,7 +158,6 @@ describe('replacement environment host routes', () => {
       rpcPort: 0,
       webPort: 0,
       machineId: 'machine-a',
-      artifactKey: new Uint8Array(32).fill(1),
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -218,7 +215,7 @@ describe('replacement environment host routes', () => {
     expect(rejectedOmp.status).toBe(400);
   });
 
-  it('restarts identical machine bytes with channel identity and no inherited custom release', async () => {
+  it('restarts identical machine bytes with channel identity and no inherited custom release or storage key', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-channel-machine-'));
     roots.push(root);
     const environment = new ReplacementEnvironment({
@@ -228,9 +225,8 @@ describe('replacement environment host routes', () => {
       rpcPort: 0,
       webPort: 0,
       machineId: 'machine-a',
-      artifactKey: new Uint8Array(32).fill(1),
       controlToken: 'control-token',
-      environment: { GITSPACE_MACHINE_RELEASE_SHA: 'stale-custom', GITSPACE_RELEASE_SHA: 'legacy-custom' },
+      environment: { GITSPACE_MACHINE_RELEASE_SHA: 'stale-custom', GITSPACE_RELEASE_SHA: 'legacy-custom', GITSPACE_ARTIFACT_KEY: Buffer.alloc(32, 1).toString('base64') },
     });
     environments.push(environment);
     const candidate = join(root, 'machine-candidate');
@@ -240,6 +236,7 @@ describe('replacement environment host routes', () => {
         pid: process.pid,
         sha: process.env.GITSPACE_MACHINE_RELEASE_SHA ?? null,
         legacySha: process.env.GITSPACE_RELEASE_SHA ?? null,
+        storageKey: process.env.GITSPACE_ARTIFACT_KEY ?? null,
       }));
       const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
       console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
@@ -249,7 +246,7 @@ describe('replacement environment host routes', () => {
     const artifact = { entrypoint: 'machine-daemon' as const, path: candidate, hash, dependsOn: [] };
     await environment.deploy({ artifacts: [artifact], releaseSha: null, revision: 'channel', dirty: false });
     const initial = JSON.parse(await readFile(join(root, 'machine-boot.json'), 'utf8'));
-    expect(initial).toMatchObject({ sha: null, legacySha: null });
+    expect(initial).toMatchObject({ sha: null, legacySha: null, storageKey: null });
 
     await environment.deploy({ artifacts: [artifact], releaseSha: 'custom-machine', revision: 'custom-machine', dirty: false });
     const custom = JSON.parse(await readFile(join(root, 'machine-boot.json'), 'utf8'));
@@ -263,7 +260,7 @@ describe('replacement environment host routes', () => {
     expect(restored.status).toBe(200);
     expect(environmentLaunchResponseSchema.parse(await restored.json())).toEqual({ status: 'applied', hash, error: null });
     const channel = JSON.parse(await readFile(join(root, 'machine-boot.json'), 'utf8'));
-    expect(channel).toMatchObject({ sha: null, legacySha: null });
+    expect(channel).toMatchObject({ sha: null, legacySha: null, storageKey: null });
     expect(channel.pid).not.toBe(custom.pid);
     expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: null });
   });
@@ -273,7 +270,6 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'test-machine-git-lfs', root, repositoryRoot: root, rpcPort: 0, webPort: 0, machineId: 'machine-a',
-      artifactKey: new Uint8Array(32).fill(1), controlToken: 'control-token',
       environment: { GITSPACE_RIPGREP_PATH: '/stale/rg' },
     });
     environments.push(environment);
@@ -316,7 +312,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const options = {
       id: 'restart-test', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     };
     for (const label of ['channel', 'selected']) {
@@ -369,7 +365,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'native-rollback', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -433,7 +429,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'wal-checkpoint', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -476,7 +472,7 @@ describe('replacement environment host routes', () => {
     legacy.close();
     const environment = new ReplacementEnvironment({
       id: 'journal-migration', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -499,7 +495,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'retire-refusal', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -528,7 +524,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'shutdown-timeout', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -571,7 +567,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'readiness-failure', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'machine-a', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -608,7 +604,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'lock-evidence', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'lock-proof-machine', artifactKey: new Uint8Array(32).fill(1),
+      machineId: 'lock-proof-machine', 
       controlToken: 'control-token',
     });
     environments.push(environment);
@@ -656,7 +652,7 @@ describe('replacement environment host routes', () => {
     roots.push(root);
     const environment = new ReplacementEnvironment({
       id: 'test-generation-crash', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
-      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1), controlToken: 'control-token',
+      machineId: 'machine-a', controlToken: 'control-token',
     });
     environments.push(environment);
     const candidate = join(root, 'candidates', 'machine-crashes');

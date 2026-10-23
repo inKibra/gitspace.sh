@@ -15,8 +15,6 @@ function requiredEnvironment(name: string): string {
 
 const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
 const bundleRoot = process.env.GITSPACE_BUNDLE_ROOT ?? import.meta.dir;
-const artifactKey = Uint8Array.from(Buffer.from(requiredEnvironment('GITSPACE_ARTIFACT_KEY'), 'base64'));
-if (artifactKey.byteLength !== 32) throw new Error('GITSPACE_ARTIFACT_KEY must decode to 32 bytes');
 await mkdir(environmentRoot, { recursive: true });
 const selection: MachineSelection = JSON.parse(requiredEnvironment('GITSPACE_HOST_SELECTION'));
 await verifyMachine(selection);
@@ -35,6 +33,9 @@ if (owner) {
   throw new Error('An interrupted update requires bootstrap recovery before opening the machine database');
 }
 const releaseLock = acquireMachineLock(environmentRoot, 'host');
+// Retired: the artifact cache of envelope-era releases held ciphertext (`sealed`) and its plaintext twin (`plain`).
+// Tenant objects now travel as verified plaintext and no machine code reads this directory.
+await rm(join(environmentRoot, 'cache'), { recursive: true, force: true });
 process.env.GITSPACE_CONTROL_TOKEN ??=
   (await readJson<{ token: string }>(join(environmentRoot, 'host-control.json')))?.token ?? crypto.randomUUID();
 await atomicJson(join(environmentRoot, 'host-control.json'), { token: process.env.GITSPACE_CONTROL_TOKEN });
@@ -78,7 +79,6 @@ const environment = new ReplacementEnvironment({
   rpcHost: process.env.GITSPACE_HOST_RPC_HOST,
   webPort: Number(process.env.GITSPACE_HOST_WEB_PORT),
   machineId: requiredEnvironment('GITSPACE_MACHINE_ID'),
-  artifactKey,
   controlToken: process.env.GITSPACE_CONTROL_TOKEN,
   // The host holds the relay connection; the running generation observes terminals.
   liveNotices: (notices) => { for (const notice of notices) relay?.liveNotice(notice); },

@@ -1,116 +1,109 @@
-import { afterEach, expect, it } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, collectBytes, GitLfsObjectSchema, type GitLfsObject, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { expect, it } from 'bun:test';
+import { collectBytes, GitLfsObjectSchema, type GitLfsObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { createCloudGitLfsPublisher, createCloudGitLfsStore } from '../src/cloud-lfs-store.js';
-import { FileCheckpointBlobStore } from '../src/checkpoint-blobs.js';
-import { deriveArtifactScopeKey, encryptArtifactBytes } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore } from '../src/cloud-space-authority.js';
+import { fakeDataEndpoint } from './data-endpoint-fake.js';
 
-const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+const PART = 32 * 1024 * 1024;
 
 async function* source(bytes: Uint8Array) { yield bytes; }
 async function downloaded(store: Pick<GitLfsStore, 'get'>, object: GitLfsObject) {
   const stream = await store.get(object);
   return stream === null ? null : collectBytes(stream, object.size);
 }
-
-it('pins before upload, roundtrips encrypted payloads, deduplicates, and rejects a wrong plaintext oid', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'gitspace-lfs-adapter-'));
-  roots.push(root);
-  const bytes = new TextEncoder().encode('machine LFS payload');
-  const object = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(bytes).digest('hex'), size: bytes.byteLength });
-  let rejectPin = true;
+function lfsObject(...parts: Uint8Array[]) {
+  const hash = new Bun.CryptoHasher('sha256');
+  for (const part of parts) hash.update(part);
+  return GitLfsObjectSchema.parse({ oid: hash.digest('hex'), size: parts.reduce((total, part) => total + part.byteLength, 0) });
+}
+function controlOptions(pin: (operation: string) => Response = () => Response.json({ status: 'ok', value: { objects: [] } })) {
   const fetcher = Object.assign(async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const request = JSON.parse(String(init?.body));
-    return rejectPin && request.operation === 'lfs.pin' ? Response.json({ status: 'error' }, { status: 403 }) : Response.json({ status: 'ok', value: request.operation === 'lfs.pin' ? { objects: [] } : null });
+    const operation = String(JSON.parse(String(init?.body)).operation);
+    return operation === 'lfs.pin' ? pin(operation) : Response.json({ status: 'ok', value: null });
   }, { preconnect: fetch.preconnect });
-  const options = { projectId: 'project-a', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), publicationId: 'capture-a', controlOptions: { userId: 'account-a', machineId: 'machine-a', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } };
-  const store = await createCloudGitLfsPublisher(options);
+  return { userId: 'account-a', machineId: 'machine-a', baseUrl: 'https://account.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher };
+}
+
+it('pins before upload, stores the plaintext under its oid, deduplicates, and rejects a wrong plaintext oid', async () => {
+  const data = fakeDataEndpoint();
+  const bytes = new TextEncoder().encode('machine LFS payload');
+  const object = lfsObject(bytes);
+  const key = `lfs/projects/project-a/objects/${object.oid}`;
+  let rejectPin = true;
+  const options = { projectId: 'project-a', blobs: data.store, publicationId: 'capture-a', controlOptions: controlOptions(() => rejectPin ? Response.json({ status: 'error' }, { status: 403 }) : Response.json({ status: 'ok', value: { objects: [] } })) };
+  const store = createCloudGitLfsPublisher(options);
   await expect(store.put(object, source(bytes))).rejects.toThrow('403');
   expect(await store.get(object)).toBeNull();
   rejectPin = false;
   await store.put(object, source(bytes));
+  expect(data.objects.get(key)?.bytes).toEqual(bytes);
+  expect(data.requests.find(request => request.operation === 'data.put')?.payload).toEqual({ key, hash: `sha256:${object.oid}`, size: object.size });
   expect(await downloaded(store, object)).toEqual(bytes);
-  const path = join(root, `lfs/projects/project-a/objects/${object.oid}`);
-  const ciphertext = await readFile(path);
-  expect(ciphertext).not.toEqual(Buffer.from(bytes));
+  const puts = data.requests.filter(request => request.operation === 'data.put').length;
   await store.put(object, source(bytes));
-  expect(await readFile(path)).toEqual(ciphertext);
-  await expect(store.put(object, source(new Uint8Array(bytes.length)))).rejects.toThrow('oid/size');
-  expect(await (await createCloudGitLfsStore({ ...options, projectId: 'other-project' })).get(object)).toBeNull();
+  expect(data.requests.filter(request => request.operation === 'data.put').length).toBe(puts);
+  await expect(store.put(object, source(new Uint8Array(bytes.length)))).rejects.toThrow('failed integrity verification');
+  expect(await createCloudGitLfsStore({ ...options, projectId: 'other-project' }).get(object)).toBeNull();
   await store.releasePublication();
 });
 
-it('streams a multi-chunk object across arbitrary upload boundaries and verifies completion', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'gitspace-lfs-stream-'));
-  roots.push(root);
-  const first = new Uint8Array(CHECKPOINT_CHUNK_BYTES).fill(37);
+it('uploads an object above one request in parts across arbitrary source boundaries and verifies it on read', async () => {
+  const data = fakeDataEndpoint();
+  const first = new Uint8Array(PART).fill(37);
   const last = new Uint8Array([9, 8, 7]);
-  const object = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(first).update(last).digest('hex'), size: first.length + last.length });
-  const fetcher = Object.assign(async () => Response.json({ status: 'ok', value: { objects: [] } }), { preconnect: fetch.preconnect });
-  const store = await createCloudGitLfsPublisher({ projectId: 'stream', publicationId: 'upload', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } });
+  const object = lfsObject(first, last);
+  const store = createCloudGitLfsPublisher({ projectId: 'stream', publicationId: 'upload', blobs: data.store, controlOptions: controlOptions() });
   await store.put(object, (async function* () {
     yield first.subarray(0, 13);
     yield first.subarray(13);
     yield last;
   })());
+  expect(data.requests.filter(request => request.operation === 'data.multipart.part').map(request => request.payload.size)).toEqual([PART, 3]);
   const result = await store.get(object);
   if (!result) throw new Error('Missing object');
-  const sizes: number[] = [];
   const hash = new Bun.CryptoHasher('sha256');
-  for await (const chunk of result) { sizes.push(chunk.length); hash.update(chunk); }
-  expect(sizes).toEqual([first.length, last.length]);
+  for await (const chunk of result) hash.update(chunk);
   expect(hash.digest('hex')).toBe(object.oid);
   expect(await store.has(object)).toBe(true);
 });
 
-it('rejects an authenticated oversized inventory before requesting its chunks', async () => {
-  const key = new Uint8Array(32).fill(11);
-  const size = CHECKPOINT_CHUNK_BYTES + 1;
-  const forged = new TextEncoder().encode(JSON.stringify({ version: 1, size: Number.MAX_SAFE_INTEGER, chunks: [] }));
-  const sealed = await encryptArtifactBytes(forged, await deriveArtifactScopeKey(key, 'lfs:stream'));
-  const envelope = new Uint8Array(sealed.length + 1);
-  envelope[0] = CHUNKED_CHECKPOINT_VERSION;
-  envelope.set(sealed, 1);
-  let reads = 0;
-  const store = await createCloudGitLfsStore({ projectId: 'stream', blobs: {
-    async get() { reads++; if (reads > 1) throw new Error('Unexpected chunk read'); return envelope; },
-    async put() { throw new Error('Unexpected upload'); },
-  }, encryptionKey: key, controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21) } });
-  await expect(downloaded(store, GitLfsObjectSchema.parse({ oid: 'a'.repeat(64), size }))).rejects.toThrow();
-  expect(reads).toBe(1);
+it('refuses served bytes that are not the oid even when the account vouches for them', async () => {
+  const data = fakeDataEndpoint();
+  const bytes = new TextEncoder().encode('payload');
+  const object = lfsObject(bytes);
+  const key = `lfs/projects/stream/objects/${object.oid}`;
+  data.objects.set(key, { bytes, workspaceId: null });
+  data.tamper(key, new TextEncoder().encode('paYload'));
+  const store = createCloudGitLfsStore({ projectId: 'stream', blobs: data.store, controlOptions: controlOptions() });
+  await expect(downloaded(store, object)).rejects.toThrow('failed integrity verification');
+  expect(await store.has(object).catch(() => 'refused')).toBe('refused');
 });
 
-it('cancels an oversized HTTP ciphertext without reading the remainder', async () => {
+it('cancels an oversized HTTP body without reading the remainder', async () => {
   let pulls = 0;
   let canceled = false;
   const fetcher = Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
     pull(controller) { pulls++; controller.enqueue(new Uint8Array(32)); if (pulls === 4) controller.close(); },
     cancel() { canceled = true; },
-  }, { highWaterMark: 0 })), { preconnect: fetch.preconnect });
+  }, { highWaterMark: 0 }), { headers: { 'x-gitspace-sha256': `sha256:${'a'.repeat(64)}`, 'content-length': '128' } }), { preconnect: fetch.preconnect });
   const store = new CloudDataCheckpointBlobStore({ userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher });
-  await expect(store.get('lfs/projects/a/objects/test', undefined, 16)).rejects.toThrow();
+  await expect(store.get('lfs/projects/a/objects/test', undefined, 16)).rejects.toThrow('exceeds 16 bytes');
   expect(canceled).toBe(true);
-  expect(pulls).toBe(1);
+  expect(pulls).toBeLessThanOrEqual(1);
 });
 
 it('does not publish a mismatched streaming source and closes it on overflow', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'gitspace-lfs-source-'));
-  roots.push(root);
+  const data = fakeDataEndpoint();
   const bytes = new Uint8Array([1, 2, 3]);
-  const object = GitLfsObjectSchema.parse({ oid: new Bun.CryptoHasher('sha256').update(bytes).digest('hex'), size: bytes.length });
-  const fetcher = Object.assign(async () => Response.json({ status: 'ok', value: { objects: [] } }), { preconnect: fetch.preconnect });
-  const store = await createCloudGitLfsPublisher({ projectId: 'stream', publicationId: 'upload', blobs: new FileCheckpointBlobStore(root), encryptionKey: new Uint8Array(32).fill(11), controlOptions: { userId: 'a', machineId: 'b', baseUrl: 'https://offline.invalid', signingPrivateKey: new Uint8Array(32).fill(21), fetcher } });
+  const object = lfsObject(bytes);
+  const store = createCloudGitLfsPublisher({ projectId: 'stream', publicationId: 'upload', blobs: data.store, controlOptions: controlOptions() });
   let closed = false;
   await expect(store.put(object, (async function* () {
     try { yield new Uint8Array(4); throw new Error('Read past overflow'); }
     finally { closed = true; }
-  })())).rejects.toThrow('oid/size');
+  })())).rejects.toThrow('exceeds its recorded size');
   expect(closed).toBe(true);
   expect(await store.get(object)).toBeNull();
-  await expect(store.put(object, source(new Uint8Array(3)))).rejects.toThrow('oid/size');
+  await expect(store.put(object, source(new Uint8Array(3)))).rejects.toThrow('failed integrity verification');
   expect(await store.get(object)).toBeNull();
 });

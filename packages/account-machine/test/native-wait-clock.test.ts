@@ -157,7 +157,6 @@ for (const category of ['owner', 'orphan'] as const) {
         const category = ${JSON.stringify(category)};
         process.env.GITSPACE_ENVIRONMENT_ROOT = root;
         process.env.GITSPACE_HOST_SELECTION = '{}';
-        process.env.GITSPACE_ARTIFACT_KEY = Buffer.alloc(32).toString('base64');
         process.env.GITSPACE_MACHINE_ID = 'clock-fixture';
         process.env.GITSPACE_UPDATE_OWNER = category === 'owner' ? '123' : '';
         mock.module(${JSON.stringify(source('machine-update.ts'))}, () => ({

@@ -104,7 +104,7 @@ describe('cloud application data store', () => {
           return new Response(null, { status: 201 });
         }
         const bytes = objects.get(key);
-        return bytes ? new Response(new Uint8Array(bytes)) : new Response(null, { status: 404 });
+        return bytes ? new Response(new Uint8Array(bytes), { headers: { 'x-gitspace-sha256': `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`, 'content-length': String(bytes.byteLength) } }) : new Response(null, { status: 404 });
       }) as typeof fetch,
     };
     const store = new CloudDataCheckpointBlobStore(options);
@@ -176,7 +176,7 @@ describe('cloud application data store', () => {
     let uploadsReceived = 0;
     const server = createServer(async (request, response) => {
       if (request.method === 'GET') {
-        response.end(stored);
+        response.writeHead(200, stored ? { 'x-gitspace-sha256': `sha256:${new Bun.CryptoHasher('sha256').update(stored).digest('hex')}`, 'content-length': String(stored.byteLength) } : {}).end(stored);
         return;
       }
       const signed = signedControlRequestSchema.parse(JSON.parse(Buffer.from(String(request.headers['x-gitspace-control']), 'base64url').toString()));
@@ -572,7 +572,7 @@ describe('expired signed requests', () => {
       fetcher: (async (_input, init) => {
         signed.push(headerRequest(init));
         const rejection = rejections[signed.length - 1];
-        return rejection ? Response.json(rejection, { status: 401 }) : new Response(new Uint8Array([7]));
+        return rejection ? Response.json(rejection, { status: 401 }) : new Response(new Uint8Array([7]), { headers: { 'x-gitspace-sha256': `sha256:${new Bun.CryptoHasher('sha256').update(new Uint8Array([7])).digest('hex')}`, 'content-length': '1' } });
       }) as typeof fetch,
     });
     const download = store.get('objects/checkpoint');

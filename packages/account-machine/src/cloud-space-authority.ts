@@ -4,6 +4,7 @@ import { collectBytes, streamBytes, WorkspaceDomainError, WorkspaceFailureSchema
 import {
   createServerClock,
   createSignedControlRequest,
+  DATA_PUT_MAX_BYTES,
   type HostedRouteLease,
   type HostedRoutes,
   type HostedServiceRoute,
@@ -27,9 +28,9 @@ import {
   type SignedControlRequest,
   type UserSettings,
 } from '@gitspace/protocol';
-import type { CheckpointBlobStore } from './checkpoint-blobs.js';
+import { hashBytes, verifiedBytes, type BlobHash, type DataWorkspace, type StreamingBlobStore } from './checkpoint-blobs.js';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
-import { cloudResponseRay, withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
+import { cloudResponseRay, withCloudRequestDiagnostics, type UploadDiagnostics } from './cloud-request-diagnostics.js';
 import { EnvironmentError, EnvironmentFailureSchema, type EnvironmentLifecycleAuthority, type HostedIngressRegistration, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 
 export class CloudSpaceAuthorityError extends Error {
@@ -83,15 +84,21 @@ function objectUrl(baseUrl: string, key: string): URL {
   return new URL(`/v1/data/${key.split('/').map(encodeURIComponent).join('/')}`, baseUrl);
 }
 
-function hashBytes(bytes: Uint8Array): `sha256:${string}` {
-  return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
-}
-
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   return owned.buffer;
 }
+
+const DATA_SHA256_HEADER = 'x-gitspace-sha256';
+const DATA_SIZE_HEADER = 'content-length';
+const dataFailureCodes: Record<string, string> = {
+  'data.put': 'DATA_PUT_FAILED',
+  'data.multipart.create': 'DATA_MULTIPART_FAILED',
+  'data.multipart.part': 'DATA_PART_FAILED',
+  'data.multipart.complete': 'DATA_MULTIPART_FAILED',
+  'data.multipart.abort': 'DATA_MULTIPART_FAILED',
+};
 
 const uploadMaxAttempts = 10;
 
@@ -160,111 +167,133 @@ async function readControlError(response: Response): Promise<z.infer<typeof cont
   }
 }
 
-export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
+/** Plaintext tenant objects through the signed data endpoint; the account encrypts them at rest under their scope. */
+export class CloudDataCheckpointBlobStore implements StreamingBlobStore {
   private readonly options: CloudControlOptions;
 
   constructor(options: SignedCloudRequestOptions) {
     this.options = cloudControlOptions(options);
   }
 
-  async put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`> {
+  async put(key: string, bytes: Uint8Array, workspace?: DataWorkspace): Promise<BlobHash> {
     const hash = hashBytes(bytes);
+    if (bytes.byteLength > DATA_PUT_MAX_BYTES) {
+      return this.putStream(key, (async function* () { yield bytes; })(), { size: bytes.byteLength, hash }, workspace);
+    }
     const url = objectUrl(this.options.baseUrl, key);
+    const scoped = { ...workspace };
     // Snapshot once so every attempt verifies and uploads the same immutable content.
     const body = ownedBuffer(bytes);
-    const uploadId = crypto.randomUUID();
-    let resigned = false;
-    for (let attempt = 0; ; attempt += 1) {
-      const uploadDiagnostics = {
-        uploadId,
-        objectKey: key,
-        byteCount: body.byteLength,
-        attempt: attempt + 1,
-        maxAttempts: uploadMaxAttempts,
-        targetOrigin: url.origin,
-      };
-      try {
-        // A prior PUT may have committed even when its response was lost.
-        const head = signedRequest(this.options, 'data.head', { key, hash });
-        const exists = await withCloudRequestDiagnostics(head, async (diagnostics) => {
-          const fetchStarted = performance.now();
-          const response = await cloudFetch(this.options, url, {
-            method: 'HEAD',
-            headers: { 'x-gitspace-control': encodedRequest(head), ...diagnostics.headers },
-          });
-          diagnostics.responseHeadersMs = performance.now() - fetchStarted;
-          diagnostics.response = response;
-          diagnostics.stage = 'http';
-          if (response.status === 404) {
-            void response.body?.cancel().catch(() => undefined);
-            return false;
-          }
-          if (response.status !== 200) {
-            const serverError = await readControlError(response);
-            throw new CloudSpaceAuthorityError(
-              'DATA_HEAD_FAILED',
-              `Application object metadata ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`,
-              { ...serverError, key, status: response.status },
-            );
-          }
+    return this.withUploadRetries(key, body.byteLength, url, async (uploadDiagnostics) => {
+      // A prior PUT may have committed even when its response was lost.
+      const head = signedRequest(this.options, 'data.head', { key, hash, ...scoped });
+      const exists = await withCloudRequestDiagnostics(head, async (diagnostics) => {
+        const fetchStarted = performance.now();
+        const response = await cloudFetch(this.options, url, {
+          method: 'HEAD',
+          headers: { 'x-gitspace-control': encodedRequest(head), ...diagnostics.headers },
+        });
+        diagnostics.responseHeadersMs = performance.now() - fetchStarted;
+        diagnostics.response = response;
+        diagnostics.stage = 'http';
+        if (response.status === 404) {
           void response.body?.cancel().catch(() => undefined);
-          diagnostics.stage = 'integrity';
-          if (response.headers.get('x-gitspace-sha256') !== hash
-            || response.headers.get('content-length') !== String(body.byteLength)) {
-            throw new CloudSpaceAuthorityError(
-              'DATA_INTEGRITY_FAILED',
-              `Application object ${key} metadata does not match the upload`,
-              { key, status: response.status },
-            );
-          }
-          return true;
-        }, uploadDiagnostics);
-        if (exists) return hash;
-        // PUT signs its own operation, hash and size.
-        const request = signedRequest(this.options, 'data.put', { key, hash, size: body.byteLength });
-        return await withCloudRequestDiagnostics(request, async (diagnostics) => {
-          const fetchStarted = performance.now();
-          const response = await cloudFetch(this.options, url, {
-            method: 'PUT',
-            headers: {
-              'content-length': String(body.byteLength),
-              'content-type': 'application/octet-stream',
-              'x-gitspace-control': encodedRequest(request),
-              ...diagnostics.headers,
-            },
-            body,
-          });
-          diagnostics.responseHeadersMs = performance.now() - fetchStarted;
-          diagnostics.response = response;
-          diagnostics.stage = 'http';
-          if (!response.ok) {
-            const serverError = await readControlError(response);
-            throw new CloudSpaceAuthorityError(
-              'DATA_PUT_FAILED',
-              `Application object upload ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`,
-              { ...serverError, key, status: response.status },
-            );
-          }
-          await response.body?.cancel().catch(() => undefined);
-          return hash;
-        }, uploadDiagnostics);
-      } catch (error) {
-        // A slow upload can outlive its signature; one fresh signature is enough, a second expiry is not transient.
-        const expired = !resigned && requestExpired(error);
-        if (attempt + 1 >= uploadMaxAttempts || !(expired || retryableUploadError(error))) throw error;
-        if (expired) {
-          resigned = true;
-          continue;
+          return false;
         }
-        // Bound retries and preserve the last transport or HTTP error.
-        await Bun.sleep(Math.min(250 * 2 ** attempt, 5_000));
+        if (response.status !== 200) {
+          const serverError = await readControlError(response);
+          throw new CloudSpaceAuthorityError(
+            'DATA_HEAD_FAILED',
+            `Application object metadata ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`,
+            { ...serverError, key, status: response.status },
+          );
+        }
+        void response.body?.cancel().catch(() => undefined);
+        diagnostics.stage = 'integrity';
+        if (response.headers.get(DATA_SHA256_HEADER) !== hash || response.headers.get(DATA_SIZE_HEADER) !== String(body.byteLength)) {
+          throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} metadata does not match the upload`, { key, status: response.status });
+        }
+        return true;
+      }, uploadDiagnostics);
+      if (exists) return hash;
+      // PUT signs its own operation, plaintext hash and size; the account refuses a body that does not match them.
+      const request = signedRequest(this.options, 'data.put', { key, hash, size: body.byteLength, ...scoped });
+      const response = await this.send(request, url, 'PUT', body, uploadDiagnostics);
+      await response.body?.cancel().catch(() => undefined);
+      return hash;
+    });
+  }
+
+  async putStream(key: string, source: AsyncIterable<Uint8Array>, expected: { size: number; hash: string }, workspace?: DataWorkspace): Promise<BlobHash> {
+    const { size } = expected;
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error('Application object size is invalid');
+    if (size <= DATA_PUT_MAX_BYTES) {
+      const bytes = await collectBytes(source, size);
+      if (bytes.byteLength !== size) throw new Error(`Application object ${key} source has an unexpected size`);
+      if (hashBytes(bytes) !== expected.hash) throw new Error(`Application object ${key} source failed integrity verification`);
+      return this.put(key, bytes, workspace);
+    }
+    const scoped = { ...workspace };
+    // The account records the declared hash and size at creation; complete refuses an object that does not match them.
+    const created = z.object({ uploadId: z.string().min(1), partBytes: z.number().int().positive() })
+      .parse(await this.dataCall('data.multipart.create', 'POST', key, { hash: expected.hash, size, ...scoped }));
+    try {
+      const hasher = new Bun.CryptoHasher('sha256');
+      const parts: Array<{ partNumber: number; etag: string }> = [];
+      let buffer = new Uint8Array(Math.min(created.partBytes, size));
+      let filled = 0;
+      let total = 0;
+      for await (const input of source) {
+        if (input.byteLength > size - total) throw new Error(`Application object ${key} source exceeds its size`);
+        total += input.byteLength;
+        hasher.update(input);
+        for (let offset = 0; offset < input.byteLength;) {
+          const count = Math.min(buffer.byteLength - filled, input.byteLength - offset);
+          buffer.set(input.subarray(offset, offset + count), filled);
+          filled += count;
+          offset += count;
+          if (filled === buffer.byteLength) {
+            // Every part but the last has exactly partBytes; the source's own chunking does not matter.
+            parts.push(await this.uploadPart(key, created.uploadId, parts.length + 1, buffer, scoped));
+            buffer = new Uint8Array(Math.min(created.partBytes, size - total + (input.byteLength - offset)));
+            filled = 0;
+          }
+        }
       }
+      const hash: BlobHash = `sha256:${hasher.digest('hex')}`;
+      if (total !== size) throw new Error(`Application object ${key} source has an unexpected size`);
+      if (hash !== expected.hash) throw new Error(`Application object ${key} source failed integrity verification`);
+      const completed = z.object({ hash: z.string(), size: z.number() })
+        .parse(await this.dataCall('data.multipart.complete', 'POST', key, { uploadId: created.uploadId, parts, ...scoped }));
+      if (completed.hash !== hash || completed.size !== size) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} completed with different content`, { key });
+      return hash;
+    } catch (error) {
+      // An unfinished upload never becomes an object; aborting only frees its parts sooner.
+      await this.dataCall('data.multipart.abort', 'DELETE', key, { uploadId: created.uploadId, ...scoped }).catch(() => undefined);
+      throw error;
     }
   }
 
-  async get(key: string, expectedHash?: string, maxBytes = 64 * 1024 * 1024): Promise<Uint8Array | null> {
+  async get(key: string, expectedHash?: string, maxBytes = 64 * 1024 * 1024, workspace?: DataWorkspace): Promise<Uint8Array | null> {
+    const source = await this.download(key, { maxBytes, ...(expectedHash === undefined ? {} : { hash: expectedHash }), ...(workspace === undefined ? {} : { workspace }) });
+    return source === null ? null : collectBytes(source, maxBytes);
+  }
+
+  getStream(key: string, expected: { hash: string; size: number }): Promise<AsyncIterable<Uint8Array> | null> {
+    return this.download(key, { ...expected, maxBytes: expected.size });
+  }
+
+  /**
+   * Plaintext whose recorded hash and size match the expected ones; the last pull fails unless the bytes match too.
+   * Drive objects name the workspace whose attachment authorizes the read.
+   */
+  private async download(key: string, expected: { hash?: string; size?: number; maxBytes: number; workspace?: DataWorkspace }): Promise<AsyncIterable<Uint8Array> | null> {
+    const { maxBytes, workspace } = expected;
     for (let resigned = false; ; resigned = true) {
-      const request = signedRequest(this.options, 'data.get', { key, ...(expectedHash ? { hash: expectedHash } : {}) });
+      const request = signedRequest(this.options, 'data.get', {
+        key, ...(expected.hash === undefined ? {} : { hash: expected.hash }),
+        ...(workspace === undefined ? {} : { projectId: workspace.projectId, workspaceId: workspace.workspaceId }),
+      });
       try {
         return await withCloudRequestDiagnostics(request, async (diagnostics) => {
           const response = await cloudFetch(this.options, objectUrl(this.options.baseUrl, key), {
@@ -272,7 +301,10 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
           });
           diagnostics.response = response;
           diagnostics.stage = 'http';
-          if (response.status === 404) return null;
+          if (response.status === 404) {
+            void response.body?.cancel().catch(() => undefined);
+            return null;
+          }
           if (!response.ok) {
             const serverError = await readControlError(response);
             const cfRay = cloudResponseRay(response);
@@ -284,18 +316,98 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
               { ...serverError, key, status: response.status, machineId: request.machineId, operation: request.operation, requestId: request.nonce, ...(cfRay ? { cfRay } : {}) },
             );
           }
-          diagnostics.stage = 'response-body';
-          const declaredSize = response.headers.get('content-length');
-          if (declaredSize !== null && Number(declaredSize) > maxBytes) {
-            await response.body?.cancel();
-            throw new Error('Checkpoint ciphertext exceeds byte limit');
-          }
-          const bytes = response.body ? await collectBytes(streamBytes(response.body), maxBytes) : new Uint8Array();
           diagnostics.stage = 'integrity';
-          if (expectedHash && hashBytes(bytes) !== expectedHash) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} failed integrity verification`);
-          return bytes;
+          const recorded = { hash: response.headers.get(DATA_SHA256_HEADER) ?? '', size: Number(response.headers.get(DATA_SIZE_HEADER) ?? Number.NaN) };
+          const mismatch = !/^sha256:[a-f0-9]{64}$/u.test(recorded.hash) || !Number.isSafeInteger(recorded.size) || recorded.size < 0
+            || (expected.hash !== undefined && recorded.hash !== expected.hash) || (expected.size !== undefined && recorded.size !== expected.size);
+          if (mismatch || recorded.size > maxBytes) {
+            void response.body?.cancel().catch(() => undefined);
+            if (mismatch) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} does not carry the expected hash and size`, { key, status: response.status });
+            throw new CloudSpaceAuthorityError('DATA_OBJECT_TOO_LARGE', `Application object ${key} exceeds ${maxBytes} bytes`, { key, size: recorded.size, maxBytes });
+          }
+          diagnostics.stage = 'response-body';
+          return verifiedBytes(response.body ? streamBytes(response.body) : (async function* () { /* Empty object. */ })(), recorded, `Application object ${key}`);
         });
       } catch (error) {
+        if (resigned || !requestExpired(error)) throw error;
+      }
+    }
+  }
+
+  private async uploadPart(key: string, uploadId: string, partNumber: number, bytes: Uint8Array, scoped: Partial<DataWorkspace>): Promise<{ partNumber: number; etag: string }> {
+    const url = objectUrl(this.options.baseUrl, key);
+    const body = ownedBuffer(bytes);
+    const hash = hashBytes(bytes);
+    return this.withUploadRetries(key, body.byteLength, url, async (uploadDiagnostics) => {
+      const request = signedRequest(this.options, 'data.multipart.part', { key, uploadId, partNumber, hash, size: body.byteLength, ...scoped });
+      const response = await this.send(request, url, 'PUT', body, uploadDiagnostics);
+      const part = z.object({ status: z.literal('ok'), value: z.object({ partNumber: z.literal(partNumber), etag: z.string().min(1) }) }).parse(await response.json());
+      return part.value;
+    });
+  }
+
+  /** Sends one signed data request and fails on a non-success status; the caller owns the successful response. */
+  private send(request: SignedControlRequest, url: URL, method: 'PUT' | 'POST' | 'DELETE', body: ArrayBuffer | null, uploadDiagnostics?: UploadDiagnostics): Promise<Response> {
+    return withCloudRequestDiagnostics(request, async (diagnostics) => {
+      const fetchStarted = performance.now();
+      const response = await cloudFetch(this.options, url, {
+        method,
+        headers: {
+          ...(body === null ? {} : { 'content-length': String(body.byteLength), 'content-type': 'application/octet-stream' }),
+          'x-gitspace-control': encodedRequest(request),
+          ...diagnostics.headers,
+        },
+        ...(body === null ? {} : { body }),
+      });
+      diagnostics.responseHeadersMs = performance.now() - fetchStarted;
+      diagnostics.response = response;
+      diagnostics.stage = 'http';
+      if (!response.ok) {
+        const serverError = await readControlError(response);
+        throw new CloudSpaceAuthorityError(
+          dataFailureCodes[request.operation] ?? 'DATA_REQUEST_FAILED',
+          `Application object ${request.operation} ${String(request.payload.key)} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`,
+          { ...serverError, key: request.payload.key, status: response.status },
+        );
+      }
+      return response;
+    }, uploadDiagnostics);
+  }
+
+  /** Bounded retries of one immutable upload: transient failures back off, one expired signature is re-signed. */
+  private async withUploadRetries<T>(key: string, byteCount: number, url: URL, attempt: (diagnostics: UploadDiagnostics) => Promise<T>): Promise<T> {
+    const uploadId = crypto.randomUUID();
+    let resigned = false;
+    for (let index = 0; ; index += 1) {
+      try {
+        return await attempt({ uploadId, objectKey: key, byteCount, attempt: index + 1, maxAttempts: uploadMaxAttempts, targetOrigin: url.origin });
+      } catch (error) {
+        // A slow upload can outlive its signature; one fresh signature is enough, a second expiry is not transient.
+        const expired = !resigned && requestExpired(error);
+        if (index + 1 >= uploadMaxAttempts || !(expired || retryableUploadError(error))) throw error;
+        if (expired) {
+          resigned = true;
+          continue;
+        }
+        // Bound retries and preserve the last transport or HTTP error.
+        await Bun.sleep(Math.min(250 * 2 ** index, 5_000));
+      }
+    }
+  }
+
+  /** A bodiless multipart request; its JSON value, or null for 204. */
+  private async dataCall(operation: 'data.multipart.create' | 'data.multipart.complete' | 'data.multipart.abort', method: 'POST' | 'DELETE', key: string, payload: Record<string, unknown>): Promise<unknown> {
+    for (let resigned = false; ; resigned = true) {
+      const request = signedRequest(this.options, operation, { key, ...payload });
+      try {
+        const response = await this.send(request, objectUrl(this.options.baseUrl, key), method, null);
+        if (response.status === 204) {
+          await response.body?.cancel().catch(() => undefined);
+          return null;
+        }
+        return z.object({ status: z.literal('ok'), value: z.unknown() }).parse(await response.json()).value;
+      } catch (error) {
+        // Rejected before the operation ran, so a freshly signed repeat cannot apply it twice.
         if (resigned || !requestExpired(error)) throw error;
       }
     }

@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -130,8 +130,9 @@ async function artifact(root: string, label: string, healthy = true, paused = fa
   };
 }
 
-async function fixture() {
+async function fixture(prepare?: (root: string) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-whole-update-'));
+  await prepare?.(root);
   const initial = await artifact(root, 'initial');
   const next = await artifact(root, 'next');
   const bad = await artifact(root, 'unhealthy', false);
@@ -145,7 +146,6 @@ async function fixture() {
     GITSPACE_BUNDLE_ROOT: root,
     GITSPACE_INITIAL_MACHINE_MANIFEST_HASH: initial.manifestHash,
     GITSPACE_MACHINE_ID: 'disposable-whole-machine',
-    GITSPACE_ARTIFACT_KEY: Buffer.alloc(32, 1).toString('base64'),
     GITSPACE_CONTROL_TOKEN: token,
     GITSPACE_RPC_HOST: '127.0.0.1',
     GITSPACE_RPC_PORT: '0',
@@ -210,6 +210,18 @@ it('replaces both host and machine, preserves work, and supports a reverse updat
     label: 'initial',
     value: 'user-work',
   });
+}, 60_000);
+
+it('removes the retired encrypted artifact cache when the host starts, leaving the rest of the environment', async () => {
+  const { root } = await fixture(async (root) => {
+    await mkdir(join(root, 'cache', 'sealed'), { recursive: true });
+    await mkdir(join(root, 'cache', 'plain'), { recursive: true });
+    await writeFile(join(root, 'cache', 'sealed', 'a'.repeat(64)), new Uint8Array(45).fill(1));
+    await writeFile(join(root, 'cache', 'plain', 'b'.repeat(64)), 'plaintext twin');
+  });
+  const entries = await readdir(root);
+  expect(entries).not.toContain('cache');
+  expect(entries).toEqual(expect.arrayContaining(['host-selection.json', 'gitspace.db', 'host-ready.json']));
 }, 60_000);
 
 it('restores the whole predecessor and its data after an unhealthy candidate', async () => {

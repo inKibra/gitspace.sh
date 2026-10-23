@@ -1,10 +1,10 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, DEVICE_SOCKET_PROTOCOL, encodeApiKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
+import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, DEVICE_SOCKET_PROTOCOL, encodeApiKey, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
 import { accountLiveKey, liveNoticeMessageSchema, workspaceLiveKey, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
 import { workspaceStatusMessageSchema } from '@gitspace/protocol/account-directory';
 import { createGitSpaceClient } from '@gitspace/protocol/client';
-import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
 import { executionHash, loadEnvironmentBundle, serviceIngressContent, type LifecycleRun } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';

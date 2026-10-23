@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, type ArtifactManifest } from '@gitspace/protocol';
+import { artifactObjectKey, createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, signDeviceInvite, TENANT_OBJECT_PART_BYTES, type ArtifactManifest } from '@gitspace/protocol';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES, gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
@@ -9,9 +9,8 @@ import { describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import type { ProjectAuthorityDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
-import { createCipheriv, createHash } from 'node:crypto';
-import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION } from '@gitspace/protocol-workspace';
-import { readArtifactObject } from '../src/artifact-object-reader.js';
+import { createHash } from 'node:crypto';
+import { tenantObjectKey, tenantStore } from '../src/tenant-store.js';
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
 
 async function fixture() {
@@ -36,13 +35,13 @@ async function fixture() {
     await authority.putWorkspace({ id, projectId, kind, name: kind, branch: 'main', phase: kind === 'base' ? null : 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await index.putWorkspaceLocation(id, projectId);
   }
-  const key = credentialProtocolBase64.decode(await vault.artifactKey(userId));
-  const store = async (sealed: Uint8Array) => {
-    const hash = `sha256:${createHash('sha256').update(sealed).digest('hex')}` as const;
-    await env.DATA.put(`users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${hash.slice(7)}`, sealed);
+  const tenant = tenantStore(env);
+  const store = async (scopeId: string, bytes: Uint8Array) => {
+    const hash = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as const;
+    await tenant.put(artifactObjectKey(userId, scopeId, hash), scopeId, bytes);
     return hash;
   };
-  const persist = async (scopeId: string, content: string) => store(await encryptArtifactBytes(new TextEncoder().encode(content), await deriveArtifactScopeKey(key, scopeId)));
+  const persist = (scopeId: string, content: string) => store(scopeId, new TextEncoder().encode(content));
   const publish = async (spaceId: string, generation: number, files: Array<{ path: string; content: string; mediaType?: string }>) => {
     const scopeId = `space:${spaceId}`;
     const entries: ArtifactManifest['entries'] = [];
@@ -51,63 +50,28 @@ async function fixture() {
     await authority.putArtifactScope({ id: scopeId, workspaceId: spaceId, generation, expectedGeneration: generation - 1, manifestHash });
     return entries;
   };
-  const publishChunked = async () => {
+  /** A file above one part: stored as uniform multipart parts, ones then a 17-byte tail of twos. */
+  const publishLarge = async () => {
     const scopeId = `space:${workspaceId}`;
-    const scopeKey = await deriveArtifactScopeKey(key, scopeId);
-    const expected = createHash('sha256');
-    const chunks = [];
-    for (const size of [CHECKPOINT_CHUNK_BYTES, 17]) {
-      const bytes = new Uint8Array(size).fill(size === 17 ? 2 : 1);
-      expected.update(bytes);
-      chunks.push({ hash: await store(await encryptArtifactBytes(bytes, scopeKey)), size });
-    }
-    const size = CHECKPOINT_CHUNK_BYTES + 17;
-    const encrypted = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify({ version: 1, size, chunks })), scopeKey);
-    const envelope = new Uint8Array(encrypted.byteLength + 1);
-    envelope[0] = CHUNKED_CHECKPOINT_VERSION;
-    envelope.set(encrypted, 1);
-    const blobHash = await store(envelope);
+    const size = TENANT_OBJECT_PART_BYTES + 17;
+    const bytes = new Uint8Array(size).fill(1);
+    bytes.fill(2, TENANT_OBJECT_PART_BYTES);
+    const blobHash = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as const;
+    const name = artifactObjectKey(userId, scopeId, blobHash);
+    const writer = tenant.writer(name, scopeId, { sha256: blobHash, size });
+    for (let offset = 0; offset < size; offset += 1024 * 1024) await writer.write(bytes.subarray(offset, offset + 1024 * 1024));
+    await writer.close();
     const entries = [{ path: 'large.bin', blobHash, size, mediaType: 'application/octet-stream' }];
     const manifestHash = await persist(scopeId, JSON.stringify({ version: 1, scopeId, generation: 1, entries }));
     await authority.putArtifactScope({ id: scopeId, workspaceId, generation: 1, expectedGeneration: 0, manifestHash });
-    return { blobHash, size, digest: expected.digest('hex'), finalKey: `users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${chunks[1]!.hash.slice(7)}` };
-  };
-  const publishLegacy = async () => {
-    const scopeId = `space:${workspaceId}`;
-    const scopeKey = await deriveArtifactScopeKey(key, scopeId);
-    // Match the largest retained old envelope without allocating a second full payload.
-    const size = 39_479_629;
-    const nonce = new Uint8Array(12).fill(7);
-    const cipher = createCipheriv('aes-256-gcm', scopeKey, nonce);
-    const sealed = new Uint8Array(size + 29);
-    sealed[0] = 1;
-    sealed.set(nonce, 1);
-    const block = Uint8Array.from({ length: 64 * 1024 }, (_, index) => index % 251);
-    const expected = createHash('sha256');
-    for (let offset = 0; offset < size; offset += block.byteLength) {
-      const bytes = block.subarray(0, Math.min(block.byteLength, size - offset));
-      expected.update(bytes);
-      sealed.set(cipher.update(bytes), 13 + offset);
-    }
-    sealed.set(cipher.final(), 13 + size);
-    sealed.set(cipher.getAuthTag(), 13 + size);
-    const blobHash = await store(sealed);
-    const entries = [{ path: 'legacy.pcm', blobHash, size, mediaType: 'audio/pcm' }];
-    const manifestHash = await persist(scopeId, JSON.stringify({ version: 1, scopeId, generation: 1, entries }));
-    const scope = { id: scopeId, workspaceId, generation: 1, manifestHash };
-    await authority.putArtifactScope({ ...scope, expectedGeneration: 0 });
-    return {
-      blobHash, size, scopeKey, scope, digest: expected.digest('hex'),
-      objectKey: `users/${userId}/accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${blobHash.slice(7)}`,
-    };
+    return { blobHash, size, bytes, key: tenantObjectKey(userId, name) };
   };
   const origin = `https://${handle}.gitspace.sh`;
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return worker.fetch(new Request(input, init), env);
   }) as typeof fetch;
   const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: createSignedRpcFetch({ deviceId: binding.deviceId, userId, signingPrivateKey: deviceKey, fetch: fetcher }) }) });
-  const seal = async (scopeId: string, bytes: Uint8Array) => store(await encryptArtifactBytes(bytes, await deriveArtifactScopeKey(key, scopeId)));
-  return { client, authority, projectId, workspaceId, publish, publishChunked, publishLegacy, origin, seal };
+  return { client, authority, projectId, workspaceId, publish, publishLarge, origin, store };
 }
 
 async function readBytes(stream: AsyncIterable<{ status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown }>): Promise<Buffer> {
@@ -228,34 +192,36 @@ describe('user artifact flows', () => {
     expect(bytes).toEqual(Buffer.from(content));
   });
 
-  it('names a file a machine sealed only when it opens under the workspace scope key', async () => {
-    const { client, workspaceId, projectId, seal } = await fixture();
+  it('names a file a machine stored only when the workspace scope holds it at its digest and size', async () => {
+    const { client, workspaceId, projectId, store } = await fixture();
     const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
     const zip = Uint8Array.from({ length: 70_000 }, (_, index) => (index * 7) % 256);
     const target = await artifacts.machineTarget('drive://workspace/uploads/font.zip');
     expect(target).toEqual({ scopeId: `space:${workspaceId}`, path: 'uploads/font.zip' });
-    // Sealed under the project's scope key, the object is refused and nothing is named.
-    const foreign = await seal(`space:${projectId}`, zip);
-    await expect(artifacts.write('drive://workspace/uploads/font.zip', { sealed: { blobHash: foreign, size: zip.byteLength }, mediaType: 'application/zip' })).rejects.toThrow();
-    const sealed = { blobHash: await seal(target.scopeId, zip), size: zip.byteLength };
-    await expect(artifacts.write('drive://workspace/uploads/font.zip', { sealed: { ...sealed, size: zip.byteLength + 1 }, mediaType: 'application/zip' })).rejects.toThrow();
+    // Stored in the project's scope, the object is not this workspace's and nothing is named.
+    const foreign = await store(`space:${projectId}`, zip);
+    await expect(artifacts.write('drive://workspace/uploads/font.zip', { stored: { blobHash: foreign, size: zip.byteLength }, mediaType: 'application/zip' })).rejects.toThrow();
+    const stored = { blobHash: await store(target.scopeId, zip), size: zip.byteLength };
+    await expect(artifacts.write('drive://workspace/uploads/font.zip', { stored: { ...stored, size: zip.byteLength + 1 }, mediaType: 'application/zip' })).rejects.toThrow();
     expect((await artifacts.list()).map(entry => entry.path)).toEqual([]);
-    const written = await artifacts.write('drive://workspace/uploads/font.zip', { sealed, mediaType: 'application/zip' });
-    expect(written).toMatchObject({ url: 'drive://workspace/uploads/font.zip', hash: sealed.blobHash, size: zip.byteLength, mediaType: 'application/zip' });
-    expect(await artifacts.locate('drive://workspace/uploads/font.zip')).toEqual({ scopeId: target.scopeId, ...sealed });
+    const written = await artifacts.write('drive://workspace/uploads/font.zip', { stored, mediaType: 'application/zip' });
+    expect(written).toMatchObject({ url: 'drive://workspace/uploads/font.zip', hash: stored.blobHash, size: zip.byteLength, mediaType: 'application/zip' });
+    expect(await artifacts.locate('drive://workspace/uploads/font.zip')).toEqual({ scopeId: target.scopeId, ...stored });
     const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/uploads/font.zip', hash: null }));
     expect(bytes).toEqual(Buffer.from(zip));
   });
 
-  it('records the hash of every drive file it stores, so a machine reader can name it', async () => {
+  it('stores every drive file in its scope under its plaintext digest and size', async () => {
     const { workspaceId, projectId } = await fixture();
     const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
-    const written = await artifacts.write('drive://workspace/notes.txt', { bytes: new TextEncoder().encode('drive notes') });
-    const stored = await env.DATA.head(`users/${env.ACCOUNT_ID}/accounts/${Buffer.from(env.ACCOUNT_ID).toString('base64url')}/artifacts/sha256/${written.hash.slice(7)}`);
-    expect(stored?.customMetadata?.sha256).toBe(written.hash);
+    const bytes = new TextEncoder().encode('drive notes');
+    const written = await artifacts.write('drive://workspace/notes.txt', { bytes });
+    expect(written.hash).toBe(`sha256:${createHash('sha256').update(bytes).digest('hex')}`);
+    const stored = await env.DATA.head(tenantObjectKey(env.ACCOUNT_ID, artifactObjectKey(env.ACCOUNT_ID, `space:${workspaceId}`, written.hash)));
+    expect(stored?.customMetadata).toEqual({ scope: `space:${workspaceId}`, sha256: written.hash, size: String(bytes.byteLength) });
   });
 
-  it('rejects a conflicting batch atomically and keeps re-encrypted project copies independent of later workspace edits', async () => {
+  it('rejects a conflicting batch atomically and keeps project copies independent of later workspace edits', async () => {
     const setup = await fixture();
     const { client, projectId, workspaceId, publish, authority } = setup;
     const source = await publish(workspaceId, 1, [{ path: 'a.txt', content: 'original A' }, { path: 'b.txt', content: 'original B' }]);
@@ -342,9 +308,9 @@ describe('user artifact flows', () => {
     expect(await (await get(pinned.value.url, { range: 'bytes=0-1' })).text()).toBe('AB');
   });
 
-  it('serves a range at the end of a chunked file from its last parts', async () => {
-    const { client, workspaceId, publishChunked, origin } = await fixture();
-    const chunked = await publishChunked();
+  it('serves a range at the end of a multipart file', async () => {
+    const { client, workspaceId, publishLarge, origin } = await fixture();
+    const chunked = await publishLarge();
     const large = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/large.bin', hash: chunked.blobHash });
     if (large.status === 'error') throw large.error;
     const tail = await worker.fetch(new Request(new URL(large.value.url, origin), { headers: { range: `bytes=${chunked.size - 20}-` } }), env);
@@ -381,9 +347,9 @@ describe('user artifact flows', () => {
     expect(await client.inspector.artifacts.shares.list({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/demo.html' })).toMatchObject({ status: 'ok', value: [] });
   });
 
-  it('streams chunked shares completely, keeps preview/copy size limits honest, and rejects corrupt final parts', async () => {
-    const { client, workspaceId, publishChunked, origin } = await fixture();
-    const artifact = await publishChunked();
+  it('streams large shares completely, keeps preview/copy size limits honest, and refuses corrupted objects', async () => {
+    const { client, workspaceId, publishLarge, origin } = await fixture();
+    const artifact = await publishLarge();
     const request = { spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/large.bin', hash: artifact.blobHash };
     const previews = [];
     for await (const frame of client.inspector.artifacts.read(request)) previews.push(frame);
@@ -406,20 +372,21 @@ describe('user artifact flows', () => {
     }
     reader.releaseLock();
     expect(size).toBe(artifact.size);
-    expect(received.digest('hex')).toBe(artifact.digest);
-    await env.DATA.put(artifact.finalKey, new Uint8Array([1, 2, 3]));
+    expect(`sha256:${received.digest('hex')}`).toBe(artifact.blobHash);
+    const metadata = (await env.DATA.head(artifact.key))!.customMetadata;
+    // The same recorded digest and size over a changed final byte: no link is published for it.
+    const tampered = Uint8Array.from(artifact.bytes);
+    tampered[tampered.byteLength - 1] = 3;
+    await env.DATA.put(artifact.key, tampered, { customMetadata: metadata });
     expect((await client.inspector.artifacts.shares.create({ ...request, expiresAt: null })).status).toBe('error');
+    // A body of another size is refused before any byte is served.
+    await env.DATA.put(artifact.key, new Uint8Array([1, 2, 3]), { customMetadata: metadata });
     expect((await worker.fetch(new Request(url, { method: 'HEAD' }), env)).status).toBe(404);
-    const corrupt = await worker.fetch(new Request(url), env);
-    await expect((async () => {
-      const reader = corrupt.body!.getReader();
-      try { while (!(await reader.read()).done) { /* Verify the stream fails, rather than ending successfully. */ } }
-      finally { reader.releaseLock(); }
-    })()).rejects.toThrow();
-  }, 30_000);
+    expect((await worker.fetch(new Request(url), env)).status).toBe(404);
+  }, 60_000);
 
-  it('uploads binary files in verified sequential chunks and commits them as workspace artifacts', async () => {
-    const { client, workspaceId } = await fixture();
+  it('uploads binary files in verified sequential chunks, commits them as workspace artifacts and serves them by URL', async () => {
+    const { client, workspaceId, origin } = await fixture();
     const request = { spaceId: workspaceId, expectedGeneration: 0 };
     const bytes = Uint8Array.from({ length: ARTIFACT_UPLOAD_CHUNK_BYTES + 1_000 }, (_, index) => index % 251);
     const chunk = (offset: number) => {
@@ -445,6 +412,11 @@ describe('user artifact flows', () => {
     // A ':' in the name is encoded, so it is not read as a `:raw` or line selector.
     const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: committed.value.url, hash: committed.value.hash }));
     expect(stored).toEqual(Buffer.from(bytes));
+    const minted = await client.inspector.artifacts.file({ ...request, url: committed.value.url, hash: null });
+    if (minted.status === 'error') throw minted.error;
+    const ranged = await worker.fetch(new Request(new URL(minted.value.url, origin), { headers: { range: `bytes=${ARTIFACT_UPLOAD_CHUNK_BYTES - 2}-${ARTIFACT_UPLOAD_CHUNK_BYTES + 1}` } }), env);
+    expect([ranged.status, ranged.headers.get('content-range')]).toEqual([206, `bytes ${ARTIFACT_UPLOAD_CHUNK_BYTES - 2}-${ARTIFACT_UPLOAD_CHUNK_BYTES + 1}/${bytes.length}`]);
+    expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(bytes.subarray(ARTIFACT_UPLOAD_CHUNK_BYTES - 2, ARTIFACT_UPLOAD_CHUNK_BYTES + 2));
     expect(await client.inspector.artifacts.uploadAbort(upload)).toMatchObject({ status: 'ok', value: { aborted: false } });
 
     await expect(client.inspector.artifacts.uploadBegin({ ...request, fileName: 'huge.bin', size: 17 * 1024 * 1024, mediaType: null })).rejects.toThrow('less than or equal to 16777216');

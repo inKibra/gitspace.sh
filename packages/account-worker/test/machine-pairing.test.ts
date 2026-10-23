@@ -103,27 +103,13 @@ describe('browser-approved machine pairing', () => {
     expect(delivered.value).toMatchObject({ state: 'enrolled', machineId: grant.grant.machineId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootKey)), grant });
     expect(delivered.value).not.toHaveProperty('rootPrivateKey');
     expect(delivered.value).not.toHaveProperty('vaultKey');
+    expect(delivered.value).not.toHaveProperty('artifactKey');
     expect(await (await SELF.fetch(signedRequest('poll', body, pairing.pairingId, machineKey))).json()).toEqual(delivered);
     const relayAuthority = () => SELF.fetch('https://auth.test/v1/relay/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant, capability: 'space.control' }) });
     expect((await relayAuthority()).status).toBe(200);
     await owner.vault.revokeDeviceGrant(owner.deviceId);
     expect((await SELF.fetch(signedRequest('poll', body, pairing.pairingId, machineKey))).status).toBe(403);
     expect((await relayAuthority()).status).toBe(401);
-  });
-
-  it('answers other vault requests while a machine poll is in flight', async () => {
-    const owner = await account();
-    const pairing = await created(owner);
-    await approved(owner, pairing);
-    let answered: string | null = null;
-    vi.spyOn(CredentialVaultDO.prototype, 'artifactKey').mockImplementationOnce(async (userId: string) => {
-      // The vault is mid-poll; a vault holding a lock for the whole poll would deadlock on this second request.
-      answered = await env.CREDENTIALS.getByName(userId).artifactKey(userId);
-      return answered;
-    });
-    const response = await SELF.fetch(signedRequest('poll', { userId: owner.userId, pairingId: pairing.pairingId }, pairing.pairingId, machineKey));
-    expect(answered).not.toBeNull();
-    expect(await response.json()).toMatchObject({ status: 'ok', value: { state: 'enrolled', artifactKey: answered } });
   });
 
   it('rejects cross-account, cancelled, expired and revoked-machine delivery', async () => {

@@ -11,6 +11,7 @@ import { forwardPosition, type ForwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
+import { forgetTenantScope } from './tenant-store.js';
 
 type ProjectAuthority = DurableObjectStub<ProjectAuthorityDO>;
 type SpaceAuthority = DurableObjectStub<SpaceAuthorityDO>;
@@ -344,6 +345,8 @@ export async function deleteCloudWorkspace(env: Env, userId: string, workspaceId
     await advance();
     const removed = await authority.removeWorkspace(workspaceId);
     await env.USER_PROJECTS.getByName(userId).removeWorkspaceLocation(workspaceId);
+    // Its drive and workspace objects become unreadable with their key.
+    await forgetTenantScope(env, `space:${workspaceId}`);
     return removed;
   });
 }
@@ -444,6 +447,8 @@ export async function deleteCloudProject(env: Env, userId: string, projectId: st
   await authority.deleteProject(expectedRevision);
   await code.deleteRepository(artifactsProjectRepository(projectId));
   await env.USER_PROJECTS.getByName(userId).remove(projectId);
+  // Every drive, workspace and LFS object of the project becomes unreadable with its scope's key.
+  for (const scope of [`lfs:${projectId}`, `space:${projectId}`, ...workspaces.map(workspace => `space:${workspace.id}`)]) await forgetTenantScope(env, scope);
 }
 
 /** Moves a workspace's phase within the ceiling its dependencies set: the workspace object applies it, then its
