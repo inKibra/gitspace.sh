@@ -2687,7 +2687,9 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
         ...noStore, 'content-length': String(metadata.size), 'content-type': 'application/octet-stream',
         'x-gitspace-sha256': metadata.sha256, 'x-gitspace-size': String(metadata.size),
       });
-      return new Response(object?.body ?? null, { headers });
+      // The verified body has no length of its own, so it would go out chunked without the content-length machines
+      // read the size from; a fixed length keeps it.
+      return new Response(object ? object.body.pipeThrough(new FixedLengthStream(metadata.size)) : null, { headers });
     }
     case 'data.put': {
       const declared = dataObjectWriteSchema.safeParse(signed.payload);
