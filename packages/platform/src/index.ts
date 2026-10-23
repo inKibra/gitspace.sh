@@ -6,7 +6,7 @@ import { sendSpendDigestIfDue } from './spend-digest.js';
 
 /** `wrangler.jsonc` cron of the storage watchdog and the spend digest; the other cron is the daily usage report. */
 const STORAGE_WATCHDOG_CRON = '*/10 * * * *';
-import { platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
+import { legacyPlatformDeployRequestSchema, platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
 import { CloudflareR2PlatformClient } from './storage-provider.js';
 import { CreditLedgerDO, isCreditLedgerRecord, type CreditLedgerRecord } from './credit-ledger.js';
 import { deployChannelTenant, deployTenantWorker, revertTenantWorker, type DeployResult } from './deployer.js';
@@ -281,11 +281,12 @@ async function handleTenantDeployment(request: Request, env: Env, tenant: string
   if (denied) return denied;
   let result: DeployResult;
   if (action === 'deploy') {
-    const parsed = platformDeployRequestSchema.safeParse(body);
+    // LEGACY(single-bundle releases): tenants on a release from before module releases still send `bundleKey`.
+    const parsed = platformDeployRequestSchema.or(legacyPlatformDeployRequestSchema).safeParse(body);
     if (!parsed.success) return platformError(400, 'INVALID_DEPLOY_REQUEST', parsed.error.message);
-    if (!parsed.data.bundleKey.startsWith(`users/${accountId}/`)
-      || parsed.data.bundleKey.split('/').some((part) => !part || part === '.' || part === '..' || part.includes('\\'))) {
-      return platformError(403, 'BUNDLE_ACCOUNT_MISMATCH', 'Worker bundle does not belong to this account');
+    const key = 'manifestKey' in parsed.data ? parsed.data.manifestKey : parsed.data.bundleKey;
+    if (!key.startsWith(`users/${accountId}/`) || key.split('/').some((part) => !part || part === '.' || part === '..' || part.includes('\\'))) {
+      return platformError(403, 'BUNDLE_ACCOUNT_MISMATCH', 'Worker release does not belong to this account');
     }
     result = await deployTenantWorker(env, tenant, parsed.data);
   } else {

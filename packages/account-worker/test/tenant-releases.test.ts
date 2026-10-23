@@ -9,6 +9,7 @@ import {
   type ControlOperation,
 } from '@gitspace/protocol';
 import {
+  workerModuleKey,
   deploymentStatusSchema,
   releaseRecordSchema,
   type PlatformDeployRequest,
@@ -32,7 +33,7 @@ function stageInput(sha: string): StageReleaseInput {
     label: `workspace build ${sha}`,
     source: { kind: 'workspace', workspaceId: 'workspace-a', commit: 'a'.repeat(40), uncommittedFiles: 0 },
     artifacts: {
-      worker: { key: `releases/${sha}/worker.mjs`, hash: HASH, size: 1024 },
+      worker: { key: `releases/${sha}/worker.manifest.json`, hash: HASH, size: 1024 },
       machine: { key: `releases/${sha}/machine.js`, hash: HASH, size: 2048 },
       frontend: { key: `releases/${sha}/frontend`, hash: HASH, size: 4096 },
     },
@@ -326,7 +327,7 @@ describe('tenant releases', () => {
     expect(deploys).toHaveLength(1);
     expect(deploys[0]).toEqual({
       authorization: 'Bearer tenant-token',
-      body: { accountId: userId, sha: 'good111', bundleKey: `users/${userId}/releases/good111/worker.mjs`, bundleHash: HASH, metadata: stageInput('good111').worker },
+      body: { accountId: userId, sha: 'good111', manifestKey: `users/${userId}/releases/good111/worker.manifest.json`, manifestHash: HASH, metadata: stageInput('good111').worker },
     });
 
     await control('deploy.stage', stageInput('bad222'));
@@ -386,6 +387,19 @@ describe('tenant releases', () => {
     expect(actions).toHaveLength(2);
     const status = deploymentStatusSchema.parse(await control('deploy.status', {}));
     expect(status.desired.worker).toBeNull();
+  });
+
+  it('serves each module of a staged worker release to the platform with its exact length', async () => {
+    const manifestKey = `users/${env.ACCOUNT_ID}/releases/route-release/worker.manifest.json`;
+    const wasm = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+    await env.DATA.put(workerModuleKey(manifestKey, 'engine.wasm'), wasm);
+    const get = (key: string, token = env.PLATFORM_TOKEN) => SELF.fetch(`https://tenant.test/__platform/objects/${key.split('/').map(encodeURIComponent).join('/')}`, { headers: { authorization: `Bearer ${token}` } });
+    const module = await get(workerModuleKey(manifestKey, 'engine.wasm'));
+    expect(module.status).toBe(200);
+    expect(module.headers.get('content-length')).toBe(String(wasm.byteLength));
+    expect([...new Uint8Array(await module.arrayBuffer())]).toEqual([...wasm]);
+    expect((await get(workerModuleKey(manifestKey, 'missing.wasm'))).status).toBe(404);
+    expect((await get(workerModuleKey(manifestKey, 'engine.wasm'), 'not-the-platform')).status).toBe(401);
   });
 
   it('serves the pinned default frontend without following a moving asset tree or forwarding credentials', async () => {

@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from '../src/default-release.js';
 import { loadDefaultRelease } from '@gitspace/protocol/default-release';
-import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 
 const sha = 'a'.repeat(40);
 const nextSha = 'b'.repeat(40);
 const bytes = (value: string) => new TextEncoder().encode(value);
+const workerModule = (commit: string) => `defaults/releases/${commit}/worker/worker.mjs`;
 function storage() {
   const objects = new Map<string, { bytes: Uint8Array; etag: string }>();
   let revision = 0;
@@ -24,7 +24,7 @@ function storage() {
 async function build(commit = sha, imageCommit = commit, embeddedCommit = commit) {
   return buildDefaultRelease(commit, {
     verifyCommit: async () => commit,
-    worker: async () => ({ commit, version: commit, bytes: encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: bytes(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(embeddedCommit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }]), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
+    worker: async () => ({ commit, version: commit, modules: [{ name: 'worker.mjs', type: 'esm', content: bytes(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(embeddedCommit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }], metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
     frontend: async () => ({ commit, files: [{ path: 'index.html', bytes: bytes(`ui:${commit}`), contentType: 'text/html' }] }),
     image: async () => ({ commit: imageCommit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance: bytes(JSON.stringify({ commit: imageCommit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` })) }),
   });
@@ -41,7 +41,7 @@ describe('coherent default account releases', () => {
     expect((await loadDefaultRelease(f.api)).commit).toBe(nextSha);
     await rollbackDefaultRelease(f.api);
     expect(await loadDefaultRelease(f.api)).toEqual(first.manifest);
-    expect(f.objects.has(first.manifest.worker.bundle.key)).toBe(true);
+    expect(f.objects.has(workerModule(sha))).toBe(true);
   });
   test('rejects cross-commit image provenance before writing anything', async () => {
     await expect(build(sha, nextSha)).rejects.toThrow('commit');
@@ -62,11 +62,11 @@ describe('coherent default account releases', () => {
   test('refuses corrupted local or immutable remote content and never activates it', async () => {
     const f = storage();
     const release = await build();
-    release.objects.set(release.manifest.worker.bundle.key, bytes('tampered'));
+    release.objects.set(workerModule(sha), bytes('tampered'));
     await expect(publishDefaultRelease(release, f.api)).rejects.toThrow('integrity');
     expect(f.objects.has('defaults/account.json')).toBe(false);
     const valid = await build();
-    f.objects.set(valid.manifest.worker.bundle.key, { bytes: bytes('collision'), etag: 'collision' });
+    f.objects.set(workerModule(sha), { bytes: bytes('collision'), etag: 'collision' });
     await expect(publishDefaultRelease(valid, f.api)).rejects.toThrow('integrity');
   });
   test('same release retries are idempotent and bootstrap rejects missing selected artifacts', async () => {
@@ -74,7 +74,7 @@ describe('coherent default account releases', () => {
     const release = await build();
     await publishDefaultRelease(release, f.api);
     await publishDefaultRelease(release, f.api);
-    f.objects.delete(release.manifest.worker.bundle.key);
+    f.objects.delete(`defaults/releases/${sha}/worker.manifest.json`);
     await expect(loadDefaultRelease(f.api)).rejects.toThrow('missing');
   });
   test('concurrent promotions cannot overwrite a pointer changed since publication began', async () => {

@@ -1,13 +1,13 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Miniflare } from 'miniflare';
-import { buildWorkerBundle } from './builders.js';
-import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
-import { workerBundleSchema } from '@gitspace/protocol/deployment';
+import { buildWorkerRelease } from './builders.js';
+import { workerManifestSchema } from '@gitspace/protocol/deployment';
 
-test('production worker builder packages static Rust WASM and runs the uploaded module graph in workerd', async () => {
+test('production worker builder writes static Rust WASM as its own module and runs the manifest module graph in workerd', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gitspace-worker-wasm-'));
   let worker: Miniflare | undefined;
   try {
@@ -15,20 +15,22 @@ test('production worker builder packages static Rust WASM and runs the uploaded 
     await mkdir(source, { recursive: true });
     const matcher = new URL('../../protocol-runtime/src/search.ts', import.meta.url).pathname;
     await writeFile(join(source, 'index.ts'), `import { searchSnapshotFiles } from ${JSON.stringify(matcher)}; export default { fetch(){return Response.json(searchSnapshotFiles([{path:'src/a.ts',content:'αβ\\n'}],{pattern:'\\\\p{Greek}+',path:'.'}));} };`);
-    const built = await buildWorkerBundle(directory, 'local-only', join(directory, 'bundle'));
-    const bytes = await Bun.file(built.path).arrayBuffer();
-    const artifact = workerBundleSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
-    expect(artifact.modules.some(module => module.type === 'wasm')).toBe(true);
-    const decoded = decodeWorkerBundle(bytes, 'worker.mjs');
-    if (decoded.isErr()) throw decoded.error;
-    worker = new Miniflare({ modules: decoded.value.map(module => module.type === 'wasm'
+    const built = await buildWorkerRelease(directory, 'local-only', join(directory, 'bundle'));
+    const manifestBytes = await readFile(built.path);
+    expect(built.hash).toBe(`sha256:${createHash('sha256').update(manifestBytes).digest('hex')}`);
+    const manifest = workerManifestSchema.parse(JSON.parse(manifestBytes.toString('utf8')));
+    expect(manifest.mainModule).toBe('worker.mjs');
+    expect(manifest.modules.map(module => module.type)).toEqual(['esm', 'wasm']);
+    // Every module is a file beside the manifest whose size and digest the manifest pins.
+    const modules = await Promise.all(manifest.modules.map(async module => ({ ...module, content: await readFile(join(dirname(built.path), module.name)) })));
+    for (const module of modules) {
+      expect(module.content.byteLength).toBe(module.size);
+      expect(createHash('sha256').update(module.content).digest('hex')).toBe(module.sha256);
+    }
+    worker = new Miniflare({ modules: modules.map(module => module.type === 'wasm'
       ? { type: 'CompiledWasm', path: join(directory, module.name), contents: module.content }
-      : { type: 'ESModule', path: join(directory, module.name), contents: new TextDecoder().decode(module.content) }), modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], outboundService: () => { throw new Error('Live calls forbidden'); } });
+      : { type: 'ESModule', path: join(directory, module.name), contents: module.content.toString('utf8') }), modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], outboundService: () => { throw new Error('Live calls forbidden'); } });
     const response = await worker.dispatchFetch('http://proof/');
     expect(await response.json()).toMatchObject({ text: 'src/a.ts:1:αβ' });
-    const wasm = artifact.modules.find(module => module.type === 'wasm');
-    if (!wasm) throw new Error('Missing static wasm module');
-    wasm.base64 = btoa('corrupted wasm');
-    expect(decodeWorkerBundle(new TextEncoder().encode(JSON.stringify(artifact)).buffer, 'worker.mjs').isErr()).toBe(true);
   } finally { await worker?.dispose(); await rm(directory, { recursive: true, force: true }); }
 }, 30000);

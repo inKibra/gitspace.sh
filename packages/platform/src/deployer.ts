@@ -1,14 +1,20 @@
 import {
+  WORKER_MANIFEST_FILE,
   WORKER_VERSION_HEADER,
+  workerBundleSchema,
+  workerManifestSchema,
+  workerModuleKey,
   workerReleaseMetadataSchema,
+  type LegacyPlatformDeployRequest,
   type PlatformDeployRequest,
   type PlatformDeployResponse,
+  type WorkerManifest,
   type WorkerReleaseMetadata,
 } from '@gitspace/protocol/deployment';
+import type { WorkerModule } from '@gitspace/protocol/worker-bundle';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
-import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 import { defaultReleaseReader } from './default-release.js';
-import { DEFAULT_ACCOUNT_POINTER, resolveDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
+import { DEFAULT_ACCOUNT_POINTER, resolveDefaultRelease } from '@gitspace/protocol/default-release';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
 
@@ -55,9 +61,9 @@ export interface DeployFailure {
   message: string;
 }
 
-export type DeployResult =
-  | { status: 'ok'; value: PlatformDeployResponse }
-  | { status: 'error'; error: DeployFailure };
+type Outcome<T> = { status: 'ok'; value: T } | { status: 'error'; error: DeployFailure };
+
+export type DeployResult = Outcome<PlatformDeployResponse>;
 
 /**
  * Migrations Cloudflare still has to run for this tenant: every tag after the
@@ -141,9 +147,114 @@ async function ensureArtifactsNamespace(env: Env, namespace: string): Promise<De
   }
 }
 
-async function sha256Prefixed(bytes: ArrayBuffer): Promise<string> {
+async function sha256Hex(bytes: BufferSource): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function invalidModules(message: string): { status: 'error'; error: DeployFailure } {
+  return { status: 'error', error: { status: 409, code: 'WORKER_MODULE_INVALID', message } };
+}
+
+function missingObject(key: string): { status: 'error'; error: DeployFailure } {
+  return { status: 'error', error: { status: 404, code: 'RELEASE_OBJECT_NOT_FOUND', message: `Release object unavailable at ${key}` } };
+}
+
+/** Reads a release object: from the tenant's data bucket through its own Worker, or from RELEASES. */
+type ObjectReader = (key: string) => Promise<ReadableStream<Uint8Array> | null>;
+
+/** A manifest is a few hundred bytes per module; anything longer is not one. */
+const WORKER_MANIFEST_MAX_BYTES = 64 * 1024;
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+const MODULE_CONTENT_TYPES: Record<WorkerModule['type'], string> = { esm: 'application/javascript+module', wasm: 'application/wasm' };
+
+/** Reads at most `limit` bytes into one buffer; null when the object is longer. */
+async function readBounded(body: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const bytes = new Uint8Array(limit);
+  const reader = body.getReader();
+  let length = 0;
+  for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+    if (length + chunk.value.byteLength > limit) {
+      await reader.cancel();
+      return null;
+    }
+    bytes.set(chunk.value, length);
+    length += chunk.value.byteLength;
+  }
+  return bytes.subarray(0, length);
+}
+
+async function readWorkerManifest(read: ObjectReader, key: string, expectedHash: string | null, mainModule: string): Promise<Outcome<{ bytes: Uint8Array<ArrayBuffer>; manifest: WorkerManifest }>> {
+  const body = await read(key);
+  if (!body) return missingObject(key);
+  const bytes = await readBounded(body, WORKER_MANIFEST_MAX_BYTES);
+  if (!bytes) return invalidModules(`Worker manifest is larger than ${WORKER_MANIFEST_MAX_BYTES} bytes`);
+  const hash = `sha256:${await sha256Hex(bytes)}`;
+  if (expectedHash !== null && hash !== expectedHash) return { status: 'error', error: { status: 409, code: 'MANIFEST_HASH_MISMATCH', message: `Worker manifest hashes to ${hash}, expected ${expectedHash}` } };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return invalidModules('Worker manifest is not JSON');
+  }
+  const manifest = workerManifestSchema.safeParse(parsed);
+  if (!manifest.success) return invalidModules(`Worker manifest is invalid: ${manifest.error.message}`);
+  if (manifest.data.mainModule !== mainModule) return invalidModules(`Worker manifest main module ${manifest.data.mainModule} differs from the release's ${mainModule}`);
+  return { status: 'ok', value: { bytes, manifest: manifest.data } };
+}
+
+/** Reads one module into exactly its manifest size and checks its digest before anything stores or uploads it. */
+async function readWorkerModule(read: ObjectReader, manifestKey: string, module: WorkerManifest['modules'][number]): Promise<Outcome<WorkerModule>> {
+  const key = workerModuleKey(manifestKey, module.name);
+  const body = await read(key);
+  if (!body) return missingObject(key);
+  const content = await readBounded(body, module.size);
+  if (!content || content.byteLength !== module.size || await sha256Hex(content) !== module.sha256) return invalidModules(`Worker module integrity mismatch: ${module.name}`);
+  if (module.type === 'wasm' && WASM_MAGIC.some((byte, index) => content[index] !== byte)) return invalidModules(`Invalid WASM module: ${module.name}`);
+  return { status: 'ok', value: { name: module.name, type: module.type, content } };
+}
+
+/**
+ * LEGACY(single-bundle releases): a version-1 `worker.bundle.json` carries every module base64-encoded in one JSON
+ * document. Reached only by a deploy request that still names a bundle and by a revert, fallback or channel deploy of a
+ * release stored before module releases; delete with `legacyPlatformDeployRequestSchema` and the legacy default worker
+ * once no tenant sends one and no deploy record or default pin names one. The document is decoded once: its text is
+ * released after parsing and each module decodes straight into its own bytes.
+ */
+async function legacyBundleModules(env: Env, key: string, mainModule: string): Promise<Outcome<WorkerModule[]>> {
+  const object = await env.RELEASES.get(key);
+  if (!object) return missingObject(key);
+  const modules: WorkerModule[] = [];
+  try {
+    const bundle = workerBundleSchema.parse(JSON.parse(await object.text()));
+    for (const module of bundle.modules) {
+      const binary = atob(module.base64);
+      const content = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) content[index] = binary.charCodeAt(index);
+      if (content.byteLength !== module.bytes || `sha256:${await sha256Hex(content)}` !== module.hash) return invalidModules(`Worker module integrity mismatch: ${module.name}`);
+      if (module.type === 'wasm' && WASM_MAGIC.some((byte, index) => content[index] !== byte)) return invalidModules(`Invalid WASM module: ${module.name}`);
+      modules.push({ name: module.name, type: module.type, content });
+    }
+  } catch (error) {
+    return invalidModules(error instanceof Error ? error.message : String(error));
+  }
+  if (!modules.some(module => module.name === mainModule && module.type === 'esm')) return invalidModules('Worker bundle has no declared main module');
+  return { status: 'ok', value: modules };
+}
+
+/** A stored release's modules: a worker manifest and the modules beside it, or a LEGACY single bundle. */
+async function loadWorkerModules(env: Env, workerKey: string, mainModule: string): Promise<Outcome<WorkerModule[]>> {
+  if (!workerKey.endsWith(`/${WORKER_MANIFEST_FILE}`)) return legacyBundleModules(env, workerKey, mainModule);
+  const read: ObjectReader = async key => (await env.RELEASES.get(key))?.body ?? null;
+  const manifest = await readWorkerManifest(read, workerKey, null, mainModule);
+  if (manifest.status === 'error') return manifest;
+  const modules: WorkerModule[] = [];
+  for (const entry of manifest.value.manifest.modules) {
+    const module = await readWorkerModule(read, workerKey, entry);
+    if (module.status === 'error') return module;
+    modules.push(module.value);
+  }
+  return { status: 'ok', value: modules };
 }
 
 interface CloudflareApiEnvelope {
@@ -171,16 +282,36 @@ async function readCloudflareEnvelope(response: Response): Promise<CloudflareApi
   }
 }
 
-async function uploadScript(env: Env, tenant: string, bundle: ArrayBuffer, metadata: ScriptUploadMetadata): Promise<DeployFailure | null> {
-  const decoded = decodeWorkerBundle(bundle, metadata.main_module);
-  if (decoded.isErr()) return { status: 409, code: 'WORKER_MODULE_INVALID', message: decoded.error.message };
-  const form = new FormData();
-  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
-  for (const module of decoded.value) form.append(module.name, new Blob([module.content], { type: module.type === 'wasm' ? 'application/wasm' : 'application/javascript+module' }), module.name);
+/**
+ * Streams the multipart upload from the module bytes already in memory: a `FormData` body would copy every module into
+ * a Blob and again into the serialized request.
+ */
+async function uploadScript(env: Env, tenant: string, workerKey: string, metadata: ScriptUploadMetadata): Promise<DeployFailure | null> {
+  const modules = await loadWorkerModules(env, workerKey, metadata.main_module);
+  if (modules.status === 'error') return modules.error;
+  const boundary = `gitspace-${crypto.randomUUID()}`;
+  const encoder = new TextEncoder();
+  const parts: Uint8Array[] = [
+    encoder.encode(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"; filename="metadata.json"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(metadata)}\r\n`),
+    ...modules.value.flatMap(module => [
+      encoder.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${module.name}"; filename="${module.name}"\r\nContent-Type: ${MODULE_CONTENT_TYPES[module.type]}\r\n\r\n`),
+      module.content,
+      encoder.encode('\r\n'),
+    ]),
+    encoder.encode(`--${boundary}--\r\n`),
+  ];
+  const length = parts.reduce((total, part) => total + part.byteLength, 0);
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const part = parts.shift();
+      if (part) controller.enqueue(part);
+      else controller.close();
+    },
+  }).pipeThrough(new FixedLengthStream(length));
   const url = `${CLOUDFLARE_API}/accounts/${env.CF_ACCOUNT_ID}/workers/dispatch/namespaces/${env.DISPATCH_NAMESPACE}/scripts/${env.DISPATCH_NAMESPACE}-tenant-${tenant}`;
   let response: Response;
   try {
-    response = await fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${env.CF_API_TOKEN}` }, body: form });
+    response = await fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${env.CF_API_TOKEN}`, 'content-type': `multipart/form-data; boundary=${boundary}` }, body });
   } catch (error) {
     return { status: 502, code: 'UPLOAD_UNREACHABLE', message: error instanceof Error ? error.message : String(error) };
   }
@@ -222,11 +353,12 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string): Promi
   return { healthy: false, version };
 }
 
+/** A release to upload; its bytes are read from RELEASES only for the upload itself, so no swap holds two releases. */
 interface Candidate {
   /** Exact Worker build identity, checked by the post-upload health probe. */
   sha: string;
-  bundleKey: string;
-  bundle: ArrayBuffer;
+  /** RELEASES key: a worker manifest, or a LEGACY single bundle. */
+  workerKey: string;
   metadata: WorkerReleaseMetadata;
 }
 
@@ -234,23 +366,19 @@ type Deployments = DurableObjectStub<TenantDeploymentsDO>;
 
 async function loadFallback(env: Env, state: TenantDeploymentState, exclude: string): Promise<Candidate | null> {
   const active: TenantDeployRecord | null = state.active && state.active.sha !== exclude ? state.active : null;
-  if (active) {
-    const object = await env.RELEASES.get(active.bundleKey);
-    if (object) return { sha: active.sha, bundleKey: active.bundleKey, bundle: await object.arrayBuffer(), metadata: active.metadata };
-  }
+  if (active && await env.RELEASES.head(active.workerKey)) return { sha: active.sha, workerKey: active.workerKey, metadata: active.metadata };
   return loadChannel(env);
 }
 
+/** The current default release; resolving it verifies its worker manifest (or LEGACY bundle) against the default manifest. */
 async function loadChannel(env: Env): Promise<Candidate | null> {
   try {
-    const reader = defaultReleaseReader(env.RELEASES);
-    const { release: manifest, pin } = await resolveDefaultRelease(reader);
-    const bundle = await verifyDefaultObject(reader, manifest.worker.bundle);
+    const { release: manifest, pin } = await resolveDefaultRelease(defaultReleaseReader(env.RELEASES));
     const metadata = workerReleaseMetadataSchema.parse({
       ...manifest.worker.metadata,
       resources: [...manifest.worker.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'), { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: pin }],
     });
-    return { sha: manifest.worker.version, bundleKey: manifest.worker.bundle.key, bundle: new Uint8Array(bundle).buffer, metadata };
+    return { sha: manifest.worker.version, workerKey: 'manifest' in manifest.worker ? manifest.worker.manifest.key : manifest.worker.bundle.key, metadata };
   } catch { return null; }
 }
 
@@ -304,7 +432,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
     blobBucket: tenantConfig.blobBucket,
     publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
   });
-  const rejected = await uploadScript(env, tenant, candidate.bundle, uploadMetadata);
+  const rejected = await uploadScript(env, tenant, candidate.workerKey, uploadMetadata);
   if (rejected) {
     await deployments.releaseLease();
     return { status: 'error', error: rejected };
@@ -313,7 +441,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
   const probe = await probeHealth(env, tenant, expectedSha);
   const sha = probe.version ?? candidate.sha;
   if (probe.healthy) {
-    await deployments.recordDeploy({ sha, bundleKey: candidate.bundleKey, metadata: candidate.metadata, healthy: true, revertedTo: null, appliedMigrationTag });
+    await deployments.recordDeploy({ sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: true, revertedTo: null, appliedMigrationTag });
     return { status: 'ok', value: { sha, healthy: true, revertedTo: null, appliedMigrationTag } };
   }
 
@@ -321,7 +449,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
   let revertedTo: string | null = null;
   if (fallback) {
     const fallbackDelta = migrationDelta(fallback.metadata.migrations, appliedMigrationTag);
-    const fallbackRejected = await uploadScript(env, tenant, fallback.bundle, scriptUploadMetadata(
+    const fallbackRejected = await uploadScript(env, tenant, fallback.workerKey, scriptUploadMetadata(
       fallback.metadata,
       fallbackDelta,
       [tenant, fallback.sha],
@@ -336,7 +464,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
         revertedTo = fallbackSha;
         await deployments.recordDeploy({
           sha: fallbackSha,
-          bundleKey: fallback.bundleKey,
+          workerKey: fallback.workerKey,
           metadata: fallback.metadata,
           healthy: true,
           revertedTo: null,
@@ -345,14 +473,14 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
       }
     }
   }
-  await deployments.recordDeploy({ sha: candidate.sha, bundleKey: candidate.bundleKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag });
+  await deployments.recordDeploy({ sha: candidate.sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag });
   return { status: 'ok', value: { sha: candidate.sha, healthy: false, revertedTo, appliedMigrationTag } };
 }
 
 export async function deployChannelTenant(env: Env, tenant: string): Promise<DeployResult> {
   const candidate = await loadChannel(env);
   if (!candidate) {
-    return { status: 'error', error: { status: 503, code: 'CHANNEL_UNAVAILABLE', message: 'Relay channel bundle is not published' } };
+    return { status: 'error', error: { status: 503, code: 'CHANNEL_UNAVAILABLE', message: 'Relay channel release is not published' } };
   }
   const deployments = env.DEPLOYMENTS.getByName(tenant);
   const lease = await deployments.acquireLease();
@@ -360,26 +488,54 @@ export async function deployChannelTenant(env: Env, tenant: string): Promise<Dep
   return swap(env, tenant, deployments, lease.value, candidate, false);
 }
 
-export async function deployTenantWorker(env: Env, tenant: string, request: PlatformDeployRequest): Promise<DeployResult> {
-  const source = await env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`).fetch(new Request(
-    `https://${tenant}.gitspace.sh/__platform/objects/${request.bundleKey.split('/').map(encodeURIComponent).join('/')}`,
-    { headers: { authorization: `Bearer ${await env.DEPLOYMENTS.getByName(tenant).providerToken()}` } },
-  ));
-  if (!source.ok) return { status: 'error', error: { status: source.status, code: 'BUNDLE_NOT_FOUND', message: `Tenant object unavailable at ${request.bundleKey}` } };
-  const bundle = await source.arrayBuffer();
-  const hash = await sha256Prefixed(bundle);
-  if (hash !== request.bundleHash) {
-    return { status: 'error', error: { status: 409, code: 'BUNDLE_HASH_MISMATCH', message: `Bundle hashes to ${hash}, expected ${request.bundleHash}` } };
+/** Copies a tenant's module release into RELEASES, checking the manifest digest and each module against the manifest. */
+async function stageModuleRelease(env: Env, tenant: string, read: ObjectReader, sha: string, release: { key: string; hash: string }, mainModule: string): Promise<Outcome<string>> {
+  const manifest = await readWorkerManifest(read, release.key, release.hash, mainModule);
+  if (manifest.status === 'error') return manifest;
+  const workerKey = `tenants/${tenant}/${sha}/${WORKER_MANIFEST_FILE}`;
+  for (const entry of manifest.value.manifest.modules) {
+    const module = await readWorkerModule(read, release.key, entry);
+    if (module.status === 'error') return module;
+    await env.RELEASES.put(workerModuleKey(workerKey, entry.name), module.value.content);
   }
-  const decoded = decodeWorkerBundle(bundle, request.metadata.mainModule);
-  if (decoded.isErr()) return { status: 'error', error: { status: 409, code: 'WORKER_MODULE_INVALID', message: decoded.error.message } };
-  const bundleKey = `tenants/${tenant}/${request.sha}/worker.bundle.json`;
-  await env.RELEASES.put(bundleKey, bundle, { httpMetadata: { contentType: 'application/json' } });
+  // Last, so a stored manifest only ever names stored modules.
+  await env.RELEASES.put(workerKey, manifest.value.bytes, { httpMetadata: { contentType: 'application/json' } });
+  return { status: 'ok', value: workerKey };
+}
+
+/** LEGACY(single-bundle releases): stores the bundle as sent, checked against its digest; `legacyBundleModules` decodes it at upload. */
+async function stageLegacyBundle(env: Env, tenant: string, read: ObjectReader, sha: string, bundle: { key: string; hash: string }): Promise<Outcome<string>> {
+  const body = await read(bundle.key);
+  if (!body) return missingObject(bundle.key);
+  const bytes = await new Response(body).arrayBuffer();
+  const hash = `sha256:${await sha256Hex(bytes)}`;
+  if (hash !== bundle.hash) return { status: 'error', error: { status: 409, code: 'BUNDLE_HASH_MISMATCH', message: `Bundle hashes to ${hash}, expected ${bundle.hash}` } };
+  const workerKey = `tenants/${tenant}/${sha}/worker.bundle.json`;
+  await env.RELEASES.put(workerKey, bytes, { httpMetadata: { contentType: 'application/json' } });
+  return { status: 'ok', value: workerKey };
+}
+
+export async function deployTenantWorker(env: Env, tenant: string, request: PlatformDeployRequest | LegacyPlatformDeployRequest): Promise<DeployResult> {
+  const tenantWorker = env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`);
+  const token = await env.DEPLOYMENTS.getByName(tenant).providerToken();
+  const read: ObjectReader = async key => {
+    const response = await tenantWorker.fetch(new Request(`https://${tenant}.gitspace.sh/__platform/objects/${key.split('/').map(encodeURIComponent).join('/')}`, { headers: { authorization: `Bearer ${token}` } }));
+    if (response.ok && response.body) return response.body;
+    await response.body?.cancel();
+    return null;
+  };
+  // LEGACY(single-bundle releases): a tenant on an older release names its worker `bundleKey`: a single bundle, or a
+  // module manifest when a newer machine built the release.
+  const release = 'manifestKey' in request ? { key: request.manifestKey, hash: request.manifestHash } : { key: request.bundleKey, hash: request.bundleHash };
+  const staged = release.key.endsWith(`/${WORKER_MANIFEST_FILE}`)
+    ? await stageModuleRelease(env, tenant, read, request.sha, release, request.metadata.mainModule)
+    : await stageLegacyBundle(env, tenant, read, request.sha, release);
+  if (staged.status === 'error') return staged;
 
   const deployments = env.DEPLOYMENTS.getByName(tenant);
   const lease = await deployments.acquireLease();
   if (lease.status === 'error') return { status: 'error', error: { status: 409, ...lease.error } };
-  return swap(env, tenant, deployments, lease.value, { sha: request.sha, bundleKey, bundle, metadata: request.metadata }, true);
+  return swap(env, tenant, deployments, lease.value, { sha: request.sha, workerKey: staged.value, metadata: request.metadata }, true);
 }
 
 export async function revertTenantWorker(env: Env, tenant: string, to: 'previous' | 'channel'): Promise<DeployResult> {
@@ -391,8 +547,7 @@ export async function revertTenantWorker(env: Env, tenant: string, to: 'previous
   let candidate: Candidate | null = null;
   if (to === 'previous') {
     const previous = state.previous;
-    const object = previous ? await env.RELEASES.get(previous.bundleKey) : null;
-    if (previous && object) candidate = { sha: previous.sha, bundleKey: previous.bundleKey, bundle: await object.arrayBuffer(), metadata: previous.metadata };
+    if (previous && await env.RELEASES.head(previous.workerKey)) candidate = { sha: previous.sha, workerKey: previous.workerKey, metadata: previous.metadata };
   } else {
     candidate = await loadChannel(env);
   }
@@ -403,7 +558,7 @@ export async function revertTenantWorker(env: Env, tenant: string, to: 'previous
       error: {
         status: 409,
         code: to === 'previous' ? 'NO_PREVIOUS_RELEASE' : 'CHANNEL_UNAVAILABLE',
-        message: to === 'previous' ? 'No earlier healthy release to restore' : 'Channel bundle is not published to RELEASES',
+        message: to === 'previous' ? 'No earlier healthy release to restore' : 'Channel release is not published to RELEASES',
       },
     };
   }

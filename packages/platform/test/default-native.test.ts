@@ -29,7 +29,7 @@ it('bounds repeated unknown-generation scans per tenant without losing historica
   const fixture = await publishDefaultFixture(env.RELEASES);
   const tenant = crypto.randomUUID();
   await env.DEPLOYMENTS.getByName(tenant).recordDeploy({
-    sha: fixture.commit, bundleKey: fixture.release.worker.bundle.key,
+    sha: fixture.commit, workerKey: fixture.release.worker.manifest.key,
     metadata: { ...fixture.release.worker.metadata, resources: [{ name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: fixture.pin }] },
     healthy: true, revertedTo: null, appliedMigrationTag: null,
   });
@@ -56,7 +56,7 @@ it('shares a slow unknown-generation scan and caches its result for the full win
   const fixture = await publishDefaultFixture(env.RELEASES);
   const tenant = crypto.randomUUID();
   await env.DEPLOYMENTS.getByName(tenant).recordDeploy({
-    sha: fixture.commit, bundleKey: fixture.release.worker.bundle.key,
+    sha: fixture.commit, workerKey: fixture.release.worker.manifest.key,
     metadata: { ...fixture.release.worker.metadata, resources: [{ name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: fixture.pin }] },
     healthy: true, revertedTo: null, appliedMigrationTag: null,
   });

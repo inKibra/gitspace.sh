@@ -6,8 +6,12 @@ import { BudgetedDurableObject } from './storage-quarantine.js';
 export interface TenantDeployRecord {
   id: number;
   sha: string;
-  /** Object key in RELEASES (`tenants/<tenant>/<sha>/worker.bundle.json` or `defaults/releases/<sha>/worker.bundle.json`). */
-  bundleKey: string;
+  /**
+   * RELEASES key of the uploaded worker: a manifest (`tenants/<tenant>/<sha>/worker.manifest.json` or
+   * `defaults/releases/<sha>/worker.manifest.json`, modules beside it under `worker/`), or a LEGACY single
+   * `worker.bundle.json` from before module releases. Stored in the `bundle_key` column.
+   */
+  workerKey: string;
   metadata: WorkerReleaseMetadata;
   uploadedAt: string;
   healthy: boolean;
@@ -29,7 +33,7 @@ export type DeployLease =
 
 export interface DeployOutcome {
   sha: string;
-  bundleKey: string;
+  workerKey: string;
   metadata: WorkerReleaseMetadata;
   healthy: boolean;
   revertedTo: string | null;
@@ -71,7 +75,7 @@ function toRecord(row: DeployRow): TenantDeployRecord {
   return {
     id: row.id,
     sha: row.sha,
-    bundleKey: row.bundle_key,
+    workerKey: row.bundle_key,
     metadata: workerReleaseMetadataSchema.parse(JSON.parse(row.metadata_json)),
     uploadedAt: row.uploaded_at,
     healthy: row.healthy === 1,
@@ -247,7 +251,7 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
         `INSERT INTO deploys(sha, bundle_key, metadata_json, uploaded_at, healthy, reverted_to)
          VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
         outcome.sha,
-        outcome.bundleKey,
+        outcome.workerKey,
         JSON.stringify(outcome.metadata),
         uploadedAt,
         outcome.healthy ? 1 : 0,

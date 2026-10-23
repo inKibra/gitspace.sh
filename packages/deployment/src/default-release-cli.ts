@@ -2,13 +2,13 @@
 import { GetObjectCommand, PutObjectCommand, S3ServiceException } from '@aws-sdk/client-s3';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
-import { buildWorkerBundle, buildFrontendTree, workerMetadataFromWrangler, workspaceRevision } from './builders.js';
+import { buildWorkerRelease, buildFrontendTree, workerMetadataFromWrangler, workspaceRevision } from './builders.js';
 import { releaseStorageClient } from './release.js';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
 import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
-import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
+import { workerManifestSchema } from '@gitspace/protocol/deployment';
 import { DISTRIBUTION_PLATFORMS } from './distribution.js';
 
 export function defaultReleaseStorage(bucket: string): DefaultReleaseStorage & { close(): void } {
@@ -59,7 +59,7 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
       const encoder = new TextEncoder();
       const build = await buildDefaultRelease(commit, {
         verifyCommit: async () => commit,
-        worker: async () => ({ commit, version: commit, bytes: encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: encoder.encode(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(commit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }]), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
+        worker: async () => ({ commit, version: commit, modules: [{ name: 'worker.mjs', type: 'esm', content: encoder.encode(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(commit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }], metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
         frontend: async () => ({ commit, files: [{ path: 'index.html', bytes: encoder.encode(commit), contentType: 'text/html' }] }),
         image: async () => ({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance: encoder.encode(JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` })) }),
       });
@@ -95,8 +95,10 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
       verifyCommit: async () => (await workspaceRevision(root)).key,
       machines: async () => machines,
       async worker() {
-        const artifact = await buildWorkerBundle(root, commit, join(temporary, 'worker'));
-        return { commit, version: commit, bytes: new Uint8Array(await Bun.file(artifact.path).arrayBuffer()), metadata: await workerMetadataFromWrangler(root) };
+        const artifact = await buildWorkerRelease(root, commit, join(temporary, 'worker'));
+        const manifest = workerManifestSchema.parse(JSON.parse(await readFile(artifact.path, 'utf8')));
+        const modules = await Promise.all(manifest.modules.map(async module => ({ name: module.name, type: module.type, content: await Bun.file(join(dirname(artifact.path), module.name)).bytes() })));
+        return { commit, version: commit, modules, metadata: await workerMetadataFromWrangler(root) };
       },
       async frontend() { const artifact = await buildFrontendTree(root, join(temporary, 'frontend')); return { commit, files: await files(artifact.path) }; },
       async image() {

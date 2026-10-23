@@ -20,35 +20,61 @@ export const releaseTargetSchema = z.enum(['worker', 'machine', 'frontend']);
 export type ReleaseTarget = z.infer<typeof releaseTargetSchema>;
 
 export const releaseArtifactSchema = z.object({
-  /** Object key; executable targets point to an authenticated manifest, frontend to a tree prefix. */
+  /** Object key; the worker and executable targets point to an authenticated manifest, frontend to a tree prefix. */
   key: z.string().min(1).max(2_048),
   hash: hashSchema,
-  /** Bytes of the referenced object (manifest for executables); total bytes for the frontend tree. */
+  /** Bytes of the referenced object (the manifest for the worker and executables); total bytes for the frontend tree. */
   size: z.number().int().nonnegative(),
 });
 export type ReleaseArtifact = z.infer<typeof releaseArtifactSchema>;
 
-/** Immutable transport envelope: module bytes, names and per-module integrity travel together. */
-export const workerBundleSchema = z.object({
-  version: z.literal(1),
+const workerModuleNameSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/u);
+const WORKER_MODULE_MAX_BYTES = 32 * 1024 * 1024;
+const WORKER_GRAPH_MAX_BYTES = 48 * 1024 * 1024;
+
+/** A Worker release's inventory: each module is its own object (`workerModuleKey`), pinned here by size and digest. */
+export const WORKER_MANIFEST_FILE = 'worker.manifest.json';
+export const workerManifestSchema = z.object({
+  version: z.literal(2),
+  mainModule: workerModuleNameSchema,
   modules: z.array(z.object({
-    name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/u),
+    name: workerModuleNameSchema,
     type: z.enum(['esm', 'wasm']),
-    hash: hashSchema,
-    bytes: z.number().int().nonnegative().max(32 * 1024 * 1024),
-    base64: z.string().max(44 * 1024 * 1024),
+    size: z.number().int().nonnegative().max(WORKER_MODULE_MAX_BYTES),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   }).strict()).min(1).max(64),
-}).strict().superRefine((bundle, context) => {
+}).strict().superRefine((manifest, context) => {
   const names = new Set<string>();
-  for (const module of bundle.modules) {
+  for (const module of manifest.modules) {
     if (names.has(module.name)) context.addIssue({ code: 'custom', message: `Duplicate worker module ${module.name}` });
     names.add(module.name);
   }
-  if (bundle.modules.reduce((bytes, module) => bytes + module.bytes, 0) > 48 * 1024 * 1024) context.addIssue({ code: 'custom', message: 'Worker module graph exceeds its transport limit' });
+  if (manifest.modules.reduce((bytes, module) => bytes + module.size, 0) > WORKER_GRAPH_MAX_BYTES) context.addIssue({ code: 'custom', message: 'Worker module graph exceeds its size limit' });
+  if (!manifest.modules.some(module => module.name === manifest.mainModule && module.type === 'esm')) context.addIssue({ code: 'custom', message: 'Worker manifest has no declared main module' });
 });
-export type WorkerBundle = z.infer<typeof workerBundleSchema>;
+export type WorkerManifest = z.infer<typeof workerManifestSchema>;
 
-/** Worker metadata the platform needs to upload the bundle; derived from the workspace's wrangler config. */
+/** Modules sit beside their manifest: `<dir>/worker.manifest.json` names `<dir>/worker/<module>`. */
+export function workerModuleKey(manifestKey: string, name: string): string {
+  return `${manifestKey.slice(0, -WORKER_MANIFEST_FILE.length)}worker/${name}`;
+}
+
+/**
+ * LEGACY(single-bundle releases): every module base64-encoded in one JSON document. Read only by the platform for
+ * deploy requests and stored releases from before module releases; delete with `legacyPlatformDeployRequestSchema`.
+ */
+export const workerBundleSchema = z.object({
+  version: z.literal(1),
+  modules: z.array(z.object({
+    name: workerModuleNameSchema,
+    type: z.enum(['esm', 'wasm']),
+    hash: hashSchema,
+    bytes: z.number().int().nonnegative().max(WORKER_MODULE_MAX_BYTES),
+    base64: z.string().max(44 * 1024 * 1024),
+  }).strict()).min(1).max(64),
+}).strict();
+
+/** Worker metadata the platform needs to upload the worker; derived from the workspace's wrangler config. */
 export const workerReleaseMetadataSchema = z.object({
   mainModule: z.string().min(1).max(160),
   compatibilityDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
@@ -279,12 +305,25 @@ export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 /** Body the tenant sends the platform to swap its own worker. */
 export const platformDeployRequestSchema = z.object({
   sha: z.string().min(1).max(160),
-  /** Key of the worker bundle in the shared data bucket, under the tenant's prefix. */
+  /** Key of the release's worker manifest in the shared data bucket, under the tenant's prefix; its modules sit beside it. */
+  manifestKey: z.string().min(1).max(2_048).refine(key => key.endsWith(`/${WORKER_MANIFEST_FILE}`), 'Worker release has no module manifest; rebuild it'),
+  /** Digest of the manifest bytes; the manifest pins every module. */
+  manifestHash: hashSchema,
+  metadata: workerReleaseMetadataSchema,
+});
+export type PlatformDeployRequest = z.infer<typeof platformDeployRequestSchema>;
+
+/**
+ * LEGACY(single-bundle releases): the body a tenant running a release from before module releases sends. Its key names
+ * a single bundle, or a module manifest when a newer machine built the release. Delete once every tenant sends `manifestKey`.
+ */
+export const legacyPlatformDeployRequestSchema = z.object({
+  sha: z.string().min(1).max(160),
   bundleKey: z.string().min(1).max(2_048),
   bundleHash: hashSchema,
   metadata: workerReleaseMetadataSchema,
 });
-export type PlatformDeployRequest = z.infer<typeof platformDeployRequestSchema>;
+export type LegacyPlatformDeployRequest = z.infer<typeof legacyPlatformDeployRequestSchema>;
 
 export const platformDeployResponseSchema = z.object({
   sha: z.string(),

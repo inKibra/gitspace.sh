@@ -2,11 +2,11 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { env } from 'cloudflare:workers';
 import { createRelayAuthorization } from '@gitspace/protocol/relay';
-import type { PlatformDeployResponse, WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { workerModuleKey, type PlatformDeployResponse, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
 import { migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
-import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
+import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 import { DEFAULT_ACCOUNT_POINTER } from '@gitspace/protocol/default-release';
 
 const { secretKey, publicKey } = ed25519.keygen();
@@ -16,12 +16,14 @@ interface Upload {
   metadata: ScriptUploadMetadata;
   module: string;
   wasm: number[];
+  /** Every module part in multipart order, as Cloudflare reads it. */
+  parts: Array<{ name: string; type: string }>;
 }
 
 /** What the fake Cloudflare API has "deployed": script name → module source; the dispatcher stub serves from it. */
 const scripts = new Map<string, string>();
 const uploads: Upload[] = [];
-const objects = new Map<string, Map<string, string>>();
+const objects = new Map<string, Map<string, string | Uint8Array<ArrayBuffer>>>();
 const allocatedBuckets = new Set<string>();
 const allocatedNamespaces = new Set<string>();
 let rejectNamespaceCreation = false;
@@ -30,20 +32,28 @@ const probeVersions = new Map<string, string[]>();
 const activeProbes = new Map<string, { version: string; bodies: number }>();
 let rejectNextUpload: string | null = null;
 const realFetch = globalThis.fetch;
+const WASM = [0, 97, 115, 109, 1, 0, 0, 0];
 
 function bundleSource(version: string): string {
   return `/* version: ${version} */ export default { fetch() { return new Response('ok'); } };`;
 }
 
-function bundleArtifact(version: string): string {
-  return new TextDecoder().decode(encodeWorkerBundle([
+function releaseModules(version: string): WorkerModule[] {
+  return [
     { name: 'worker.mjs', type: 'esm', content: new TextEncoder().encode(bundleSource(version)) },
-    { name: 'engine.wasm', type: 'wasm', content: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]) },
-  ]));
+    { name: 'engine.wasm', type: 'wasm', content: new Uint8Array(WASM) },
+  ];
 }
 
-async function sha256(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+/** A release as builders wrote it before module releases: every module base64-encoded in one JSON document. */
+async function legacyBundle(version: string): Promise<string> {
+  return JSON.stringify({ version: 1, modules: await Promise.all(releaseModules(version).map(async module => ({
+    name: module.name, type: module.type, hash: await sha256(module.content), bytes: module.content.byteLength, base64: btoa(String.fromCharCode(...module.content)),
+  }))) });
+}
+
+async function sha256(content: string | Uint8Array<ArrayBuffer>): Promise<`sha256:${string}`> {
+  const digest = await crypto.subtle.digest('SHA-256', typeof content === 'string' ? new TextEncoder().encode(content) : content);
   return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
@@ -112,19 +122,23 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
   };
 }
 
-async function publishDefault(commit: string, tags: string[]) {
+/** Publishes a default release; `legacy` publishes its worker the way defaults were published before module releases. */
+async function publishDefault(commit: string, tags: string[], legacy = false) {
   const prefix = `defaults/releases/${commit}/`;
-  async function object(name: string, text: string) {
+  async function object(name: string, content: string | Uint8Array<ArrayBuffer>) {
     const key = prefix + name;
-    await env.RELEASES.put(key, text);
-    return { key, size: new TextEncoder().encode(text).byteLength, sha256: (await sha256(text)).slice(7) };
+    await env.RELEASES.put(key, content);
+    return { key, size: typeof content === 'string' ? new TextEncoder().encode(content).byteLength : content.byteLength, sha256: (await sha256(content)).slice(7) };
   }
-  const bundle = await object('worker.bundle.json', bundleArtifact(commit));
+  for (const module of releaseModules(commit)) await object(`worker/${module.name}`, module.content);
+  const worker = legacy
+    ? { bundle: await object('worker.bundle.json', await legacyBundle(commit)) }
+    : { manifest: await object('worker.manifest.json', JSON.stringify(createWorkerManifest('worker.mjs', releaseModules(commit)))) };
   const frontend = await object('frontend/index.html', `<html>${commit}</html>`);
   const provenance = await object('image-provenance.json', JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` }));
   const manifest = await object('manifest.json', JSON.stringify({
     schemaVersion: 1, commit,
-    worker: { commit, version: commit, bundle, metadata: metadata(tags) },
+    worker: { commit, version: commit, ...worker, metadata: metadata(tags) },
     frontend: { commit, files: [{ ...frontend, path: 'index.html', contentType: 'text/html' }] },
     image: { commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance },
   }));
@@ -190,12 +204,26 @@ async function accountId(tenant: string): Promise<string> {
   return `u-${Array.from(digest.subarray(0, 16), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
-async function stageRelease(tenant: string, sha: string, version = sha): Promise<{ bundleKey: string; bundleHash: string }> {
-  const source = bundleArtifact(version);
-  const bundleKey = `users/${await accountId(tenant)}/releases/${sha}/worker.bundle.json`;
+function tenantObjects(tenant: string): Map<string, string | Uint8Array<ArrayBuffer>> {
   let staged = objects.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`);
   if (!staged) { staged = new Map(); objects.set(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`, staged); }
-  staged.set(bundleKey, source);
+  return staged;
+}
+
+/** Puts a module release into the tenant's data bucket the way the machine uploads it: modules, then the manifest. */
+async function stageRelease(tenant: string, sha: string, version = sha): Promise<{ manifestKey: string; manifestHash: string }> {
+  const manifestKey = `users/${await accountId(tenant)}/releases/${sha}/worker.manifest.json`;
+  const modules = releaseModules(version);
+  for (const module of modules) tenantObjects(tenant).set(workerModuleKey(manifestKey, module.name), module.content);
+  const manifest = JSON.stringify(createWorkerManifest('worker.mjs', modules));
+  tenantObjects(tenant).set(manifestKey, manifest);
+  return { manifestKey, manifestHash: await sha256(manifest) };
+}
+
+async function stageLegacyRelease(tenant: string, sha: string, version = sha): Promise<{ bundleKey: string; bundleHash: string }> {
+  const source = await legacyBundle(version);
+  const bundleKey = `users/${await accountId(tenant)}/releases/${sha}/worker.bundle.json`;
+  tenantObjects(tenant).set(bundleKey, source);
   return { bundleKey, bundleHash: await sha256(source) };
 }
 
@@ -242,12 +270,15 @@ beforeEach(() => {
     if (url.hostname !== 'api.cloudflare.com' || !match) throw new Error(`Unexpected fetch ${url}`);
     expect(init?.method).toBe('PUT');
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer test-api-token');
-    if (!(init?.body instanceof FormData)) throw new Error('Upload must be multipart');
-    const metadataPart = init.body.get('metadata');
+    const contentType = new Headers(init?.headers).get('content-type');
+    if (!contentType?.startsWith('multipart/form-data; boundary=')) throw new Error('Upload must be multipart');
+    // Parse the body the way Cloudflare does; the platform streams it rather than sending a FormData object.
+    const form = await new Response(init?.body, { headers: { 'content-type': contentType } }).formData();
+    const metadataPart = form.get('metadata');
     if (!(metadataPart instanceof File)) throw new Error('metadata part missing');
     const parsed: unknown = JSON.parse(await metadataPart.text());
     if (!parsed || typeof parsed !== 'object' || !('main_module' in parsed) || typeof parsed.main_module !== 'string') throw new Error('main_module missing');
-    const modulePart = init.body.get(parsed.main_module);
+    const modulePart = form.get(parsed.main_module);
     if (!(modulePart instanceof File)) throw new Error('module part missing');
     expect(modulePart.type).toBe('application/javascript+module');
     if (rejectNextUpload) {
@@ -256,9 +287,10 @@ beforeEach(() => {
       return Response.json({ success: false, errors: [{ code: 10021, message }], result: null }, { status: 400 });
     }
     const module = await modulePart.text();
-    const wasm = init.body.get('engine.wasm');
+    const wasm = form.get('engine.wasm');
     if (!(wasm instanceof File) || wasm.type !== 'application/wasm') throw new Error('Static WASM upload missing');
-    uploads.push({ metadata: parsed as ScriptUploadMetadata, module, wasm: [...new Uint8Array(await wasm.arrayBuffer())] });
+    const parts = [...form.entries()].flatMap(([name, value]) => name !== 'metadata' && value instanceof File ? [{ name, type: value.type }] : []);
+    uploads.push({ metadata: parsed as ScriptUploadMetadata, module, wasm: [...new Uint8Array(await wasm.arrayBuffer())], parts });
     scripts.set(match[1]!, module);
     return Response.json({ success: true, errors: [], result: { id: match[1] } });
   };
@@ -367,7 +399,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(await credits.usageSummary()).toEqual({ records: 1, debitedMicros: Number(env.DEPLOY_SETTLEMENT_MICROS) });
   });
 
-  it('uploads the bundle with tenant-scoped bindings and migrations and meters the deploy', async () => {
+  it('uploads every manifest module with tenant-scoped bindings and migrations and meters the deploy', async () => {
     await env.CREDITS.getByName('bravo').configure({ balanceMicros: 1_000_000, riskReserveMicros: 0 });
     const token = await mintToken('bravo', 'v8');
     const result = await deploy('bravo', token, 'abc123', ['v7', 'v8', 'v9', 'v10']);
@@ -376,7 +408,8 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(uploads).toHaveLength(1);
     const upload = uploads[0]!;
     expect(upload.module).toBe(bundleSource('abc123'));
-    expect(upload.wasm).toEqual([0, 97, 115, 109, 1, 0, 0, 0]);
+    expect(upload.wasm).toEqual(WASM);
+    expect(upload.parts).toEqual([{ name: 'worker.mjs', type: 'application/javascript+module' }, { name: 'engine.wasm', type: 'application/wasm' }]);
     expect(upload.metadata).toMatchObject({
       bindings: expect.arrayContaining([
         { type: 'durable_object_namespace', name: 'CREDENTIALS', class_name: 'CredentialVaultDO' },
@@ -391,8 +424,10 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
     });
 
-    const copy = await env.RELEASES.get('tenants/bravo/abc123/worker.bundle.json');
-    expect(await copy?.text()).toBe(bundleArtifact('abc123'));
+    // The release is kept in RELEASES as sent: the manifest and each module beside it.
+    const stored = await env.RELEASES.get('tenants/bravo/abc123/worker.manifest.json');
+    expect(await stored?.text()).toBe(tenantObjects('bravo').get(`users/${await accountId('bravo')}/releases/abc123/worker.manifest.json`));
+    expect([...new Uint8Array(await (await env.RELEASES.get('tenants/bravo/abc123/worker/engine.wasm'))!.arrayBuffer())]).toEqual(WASM);
 
     const ledger = await env.CREDITS.getByName('bravo').listLedger();
     expect(ledger).toHaveLength(1);
@@ -409,12 +444,59 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(uploads[0]!.metadata.migrations).toEqual({ new_tag: 'v2', steps: [{ new_sqlite_classes: ['Classv1'] }, { new_sqlite_classes: ['Classv2'] }] });
   });
 
-  it('rejects a bundle whose bytes do not match the declared hash', async () => {
+  it('rejects a manifest whose bytes do not match the declared hash', async () => {
     const token = await mintToken('delta');
     const staged = await stageRelease('delta', 'd1');
-    const response = await tenantPost('delta', 'deploy', token, { sha: 'd1', bundleKey: staged.bundleKey, bundleHash: `sha256:${'0'.repeat(64)}`, metadata: metadata(['v1']) });
+    const response = await tenantPost('delta', 'deploy', token, { sha: 'd1', manifestKey: staged.manifestKey, manifestHash: `sha256:${'0'.repeat(64)}`, metadata: metadata(['v1']) });
     expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'MANIFEST_HASH_MISMATCH' } });
     expect(uploads).toHaveLength(0);
+  });
+
+  it.each([
+    ['different bytes of the same size', (content: Uint8Array<ArrayBuffer>) => content.map((byte, index) => index === 4 ? byte ^ 1 : byte)],
+    ['one byte more than the manifest size', (content: Uint8Array<ArrayBuffer>) => new Uint8Array([...content, 0])],
+    ['one byte less than the manifest size', (content: Uint8Array<ArrayBuffer>) => content.slice(0, -1)],
+  ])('rejects a module with %s before storing or uploading anything', async (_case, tamper) => {
+    const tenant = `tamper-${crypto.randomUUID().slice(0, 8)}`;
+    const token = await mintToken(tenant);
+    const staged = await stageRelease(tenant, 't1');
+    const moduleKey = workerModuleKey(staged.manifestKey, 'engine.wasm');
+    const original = tenantObjects(tenant).get(moduleKey);
+    if (!(original instanceof Uint8Array)) throw new Error('Staged module missing');
+    tenantObjects(tenant).set(moduleKey, tamper(original));
+    const response = await tenantPost(tenant, 'deploy', token, { sha: 't1', ...staged, metadata: metadata(['v1']) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'WORKER_MODULE_INVALID', message: 'Worker module integrity mismatch: engine.wasm' } });
+    expect(uploads).toHaveLength(0);
+    expect(await env.RELEASES.head(`tenants/${tenant}/t1/worker.manifest.json`)).toBeNull();
+    expect((await env.DEPLOYMENTS.getByName(tenant).getState()).active).toBeNull();
+  });
+
+  it('deploys a legacy bundle request and restores it from RELEASES after a module release', async () => {
+    const token = await mintToken('legacy');
+    const legacy = await stageLegacyRelease('legacy', 'one');
+    const first = await tenantPost('legacy', 'deploy', token, { sha: 'one', ...legacy, metadata: metadata(['v1']) });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ sha: 'one', healthy: true });
+    expect(uploads[0]).toMatchObject({ module: bundleSource('one'), wasm: WASM, parts: [{ name: 'worker.mjs', type: 'application/javascript+module' }, { name: 'engine.wasm', type: 'application/wasm' }] });
+    expect(await (await env.RELEASES.get('tenants/legacy/one/worker.bundle.json'))?.text()).toBe(await legacyBundle('one'));
+
+    await deploy('legacy', token, 'two', ['v1']);
+    objects.delete(`${env.DISPATCH_NAMESPACE}-tenant-legacy`);
+    const response = await tenantPost('legacy', 'revert', token, { to: 'previous' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(uploads[2]).toMatchObject({ module: bundleSource('one'), wasm: WASM, metadata: { tags: ['legacy', 'one'] } });
+  });
+
+  it('deploys a module release named by a legacy request from a tenant that predates module releases', async () => {
+    const token = await mintToken('transition');
+    const staged = await stageRelease('transition', 'modules');
+    const response = await tenantPost('transition', 'deploy', token, { sha: 'modules', bundleKey: staged.manifestKey, bundleHash: staged.manifestHash, metadata: metadata(['v1']) });
+    expect(response.status).toBe(200);
+    expect(uploads[0]).toMatchObject({ module: bundleSource('modules'), wasm: WASM });
+    expect(await env.RELEASES.head('tenants/transition/modules/worker.manifest.json')).not.toBeNull();
   });
 
   it('surfaces Cloudflare rejections without recording a deploy', async () => {
@@ -466,21 +548,23 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     ]);
   });
 
-  it('falls back to the channel bundle when a first deploy is unhealthy', async () => {
+  it.each([['module', false], ['legacy bundle', true]])('falls back to a channel published as a %s when a first deploy is unhealthy', async (_format, legacy) => {
     const commit = 'a'.repeat(40);
-    await publishDefault(commit, ['v1']);
-    const token = await mintToken('golf');
-    const result = await deploy('golf', token, 'unhealthy', ['v1'], 'nope');
+    await publishDefault(commit, ['v1'], legacy);
+    const tenant = `golf-${legacy ? 'legacy' : 'modules'}`;
+    const token = await mintToken(tenant);
+    const result = await deploy(tenant, token, 'unhealthy', ['v1'], 'nope');
     expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: commit, appliedMigrationTag: 'v1' });
-    expect(uploads[1]!.module).toBe(bundleSource(commit));
-    expect(uploads[1]!.metadata.tags).toEqual(['golf', commit]);
+    expect(uploads[1]).toMatchObject({ module: bundleSource(commit), wasm: WASM, metadata: { tags: [tenant, commit] } });
+    const fallback = (await env.DEPLOYMENTS.getByName(tenant).getState()).active;
+    expect(fallback?.workerKey).toBe(`defaults/releases/${commit}/${legacy ? 'worker.bundle.json' : 'worker.manifest.json'}`);
   });
 });
 
 describe('POST /__platform/tenants/:tenant/revert', () => {
   it('refuses legacy split channel objects without a coherent default pointer', async () => {
     await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
-    await env.RELEASES.put('channel/worker.bundle.json', bundleArtifact('channel:split'));
+    await env.RELEASES.put('channel/worker.bundle.json', await legacyBundle('channel:split'));
     await env.RELEASES.put('channel/metadata.json', JSON.stringify(metadata(['v1'])));
     const token = await mintToken('split-default');
     const response = await tenantPost('split-default', 'revert', token, { to: 'channel' });

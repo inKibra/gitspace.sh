@@ -128,6 +128,79 @@ describe('canonical cache deployment sources', () => {
     } finally { journal.close(); }
   });
 
+  it('uploads each worker module the manifest pins, then the manifest, and stages the manifest as the worker artifact', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-worker-launch-'));
+    roots.push(root);
+    const checkout = join(root, 'canonical-checkout');
+    await mkdir(join(checkout, 'packages/deployment/src'), { recursive: true });
+    await mkdir(join(checkout, 'packages/account-worker'), { recursive: true });
+    await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'worker-source-fixture', private: true }));
+    await writeFile(join(checkout, 'packages/account-worker/package.json'), JSON.stringify({ name: '@gitspace/account-worker', gitspace: { inferenceVersion: 1 } }));
+    await mkdir(join(checkout, 'packages/protocol'), { recursive: true });
+    await writeFile(join(checkout, 'packages/protocol/package.json'), JSON.stringify({ name: '@gitspace/protocol' }));
+    await writeFile(join(checkout, 'packages/deployment/src/builders.ts'), `
+      import { mkdir, writeFile } from 'node:fs/promises';
+      import { join } from 'node:path';
+      const hex = bytes => new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
+      export async function buildWorkerRelease(_root, _sha, output) {
+        await mkdir(output, { recursive: true });
+        const modules = [
+          { name: 'worker.mjs', type: 'esm', content: new TextEncoder().encode('export default {};') },
+          { name: 'engine.wasm', type: 'wasm', content: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]) },
+        ];
+        for (const module of modules) await writeFile(join(output, module.name), module.content);
+        const manifest = JSON.stringify({ version: 2, mainModule: 'worker.mjs', modules: modules.map(module => ({ name: module.name, type: module.type, size: module.content.byteLength, sha256: hex(module.content) })) });
+        await writeFile(join(output, 'worker.manifest.json'), manifest);
+        return { path: join(output, 'worker.manifest.json'), hash: 'sha256:' + hex(manifest) };
+      }
+      export async function workerMetadataFromWrangler() {
+        return { mainModule: 'worker.mjs', compatibilityDate: '2026-08-27', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] };
+      }
+    `);
+    for (const command of [
+      [process.execPath, 'install', '--lockfile-only', '--ignore-scripts'],
+      ['git', 'init', '-b', 'main'],
+      ['git', 'add', '.'],
+      ['git', '-c', 'user.name=Worker Test', '-c', 'user.email=worker@example.invalid', 'commit', '-m', 'source'],
+    ]) {
+      const child = Bun.spawn(command, { cwd: checkout, stdout: 'pipe', stderr: 'pipe' });
+      if (await child.exited !== 0) throw new Error(await new Response(child.stderr).text());
+    }
+    const journal = new ExecutorJournal(join(root, 'attempts.sqlite'));
+    journal.installAttachment(cache(checkout));
+    const uploads: Array<{ key: string; bytes: number[]; hash: `sha256:${string}` }> = [];
+    let staged: ReleaseRecord | null = null;
+    const launcher = new DeploymentLauncher({
+      attachments: () => journal.attachments(), machineId: 'builder', buildRoot: join(root, 'builds'),
+      blobs: { put: async (key, bytes) => {
+        const hash: `sha256:${string}` = `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
+        uploads.push({ key, bytes: [...bytes], hash });
+        return hash;
+      } },
+      authority: {
+        reportLaunchProgress: async () => {},
+        stageRelease: async input => {
+          staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'pending', frontend: 'skipped', machines: {} }, error: null });
+          return staged;
+        },
+        launchRelease: async sha => {
+          if (!staged || staged.sha !== sha) throw new Error('Release was not staged');
+          staged.status.worker = 'applied';
+          return { record: staged, desired: { worker: sha, machine: null, frontend: null, updatedAt: new Date().toISOString() } };
+        },
+      },
+    });
+    try {
+      const record = await launcher.launchAndWait({ source: { kind: 'workspace', workspaceId: 'workspace' }, targets: ['worker'] });
+      const prefix = `releases/${record.sha}/`;
+      expect(uploads.map(upload => upload.key)).toEqual([`${prefix}worker/worker.mjs`, `${prefix}worker/engine.wasm`, `${prefix}worker.manifest.json`]);
+      expect(uploads[1]!.bytes).toEqual([0, 97, 115, 109, 1, 0, 0, 0]);
+      const manifest = uploads[2]!;
+      expect(record.artifacts.worker).toEqual({ key: manifest.key, hash: manifest.hash, size: manifest.bytes.length });
+      expect(record.worker).toMatchObject({ mainModule: 'worker.mjs' });
+    } finally { journal.close(); }
+  });
+
   it.each(['attaching', 'detached'] as const)('refuses a %s cache instead of building its retained files', state => {
     const local = cache('/retained');
     expect(() => deploymentSource([{ ...local, attachment: { ...local.attachment, state } }], 'builder', 'workspace')).toThrow('ready live cache');

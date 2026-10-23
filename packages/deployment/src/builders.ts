@@ -2,11 +2,11 @@ import { cp, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { builtinModules } from 'node:module';
 import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from './executable-manifest.js';
-import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { WORKER_MANIFEST_FILE, workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { packageMachineNativeRuntime } from './native-build.js';
-import { encodeWorkerBundle, type WorkerModule } from '@gitspace/protocol/worker-bundle';
+import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 import { writeBrowserRunner } from '@gitspace/browser-runner';
 
 /**
@@ -16,7 +16,7 @@ import { writeBrowserRunner } from '@gitspace/browser-runner';
  */
 
 export interface BuiltArtifact {
-  /** Bundle file or generation directory, plus its content-addressed hash. */
+  /** Worker manifest (its modules beside it, by name), generation directory or frontend tree, plus its content-addressed hash. */
   path: string;
   hash: `sha256:${string}`;
 }
@@ -93,13 +93,14 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
     }],
   });
   if (!result.success) throw new AggregateError(result.logs, 'Worker build failed');
-  const entry = new Uint8Array(await Bun.file(join(outDir, 'worker.mjs')).arrayBuffer());
-  const path = join(outDir, 'worker.bundle.json');
-  await Bun.write(path, encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: entry }, ...[...modules.values()].sort((a, b) => a.name.localeCompare(b.name))]));
+  const entry: WorkerModule = { name: 'worker.mjs', type: 'esm', content: new Uint8Array(await Bun.file(join(outDir, 'worker.mjs')).arrayBuffer()) };
+  // Each module stays its own file beside the manifest, so nothing downstream re-encodes or holds the release as one blob.
+  const path = join(outDir, WORKER_MANIFEST_FILE);
+  await Bun.write(path, JSON.stringify(createWorkerManifest(entry.name, [entry, ...[...modules.values()].sort((a, b) => a.name.localeCompare(b.name))])));
   return { path, hash: await hashArtifactPath(path) };
 }
-/** Account tenant Worker bundle stamped with its release sha (`GITSPACE_WORKER_SHA`, served at `/healthz`). */
-export async function buildWorkerBundle(root: string, sha: string, outDir: string): Promise<BuiltArtifact> {
+/** Account tenant Worker release stamped with its release sha (`GITSPACE_WORKER_SHA`, served at `/healthz`). */
+export async function buildWorkerRelease(root: string, sha: string, outDir: string): Promise<BuiltArtifact> {
   // Generated for each build, never committed: the browser runner module the session object loads for scripts.
   await writeBrowserRunner(join(root, 'packages/account-worker/src/generated/browser-runner.js'));
   return buildWorkerEntrypoint(join(root, 'packages/account-worker/src/index.ts'), sha, outDir);

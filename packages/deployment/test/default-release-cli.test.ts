@@ -3,7 +3,6 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { buildDefaultRelease } from '../src/default-release.js';
-import { encodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
 import { runDefaultRelease } from '../src/default-release-cli.js';
 
 const commit = 'b'.repeat(40);
@@ -14,7 +13,7 @@ test('rejects self-consistent foreign saved-directory publication before opening
   try {
     const release = await buildDefaultRelease(commit, {
       verifyCommit: async () => commit,
-      worker: async () => ({ commit, version: commit, bytes: encodeWorkerBundle([{ name: 'worker.mjs', type: 'esm', content: encode(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(commit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }]), metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
+      worker: async () => ({ commit, version: commit, modules: [{ name: 'worker.mjs', type: 'esm', content: encode(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(commit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }], metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
       frontend: async () => ({ commit, files: [{ path: 'index.html', bytes: encode('foreign'), contentType: 'text/html' }] }),
       image: async () => ({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance: encode(JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` })) }),
     });

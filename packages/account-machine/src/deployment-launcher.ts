@@ -1,12 +1,12 @@
 import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ExecutorJournal, LocalAttachment } from '@gitspace/runtime-machine';
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceRevision } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
-import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerReleaseMetadataSchema, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-objects.js';
 import { z } from 'zod';
 
@@ -40,7 +40,7 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
     const output = ${JSON.stringify(output)};
     const target = ${JSON.stringify(target)};
     let built;
-    if (target === 'worker') built = { ...await builders.buildWorkerBundle(root, ${JSON.stringify(sha)}, output), worker: await builders.workerMetadataFromWrangler(root) };
+    if (target === 'worker') built = { ...await builders.buildWorkerRelease(root, ${JSON.stringify(sha)}, output), worker: await builders.workerMetadataFromWrangler(root) };
     else if (target === 'machine') built = await builders.buildMachineBundle(root, output);
     else built = await builders.buildFrontendTree(root, output);
     await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(built));
@@ -254,8 +254,8 @@ export class DeploymentLauncher {
         progress('build', 'building tenant worker');
         const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'worker', join(buildRoot, 'worker'), environment);
         worker = workerReleaseMetadataSchema.parse(built.worker);
-        progress('upload', `uploading ${keys.worker}`);
-        artifacts.worker = await this.putFile(keys.worker, built.path);
+        progress('upload', `uploading ${keys.worker} and its modules`);
+        artifacts.worker = await this.putWorker(keys.worker, built);
       }
       if (targets.includes('machine')) {
         progress('build', 'building machine daemon');
@@ -335,11 +335,18 @@ export class DeploymentLauncher {
     return { key, hash: built.manifestHash, size: bytes.byteLength };
   }
 
-  private async putFile(key: string, path: string): Promise<ReleaseArtifact> {
-    const bytes = new Uint8Array(await readFile(path));
-    const hash = sha256(bytes);
-    const uploadedHash = await this.options.blobs.put(key, bytes);
-    if (uploadedHash !== hash) throw new Error(`Uploaded file hash mismatch: ${path}`);
-    return { key, hash, size: bytes.byteLength };
+  /** Uploads each module the manifest pins, checked against it, then the manifest, so a stored manifest never names a missing module. */
+  private async putWorker(key: string, built: BuiltArtifact): Promise<ReleaseArtifact> {
+    const bytes = new Uint8Array(await readFile(built.path));
+    if (sha256(bytes) !== built.hash) throw new Error('Worker manifest changed before upload');
+    const manifest = workerManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+    for (const module of manifest.modules) {
+      const content = new Uint8Array(await readFile(join(dirname(built.path), module.name)));
+      const hash = sha256(content);
+      if (content.byteLength !== module.size || hash !== `sha256:${module.sha256}`) throw new Error(`Worker module changed before upload: ${module.name}`);
+      if (await this.options.blobs.put(workerModuleKey(key, module.name), content) !== hash) throw new Error(`Uploaded worker module hash mismatch: ${module.name}`);
+    }
+    if (await this.options.blobs.put(key, bytes) !== built.hash) throw new Error('Uploaded worker manifest hash mismatch');
+    return { key, hash: built.hash, size: bytes.byteLength };
   }
 }

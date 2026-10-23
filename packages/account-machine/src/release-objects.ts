@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { WORKER_MANIFEST_FILE } from '@gitspace/protocol';
 
 export const frontendManifestSchema = z.object({
   files: z.array(z.object({
@@ -10,6 +11,7 @@ export const frontendManifestSchema = z.object({
 export type FrontendManifest = z.infer<typeof frontendManifestSchema>;
 
 export interface ReleaseObjectKeys {
+  /** Worker manifest; its modules live beside it at `workerModuleKey(worker, name)`. */
   worker: string;
   machine: string;
   frontendManifest: string;
@@ -19,7 +21,7 @@ export interface ReleaseObjectKeys {
 
 export function releaseObjectKeys(sha: string): ReleaseObjectKeys {
   return {
-    worker: `releases/${sha}/worker.bundle.json`,
+    worker: `releases/${sha}/${WORKER_MANIFEST_FILE}`,
     machine: `releases/${sha}/machine.manifest.json`,
     frontendManifest: `releases/${sha}/frontend.manifest.json`,
     frontend: `releases/${sha}/frontend`,

@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
-import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultReleaseContents, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
-import type { WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
-import { decodeWorkerBundle } from '@gitspace/protocol/worker-bundle';
+import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultReleaseContents, verifyDefaultWorker, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
+import { WORKER_MANIFEST_FILE, workerModuleKey, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 
 export type DefaultReleaseStorage = DefaultReleaseReader & { put(key: string, bytes: Uint8Array, expectedEtag: string | null): Promise<void> };
 export type DefaultReleaseBuild = { manifest: DefaultRelease; objects: Map<string, Uint8Array> };
 export type DefaultReleaseBuilders = {
   verifyCommit(): Promise<string>;
-  worker(): Promise<{ commit: string; version: string; bytes: Uint8Array; metadata: WorkerReleaseMetadata }>;
+  worker(): Promise<{ commit: string; version: string; modules: WorkerModule[]; metadata: WorkerReleaseMetadata }>;
   frontend(): Promise<{ commit: string; files: { path: string; bytes: Uint8Array; contentType: string }[] }>;
   image(): Promise<{ commit: string; image: string; provenance: Uint8Array }>;
   machines?(): Promise<DefaultRelease['machines']>;
@@ -19,10 +19,9 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   defaultCommitSchema.parse(commit);
   if (await builders.verifyCommit() !== commit) throw new Error('Build checkout commit mismatch or dirty tree');
   const worker = await builders.worker();
-  const decoded = decodeWorkerBundle(new Uint8Array(worker.bytes).buffer, worker.metadata.mainModule);
-  if (decoded.isErr()) throw new Error(`Worker bundle validation failed: ${decoded.error.message}`);
-  const main = decoded.value.find(module => module.name === worker.metadata.mainModule && module.type === 'esm');
-  if (!main) throw new Error('Worker bundle has no declared main module');
+  const workerManifest = new TextEncoder().encode(JSON.stringify(createWorkerManifest(worker.metadata.mainModule, worker.modules)));
+  const main = worker.modules.find(module => module.name === worker.metadata.mainModule);
+  if (!main) throw new Error('Worker release has no declared main module');
   // Bun's non-minified Worker build folds GITSPACE_WORKER_SHA into these
   // declarations, including renamed copies from other bundled modules.
   const source = new TextDecoder('utf-8', { fatal: true }).decode(main.content);
@@ -34,11 +33,13 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   if (await builders.verifyCommit() !== commit) throw new Error('Build checkout commit changed during build');
   const prefix = `defaults/releases/${commit}/`;
   const objects = new Map<string, Uint8Array>();
-  objects.set(`${prefix}worker.bundle.json`, worker.bytes);
+  const workerManifestKey = `${prefix}${WORKER_MANIFEST_FILE}`;
+  for (const module of worker.modules) objects.set(workerModuleKey(workerManifestKey, module.name), module.content);
+  objects.set(workerManifestKey, workerManifest);
   objects.set(`${prefix}image-provenance.json`, image.provenance);
   const manifest = defaultReleaseSchema.parse({
     schemaVersion: 1, commit, machines,
-    worker: { commit: worker.commit, version: worker.version, bundle: defaultObject(`${prefix}worker.bundle.json`, worker.bytes), metadata: worker.metadata },
+    worker: { commit: worker.commit, version: worker.version, manifest: defaultObject(workerManifestKey, workerManifest), metadata: worker.metadata },
     frontend: { commit: frontend.commit, files: frontend.files.map(file => {
       const key = `${prefix}frontend/${file.path}`;
       objects.set(key, file.bytes);
@@ -66,7 +67,7 @@ export async function publishDefaultRelease(build: DefaultReleaseBuild, storage:
   const before = await storage.get(DEFAULT_ACCOUNT_POINTER);
   const pointer = before ? defaultPointerSchema.parse(JSON.parse(new TextDecoder().decode(before.bytes))) : null;
   if (pointer) await verifyRelease(storage, pointer.current);
-  for (const object of [manifest.worker.bundle, ...manifest.frontend.files, manifest.image.provenance, reference]) {
+  for (const object of [...await verifyDefaultWorker(local, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, reference]) {
     const bytes = await verifyDefaultObject(local, object);
     if (!await storage.get(object.key)) {
       try { await storage.put(object.key, bytes, null); }

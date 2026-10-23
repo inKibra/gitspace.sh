@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { workerReleaseMetadataSchema, executableArtifactManifestSchema, machineNativePlatformSchema, releaseArtifactSchema } from './deployment.js';
+import { WORKER_MANIFEST_FILE, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, executableArtifactManifestSchema, machineNativePlatformSchema, releaseArtifactSchema } from './deployment.js';
 import { cloudImageReferenceSchema } from './cloud-image.js';
 
 export const DEFAULT_ACCOUNT_POINTER = 'defaults/account.json';
@@ -22,7 +22,11 @@ export const defaultNativeProvenanceSchema = z.object({ sourceRevision: defaultC
 export const defaultMachineReleaseSchema = z.object({ sha: z.string().min(1), commit: defaultCommitSchema, platform: machineNativePlatformSchema, artifact: releaseArtifactSchema }).strict();
 export const defaultReleaseSchema = z.object({
   schemaVersion: z.literal(1), commit: defaultCommitSchema,
-  worker: z.object({ commit: defaultCommitSchema, version: defaultCommitSchema, bundle: defaultObjectSchema, metadata: workerReleaseMetadataSchema }).strict(),
+  worker: z.union([
+    z.object({ commit: defaultCommitSchema, version: defaultCommitSchema, manifest: defaultObjectSchema, metadata: workerReleaseMetadataSchema }).strict(),
+    /** LEGACY(single-bundle releases): a default published before module releases; delete once no pointer or tenant pin names one. */
+    z.object({ commit: defaultCommitSchema, version: defaultCommitSchema, bundle: defaultObjectSchema, metadata: workerReleaseMetadataSchema }).strict(),
+  ]),
   frontend: z.object({ commit: defaultCommitSchema, files: z.array(defaultObjectSchema.extend({ path: pathSchema, contentType: z.string().min(1) })).min(1) }).strict(),
   image: z.object({ commit: defaultCommitSchema, image: cloudImageReferenceSchema, provenance: defaultObjectSchema }).strict(),
   machines: z.array(defaultNativeArtifactSchema).default([]),
@@ -30,7 +34,9 @@ export const defaultReleaseSchema = z.object({
   if ([manifest.worker.commit, manifest.worker.version, manifest.frontend.commit, manifest.image.commit].some(commit => commit !== manifest.commit)) context.addIssue({ code: 'custom', message: 'Default release part commit mismatch' });
   if (manifest.machines.some(machine => machine.commit !== manifest.commit) || new Set(manifest.machines.map(machine => machine.platform)).size !== manifest.machines.length) context.addIssue({ code: 'custom', message: 'Native default commit mismatch or duplicate platform' });
   const keys = new Set<string>();
-  for (const object of [manifest.worker.bundle, ...manifest.frontend.files, manifest.image.provenance]) {
+  const worker = 'manifest' in manifest.worker ? manifest.worker.manifest : manifest.worker.bundle;
+  if ('manifest' in manifest.worker && worker.key !== `defaults/releases/${manifest.commit}/${WORKER_MANIFEST_FILE}`) context.addIssue({ code: 'custom', message: 'Default worker manifest namespace mismatch' });
+  for (const object of [worker, ...manifest.frontend.files, manifest.image.provenance]) {
     if (!object.key.startsWith(`defaults/releases/${manifest.commit}/`) || keys.has(object.key)) context.addIssue({ code: 'custom', message: 'Default release object namespace mismatch or duplicate' });
     keys.add(object.key);
   }
@@ -59,13 +65,28 @@ export async function readDefaultManifest(reader: DefaultReleaseReader, referenc
   return manifest;
 }
 
-export async function verifyDefaultReleaseContents(reader: DefaultReleaseReader, manifest: DefaultRelease, nativeContent: 'all' | 'manifests' = 'all'): Promise<void> {
-  for (const object of [manifest.worker.bundle, ...manifest.frontend.files]) await verifyDefaultObject(reader, object);
+/** Verifies the worker's manifest (and with `all` each module it pins); returns every object the worker publishes. */
+export async function verifyDefaultWorker(reader: DefaultReleaseReader, worker: DefaultRelease['worker'], content: 'all' | 'manifests'): Promise<DefaultObject[]> {
+  if (!('manifest' in worker)) {
+    await verifyDefaultObject(reader, worker.bundle);
+    return [worker.bundle];
+  }
+  const manifest = workerManifestSchema.parse(JSON.parse(new TextDecoder().decode(await verifyDefaultObject(reader, worker.manifest))));
+  if (manifest.mainModule !== worker.metadata.mainModule) throw new Error('Default worker main module mismatch');
+  const modules = manifest.modules.map(module => ({ key: workerModuleKey(worker.manifest.key, module.name), sha256: module.sha256, size: module.size }));
+  if (content === 'all') for (const module of modules) await verifyDefaultObject(reader, module);
+  return [...modules, worker.manifest];
+}
+
+/** `manifests` checks each manifest; `all` also checks every worker module and native chunk they pin. */
+export async function verifyDefaultReleaseContents(reader: DefaultReleaseReader, manifest: DefaultRelease, content: 'all' | 'manifests' = 'all'): Promise<void> {
+  await verifyDefaultWorker(reader, manifest.worker, content);
+  for (const object of manifest.frontend.files) await verifyDefaultObject(reader, object);
   const provenance = defaultImageProvenanceSchema.parse(JSON.parse(new TextDecoder().decode(await verifyDefaultObject(reader, manifest.image.provenance))));
   if (provenance.commit !== manifest.commit || provenance.image !== manifest.image.image) throw new Error('Default image provenance commit or image mismatch');
   for (const native of manifest.machines) {
     await verifyDefaultNativeArtifact(reader, native);
-    if (nativeContent === 'all') for (const chunk of native.chunks) await verifyDefaultObject(reader, chunk);
+    if (content === 'all') for (const chunk of native.chunks) await verifyDefaultObject(reader, chunk);
   }
 }
 

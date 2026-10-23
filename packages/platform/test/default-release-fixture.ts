@@ -1,4 +1,6 @@
 import { DEFAULT_ACCOUNT_POINTER } from '@gitspace/protocol/default-release';
+import { workerModuleKey } from '@gitspace/protocol/deployment';
+import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 
 export async function publishDefaultFixture(bucket: R2Bucket) {
   const commit = 'd'.repeat(40);
@@ -20,11 +22,13 @@ export async function publishDefaultFixture(bucket: R2Bucket) {
     treeHash: generation, files: [{ path: 'machine.js', hash: generation, size: chunk.size, mode: 420, chunks: [{ key: `objects/sha256/${chunk.sha256}`, hash: generation, size: chunk.size }] }], omp: null,
   }));
   const image = `registry.example/tenant/default@sha256:${'d'.repeat(64)}`;
-  const bundle = await object(`${root}worker.json`, '{}');
+  const worker: WorkerModule = { name: 'worker.mjs', type: 'esm', content: new TextEncoder().encode('export default {};') };
+  const manifest = await object(`${root}worker.manifest.json`, JSON.stringify(createWorkerManifest('worker.mjs', [worker])));
+  await bucket.put(workerModuleKey(manifest.key, worker.name), worker.content);
   const frontend = await object(`${root}frontend/index.html`, '<html>original</html>');
   const provenance = await object(`${root}image-provenance.json`, JSON.stringify({ commit, image }));
   const release = { schemaVersion: 1, commit,
-    worker: { commit, version: commit, bundle, metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-08-27', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } },
+    worker: { commit, version: commit, manifest, metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-08-27', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } },
     frontend: { commit, files: [{ ...frontend, path: 'index.html', contentType: 'text/html' }] },
     image: { commit, image, provenance }, machines: [{ commit, platform: 'linux-x64', generation, artifact, chunks: [chunk] }],
   };

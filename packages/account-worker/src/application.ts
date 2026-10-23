@@ -2380,7 +2380,7 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   let outcome: { status: ReleaseStatus; error: string | null };
   try {
     if (!worker || !metadata) throw new Error('Worker artifact and metadata are required');
-    outcome = await platformCall(env, userId, 'deploy', { sha: input.sha, bundleKey: dataObjectKey(userId, worker.key), bundleHash: worker.hash, metadata });
+    outcome = await platformCall(env, userId, 'deploy', { sha: input.sha, manifestKey: dataObjectKey(userId, worker.key), manifestHash: worker.hash, metadata });
   } catch (error) {
     outcome = { status: 'failed', error: error instanceof Error ? error.message : 'Worker deployment failed' };
   }
