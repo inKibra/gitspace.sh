@@ -94,7 +94,7 @@ describe('private hosted service access', () => {
     expect(cookies).not.toContain('Domain=');
     expect((await exports.default.fetch(callback)).status).toBe(401);
     const token = cookies.split(`${SERVICE_COOKIE}=`)[1]!.split(';')[0]!;
-    expect(await relay.serviceValidate(token, hostname)).toMatchObject({ deviceId });
+    expect(await relay.serviceValidate(token, hostname)).toMatchObject({ caller: { kind: 'device', deviceId } });
     expect(await relay.serviceValidate(token, `other--${env.TENANT_ID}-srv.gssh.dev`)).toBeNull();
     expect(await env.RELAY.getByName('foreign-tenant-fixture').serviceValidate(token, hostname)).toBeNull();
   });
@@ -110,7 +110,7 @@ describe('private hosted service access', () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 60_001);
     try {
       expect(await relay.serviceRedeem(ticket, hostname, state)).toBeNull();
-      expect(await relay.serviceValidate(live.token, hostname)).toMatchObject({ deviceId });
+      expect(await relay.serviceValidate(live.token, hostname)).toMatchObject({ caller: { kind: 'device', deviceId } });
       clock.mockReturnValue(now + 900_001);
       expect(await relay.serviceValidate(live.token, hostname)).toBeNull();
     } finally { clock.mockRestore(); }

@@ -14,6 +14,35 @@ export function tabWithinGrant(grant: { origins: string[] }, urls: { tabUrl?: st
   return !urls.targetUrl || permitted(grant, urls.targetUrl);
 }
 
+/** The site a tab shows: the hostname of an http(s) page, else none. */
+export function siteOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try { const parsed = new URL(url); return ['http:', 'https:'].includes(parsed.protocol) ? parsed.hostname : null; } catch { return null; }
+}
+
+/** A Chrome tab group as `chrome.tabGroups.query` reports it. */
+export type ChromeTabGroup = { id: number; title?: string; color: string };
+/** Who added a tab to a workspace group, and the site it consents to (a tab you dragged in only). */
+export type GroupMember = { by: 'agent' | 'page' | 'you'; site: string | null };
+
+/**
+ * The Chrome group a workspace's record adopts after Chrome restored it under a new id: the one group with the
+ * workspace group's name and colour that no live record of another workspace holds (`bound`). None when there is no
+ * such group or more than one; a new group starts then.
+ */
+export function restoredGroup(groups: ChromeTabGroup[], title: string, color: string, bound: number[]): number | null {
+  const [match, ...others] = groups.filter(group => group.title === title && group.color === color && !bound.includes(group.id));
+  return match && !others.length ? match.id : null;
+}
+
+/** The members of an adopted group. Chrome does not keep which tabs the agent opened, so each counts as one you
+ * dragged in: usable on the site it shows, never closed for you. */
+export function restoredMembers(tabs: { id?: number; url?: string }[]): Record<number, GroupMember> {
+  const members: Record<number, GroupMember> = {};
+  for (const tab of tabs) if (tab.id !== undefined) members[tab.id] = { by: 'you', site: siteOf(tab.url) };
+  return members;
+}
+
 /** The DevTools commands a grant allows on its tab; enforced inside the installed extension. */
 export function relayCommandAllowed(grant: { origins: string[] }, targetId: string, session: string, method: string, params: Record<string, unknown>, sessionId?: string): boolean {
   if (sessionId && sessionId !== session) return false;

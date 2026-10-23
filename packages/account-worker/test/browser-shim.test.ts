@@ -85,4 +85,23 @@ describe('CdpBrowserShim', () => {
     expect(browser.calls.filter(call => call.method === 'Target.detachFromTarget').map(call => call.params.sessionId)).toEqual(['session-1']);
     await expect(b.send('Runtime.evaluate', { expression: '1' }, 'session-2')).resolves.toEqual({});
   });
+
+  it('never shows a client the service session cookie: cookie commands are refused and network events blank it', async () => {
+    const browser = fakeBrowser();
+    const shim = await CdpBrowserShim.open(browser.channel);
+    const events: CdpEvent[] = [];
+    const client = shim.client(event => events.push(event));
+    await client.send('Target.setAutoAttach', { autoAttach: true, flatten: true });
+    for (const method of ['Network.getCookies', 'Network.setCookie', 'Network.setCookies', 'Network.deleteCookies']) await expect(client.send(method, { urls: ['https://app--ws--test-srv.gssh.dev/'] }, 'session-1')).rejects.toThrow('cookies');
+    browser.emit({ method: 'Network.requestWillBeSentExtraInfo', sessionId: 'session-1', params: {
+      requestId: 'request', headers: { Cookie: 'app=1; __Host-gitspace-service=secret-token; __Host-gitspace-service-state=state' },
+      associatedCookies: [{ blockedReasons: [], cookie: { name: '__Host-gitspace-service', value: 'secret-token', httpOnly: true } }, { blockedReasons: [], cookie: { name: 'app', value: '1' } }],
+    } });
+    browser.emit({ method: 'Network.responseReceived', sessionId: 'session-1', params: { requestId: 'request', response: { requestHeadersText: 'GET / HTTP/1.1\r\nCookie: __Host-gitspace-service=secret-token\r\n\r\n' } } });
+    expect(JSON.stringify(events)).not.toContain('secret-token');
+    expect(events.at(-2)?.params).toMatchObject({
+      headers: { Cookie: 'app=1; __Host-gitspace-service=; __Host-gitspace-service-state=state' },
+      associatedCookies: [{ cookie: { name: '__Host-gitspace-service', value: '' } }, { cookie: { name: 'app', value: '1' } }],
+    });
+  });
 });

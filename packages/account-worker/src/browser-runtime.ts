@@ -12,6 +12,10 @@ export type AccountBrowserTransport = {
   tabs(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<unknown>;
   revoke(groupId: string, pairingId: string): Promise<void>;
 };
+/** How a cloud tab reaches its workspace's hosted services. `urlPattern` narrows interception to hosted names;
+ * `admit` gives the browser its own session for one of the workspace's hostnames, after which the request goes to the
+ * network like any page's, so responses stream and WebSockets open. */
+export type AccountBrowserServices = { urlPattern: string; hostname(hostname: string): boolean; workspace: BrowserWorkspaceServiceHostname; admit(hostname: string): Promise<void> };
 export class AccountBrowserRuntime {
   private tabs = new Map<string, Tab>();
   private groups = new Map<string, RuntimeAccountBrowserGrant>();
@@ -19,7 +23,7 @@ export class AccountBrowserRuntime {
   private outputs = new BrowserOutputStore();
   private cloud = new Map<string, Promise<BrowserChannel>>();
   /** `cloud` opens this workspace's view of its cloud browser (a client of the browser session object). */
-  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; serviceFetch?: (request: Request) => Promise<Response>; serviceHostname?: (hostname: string) => boolean; workspaceServiceHostname?: BrowserWorkspaceServiceHostname }) {}
+  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices }) {}
   async execute(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization;
     const scope = JSON.stringify([body.scope.projectId, body.scope.workspaceId]);
@@ -163,27 +167,27 @@ export class AccountBrowserRuntime {
     return current;
   }
   private async interceptServices(tab: Tab) {
-    if (!this.options.serviceFetch || !this.options.serviceHostname) return;
-    const serviceFetch = this.options.serviceFetch, serviceHostname = this.options.serviceHostname, workspaceServiceHostname = this.options.workspaceServiceHostname;
-    if (!workspaceServiceHostname) throw new Error('Browser workspace service authority unavailable');
-    const policy = new BrowserServicePolicy(hostname => workspaceServiceHostname(hostname, tab.grant));
+    const services = this.options.services;
+    if (!services) return;
+    const policy = new BrowserServicePolicy(hostname => services.workspace(hostname, tab.grant));
     tab.servicePolicy = policy;
     tab.unsubscribeServices = tab.channel.subscribe(event => {
       policy.observe(event, tab.sessionId);
       if (event.sessionId !== tab.sessionId || event.method !== 'Fetch.requestPaused') return;
       const paused = BrowserServicePaused.safeParse(event.params);
       if (!paused.success) { tab.stale = true; return; }
-      const { requestId, request: intercepted } = paused.data;
+      const { requestId, request } = paused.data;
       void (async () => {
-        if (!serviceHostname(new URL(intercepted.url).hostname)) { await tab.channel.send('Fetch.continueRequest', { requestId }, tab.sessionId); return; }
-        if (!await policy.allows(paused.data)) { await tab.channel.send('Fetch.failRequest', { requestId, errorReason: 'AccessDenied' }, tab.sessionId); return; }
-        const request = new Request(intercepted.url, { method: intercepted.method, headers: intercepted.headers, redirect: 'manual', ...(intercepted.postData === undefined ? {} : { body: intercepted.postData }) });
-        const response = await serviceFetch(request);
-        await tab.channel.send('Fetch.fulfillRequest', { requestId, responseCode: response.status, responseHeaders: [...response.headers].map(([name, value]) => ({ name, value })), body: Buffer.from(await response.arrayBuffer()).toString('base64') }, tab.sessionId);
+        const { hostname } = new URL(request.url);
+        if (services.hostname(hostname)) {
+          if (!await policy.allows(paused.data)) { await tab.channel.send('Fetch.failRequest', { requestId, errorReason: 'AccessDenied' }, tab.sessionId); return; }
+          await services.admit(hostname);
+        }
+        await tab.channel.send('Fetch.continueRequest', { requestId }, tab.sessionId);
       })().catch(async () => { tab.stale = true; try { await tab.channel.send('Fetch.failRequest', { requestId, errorReason: 'AccessDenied' }, tab.sessionId); } catch {} });
     });
     policy.initialize(await tab.channel.send('Page.getFrameTree', {}, tab.sessionId));
     await tab.channel.send('Network.enable', {}, tab.sessionId);
-    await tab.channel.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, tab.sessionId);
+    await tab.channel.send('Fetch.enable', { patterns: [{ urlPattern: services.urlPattern, requestStage: 'Request' }] }, tab.sessionId);
   }
 }

@@ -43,9 +43,9 @@ import { forwardTunnelRequest, relayRequest, tunnelTarget, verifiedTunnelBody, T
 import { handleMcpRequest } from './mcp-server.js';
 import { z } from 'zod';
 import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
-import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
+import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
 import { serveIngress } from './service-ingress.js';
-import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
+import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
@@ -340,6 +340,19 @@ export class UserRelayDO extends BudgetedDurableObject {
     await this.scheduleMachineCheck();
     return sessionId !== null;
   }
+  /** A workspace's cloud browser's session for one of that workspace's live hostnames (workspace or machine URL), for
+   * its browser session object to set as a cookie. Minting again renews it. */
+  async serviceCloudSession(hostname: string, workspace: ServiceWorkspace) {
+    if (!await isWorkspaceServiceHostname(this.env, workspace, hostname, workspace)) throw new Error('Not a live service of this workspace');
+    const session = await this.serviceSessions.cloud(hostname, workspace);
+    await this.scheduleMachineCheck();
+    return session;
+  }
+  /** Ends a workspace's cloud browser sessions and the requests and WebSockets open on them. */
+  async serviceRevokeCloud(workspace: ServiceWorkspace) {
+    await this.closeServiceSessions(await this.serviceSessions.revokeCloud(workspace));
+    await this.scheduleMachineCheck();
+  }
   private async closeServiceSessions(sessionIds: readonly string[]) {
     if (!sessionIds.length) return;
     const revoked = new Set(sessionIds);
@@ -356,14 +369,14 @@ export class UserRelayDO extends BudgetedDurableObject {
   private async serviceTunnelAuthorized(requestId: string, pending: PendingTunnel): Promise<boolean> {
     if (!pending.session) return true;
     const session = await this.serviceSessions.validate(pending.session.sessionId, pending.session.hostname).catch(() => null);
-    if (session && session.deviceId === pending.session.deviceId) return true;
+    if (session && sameServiceCaller(session.caller, pending.session.caller)) return true;
     await this.failTunnel(requestId, new Error('Service authorization expired'), 401, 'SERVICE_SESSION_EXPIRED');
     return false;
   }
   private async serviceSocketAuthorized(socket: WebSocket, service: ServiceSocketAttachment): Promise<boolean> {
     if (!service.session) return true;
     const session = await this.serviceSessions.validate(service.session.sessionId, service.session.hostname).catch(() => null);
-    if (session && session.deviceId === service.session.deviceId) return true;
+    if (session && sameServiceCaller(session.caller, service.session.caller)) return true;
     closeOpenSocket(socket, 1008, 'Service authorization expired');
     return false;
   }
@@ -413,7 +426,11 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayUnpair(pairingId: string) { return this.browserRelay.unpair(pairingId); }
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
-  browserRelayRetireWorkspace(projectId: string, workspaceId: string) { return this.browserRelay.retireWorkspace(projectId, workspaceId); }
+  /** An archived or deleted workspace's Chrome groups end, and its cloud browser's service sessions with them. */
+  async browserRelayRetireWorkspace(projectId: string, workspaceId: string) {
+    await this.browserRelay.retireWorkspace(projectId, workspaceId);
+    await this.serviceRevokeCloud({ projectId, workspaceId });
+  }
   /** A script on a Chrome (`browser.run`) begins with its signed run authority and ends from the browser session. */
   browserRelayScriptBegin(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.scriptBegin(authorization); }
   browserRelayScriptEnd(token: string) { return this.browserRelay.scriptEnd(token); }
@@ -725,7 +742,7 @@ export class UserRelayDO extends BudgetedDurableObject {
       const parsed = ServiceSessionSchema.safeParse(raw);
       if (!parsed.success) return jsonError(401, 'SERVICE_SESSION_REJECTED', 'Invalid service session');
       const current = await this.serviceSessions.validate(parsed.data.sessionId, parsed.data.hostname);
-      if (!current || current.deviceId !== parsed.data.deviceId || current.hostname !== request.headers.get('x-forwarded-host')) return jsonError(401, 'SERVICE_SESSION_REJECTED', 'Service session expired');
+      if (!current || !sameServiceCaller(current.caller, parsed.data.caller) || current.hostname !== request.headers.get('x-forwarded-host')) return jsonError(401, 'SERVICE_SESSION_REJECTED', 'Service session expired');
       session = current;
     }
     let machine: WebSocket | undefined;
@@ -1020,7 +1037,7 @@ export default {
         return new Response(null, { status: 303, headers });
       }
       const session = await relay.serviceValidate(serviceCookie(request, SERVICE_COOKIE), url.hostname);
-      if (session) return fetchInternalService(env, { kind: 'device', accountId: env.ACCOUNT_ID, deviceId: session.deviceId }, request, session, resolved);
+      if (session) return fetchInternalService(env, session.caller, request, session, resolved);
       if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') return jsonError(401, 'SERVICE_LOGIN_REQUIRED', 'Open this service in the browser to approve access');
       const state = crypto.randomUUID();
       const approval = new URL('/service-access', env.ACCOUNT_URL);

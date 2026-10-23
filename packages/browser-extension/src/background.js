@@ -1,7 +1,7 @@
 // The extension's service worker. Bundled by `src/build.ts`; the download prepends the account it belongs to as
 // `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
-import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, tabWithinGrant } from './commands.ts';
+import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, siteOf, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
@@ -73,7 +73,6 @@ async function targetInfo(id) { const target = (await targets()).find(target => 
 const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'];
 /** A workspace keeps one colour wherever its group is recreated. */
 function groupColor(workspaceId) { let hash = 0; for (const character of workspaceId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0; return GROUP_COLORS[hash % GROUP_COLORS.length]; }
-function siteOf(url) { try { const parsed = new URL(url); return ['http:', 'https:'].includes(parsed.protocol) ? parsed.hostname : null; } catch { return null; } }
 /** The grant as it applies to one tab: a tab you dragged in is also usable on the site it showed then. */
 function scoped(grant, record, tabId) { const entry = record?.members?.[tabId]; return entry?.by === 'you' && entry.site ? { ...grant, origins: [...grant.origins, entry.site] } : grant; }
 async function retireGroup(groupId, closeTabs = false) {
@@ -123,9 +122,25 @@ async function groupRecord(grant, establish = false) {
   let { browserEpoch } = await chrome.storage.session.get('browserEpoch');
   if (!browserEpoch) { browserEpoch = crypto.randomUUID(); await chrome.storage.session.set({browserEpoch}); }
   if (record && record.groupId !== grant.groupId) return {key,browserEpoch};
-  if (record && record.browserEpoch !== browserEpoch) { await persist(key,null); return {key,browserEpoch}; }
+  if (record && record.browserEpoch !== browserEpoch) return { key, record: await readopt(key, grant, browserEpoch), browserEpoch };
   if (record) { try { await chrome.tabGroups.get(record.chromeGroupId); } catch { await persist(key, null); return { key, browserEpoch }; } }
   return { key, record, browserEpoch };
+}
+/** After a Chrome restart the record names a group and tabs that no longer exist, and Chrome has restored the group
+ * under a new id: the record adopts it (`restoredGroup`) with each of its tabs as one you dragged in, or is dropped. */
+function readopt(key, grant, browserEpoch) {
+  return serially(async () => {
+    const current = await stored(key);
+    if (current?.groupId !== grant.groupId) return undefined;
+    if (current.browserEpoch === browserEpoch) return current;
+    const bound = (await groupRecords()).filter(other => other.key !== key && other.record.browserEpoch === browserEpoch).map(other => other.record.chromeGroupId);
+    const chromeGroupId = restoredGroup(await chrome.tabGroups.query({}), grant.groupName, groupColor(grant.workspaceId), bound);
+    if (chromeGroupId === null) { await persist(key, null); return undefined; }
+    const adopted = { groupId: grant.groupId, chromeGroupId, browserEpoch, members: restoredMembers(await chrome.tabs.query({ groupId: chromeGroupId })) };
+    await persist(key, adopted);
+    scheduleReport(grant.groupId);
+    return adopted;
+  });
 }
 async function member(grant, targetId) {
   if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Workspace group grant expired');

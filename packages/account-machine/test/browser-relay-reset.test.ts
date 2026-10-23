@@ -171,16 +171,21 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
   expect(await list()).toEqual([{targetId:'2',title:'Page',url:'https://approved.example/returned',addedBy:'you'}]);
 });
 
-it('invalidates persisted Chrome IDs after group deletion or a browser session change', async () => {
-  const group = {groupId:'logical',projectId:'project',workspaceId:'workspace'};
+it('after a browser restart adopts the one restored group of the workspace, else invalidates persisted Chrome IDs', async () => {
+  const group = {groupId:'logical',groupName:'Workspace',projectId:'project',workspaceId:'workspace'};
   const key = 'group:' + JSON.stringify(['account','machine','project','workspace']);
+  const otherKey = 'group:' + JSON.stringify(['account','machine','project','other']);
   const keys = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
-  const state = new Map<string, unknown>([['identity',{privateKey:keys.privateKey,trust:{accountId:'account'},pairingId:'machine',generation:1}],[key,{groupId:'logical',chromeGroupId:7,browserEpoch:'old'}]]);
+  const stale = {groupId:'logical',chromeGroupId:7,browserEpoch:'old',members:{3:{by:'agent',site:null}}};
+  const state = new Map<string, unknown>([['identity',{privateKey:keys.privateKey,trust:{accountId:'account'},pairingId:'machine',generation:1}],[key,stale]]);
   let epoch = 'new';
   let exists = true;
+  let groups: Array<{id:number;title:string;color:string}> = [];
+  const tabs = [{id:31,groupId:12,url:'https://restored.example/page'},{id:32,groupId:12,url:'about:blank'},{id:33,groupId:-1,url:'https://outside.example/'}];
   const database = {transaction() {
     const tx = {oncomplete:()=>{},onerror:()=>{},onabort:()=>{},objectStore:()=>({
       get(key:string) {const request = {result:state.get(key),onsuccess:()=>{},onerror:()=>{}}; queueMicrotask(()=>request.onsuccess()); return request;},
+      getAllKeys() {const request = {result:[...state.keys()],onsuccess:()=>{},onerror:()=>{}}; queueMicrotask(()=>request.onsuccess()); return request;},
       put(value:unknown,key:string) {state.set(key,value);},
     })};
     queueMicrotask(()=>tx.oncomplete()); return tx;
@@ -192,12 +197,32 @@ it('invalidates persisted Chrome IDs after group deletion or a browser session c
       runtime:{onMessage:{addListener(){}}},
       storage:{local:{remove:async()=>{}},session:{get:async()=>({browserEpoch:epoch}),set:async()=>{}}},
       debugger:{onEvent:{addListener(){}},onDetach:{addListener(){}}},
-      tabs:{onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated:{addListener(){}}},
-      tabGroups:{get:async()=>{if(!exists) throw new Error('Deleted');return {id:7};},onRemoved:{addListener(){}}},
+      tabs:{query:async({groupId}:{groupId:number})=>tabs.filter(tab=>tab.groupId===groupId),onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated:{addListener(){}}},
+      tabGroups:{get:async()=>{if(!exists) throw new Error('Deleted');return {id:7};},query:async()=>groups,onRemoved:{addListener(){}}},
       alarms:{create(){},onAlarm:{addListener(){}}},
     },
   });
   runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'],context);
+  const color = runInContext('groupColor(group.workspaceId)',context);
+  expect(await runInContext('groupRecord(group)',context)).toEqual({key,browserEpoch:'new'});
+  expect(state.get(key)).toBeNull();
+  // Chrome restored the group under a new id with new tabs; which of them the agent opened is lost. Another
+  // workspace's record from before the restart names the same id under the old numbering and holds nothing.
+  groups = [{id:5,title:'Workspace',color:color === 'red' ? 'blue' : 'red'},{id:12,title:'Workspace',color},{id:13,title:'Other',color}];
+  state.set(otherKey,{groupId:'other',chromeGroupId:12,browserEpoch:'old',members:{}});
+  state.set(key,stale);
+  const adopted = {groupId:'logical',chromeGroupId:12,browserEpoch:'new',members:{31:{by:'you',site:'restored.example'},32:{by:'you',site:null}}};
+  expect(await runInContext('groupRecord(group)',context)).toEqual({key,record:adopted,browserEpoch:'new'});
+  expect(state.get(key)).toEqual(adopted);
+  // A live record of another workspace holds the only match.
+  state.set(otherKey,{groupId:'other',chromeGroupId:12,browserEpoch:'new',members:{}});
+  state.set(key,stale);
+  expect(await runInContext('groupRecord(group)',context)).toEqual({key,browserEpoch:'new'});
+  expect(state.get(key)).toBeNull();
+  // Two matches: neither is adopted.
+  state.set(otherKey,null);
+  groups = [{id:12,title:'Workspace',color},{id:14,title:'Workspace',color}];
+  state.set(key,stale);
   expect(await runInContext('groupRecord(group)',context)).toEqual({key,browserEpoch:'new'});
   expect(state.get(key)).toBeNull();
   epoch = 'old'; exists = false;

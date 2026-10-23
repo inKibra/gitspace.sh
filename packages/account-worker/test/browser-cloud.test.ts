@@ -1,19 +1,33 @@
+import { env } from 'cloudflare:workers';
 import { afterEach, expect, test, vi } from 'vitest';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
-import { launchCloudBrowser } from '../src/browser-cdp.js';
+import { launchCloudBrowser, type BrowserChannel } from '../src/browser-cdp.js';
+import { CloudServiceCookies } from '../src/browser-session.js';
+import { CdpBrowserShim } from '../src/browser-shim.js';
+import { hostedServiceUrlPattern, isHostedServiceHostname, isWorkspaceServiceHostname } from '../src/service-access.js';
 import { RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 
 const RequestFrame = z.object({ id: z.number(), method: z.string(), params: z.record(z.string(), z.unknown()), sessionId: z.string().optional() });
-test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud permits explicit service navigation but denies ordinary-document %s access', async resource => {
+const SetCookies = z.object({ cookies: z.tuple([z.object({ name: z.string(), value: z.string(), url: z.string(), path: z.string(), secure: z.boolean(), httpOnly: z.boolean(), sameSite: z.string(), expires: z.number() })]) });
+const workspace = { projectId: 'project', workspaceId: 'workspace' };
+const hostname = `app--workspace--${env.TENANT_ID}-srv.gssh.dev`;
+async function leaseService(name: string, workspaceId: string) {
+  await env.HOSTED_ROUTES.getByName(name).lease(env.ACCOUNT_ID, 'project', { hostname: name, workspaceId, serviceName: 'app', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+}
+
+test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud sets its own session cookie for an explicit service navigation and lets it go to the network, but denies ordinary-document %s access', async resource => {
+  await leaseService(hostname, 'workspace');
   const store = new Map<string, unknown>();
   const storage = { async get(key: string) { return store.get(key); }, async put(key: string, value: unknown) { store.set(key, value); }, async delete(key: string) { return store.delete(key); } };
   const calls: Array<{ url: string; method: string }> = [];
-  const fulfilled = Promise.withResolvers<z.infer<typeof RequestFrame>>();
+  const commands: z.infer<typeof RequestFrame>[] = [];
+  const continued = Promise.withResolvers<z.infer<typeof RequestFrame>>();
   const denied = Promise.withResolvers<z.infer<typeof RequestFrame>>();
   const pair = new WebSocketPair(); pair[1].accept();
   pair[1].addEventListener('message', event => {
     const command = RequestFrame.parse(JSON.parse(String(event.data)));
+    commands.push(command);
     let result: unknown = {};
     if (command.method === 'Target.createTarget') result = { targetId: 'cloud-target' };
     if (command.method === 'Target.attachToTarget') result = { sessionId: 'cloud-session' };
@@ -23,8 +37,8 @@ test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud permits 
       pair[1].send(JSON.stringify({ method: 'Network.requestWillBeSent', sessionId: 'cloud-session', params: { requestId: 'hosted-network', frameId: 'frame', type: 'Document', documentURL: command.params.url, initiator: { type: 'other' }, request: { url: command.params.url } } }));
       pair[1].send(JSON.stringify({ method: 'Fetch.requestPaused', sessionId: 'cloud-session', params: { requestId: 'hosted-request', networkId: 'hosted-network', frameId: 'frame', resourceType: 'Document', request: { url: command.params.url, method: 'GET', headers: {} } } }));
     }
-    if (command.method === 'Fetch.fulfillRequest') fulfilled.resolve(command);
-    if ((command.method === 'Fetch.fulfillRequest' || command.method === 'Fetch.failRequest') && command.params.requestId === 'attacker-request') denied.resolve(command);
+    if (command.method === 'Fetch.continueRequest' && command.params.requestId === 'hosted-request') continued.resolve(command);
+    if ((command.method === 'Fetch.continueRequest' || command.method === 'Fetch.failRequest') && command.params.requestId === 'attacker-request') denied.resolve(command);
     pair[1].send(JSON.stringify({ id: command.id, result }));
   });
   const binding = { async fetch(input: RequestInfo | URL, init?: RequestInit) {
@@ -33,26 +47,53 @@ test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud permits 
     expect(request.headers.get('upgrade')).toBe('websocket');
     return new Response(null, { status: 101, webSocket: pair[0] });
   } };
-  const serviceRequests: Request[] = [];
-  const runtime = new AccountBrowserRuntime({ storage, cloud: signal => launchCloudBrowser(binding, signal), serviceHostname: hostname => hostname === 'app--tenant-srv.gssh.dev', workspaceServiceHostname: hostname => hostname === 'app--tenant-srv.gssh.dev', serviceFetch: async request => { serviceRequests.push(request); return new Response('private account service', { status: 201 }); } });
+  const upstream = await launchCloudBrowser(binding, AbortSignal.timeout(5000));
+  const cookies = new CloudServiceCookies(env, upstream, workspace);
+  const runtime = new AccountBrowserRuntime({ storage, cloud: async () => upstream, services: { urlPattern: hostedServiceUrlPattern(env), hostname: name => isHostedServiceHostname(env, name), workspace: (name, grant) => isWorkspaceServiceHostname(env, workspace, name, grant), admit: name => cookies.admit(name) } });
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
   const placement = { kind: 'cloud', accountId: 'account' };
   const authority = { body: { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: 'AA==', issuedAt: new Date().toISOString(), expiresAt }, signature: 'AA==' };
-  const authorization = RuntimeAccountBrowserAuthorizationSchema.parse({ body: { scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'subagent', taskId: 'task', requestId: 'request', attemptId: 'attempt' }, issuedAt: new Date().toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'open', source: 'headless', url: 'https://app--tenant-srv.gssh.dev/private' }, grant: { body: { projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'headless', origins: [], expiresAt }, signature: 'AA==', authority } } }, signature: 'AA==', authority });
+  const authorization = RuntimeAccountBrowserAuthorizationSchema.parse({ body: { scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'subagent', taskId: 'task', requestId: 'request', attemptId: 'attempt' }, issuedAt: new Date().toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'open', source: 'headless', url: `https://${hostname}/private` }, grant: { body: { projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'headless', origins: [], expiresAt }, signature: 'AA==', authority } } }, signature: 'AA==', authority });
   try {
     expect((await runtime.execute(authorization, AbortSignal.timeout(5000))).status).toBe('completed');
-    const reply = await fulfilled.promise;
-    expect(reply.params.responseCode).toBe(201); expect(atob(String(reply.params.body))).toBe('private account service');
-    expect(serviceRequests.map(request => request.url)).toEqual(['https://app--tenant-srv.gssh.dev/private']);
+    await continued.promise;
+    expect(commands.find(command => command.method === 'Fetch.enable')?.params.patterns).toEqual([{ urlPattern: `*://*--${env.TENANT_ID}-srv.gssh.dev/*`, requestStage: 'Request' }]);
+    const setCookie = commands.findIndex(command => command.method === 'Storage.setCookies');
+    expect(setCookie).toBeGreaterThan(-1);
+    expect(setCookie).toBeLessThan(commands.findIndex(command => command.method === 'Fetch.continueRequest'));
+    const [cookie] = SetCookies.parse(commands[setCookie]?.params).cookies;
+    expect(cookie).toMatchObject({ name: '__Host-gitspace-service', url: `https://${hostname}/`, path: '/', secure: true, httpOnly: true, sameSite: 'Lax' });
+    expect(await env.RELAY.getByName(env.RELAY_NAME).serviceValidate(cookie.value, hostname)).toMatchObject({ caller: { kind: 'cloud', ...workspace } });
     pair[1].send(JSON.stringify({ method: 'Page.frameNavigated', sessionId: 'cloud-session', params: { frame: { id: 'frame', url: 'https://attacker.example/' } } }));
     const resourceType = resource === 'Redirect' ? 'Document' : resource;
-    if (resource !== 'Unknown') pair[1].send(JSON.stringify({ method: 'Network.requestWillBeSent', sessionId: 'cloud-session', params: { requestId: 'attacker-network', frameId: 'frame', type: resourceType, documentURL: 'https://attacker.example/', initiator: { type: 'script' }, request: { url: 'https://app--tenant-srv.gssh.dev/private' }, ...(resource === 'Redirect' ? { redirectResponse: { status: 302 } } : {}) } }));
-    pair[1].send(JSON.stringify({ method: 'Fetch.requestPaused', sessionId: 'cloud-session', params: { requestId: 'attacker-request', networkId: 'attacker-network', frameId: 'frame', resourceType, request: { url: 'https://app--tenant-srv.gssh.dev/private', method: 'GET', headers: {} } } }));
+    if (resource !== 'Unknown') pair[1].send(JSON.stringify({ method: 'Network.requestWillBeSent', sessionId: 'cloud-session', params: { requestId: 'attacker-network', frameId: 'frame', type: resourceType, documentURL: 'https://attacker.example/', initiator: { type: 'script' }, request: { url: `https://${hostname}/private` }, ...(resource === 'Redirect' ? { redirectResponse: { status: 302 } } : {}) } }));
+    pair[1].send(JSON.stringify({ method: 'Fetch.requestPaused', sessionId: 'cloud-session', params: { requestId: 'attacker-request', networkId: 'attacker-network', frameId: 'frame', resourceType, request: { url: `https://${hostname}/private`, method: 'GET', headers: {} } } }));
     expect((await denied.promise).method).toBe('Fetch.failRequest');
-    expect(serviceRequests).toHaveLength(1);
+    expect(commands.filter(command => command.method === 'Storage.setCookies')).toHaveLength(1);
+    expect(commands.some(command => command.method === 'Fetch.fulfillRequest')).toBe(false);
     expect(calls).toEqual([{ url: 'https://browser.internal/v1/devtools/browser?keep_alive=600000', method: 'POST' }, { url: 'https://browser.internal/v1/devtools/browser/binding-session', method: 'GET' }]);
     await expect(runtime.execute(authorization, AbortSignal.timeout(5000))).rejects.toThrow('already consumed');
   } finally { pair[1].close(); }
+});
+
+test('a script going to its workspace service gets the session cookie first; one going to another workspace service gets none', async () => {
+  const elsewhere = `app--elsewhere--${env.TENANT_ID}-srv.gssh.dev`;
+  await leaseService(hostname, 'workspace');
+  await leaseService(elsewhere, 'elsewhere');
+  const sent: { method: string; params: Record<string, unknown> }[] = [];
+  const upstream: BrowserChannel = {
+    async send(method, params = {}) { sent.push({ method, params }); return method === 'Target.createTarget' ? { targetId: `page-${sent.length}` } : {}; },
+    subscribe() { return () => {}; },
+    async close() {},
+  };
+  const cookies = new CloudServiceCookies(env, upstream, workspace);
+  const script = (await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) })).client(() => {});
+  await script.send('Target.createTarget', { url: `https://${hostname}/app` });
+  await script.send('Target.createTarget', { url: `https://${elsewhere}/app` });
+  expect(sent.map(({ method, params }) => method === 'Target.createTarget' ? String(params.url) : method)).toEqual(['Target.setDiscoverTargets', 'Storage.setCookies', `https://${hostname}/app`, `https://${elsewhere}/app`]);
+  const [cookie] = SetCookies.parse(sent[1]?.params).cookies;
+  expect(cookie.url).toBe(`https://${hostname}/`);
+  expect(await env.RELAY.getByName(env.RELAY_NAME).serviceValidate(cookie.value, elsewhere)).toBeNull();
 });
 
 afterEach(() => { vi.restoreAllMocks(); });

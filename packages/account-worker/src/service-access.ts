@@ -1,10 +1,15 @@
 import { SERVICE_ASSERTION_HEADER, ServiceCallerSchema, stripGitSpaceCredentials, type ServiceCaller } from '@gitspace/protocol/service-access';
 import type { HostedRouteTarget } from './hosted-route-registry.js';
 import { forwardTunnelRequest, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
-import { ServiceSessionSchema, type ServiceSession } from './service-sessions.js';
+import { ServiceSessionSchema, sameServiceCaller, type ServiceSession } from './service-sessions.js';
 
 export function isHostedServiceHostname(env: Pick<Env, 'TENANT_ID'>, hostname: string): boolean {
   return hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`);
+}
+
+/** A CDP `Fetch` URL pattern covering every hosted service URL. Its wildcards also match paths, so it only narrows. */
+export function hostedServiceUrlPattern(env: Pick<Env, 'TENANT_ID'>): string {
+  return `*://*--${env.TENANT_ID}-srv.gssh.dev/*`;
 }
 
 /** Whether `hostname` is a hosted service of `workspace` with a live route: the services its cloud browser may reach.
@@ -32,7 +37,7 @@ export async function fetchInternalService(env: Env, rawCaller: ServiceCaller, r
   headers.delete(INTERNAL_SERVICE_SESSION);
   if (session) {
     const metadata = ServiceSessionSchema.parse(session);
-    if (caller.kind !== 'device' || metadata.deviceId !== caller.deviceId || metadata.hostname !== url.hostname || metadata.expiresAt <= Date.now()) return new Response('Service session mismatch', { status: 403 });
+    if (!sameServiceCaller(metadata.caller, caller) || metadata.hostname !== url.hostname || metadata.expiresAt <= Date.now()) return new Response('Service session mismatch', { status: 403 });
     headers.set(INTERNAL_SERVICE_SESSION, JSON.stringify(metadata));
   }
   stripGitSpaceCredentials(headers);

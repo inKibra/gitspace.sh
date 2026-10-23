@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { BrowserChannel } from './browser-cdp.js';
+import { SERVICE_COOKIE } from './service-sessions.js';
 
 type Params = Record<string, unknown>;
 export interface CdpEvent { method: string; params?: Params; sessionId?: string }
@@ -9,10 +10,30 @@ export interface CdpShimOptions {
   policy?: CdpPolicy;
   /** Draws the ghost cursor on this client's pages, labeled with who acts (docs/APERTURE-DESIGN.md §6.4). */
   cursor?: { label: string };
+  /** Runs before a client's navigation (`Page.navigate`, `Target.createTarget`) reaches the browser. */
+  navigating?: (url: string) => Promise<void>;
 }
 
-/** Whole-browser cookie and cache commands; refused for every client, as Playwriter does even for trusted agents. */
-export const WHOLE_BROWSER_COMMANDS: Readonly<Record<string, true>> = { 'Network.getAllCookies': true, 'Network.clearBrowserCookies': true, 'Network.clearBrowserCache': true, 'Storage.getCookies': true, 'Storage.setCookies': true, 'Storage.clearCookies': true, 'Storage.clearDataForOrigin': true, 'Storage.clearDataForStorageKey': true };
+const WHOLE_BROWSER = 'reaches the whole browser', COOKIES = 'reads or sets cookies';
+/** Cookie and cache commands, refused for every client, as Playwriter does even for trusted agents: no client reads
+ * the browser's cookies, its service session cookie included. */
+const REFUSED_COMMANDS: Readonly<Record<string, string>> = {
+  'Network.getAllCookies': WHOLE_BROWSER, 'Network.clearBrowserCookies': WHOLE_BROWSER, 'Network.clearBrowserCache': WHOLE_BROWSER,
+  'Storage.getCookies': WHOLE_BROWSER, 'Storage.setCookies': WHOLE_BROWSER, 'Storage.clearCookies': WHOLE_BROWSER, 'Storage.clearDataForOrigin': WHOLE_BROWSER, 'Storage.clearDataForStorageKey': WHOLE_BROWSER,
+  'Network.getCookies': COOKIES, 'Network.setCookie': COOKIES, 'Network.setCookies': COOKIES, 'Network.deleteCookies': COOKIES,
+};
+const SERVICE_COOKIE_VALUE = new RegExp(`${SERVICE_COOKIE}=[^;\\s]*`, 'gu');
+/** Blanks the service session cookie wherever a network event shows it: request headers (`Cookie`, raw header text)
+ * and cookie lists (`associatedCookies`). Changes `value` in place; every client gets the same event. */
+function hideServiceCookie(value: unknown): unknown {
+  if (typeof value === 'string') return value.includes(SERVICE_COOKIE) ? value.replace(SERVICE_COOKIE_VALUE, `${SERVICE_COOKIE}=`) : value;
+  if (Array.isArray(value)) { for (let index = 0; index < value.length; index++) value[index] = hideServiceCookie(value[index]); return value; }
+  if (typeof value === 'object' && value !== null) {
+    const named = 'name' in value && value.name === SERVICE_COOKIE;
+    for (const [key, entry] of Object.entries(value)) Reflect.set(value, key, named && key === 'value' ? '' : hideServiceCookie(entry));
+  }
+  return value;
+}
 
 /** One browser connection shared by several CDP clients (agent tools and scripts). The upstream allows one connection,
  * so each client gets its own virtual browser on it: its own sessions, contexts and auto-attach, and only its own
@@ -48,6 +69,7 @@ export class CdpShimClient {
 
   private async route({ method, params = {}, sessionId }: { method?: string; params?: Params; sessionId?: string }): Promise<void> {
     if (this.closed || !method) return;
+    if (method.startsWith('Network.') || method.startsWith('Fetch.')) hideServiceCookie(params);
     if (method === 'disconnected') { this.emit({ method }); return; }
     if (sessionId) {
       if (!this.sessions.has(sessionId)) return;
@@ -99,8 +121,10 @@ export class CdpShimClient {
 
   async send(method: string, params: Params = {}, sessionId?: string): Promise<unknown> {
     if (this.closed) throw new Error('Browser client closed');
-    const refusal = WHOLE_BROWSER_COMMANDS[method] ? `${method} reaches the whole browser and is not allowed` : this.options.policy?.(method, params, sessionId) ?? null;
+    const refused = REFUSED_COMMANDS[method];
+    const refusal = refused ? `${method} ${refused} and is not allowed` : this.options.policy?.(method, params, sessionId) ?? null;
     if (refusal) throw new Error(refusal);
+    if ((method === 'Page.navigate' || method === 'Target.createTarget') && typeof params.url === 'string') await this.options.navigating?.(params.url);
     if (sessionId) {
       if (!this.sessions.has(sessionId)) throw new Error(`Session ${sessionId} does not belong to this client`);
       const result = await this.upstream.send(method, params, sessionId);

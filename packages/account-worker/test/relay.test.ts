@@ -598,6 +598,80 @@ describe('portable RelayDO', () => {
     machine.close();
   });
 
+  /** A machine serving `routes` (hostname, workspace): plain requests answer `private service`, WebSockets echo. */
+  async function cloudServiceMachine(routes: ReadonlyArray<readonly [string, string]>) {
+    for (const [name, workspaceId] of routes) await env.HOSTED_ROUTES.getByName(name).lease(env.ACCOUNT_ID, 'project-a', { hostname: name, workspaceId, serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 3_600_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+    const trust = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust();
+    const machine = await openSocket('machine', 'darktop');
+    const callers: unknown[] = [];
+    machine.addEventListener('message', event => {
+      const message = parseTunnelRequest(String(event.data));
+      if (message.type === 'tunnel.request.start') {
+        const headers = new Headers(message.headers);
+        callers.push(verifyServiceAssertion({ header: headers.get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: env.ACCOUNT_ID, machineId: 'darktop', hostname: headers.get('x-forwarded-host') ?? '', method: message.method, target: message.path })?.caller);
+        if (headers.get('upgrade') === 'websocket') { machine.send(JSON.stringify({ version: 1, type: 'tunnel.websocket.open', requestId: message.requestId })); return; }
+        machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
+        machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.chunk', requestId: message.requestId, data: encodeTunnelChunk(new TextEncoder().encode('private service')) }));
+        machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.end', requestId: message.requestId }));
+      } else if (message.type === 'tunnel.websocket.data') machine.send(JSON.stringify({ ...message, data: `echo:${message.data}` }));
+    });
+    return { machine, callers };
+  }
+  async function openServiceSocket(hostname: string, cookie: string): Promise<WebSocket> {
+    const response = await exports.default.fetch(new Request(`https://${hostname}/socket`, { headers: { origin: `https://${hostname}`, upgrade: 'websocket', cookie } }));
+    expect(response.status).toBe(101);
+    const client = response.webSocket;
+    if (!client) throw new Error('Missing service WebSocket');
+    client.accept();
+    const echoed = nextMessage(client);
+    client.send('hello');
+    expect(await echoed).toBe('echo:hello');
+    return client;
+  }
+
+  it('admits a cloud browser session on its own workspace hostname over HTTP and WebSocket, and on no other', async () => {
+    const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`, elsewhere = `socket--space-b--${env.TENANT_ID}-srv.gssh.dev`;
+    const { machine, callers } = await cloudServiceMachine([[hostname, 'space-a'], [elsewhere, 'space-b']]);
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const workspace = { projectId: 'project-a', workspaceId: 'space-a' };
+    const session = await relay.serviceCloudSession(hostname, workspace);
+    // Minting again renews the same session, so WebSockets open on it stay open.
+    expect((await relay.serviceCloudSession(hostname, workspace)).token).toBe(session.token);
+    const cookie = `__Host-gitspace-service=${session.token}`;
+    expect(await (await exports.default.fetch(new Request(`https://${hostname}/app`, { headers: { cookie } }))).text()).toBe('private service');
+    const client = await openServiceSocket(hostname, cookie);
+    expect(callers).toEqual([{ kind: 'cloud', accountId: env.ACCOUNT_ID, ...workspace }, { kind: 'cloud', accountId: env.ACCOUNT_ID, ...workspace }]);
+    expect(await runInDurableObject(relay, instance => instance.serviceCloudSession(elsewhere, workspace).then(() => 'minted', () => 'refused'))).toBe('refused');
+    const foreignSocket = await exports.default.fetch(new Request(`https://${elsewhere}/socket`, { headers: { origin: `https://${elsewhere}`, upgrade: 'websocket', cookie } }));
+    expect(foreignSocket.status).toBe(401);
+    expect((await exports.default.fetch(new Request(`https://${elsewhere}/app`, { headers: { cookie }, redirect: 'manual' }))).status).toBe(303);
+    expect(callers).toHaveLength(2);
+    client.close();
+    machine.close();
+  });
+
+  it.each(['expiry', 'the workspace retiring'] as const)('ends a cloud browser session and its WebSocket on %s', async reason => {
+    const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
+    const { machine } = await cloudServiceMachine([[hostname, 'space-a']]);
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const session = await relay.serviceCloudSession(hostname, { projectId: 'project-a', workspaceId: 'space-a' });
+    const cookie = `__Host-gitspace-service=${session.token}`;
+    const client = await openServiceSocket(hostname, cookie);
+    const closed = Promise.withResolvers<CloseEvent>();
+    client.addEventListener('close', closed.resolve, { once: true });
+    if (reason === 'the workspace retiring') await relay.browserRelayRetireWorkspace('project-a', 'space-a');
+    else {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 900_001);
+      // Expired is refused at once, before the alarm removes it.
+      expect((await exports.default.fetch(new Request(`https://${hostname}/app`, { headers: { cookie }, redirect: 'manual' }))).status).toBe(303);
+      await runDurableObjectAlarm(relay);
+    }
+    expect((await closed.promise).code).toBe(1008);
+    // The cookie no longer admits: the browser is sent to sign in as any browser without a session is.
+    expect((await exports.default.fetch(new Request(`https://${hostname}/app`, { headers: { cookie }, redirect: 'manual' }))).status).toBe(303);
+    machine.close();
+  });
+
   it.each(['the machine closes the service', 'the browser closes', 'the machine disconnects'] as const)('carries a service WebSocket on a hibernatable socket until %s', async ending => {
     const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
     await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
