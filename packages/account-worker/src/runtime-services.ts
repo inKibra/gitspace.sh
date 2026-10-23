@@ -4,7 +4,7 @@ import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentStat
 import type { WorkspaceEnvironment } from './space-environment.js';
 import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
-import { RuntimeQaItemSchema, type RuntimeQaActionInput } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
@@ -145,25 +145,40 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
       const current = await list();
       const item = current.find(candidate => candidate.id === input.itemId);
       if (!item) throw new Error('QA item does not belong to this workspace');
-      if (input.action.kind === 'share') {
-        const reference = input.action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority().getProject())?.repositoryReference;
+      const { action } = input;
+      if (action.kind === 'share') {
+        const reference = action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority().getProject())?.repositoryReference;
         if (!reference) throw new Error('Project has no canonical repository');
         const repository = new URL(reference.replace(/^git@github\.com:/u, 'https://github.com/').replace(/\.git$/u, ''));
         if (repository.hostname !== 'github.com' || !/^\/[^/]+\/[^/]+\/?$/u.test(repository.pathname)) throw new Error('Issue drafts require a canonical GitHub repository');
         const url = new URL(`${repository.pathname.replace(/\/$/u, '')}/issues/new`, 'https://github.com');
         url.searchParams.set('title', item.title);
-        url.searchParams.set('body', input.action.redactedExcerpt);
+        url.searchParams.set('body', action.redactedExcerpt);
         // A draft is not a delivery receipt. Keep the local item open until an
         // authorized integration can prove that an external issue was created.
         return { shareDraft: url.toString() };
       }
-      if (input.action.kind === 'merge') {
-        const targetId = input.action.targetId;
-        const target = current.find(candidate => candidate.id === targetId);
-        if (!target || target.id === item.id || target.state === 'merged') throw new Error('Duplicate target must be a distinct canonical QA item');
+      let next: RuntimeQaItem;
+      switch (action.kind) {
+        case 'dismiss': next = { ...item, state: 'dismissed', duplicateOf: null }; break;
+        case 'merge': {
+          const target = current.find(candidate => candidate.id === action.targetId);
+          if (!target || target.id === item.id || target.state === 'merged') throw new Error('Duplicate target must be a distinct canonical QA item');
+          next = { ...item, state: 'merged', duplicateOf: target.id };
+          break;
+        }
+        case 'fixed': next = { ...item, state: 'fixed', duplicateOf: null, fixedIn: action.commit }; break;
+        case 'file': {
+          if (item.state === 'merged') throw new Error('File the issue this one was merged into instead');
+          // The account copy is written first and keyed by the item, so a retry after a failed event rewrites it.
+          const filed = await env.ACCOUNT_STATE.getByName('account').fileIssue({ id: item.id, projectId: identity.projectId, workspaceId: identity.workspaceId, title: item.title, excerpt: action.excerpt, tool: item.tool, model: item.model, historyRef: item.historyRef, createdAt: item.createdAt, filedAt: new Date().toISOString(), filedBy: actor.deviceId });
+          next = { ...item, filedAt: filed.filedAt };
+          break;
+        }
       }
-      const next = { ...item, state: input.action.kind === 'dismiss' ? 'dismissed' as const : 'merged' as const, duplicateOf: input.action.kind === 'merge' ? input.action.targetId : null };
       await authority().appendEvent({ scope: 'workspace', entity: 'qa', entityId: item.id, revision: 1, operation: 'updated', payload: { item: next, workspaceId: identity.workspaceId, actorId: actor.deviceId } });
+      // Snapshots read the loaded items, not the project, so the change shows without a new runtime.
+      items.set(item.id, next);
       return {};
     },
   };

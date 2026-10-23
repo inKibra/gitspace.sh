@@ -47,6 +47,8 @@ export const RuntimeProcArgumentsSchema = z.discriminatedUnion('op', [
   z.strictObject({ op: z.literal('send'), name: processName, text: z.string().optional(), enter: z.boolean().default(true), keys: z.array(z.enum(['ENTER', 'TAB', 'ESCAPE', 'CTRL_C', 'CTRL_D', 'UP', 'DOWN', 'LEFT', 'RIGHT'])).optional(), signal: z.enum(['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGKILL']).optional(), cols: z.number().int().positive().optional(), rows: z.number().int().positive().optional(), ...processSelection }),
   z.strictObject({ op: z.literal('wait'), name: processName, for: z.enum(['ready', 'exit']).optional(), pattern: path.optional(), timeoutMs: processTimeout.optional(), ...processSelection }),
   z.strictObject({ op: z.literal('logs'), name: processName, lines: z.number().int().positive().max(10_000).optional(), head: z.boolean().optional(), grep: path.optional(), follow: z.boolean().optional(), cursor: z.number().int().nonnegative().optional(), timeoutMs: processTimeout.optional(), ...processSelection }),
+  /** Points a workspace URL (`as`, default the name) at this machine's running service and `http` port (default its first). */
+  z.strictObject({ op: z.literal('pin'), name: processName, source: z.enum(['declared', 'process']).default('process'), as: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/u).optional(), port: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/u).optional(), ...processSelection }),
 ]);
 const agentMessagingOptions = [
   z.strictObject({ op: z.literal('send'), to: path, message: path }),

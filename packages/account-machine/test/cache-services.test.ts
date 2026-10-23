@@ -7,29 +7,32 @@ import { RuntimeServiceSchema } from '@gitspace/protocol-runtime/services';
 import { cacheServiceOperation } from '../src/cache-services.js';
 import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
+import { HostedRoutesFake } from './hosted-routes-fake.js';
 
 const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
+const BETA = '1a2b3c4d-0000-4000-8000-000000000002';
 
-test('ready cache reads its attachment checkout and registers proc ports privately without workspace possession', async () => {
+test('a declared service gets its workspace URL and a machine URL naming the machine, and stop releases both leases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cache-service-'));
   try {
     await mkdir(join(root, 'checkout/.gitspace'), { recursive: true });
     await writeFile(join(root, 'checkout/.gitspace/services.json'), JSON.stringify({ services: [{ name: 'web', command: process.execPath, args: ['-e', 'Bun.serve({hostname:\"127.0.0.1\",port:Number(process.env.PORT),fetch:()=>new Response(\"cache service\")})'], ports: [{ name: 'http' }] }] }));
-    const routes: string[] = [];
-    const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal is not allowed'); }, stop: async () => { throw new Error('Workspace terminal is not allowed'); } }, 'machine-b', root, 'gssh.dev', 'test', { leaseHostedRoute: async (_project, route) => { routes.push(route.hostname); return { ...route, updatedAt: new Date().toISOString() }; }, releaseHostedRoute: async () => true });
-    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache', machineId: 'machine-b', generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['read', 'service'], updatedAt: new Date().toISOString() });
+    const registry = new HostedRoutesFake([{ id: BETA, label: 'beta' }]);
+    const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal is not allowed'); }, stop: async () => { throw new Error('Workspace terminal is not allowed'); } }, BETA, root, 'gssh.dev', 'test', registry.authority(BETA));
+    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache', machineId: BETA, generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['read', 'service'], updatedAt: new Date().toISOString() });
     const local = { attachment, rootPath: join(root, 'checkout'), executionSecret: 'secret', prerequisitesComplete: true };
     const definitions = manager.parseDefinitions(JSON.parse(await Bun.file(join(local.rootPath, '.gitspace/services.json')).text()));
     expect(definitions[0]?.name).toBe('web');
     const started = RuntimeServiceSchema.parse(await cacheServiceOperation(manager, local, { op: 'start', name: 'web' }));
-    expect(started).toMatchObject({ name: 'web', state: 'ready', url: 'https://web--workspace-machine-b--test-srv.gssh.dev' });
+    expect(started).toMatchObject({ name: 'web', state: 'ready', url: 'https://web--workspace--test-srv.gssh.dev', machineUrl: 'https://web--beta-1a2b--workspace--test-srv.gssh.dev' });
     const listed = RuntimeServiceSchema.array().parse(await cacheServiceOperation(manager, local, { op: 'list' }));
     expect(listed).toEqual([started]);
+    expect([...registry.leases.keys()].sort()).toEqual(['web--beta-1a2b--workspace--test-srv.gssh.dev', 'web--workspace--test-srv.gssh.dev']);
+    if (!started.url) throw new Error('The service has no workspace URL');
+    expect((await manager.proxy(new Request(started.url)))?.status).toBe(401);
     await cacheServiceOperation(manager, local, { op: 'stop', name: 'web' });
-    const url = await manager.registerProcessRoute({ projectId: attachment.projectId, workspaceId: attachment.workspaceId, generation: attachment.generation, name: 'proc-http', portName: 'http', port: 3000 });
-    expect(url).toBe('https://proc-http--workspace-machine-b--test-srv.gssh.dev');
-    expect(routes).toEqual(['web--workspace-machine-b--test-srv.gssh.dev', 'proc-http--workspace-machine-b--test-srv.gssh.dev']);
-    expect((await manager.proxy(new Request(url)))?.status).toBe(401);
+    expect(registry.leases.size).toBe(0);
+    expect(await manager.proxy(new Request(started.url))).toBeNull();
     await expect(cacheServiceOperation(manager, { ...local, attachment: { ...attachment, state: 'attaching' } }, { op: 'list' })).rejects.toThrow('ready attachment');
     await manager.dispose();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -37,7 +40,7 @@ test('ready cache reads its attachment checkout and registers proc ports private
 
 test('declared services resolve their command through bundle terminal.path and receive terminal.env', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cache-service-bundle-'));
-  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal is not allowed'); }, stop: async () => { throw new Error('Workspace terminal is not allowed'); } }, 'machine-b', root, 'gssh.dev', 'test', { leaseHostedRoute: async (_project, route) => ({ ...route, updatedAt: new Date().toISOString() }), releaseHostedRoute: async () => true });
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal is not allowed'); }, stop: async () => { throw new Error('Workspace terminal is not allowed'); } }, BETA, root, 'gssh.dev', 'test', new HostedRoutesFake([{ id: BETA, label: 'beta' }]).authority(BETA));
   try {
     const checkout = join(root, 'checkout');
     await mkdir(join(checkout, '.gitspace'), { recursive: true });

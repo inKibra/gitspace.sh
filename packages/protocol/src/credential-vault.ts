@@ -56,9 +56,13 @@ export const controlOperationSchema = z.enum([
   'project.mcp.grants.list',
   'project.routes.list',
   'project.routes.lease',
+  'project.routes.pin',
   'project.routes.release',
   'project.events.append',
   'devices.list',
+  /** Issues people filed with GitSpace from their workspaces, read and resolved by the GitSpace agent. */
+  'account.issues.list',
+  'account.issues.resolve',
   'deploy.stage',
   'deploy.launch',
   'deploy.status',

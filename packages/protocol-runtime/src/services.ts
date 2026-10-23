@@ -6,7 +6,10 @@ export const RuntimeServiceOperationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('list') }),
   z.object({ op: z.enum(['start', 'stop', 'restart', 'logs']), name: z.string().min(1), source: z.enum(['declared', 'process']).default('declared') }),
 ]);
-export const RuntimeServiceSchema = z.object({ name: z.string(), source: z.enum(['declared', 'process']), terminalName: z.string(), state: z.union([DaemonStateSchema, z.literal('stopped')]), url: z.url().nullable() });
+/** One `http` port: `url` is the workspace URL pointing at this machine's port (null when it points elsewhere or nowhere); `servedBy` names the machine a declared service's own workspace URL points at instead. */
+export const RuntimeServicePortSchema = z.object({ name: z.string(), url: z.url().nullable(), machineUrl: z.url().nullable(), servedBy: z.string().nullable() });
+/** `url` and `machineUrl` are the first `http` port's. */
+export const RuntimeServiceSchema = z.object({ name: z.string(), source: z.enum(['declared', 'process']), terminalName: z.string(), state: z.union([DaemonStateSchema, z.literal('stopped')]), url: z.url().nullable(), machineUrl: z.url().nullable(), ports: z.array(RuntimeServicePortSchema) });
 export const RuntimeServiceTargetSchema = z.object({ machineId: RuntimeMachineIdSchema, attachmentId: z.string().min(1), generation: z.number().int().nonnegative() });
 export const RuntimeServiceCommandSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('list') }),

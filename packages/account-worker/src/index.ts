@@ -1037,8 +1037,10 @@ export default {
       if (url.pathname === '/api/services/approve') {
         const parsed = z.object({ hostname: z.string(), state: z.string().uuid(), returnTo: z.string() }).safeParse(JSON.parse(new TextDecoder().decode(body)));
         if (!parsed.success || !isHostedServiceHostname(env, parsed.data.hostname) || !safeServiceReturn(parsed.data.returnTo)) return jsonError(400, 'SERVICE_APPROVAL_INVALID', 'Invalid service approval');
-        const route = await env.HOSTED_ROUTES.getByName(parsed.data.hostname).get();
-        if (!route || route.tenant !== env.ACCOUNT_ID) return jsonError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Service unavailable');
+        // A workspace URL whose machine is offline is still approvable, so the browser reaches its offline answer.
+        const registry = env.HOSTED_ROUTES.getByName(parsed.data.hostname);
+        const tenant = (await registry.get())?.tenant ?? (await registry.offline())?.tenant;
+        if (tenant !== env.ACCOUNT_ID) return jsonError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Service unavailable');
         const ticket = await relay.serviceApprove({ ...parsed.data, deviceId: auth.value.device.deviceId });
         return Response.json({ status: 'ok', value: { callback: `https://${parsed.data.hostname}/__gitspace/auth?ticket=${encodeURIComponent(ticket)}` } });
       }

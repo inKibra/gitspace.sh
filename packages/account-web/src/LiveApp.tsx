@@ -296,6 +296,14 @@ export function LiveInspector({
     threads={threadsValue ?? []}
     services={[]}
     runtimeServices={<ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><RuntimeServices snapshot={runtimeContext.snapshot} machines={(serviceMachineValues ?? []).map(machine => ({ id: machine.id, label: machine.label }))} /></ScrollArea>}
+    issues={{
+      document: runtimeContext.snapshot.documents['gitspace.qa'],
+      onAct: async (itemId, action) => {
+        const result = await rpcClient.runtime.qa({ ...RuntimeIdentitySchema.parse(runtimeContext.snapshot), itemId, action });
+        if (result.status === 'error') throw result.error;
+        return result.value;
+      },
+    }}
     subagents={runtimeInspector.subagents}
     onStopSubagent={async conversationId => {
       const result = await rpcClient.runtime.session({ projectId: runtimeContext.snapshot.projectId, workspaceId: runtimeContext.snapshot.workspaceId, conversationId, command: { type: 'stop' } });

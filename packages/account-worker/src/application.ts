@@ -8,6 +8,7 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
 import { GITSPACE_SOURCE_REPOSITORY, hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
+import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { readAdvertisedRefs } from '@gitspace/runtime-workspace-do';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
@@ -3389,6 +3390,7 @@ const worker = {
             || body.operation.startsWith('catalog.')
             || body.operation.startsWith('mcp.')
             || body.operation.startsWith('devices.')
+            || body.operation.startsWith('account.issues.')
             || body.operation.startsWith('deploy.')
             || body.operation === 'artifacts.key.get'
             || body.operation.startsWith('lfs.')
@@ -3473,6 +3475,14 @@ const worker = {
         }
         if (body.operation === 'devices.list') {
           return Response.json({ status: 'ok', value: await credentialVault(env, body.userId).listDeviceGrants() }, { headers: { 'cache-control': 'private, no-store' } });
+        }
+        if (body.operation === 'account.issues.list' || body.operation === 'account.issues.resolve') {
+          // Read from the account object alone: listing never opens a workspace or project object.
+          const state = env.ACCOUNT_STATE.getByName('account');
+          const value = body.operation === 'account.issues.list'
+            ? await state.listFiledIssues(FiledIssueListInputSchema.parse(body.payload))
+            : await state.resolveFiledIssue(FiledIssueResolveInputSchema.parse(body.payload));
+          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
         }
         if (body.operation.startsWith('mcp.')) {
           const connections = userMcpConnections(env, body.userId);
@@ -3615,22 +3625,31 @@ const worker = {
               value = await authority.listMcpGrants();
               break;
             case 'project.routes.list':
-              value = await authority.listHostedRoutes();
+              value = { routes: await authority.listHostedRoutes(), pointers: await authority.listHostedPointers() };
               break;
-            case 'project.routes.lease': {
+            // The hosted route registry decides (a machine URL's one machine, a workspace URL's pointer); the project mirrors what it accepted.
+            case 'project.routes.lease':
+            case 'project.routes.pin': {
               const input = hostedServiceRouteSchema.omit({ updatedAt: true }).parse(body.payload.route);
               const ingress = new URL(input.ingress);
               if (input.machineId !== body.machineId || !input.hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`) || ingress.protocol !== 'http:' || ingress.hostname !== '127.0.0.1' || Number(ingress.port) !== input.port || ingress.pathname !== '/' || ingress.search || ingress.username || ingress.password) throw new Error('Invalid tenant service route');
               const workspace = (await authority.listWorkspaces()).find(item => item.id === input.workspaceId);
               if (!workspace) throw new Error('Service workspace does not belong to this project');
-              const route = await authority.leaseHostedRoute(input);
-              try {
-                await env.HOSTED_ROUTES.getByName(route.hostname).lease(body.userId, route);
-              } catch (error) {
-                await authority.releaseHostedRoute(route.hostname, route.machineId, route.generation);
-                throw error;
+              const machineLabel = (await env.FLEET_CATALOG.getByName(body.userId).getMachine(body.machineId))?.label ?? body.machineId;
+              const route = { ...input, updatedAt: new Date().toISOString() };
+              const registry = env.HOSTED_ROUTES.getByName(route.hostname);
+              const leased = body.operation === 'project.routes.pin'
+                ? await registry.pin(body.userId, projectId, route, { hostname: route.hostname, workspaceId: route.workspaceId, machineId: route.machineId, machineLabel, serviceName: route.serviceName, source: route.source, portName: route.portName, setAt: route.updatedAt, setBy: 'pin' })
+                : await registry.lease(body.userId, projectId, route, machineLabel);
+              if (leased.route) {
+                try {
+                  await authority.leaseHostedRoute(input, leased.pointer);
+                } catch (error) {
+                  await registry.release(body.userId, route.machineId, route.generation);
+                  throw error;
+                }
               }
-              value = route;
+              value = leased;
               break;
             }
             case 'project.routes.release': {

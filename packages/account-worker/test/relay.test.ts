@@ -522,7 +522,7 @@ describe('portable RelayDO', () => {
 
   it('serves host-cookie HTTP, cloud internal fetch, and authenticated second-machine access through signed relay ingress', async () => {
     const hostname = `web--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'web', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'web', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
     const trust = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust();
     const machine = await openSocket('machine', 'darktop');
     const observed: string[] = [];
@@ -563,7 +563,7 @@ describe('portable RelayDO', () => {
 
   it.each(['expiry', 'revocation', 'logout'] as const)('closes cookie-authenticated service WebSocket on %s after a successful roundtrip', async reason => {
     const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'socket', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
     const machine = await openSocket('machine', 'darktop');
     machine.addEventListener('message', event => {
       const message = parseTunnelRequest(String(event.data));
@@ -600,7 +600,7 @@ describe('portable RelayDO', () => {
 
   it.each(['the machine closes the service', 'the browser closes', 'the machine disconnects'] as const)('carries a service WebSocket on a hibernatable socket until %s', async ending => {
     const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'socket', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
     const machine = await openSocket('machine', 'darktop');
     const forwarded = Promise.withResolvers<TunnelRequestMessage>();
     const machineClosed = Promise.withResolvers<TunnelRequestMessage>();

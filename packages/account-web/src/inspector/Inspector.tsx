@@ -99,8 +99,9 @@ import { ArtifactUploadButton, ArtifactUploadList, useArtifactUploads, type Arti
 import type { ArtifactUploadClient } from './artifact-upload.js';
 import { syncRepositoryTreePaths } from './repository-tree-paths.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
+import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
 
-export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
+export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'issues' | 'usage' | 'guide' | 'journal';
 export type InspectorDocumentKind = 'file' | 'diff' | 'artifact' | 'resource' | 'goal' | 'workflow' | 'rubric';
 export interface InspectorOpenDocument {
   id: string;
@@ -161,6 +162,8 @@ export interface InspectorProps {
   threads: readonly ReviewThreadView[];
   services: readonly ServiceView[];
   runtimeServices?: ReactNode;
+  /** The workspace's own issues (its `gitspace.qa` document) and the actions on them. */
+  issues?: IssuesViewProps;
   subagents: readonly (ExecutionBlock | RuntimeSideAgentBlock)[];
   onStopSubagent?(conversationId: string): Promise<void>;
   renderSubagentTranscript?(conversationId: string): ReactNode;
@@ -229,6 +232,7 @@ const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }
   { id: 'files', label: 'Files' },
   { id: 'artifacts', label: 'Drive' },
   { id: 'services', label: 'Services' },
+  { id: 'issues', label: 'Issues' },
   { id: 'usage', label: 'Usage' },
   { id: 'guide', label: 'Change Guide' },
   { id: 'journal', label: 'Journal' },
@@ -1146,7 +1150,7 @@ export function Inspector(props: InspectorProps) {
     setActiveThreadId(created.id);
     setThreadSelection(null);
   };
-  const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined };
+  const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
   const threadOpen = !!(activeThread || threadSelection);
   const closeThread = (): void => { setActiveThread(null); setThreadSelection(null); };
@@ -1213,6 +1217,7 @@ export function Inspector(props: InspectorProps) {
         void loadArtifact(reference);
       }} actions={props.artifactActions} uploads={props.artifactUpload ? uploads : null} />;
       case 'services': return props.runtimeServices ?? <ServicesSurface services={props.services} onOpenTerminal={(name) => props.onOpenServiceTerminal?.(name)} onStart={props.onStartService} onStop={props.onStopService} />;
+      case 'issues': return props.issues ? <IssuesView {...props.issues} /> : <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Issues unavailable" description="This view has no workspace issues to show." /></Padded>;
       case 'usage': return <UsageView sessionId={props.usage.sessionId} report={props.usage.report} status={props.usage.status} error={props.usage.error} onLoad={props.usage.load} onRefresh={props.usage.refresh} providerUsage={props.usage.providerUsage} />;
       case 'guide': return <><ChangeGuideSurface
         guide={props.overview.changeGuide}

@@ -7,6 +7,7 @@ import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { SERVICE_ASSERTION_HEADER, signServiceAssertion } from '@gitspace/protocol/service-access';
 import { openServiceForward } from '../src/service-forward.js';
+import { HostedRoutesFake } from './hosted-routes-fake.js';
 
 const roots: string[] = [];
 interface TestServer {
@@ -59,7 +60,7 @@ describe('WorkspaceServiceManager', () => {
     };
     const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
     const trust = { accountId: 'user-a', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
-    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), 'gssh.dev', 'brad', undefined, async () => trust);
+    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), 'gssh.dev', 'brad', new HostedRoutesFake([{ id: 'machine-a', label: 'alpha' }]).authority('machine-a'), async () => trust);
     async function signed(request: Request, accountId = 'user-a') {
       const url = new URL(request.url);
       const headers = new Headers(request.headers);
@@ -118,7 +119,7 @@ describe('WorkspaceServiceManager', () => {
       },
       stop: async () => terminal('space-a', 'gitspace-svc-space-a-web', 'exited', 'gitspace:space-a:service:web'),
     };
-    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), null, null);
+    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), null, null, new HostedRoutesFake([{ id: 'machine-a', label: 'alpha' }]).authority('machine-a'));
     try {
       await manager.start('space-a', 'web');
       expect(output).toBe('mode=preview region=service\n');

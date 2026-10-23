@@ -30,7 +30,7 @@ async function browserDevice(capabilities: DeviceCapability[], scope: DeviceScop
 async function serviceSession() {
   const device = await browserDevice(['rpc.read', 'rpc.write']);
   const hostname = `web--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-  await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'web', machineId: 'offline-machine', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+  await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'web', source: 'declared', machineId: 'offline-machine', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'offline-machine');
   const relay = env.RELAY.getByName(env.RELAY_NAME);
   const state = crypto.randomUUID();
   const ticket = await relay.serviceApprove({ hostname, deviceId: device.deviceId, state, returnTo: '/' });
@@ -121,7 +121,7 @@ describe('service browser request isolation', () => {
   it('rejects read-only service approval', async () => {
     const device = await browserDevice(['rpc.read']);
     const hostname = `web--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'web', machineId: 'offline-machine', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'web', source: 'declared', machineId: 'offline-machine', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'offline-machine');
     expect((await device.request('/api/services/approve', { hostname, state: crypto.randomUUID(), returnTo: '/' })).status).toBe(403);
   });
   it('refuses a persisted service session whose browser only has rpc.read', async () => {

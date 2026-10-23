@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID, type CloudProjectSummary } from '@gitspace/protocol';
+import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID, type CloudProjectSummary, type HostedServiceRoute } from '@gitspace/protocol';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -295,6 +295,7 @@ describe('ProjectAuthorityDO', () => {
       hostname: 'app--workspace-a.example.test',
       workspaceId: 'workspace-a',
       serviceName: 'app',
+      source: 'declared',
       machineId: 'machine-a',
       ingress: 'http://127.0.0.1:17000',
       portName: 'http',
@@ -302,7 +303,7 @@ describe('ProjectAuthorityDO', () => {
       generation: 2,
       leaseExpiresAt: new Date(now + 60_000).toISOString(),
       health: 'healthy',
-    }));
+    }, null));
     expect(route).toMatchObject({ machineId: 'machine-a', generation: 2 });
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listHostedRoutes(new Date(now + 1_000).toISOString()))).toHaveLength(1);
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.releaseHostedRoute(route.hostname, 'machine-b', route.generation))).toBe(false);
@@ -312,9 +313,9 @@ describe('ProjectAuthorityDO', () => {
   it.each(['foreign machine', 'stale generation'])('fences hosted route lease from %s', async (kind) => {
     const stub = projectEnv.PROJECT_AUTHORITY.getByName(`lease-fence-${kind}`);
     await stub.bootstrap({ id: `lease-fence-${kind}`, name: 'Routes', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    const route = await stub.leaseHostedRoute({ hostname: 'app--workspace--test-srv.gssh.dev', workspaceId: 'workspace', serviceName: 'app', machineId: 'machine-a', ingress: 'http://127.0.0.1:17000', portName: 'http', port: 17000, generation: 2, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy' });
+    const route = await stub.leaseHostedRoute({ hostname: 'app--alpha-aaaa--workspace--test-srv.gssh.dev', workspaceId: 'workspace', serviceName: 'app', source: 'declared', machineId: 'machine-a', ingress: 'http://127.0.0.1:17000', portName: 'http', port: 17000, generation: 2, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy' }, null);
     await runInDurableObject(stub, (authority: ProjectAuthorityDO) => {
-      expect(() => authority.leaseHostedRoute({ ...route, machineId: kind === 'foreign machine' ? 'machine-b' : 'machine-a', generation: kind === 'stale generation' ? 1 : 3 })).toThrow();
+      expect(() => authority.leaseHostedRoute({ ...route, machineId: kind === 'foreign machine' ? 'machine-b' : 'machine-a', generation: kind === 'stale generation' ? 1 : 3 }, null)).toThrow();
     });
     expect(await stub.listHostedRoutes()).toEqual([route]);
   });
@@ -322,10 +323,30 @@ describe('ProjectAuthorityDO', () => {
   it('fences stale release from newer owner generation', async () => {
     const stub = projectEnv.PROJECT_AUTHORITY.getByName('release-fence');
     await stub.bootstrap({ id: 'release-fence', name: 'Routes', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    const route = await stub.leaseHostedRoute({ hostname: 'app--workspace--test-srv.gssh.dev', workspaceId: 'workspace', serviceName: 'app', machineId: 'machine-a', ingress: 'http://127.0.0.1:17000', portName: 'http', port: 17000, generation: 2, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy' });
+    const route = await stub.leaseHostedRoute({ hostname: 'app--alpha-aaaa--workspace--test-srv.gssh.dev', workspaceId: 'workspace', serviceName: 'app', source: 'declared', machineId: 'machine-a', ingress: 'http://127.0.0.1:17000', portName: 'http', port: 17000, generation: 2, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy' }, null);
     const released = await stub.releaseHostedRoute(route.hostname, 'machine-a', 1);
     expect(released).toBe(false);
     expect(await stub.listHostedRoutes()).toEqual([route]);
+  });
+
+  it.each(['archive', 'remove'])('ends the workspace URLs of a workspace it %ss', async (change) => {
+    const stub = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:urls-${change}`);
+    const project = await stub.bootstrap({ id: `urls-${change}`, name: 'URLs', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    const workspace = await stub.putWorkspace({
+      id: `workspace-${change}`, projectId: project.id, kind: 'worktree', name: 'URLs', branch: `urls-${change}`,
+      phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0,
+    });
+    const hostname = `app--${workspace.id}--test-srv.gssh.dev`;
+    const route: Omit<HostedServiceRoute, 'updatedAt'> = { hostname, workspaceId: workspace.id, serviceName: 'app', source: 'declared', machineId: 'machine-a', ingress: 'http://127.0.0.1:17000', portName: 'http', port: 17000, generation: 0, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy' };
+    const registry = env.HOSTED_ROUTES.getByName(hostname);
+    const leased = await registry.lease(env.ACCOUNT_ID, project.id, { ...route, updatedAt: new Date().toISOString() }, 'alpha');
+    await stub.leaseHostedRoute(route, leased.pointer);
+    expect(await stub.listHostedPointers()).toMatchObject([{ hostname, machineId: 'machine-a', setBy: 'start' }]);
+    if (change === 'archive') await stub.commitWorkspaceLifecycle(workspace.id, 'archived');
+    else expect(await stub.removeWorkspace(workspace.id)).toBe(true);
+    expect(await stub.listHostedPointers()).toEqual([]);
+    expect(await registry.get()).toBeNull();
+    expect(await registry.offline()).toBeNull();
   });
 
   it('keeps deletion tombstones while removing workspace-owned authority state', async () => {

@@ -1,5 +1,5 @@
 import { Result } from 'better-result';
-import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type RemoteBranchState } from '@gitspace/protocol';
+import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, hostedServicePointerSchema, hostedServiceUrlKind, isGitSpaceSourceRepository, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type HostedServicePointer, type RemoteBranchState } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -171,6 +171,7 @@ interface HostedRouteRow extends Record<string, SqlStorageValue> {
   hostname: string;
   workspace_id: string;
   service_name: string;
+  source: HostedServiceRoute['source'];
   machine_id: string;
   ingress: string;
   port_name: string;
@@ -300,6 +301,7 @@ function hostedRoute(row: HostedRouteRow): HostedServiceRoute {
     hostname: row.hostname,
     workspaceId: row.workspace_id,
     serviceName: row.service_name,
+    source: row.source,
     machineId: row.machine_id,
     ingress: row.ingress,
     portName: row.port_name,
@@ -780,6 +782,9 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     this.lfs = new GitLfsRetention(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS environment_shared(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)');
+      // One-time: service URLs changed form, and routes from before carried no local service source.
+      const routeColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(hosted_routes)').toArray().map(column => column.name);
+      if (routeColumns.length > 0 && !routeColumns.includes('source')) this.ctx.storage.sql.exec('DROP TABLE hosted_routes');
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS project(
           project_id TEXT PRIMARY KEY,
@@ -898,7 +903,13 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
           generation INTEGER NOT NULL,
           lease_expires_at TEXT NOT NULL,
           health TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+          updated_at TEXT NOT NULL,
+          source TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS hosted_pointers(
+          hostname TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          pointer_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS project_mcp_grants(
           project_id TEXT NOT NULL,
@@ -1410,8 +1421,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
   }
 
-  removeWorkspace(workspaceId: string): boolean {
-    return this.commit('workspace', workspaceId, () => {
+  async removeWorkspace(workspaceId: string): Promise<boolean> {
+    const removed = this.commit('workspace', workspaceId, () => {
     const current = this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces WHERE workspace_id=?',
       workspaceId,
@@ -1427,6 +1438,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('DELETE FROM stack_comparisons WHERE workspace_id=?', workspaceId);
     return true;
     });
+    await this.clearHostedPointers(workspaceId);
+    return removed;
   }
 
   /** The one read a workspace object seeds its local metadata from. A base workspace's definition is created on first use. */
@@ -1447,9 +1460,11 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
   }
 
-  /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it. */
-  commitWorkspaceLifecycle(workspaceId: string, lifecycle: WorkspaceLifecycle): CloudWorkspaceDefinition {
-    return this.commitWorkspaceChange(workspaceId, { lifecycle });
+  /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it. Archive ends the workspace's URLs. */
+  async commitWorkspaceLifecycle(workspaceId: string, lifecycle: WorkspaceLifecycle): Promise<CloudWorkspaceDefinition> {
+    const recorded = this.commitWorkspaceChange(workspaceId, { lifecycle });
+    if (lifecycle === 'archived') await this.clearHostedPointers(workspaceId);
+    return recorded;
   }
 
   /** Records a phase the workspace object has already applied to itself. Repeating a recorded phase returns it. */
@@ -1493,6 +1508,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     );
     return this.requireProject();
     });
+    await this.clearHostedPointers(null);
     // Revoke canonical authority first: interrupted cleanup can only retain an
     // assignment that blocks profile deletion, never authorize a deleted project.
     await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).removeProjectInference(deleted.id);
@@ -1734,17 +1750,29 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     ).toArray().map(hostedRoute);
   }
 
-  leaseHostedRoute(input: Omit<HostedServiceRoute, 'updatedAt'>): HostedServiceRoute {
+  /** Workspace URL pointers, mirrored from the hosted route registry that decides them. */
+  listHostedPointers(): HostedServicePointer[] {
+    return this.ctx.storage.sql.exec<{ pointer_json: string }>('SELECT pointer_json FROM hosted_pointers ORDER BY hostname').toArray()
+      .map(row => hostedServicePointerSchema.parse(JSON.parse(row.pointer_json)));
+  }
+
+  /** Records a route the hosted route registry accepted, with the pointer it holds for a workspace URL. A machine URL keeps its first live owner. */
+  leaseHostedRoute(input: Omit<HostedServiceRoute, 'updatedAt'>, pointer: HostedServicePointer | null): HostedServiceRoute {
     return this.commit('service', input.workspaceId, () => {
     const now = new Date().toISOString();
     if (input.leaseExpiresAt <= now) throw new Error('Hosted route lease must expire in the future');
     const current = this.ctx.storage.sql.exec<HostedRouteRow>('SELECT * FROM hosted_routes WHERE hostname=?', input.hostname).toArray()[0];
     if (current) {
-      const sameOwner = current.machine_id === input.machineId && current.workspace_id === input.workspaceId && current.service_name === input.serviceName;
-      if ((!sameOwner && current.lease_expires_at > now) || (sameOwner && input.generation < current.generation)) throw new Error('Hosted route lease owner or generation conflict');
+      const sameOwner = current.machine_id === input.machineId && current.workspace_id === input.workspaceId && current.service_name === input.serviceName && current.source === input.source;
+      const ownerFenced = hostedServiceUrlKind(input.hostname) === 'machine';
+      if ((ownerFenced && !sameOwner && current.lease_expires_at > now) || (sameOwner && input.generation < current.generation)) throw new Error('Hosted route lease owner or generation conflict');
     }
+    if (pointer) this.ctx.storage.sql.exec(
+      'INSERT INTO hosted_pointers VALUES(?,?,?) ON CONFLICT(hostname) DO UPDATE SET workspace_id=excluded.workspace_id, pointer_json=excluded.pointer_json',
+      pointer.hostname, pointer.workspaceId, JSON.stringify(pointer),
+    );
     this.ctx.storage.sql.exec(
-      `INSERT INTO hosted_routes VALUES(?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO hosted_routes VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(hostname) DO UPDATE SET
          workspace_id=excluded.workspace_id,
          service_name=excluded.service_name,
@@ -1755,7 +1783,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
          generation=excluded.generation,
          lease_expires_at=excluded.lease_expires_at,
          health=excluded.health,
-         updated_at=excluded.updated_at`,
+         updated_at=excluded.updated_at,
+         source=excluded.source`,
       input.hostname,
       input.workspaceId,
       input.serviceName,
@@ -1767,6 +1796,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       input.leaseExpiresAt,
       input.health,
       now,
+      input.source,
     );
     return this.listHostedRoutes(now).find((route) => route.hostname === input.hostname)!;
     });
@@ -1782,6 +1812,15 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       new Date().toISOString(),
     ).toArray().length > 0;
     });
+  }
+
+  /** Ends workspace URLs (one workspace's, or every one when null): the registry drops each pointer, then the mirror. */
+  private async clearHostedPointers(workspaceId: string | null): Promise<void> {
+    const rows = (workspaceId === null
+      ? this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers')
+      : this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers WHERE workspace_id=?', workspaceId)).toArray();
+    await Promise.all(rows.map(row => this.env.HOSTED_ROUTES.getByName(row.hostname).clear(this.env.ACCOUNT_ID, row.workspace_id)));
+    for (const row of rows) this.ctx.storage.sql.exec('DELETE FROM hosted_pointers WHERE hostname=?', row.hostname);
   }
 
   getMcpGrant(connectionId: string): ProjectMcpGrant | null {

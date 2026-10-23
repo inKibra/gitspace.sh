@@ -59,7 +59,7 @@ export function RuntimeServices({ snapshot, machines: names }: { snapshot: Runti
   const state = useRuntimeServices(snapshot);
   return <section className="space-y-3 p-3" aria-label="Workspace services">
     <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-medium">Services</h3><Button variant="secondary" size="sm" disabled={state.pending} onClick={() => void state.refresh()}>Refresh</Button></div>
-    <p className="text-xs text-muted-foreground">Declared services and agent processes on each machine. Private links use GitSpace service login.</p>
+    <p className="text-xs text-muted-foreground">Declared services and agent processes on each machine. A workspace URL stays the same wherever the service runs; a machine URL always reaches this machine's copy. Private links use GitSpace service login.</p>
     {state.error && <p role="alert" className="text-xs text-destructive">{state.error}</p>}
     {state.pendingMessage && <p role="status" className="text-xs text-muted-foreground">{state.pendingMessage}</p>}
     {state.loadingLogs && <p role="status" className="text-xs text-muted-foreground">Loading service logs…</p>}
@@ -74,7 +74,12 @@ export function RuntimeServices({ snapshot, machines: names }: { snapshot: Runti
         {machine.services.map(service => <div key={`${service.source}:${service.name}`} className="space-y-2 rounded-md bg-muted/30 p-2">
           <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium">{service.name}</span><Badge>{service.state}</Badge><span className="text-xs text-muted-foreground">{service.source === 'declared' ? 'Environment service' : 'Agent process'}</span></div>
           {machine.available && serviceControls[service.state].progress && <p role="status" className="text-xs text-muted-foreground">{serviceControls[service.state].progress}</p>}
-          {service.url && <a className="block break-all text-xs underline" href={service.url} target="_blank" rel="noopener noreferrer">{service.url} · Private</a>}
+          {service.ports.map(port => <div key={port.name} className="space-y-1 text-xs" aria-label={`${service.name} port ${port.name}`}>
+            {service.ports.length > 1 && <p className="text-muted-foreground">Port {port.name}</p>}
+            {port.url && <a className="block break-all underline" href={port.url} target="_blank" rel="noopener noreferrer">{port.url} · Workspace URL · Private</a>}
+            {port.servedBy && <p className="text-muted-foreground">Workspace URL served by {port.servedBy}</p>}
+            {port.machineUrl && <a className="block break-all underline" href={port.machineUrl} target="_blank" rel="noopener noreferrer">{port.machineUrl} · This machine · Private</a>}
+          </div>)}
           <div className="flex flex-wrap gap-2">{(['start', 'stop', 'restart', 'logs'] as const).map(op => <Button key={op} variant="secondary" size="sm" className="min-h-10" disabled={!machine.available || (op === 'logs' ? state.loadingLogs : state.pending || (op === 'start' ? !serviceControls[service.state].start : !serviceControls[service.state].stop))} onClick={() => void state.act({ op, name: service.name, source: service.source, machineId: machine.machineId, attachmentId: machine.attachmentId, generation: machine.generation }, label)}>{op === 'start' ? 'Start' : op === 'stop' ? 'Stop' : op === 'restart' ? 'Restart' : 'Logs'}</Button>)}</div>
         </div>)}
       </section>;

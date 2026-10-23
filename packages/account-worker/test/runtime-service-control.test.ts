@@ -14,7 +14,7 @@ test('service inventory spans caches and actions cannot drift to another machine
     cloudFiles: { initializeSnapshot: async () => checkpoint },
     attachments: { list: () => attachments, execute: async dispatch => {
       dispatches.push(dispatch);
-      const service = { name: 'web', source: 'declared', terminalName: 'web', state: 'ready', url: null };
+      const service = { name: 'web', source: 'declared', terminalName: 'web', state: 'ready', url: null, machineUrl: null, ports: [] };
       return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(dispatch.args && typeof dispatch.args === 'object' && !Array.isArray(dispatch.args) && dispatch.args.op === 'list' ? [service] : service) }] };
     } },
   };

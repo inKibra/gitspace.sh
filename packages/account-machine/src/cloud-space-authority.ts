@@ -4,6 +4,8 @@ import { collectBytes, streamBytes, WorkspaceDomainError, WorkspaceFailureSchema
 import {
   createServerClock,
   createSignedControlRequest,
+  type HostedRouteLease,
+  type HostedRoutes,
   type HostedServiceRoute,
   type CloudProjectSummary,
   type CloudWorkspaceDefinition,
@@ -352,15 +354,17 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
     return this.call('devices.list', {});
   }
 
-  listHostedRoutes(projectId: string): Promise<HostedServiceRoute[]> {
+  listHostedRoutes(projectId: string): Promise<HostedRoutes> {
     return this.call('project.routes.list', { projectId });
   }
 
-  leaseHostedRoute(
-    projectId: string,
-    route: Omit<HostedServiceRoute, 'updatedAt'>,
-  ): Promise<HostedServiceRoute> {
+  leaseHostedRoute(projectId: string, route: Omit<HostedServiceRoute, 'updatedAt'>): Promise<HostedRouteLease> {
     return this.call('project.routes.lease', { projectId, route });
+  }
+
+  /** Points the route's workspace URL at this machine's service and port, and leases it. */
+  pinHostedRoute(projectId: string, route: Omit<HostedServiceRoute, 'updatedAt'>): Promise<HostedRouteLease> {
+    return this.call('project.routes.pin', { projectId, route });
   }
 
   releaseHostedRoute(projectId: string, hostname: string, generation: number): Promise<boolean> {

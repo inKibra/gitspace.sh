@@ -11,8 +11,12 @@ export async function fetchInternalService(env: Env, rawCaller: ServiceCaller, r
   const caller = ServiceCallerSchema.parse(rawCaller);
   const url = new URL(request.url);
   if (caller.accountId !== env.ACCOUNT_ID || !isHostedServiceHostname(env, url.hostname) || !['https:', 'http:'].includes(url.protocol) || url.port || url.username || url.password) return new Response('Service access denied', { status: 403 });
-  const route = await env.HOSTED_ROUTES.getByName(url.hostname).get();
-  if (!route || route.tenant !== env.ACCOUNT_ID || Date.parse(route.leaseExpiresAt) <= Date.now()) return new Response('Service route unavailable', { status: 404 });
+  const registry = env.HOSTED_ROUTES.getByName(url.hostname);
+  const route = await registry.get();
+  if (!route || route.tenant !== env.ACCOUNT_ID || Date.parse(route.leaseExpiresAt) <= Date.now()) {
+    const offline = await registry.offline();
+    return offline && offline.tenant === env.ACCOUNT_ID ? new Response(`Service is offline on ${offline.machine}`, { status: 503 }) : new Response('Service route unavailable', { status: 404 });
+  }
   if (caller.kind === 'cloud' && caller.workspaceId !== route.workspaceId) return new Response('Service workspace mismatch', { status: 403 });
   const target = `${url.pathname}${url.search}`;
   const headers = new Headers(request.headers);

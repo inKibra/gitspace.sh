@@ -7,11 +7,14 @@ import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { StorageIncidentSchema, type StorageIncident } from './storage-quarantine.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
+import { FiledIssueListInputSchema, FiledIssueResolveInputSchema, FiledIssueSchema, type FiledIssue, type FiledIssueListInput, type FiledIssueResolveInput } from '@gitspace/protocol-runtime/workspace-controls';
 
 /** Storage incidents the account keeps, newest last. */
 const STORAGE_INCIDENT_LIMIT = 50;
 /** After an incident is cleared, the object's alerts stay silent this long (a quarantine still shows). */
 const STORAGE_ALERT_SNOOZE_MS = 6 * 60 * 60_000;
+/** Filed issues the account keeps: filing past this evicts the oldest resolved one, and is refused when all are open. */
+const FILED_ISSUE_LIMIT = 500;
 
 // A successful platform observation is authoritative for at most 60 seconds.
 // Refresh on use after 15 seconds; outage retries coalesce and wait 5 seconds.
@@ -84,6 +87,8 @@ export class AccountStateDO extends BudgetedDurableObject {
    super(ctx, env);
    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS account_identity (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), created_at INTEGER NOT NULL)');
    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO account_identity(singleton,created_at) VALUES(1,?)', Date.now());
+   this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS filed_issues (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, state TEXT NOT NULL, filed_at TEXT NOT NULL, row TEXT NOT NULL)');
+   this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS filed_issues_by_time ON filed_issues(state, filed_at)');
  }
  get(userId: string): AccountRecord | null {
    if (userId !== this.env.ACCOUNT_ID) return null;
@@ -138,5 +143,41 @@ export class AccountStateDO extends BudgetedDurableObject {
   private async storageAlertSnoozes(): Promise<Record<string, number>> {
     const parsed = z.record(z.string(), z.number()).safeParse(await this.ctx.storage.get('storage-alert-snoozes'));
     return parsed.success ? parsed.data : {};
+  }
+
+  /** Stores one filed issue by its id: filing it again rewrites the same row and reopens it. An id another workspace
+   * filed is refused rather than overwritten. */
+  fileIssue(raw: Omit<FiledIssue, 'state' | 'resolution'>): FiledIssue {
+    const issue = FiledIssueSchema.parse({ ...raw, state: 'open', resolution: null });
+    const sql = this.ctx.storage.sql;
+    const existing = sql.exec<{ project_id: string; workspace_id: string }>('SELECT project_id, workspace_id FROM filed_issues WHERE id=?', issue.id).toArray()[0];
+    if (existing && (existing.project_id !== issue.projectId || existing.workspace_id !== issue.workspaceId)) throw new Error('A different workspace filed an issue with this id');
+    if (!existing && sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM filed_issues').one().count >= FILED_ISSUE_LIMIT) {
+      const oldest = sql.exec<{ id: string }>('SELECT id FROM filed_issues WHERE state=\'resolved\' ORDER BY filed_at LIMIT 1').toArray()[0];
+      if (!oldest) throw new Error(`GitSpace keeps at most ${FILED_ISSUE_LIMIT} filed issues; resolve some first`);
+      sql.exec('DELETE FROM filed_issues WHERE id=?', oldest.id);
+    }
+    sql.exec('INSERT INTO filed_issues(id,project_id,workspace_id,state,filed_at,row) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state, filed_at=excluded.filed_at, row=excluded.row',
+      issue.id, issue.projectId, issue.workspaceId, issue.state, issue.filedAt, JSON.stringify(issue));
+    return issue;
+  }
+
+  listFiledIssues(raw: FiledIssueListInput = {}): FiledIssue[] {
+    const input = FiledIssueListInputSchema.parse(raw);
+    const rows = this.ctx.storage.sql.exec<{ row: string }>(
+      'SELECT row FROM filed_issues WHERE (?1 IS NULL OR state=?1) AND (?2 IS NULL OR filed_at<?2) ORDER BY filed_at DESC, id DESC LIMIT ?3',
+      input.state ?? null, input.before ?? null, input.limit,
+    ).toArray();
+    return rows.map(row => FiledIssueSchema.parse(JSON.parse(row.row)));
+  }
+
+  /** Marks a filed issue resolved here only: the workspace's own issue is not changed. */
+  resolveFiledIssue(raw: FiledIssueResolveInput): FiledIssue {
+    const input = FiledIssueResolveInputSchema.parse(raw);
+    const stored = this.ctx.storage.sql.exec<{ row: string }>('SELECT row FROM filed_issues WHERE id=?', input.id).toArray()[0];
+    if (!stored) throw new Error(`No filed issue ${input.id}`);
+    const issue = FiledIssueSchema.parse({ ...FiledIssueSchema.parse(JSON.parse(stored.row)), state: 'resolved', resolution: { at: new Date().toISOString(), commit: input.commit, note: input.note } });
+    this.ctx.storage.sql.exec('UPDATE filed_issues SET state=?, row=? WHERE id=?', issue.state, JSON.stringify(issue), issue.id);
+    return issue;
   }
 }

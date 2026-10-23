@@ -206,10 +206,13 @@ export const canonicalArtifactPromotionSchema = z.object({
 });
 export type CanonicalArtifactPromotion = z.infer<typeof canonicalArtifactPromotionSchema>;
 
+export const hostedServiceSourceSchema = z.enum(['declared', 'process']);
 export const hostedServiceRouteSchema = z.object({
   hostname: z.string().min(1).max(253),
   workspaceId: z.string().min(1).max(160),
+  /** The machine's local service: a declared service or an ad hoc process, by its local name. */
   serviceName: z.string().min(1).max(160),
+  source: hostedServiceSourceSchema,
   machineId: z.string().min(1).max(160),
   ingress: z.string().url(),
   portName: z.string().min(1).max(160),
@@ -220,6 +223,29 @@ export const hostedServiceRouteSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 export type HostedServiceRoute = z.infer<typeof hostedServiceRouteSchema>;
+/** Where a workspace URL sends traffic: one machine's local service and port. The stored decision; a route lease only says the target is up. */
+export const hostedServicePointerSchema = z.object({
+  hostname: z.string().min(1).max(253),
+  workspaceId: z.string().min(1).max(160),
+  machineId: z.string().min(1).max(160),
+  machineLabel: z.string().min(1).max(160),
+  serviceName: z.string().min(1).max(160),
+  source: hostedServiceSourceSchema,
+  portName: z.string().min(1).max(160),
+  setAt: z.string().datetime(),
+  /** `start`: the first machine to start the declared service claimed it; `pin`: an explicit pin. */
+  setBy: z.enum(['start', 'pin']),
+});
+export type HostedServicePointer = z.infer<typeof hostedServicePointerSchema>;
+/** A lease answer: `route` is null when a workspace URL points elsewhere (or, for an ad hoc process, nowhere). */
+export const hostedRouteLeaseSchema = z.object({ route: hostedServiceRouteSchema.nullable(), pointer: hostedServicePointerSchema.nullable() });
+export type HostedRouteLease = z.infer<typeof hostedRouteLeaseSchema>;
+export const hostedRoutesSchema = z.object({ routes: z.array(hostedServiceRouteSchema), pointers: z.array(hostedServicePointerSchema) });
+export type HostedRoutes = z.infer<typeof hostedRoutesSchema>;
+/** A workspace URL is `<service>--<workspace>--<account>-srv`; a machine URL adds `--<machine>` after the service. No part holds `--`. */
+export function hostedServiceUrlKind(hostname: string): 'workspace' | 'machine' {
+  return (hostname.split('.')[0] ?? '').split('--').length === 3 ? 'workspace' : 'machine';
+}
 
 export const projectEventSchema = z.object({
   offset: z.number().int().positive(),

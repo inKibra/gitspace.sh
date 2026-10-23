@@ -9,6 +9,7 @@ import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import { MachineRelayConnector } from '../src/relay-connector.js';
 import { createServiceAccessClient } from '../src/service-forward.js';
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
+import { HostedRoutesFake } from './hosted-routes-fake.js';
 
 const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
 
@@ -18,8 +19,11 @@ test('real machine connector authenticates service ingress before bridging a loc
   const trust = { accountId: 'user-a', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
   const backendHeaders = Promise.withResolvers<Headers>();
   const service = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request, server) { backendHeaders.resolve(request.headers); if (server.upgrade(request)) return; return new Response('upgrade required', { status: 400 }); }, websocket: { message(socket, message) { socket.send(`echo:${message}`); } } });
-  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine-a', root, 'gssh.dev', 'test', undefined, async () => trust);
-  const hostname = new URL(await manager.registerProcessRoute({ projectId: 'project', workspaceId: 'workspace', generation: 1, name: 'socket', portName: 'http', port: service.port! })).hostname;
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine-a', root, 'gssh.dev', 'test', new HostedRoutesFake([{ id: 'machine-a', label: 'alpha' }]).authority('machine-a'), async () => trust);
+  await manager.registerService({ projectId: 'project', workspaceId: 'workspace', generation: 1, source: 'process', name: 'socket', ports: [{ name: 'http', port: service.port! }] });
+  const [urls] = await manager.urls('project', 'workspace', [{ source: 'process', name: 'socket', ports: ['http'] }]);
+  if (!urls?.machineUrl) throw new Error('The process has no machine URL');
+  const hostname = new URL(urls.machineUrl).hostname;
   const ingress = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) { return await manager.proxy(request) ?? new Response(null, { status: 404 }); } });
   const connected = Promise.withResolvers<Bun.ServerWebSocket<undefined>>();
   const echoed = Promise.withResolvers<string>();
@@ -61,7 +65,7 @@ test('real machine connector authenticates service ingress before bridging a loc
 test('machine-B loopback WebSocket forwarding signs the relay target and preserves text and binary frames', async () => {
   const signingPrivateKey = new Uint8Array(32).fill(17);
   const signingPublicKey = credentialProtocolBase64.encode(ed25519.getPublicKey(signingPrivateKey));
-  const hostname = 'socket--workspace-machine-a--test-srv.gssh.dev';
+  const hostname = 'socket--alpha-1a2b--workspace--test-srv.gssh.dev';
   const relay = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request, server) {
     const url = new URL(request.url);
     const authorization = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey, target: `${request.method}\n${url.pathname}${url.search}`, maxSkewMs: 30_000 });

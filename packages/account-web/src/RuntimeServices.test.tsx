@@ -13,15 +13,34 @@ beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container = 
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 0, conversations: [], attachments: [], tasks: [], questions: [], documents: {} });
 it('routes duplicate service names to the chosen machine and renders its logs', async () => {
-  const machines = ['a', 'b'].map(machineId => ({ machineId, attachmentId: `cache-${machineId}`, generation: 4, available: true, error: null, services: [{ name: 'web', source: 'declared', terminalName: 'web', state: 'ready', url: `https://web--workspace-${machineId}--test-srv.gssh.dev` }] }));
+  const machines = ['a', 'b'].map(machineId => ({ machineId, attachmentId: `cache-${machineId}`, generation: 4, available: true, error: null, services: [{ name: 'web', source: 'declared', terminalName: 'web', state: 'ready', url: null, machineUrl: `https://web--${machineId}-aaaa--workspace--test-srv.gssh.dev`, ports: [{ name: 'http', url: null, machineUrl: `https://web--${machineId}-aaaa--workspace--test-srv.gssh.dev`, servedBy: null }] }] }));
   rpc.services.mockResolvedValue({ status: 'ok', value: { op: 'list', machines } });
   await act(async () => root.render(<RuntimeServices snapshot={snapshot} machines={[{ id: 'a', label: 'Alpha' }, { id: 'b', label: 'Beta' }]} />));
   const beta = container.querySelector('[aria-label="Services on Beta"]')!;
-  expect(beta.querySelector('a')?.getAttribute('href')).toBe('https://web--workspace-b--test-srv.gssh.dev');
+  expect(beta.querySelector('a')?.getAttribute('href')).toBe('https://web--b-aaaa--workspace--test-srv.gssh.dev');
   rpc.services.mockResolvedValueOnce({ status: 'ok', value: { op: 'logs', target: machines[1], log: { name: 'web', text: 'Beta service output' } } });
   await act(async () => [...beta.querySelectorAll('button')].find(button => button.textContent === 'Logs')!.click());
   expect(rpc.services).toHaveBeenLastCalledWith({ projectId: 'project', workspaceId: 'workspace', command: { op: 'logs', name: 'web', source: 'declared', machineId: 'b', attachmentId: 'cache-b', generation: 4 } });
   expect(container.querySelector('[aria-label="Service logs"]')?.textContent).toContain('Beta service output');
+});
+it('shows the workspace URL where it points, every machine URL, and which machine serves a declared service elsewhere', async () => {
+  const service = { name: 'web', source: 'declared', terminalName: 'web', state: 'ready' };
+  rpc.services.mockResolvedValue({ status: 'ok', value: { op: 'list', machines: [
+    { machineId: 'a', attachmentId: 'cache-a', generation: 1, available: true, error: null, services: [{ ...service, url: 'https://web--workspace--test-srv.gssh.dev', machineUrl: 'https://web--alpha-aaaa--workspace--test-srv.gssh.dev', ports: [
+      { name: 'http', url: 'https://web--workspace--test-srv.gssh.dev', machineUrl: 'https://web--alpha-aaaa--workspace--test-srv.gssh.dev', servedBy: null },
+      { name: 'admin', url: 'https://web-admin--workspace--test-srv.gssh.dev', machineUrl: 'https://web-admin--alpha-aaaa--workspace--test-srv.gssh.dev', servedBy: null },
+    ] }] },
+    { machineId: 'b', attachmentId: 'cache-b', generation: 1, available: true, error: null, services: [{ ...service, url: null, machineUrl: 'https://web--beta-bbbb--workspace--test-srv.gssh.dev', ports: [{ name: 'http', url: null, machineUrl: 'https://web--beta-bbbb--workspace--test-srv.gssh.dev', servedBy: 'alpha' }] }] },
+  ] } });
+  await act(async () => root.render(<RuntimeServices snapshot={snapshot} machines={[{ id: 'a', label: 'Alpha' }, { id: 'b', label: 'Beta' }]} />));
+  const alpha = container.querySelector('[aria-label="Services on Alpha"]')!;
+  expect([...alpha.querySelectorAll('a')].map(link => link.getAttribute('href'))).toEqual([
+    'https://web--workspace--test-srv.gssh.dev', 'https://web--alpha-aaaa--workspace--test-srv.gssh.dev',
+    'https://web-admin--workspace--test-srv.gssh.dev', 'https://web-admin--alpha-aaaa--workspace--test-srv.gssh.dev',
+  ]);
+  const beta = container.querySelector('[aria-label="Services on Beta"]')!;
+  expect([...beta.querySelectorAll('a')].map(link => link.getAttribute('href'))).toEqual(['https://web--beta-bbbb--workspace--test-srv.gssh.dev']);
+  expect(beta.textContent).toContain('Workspace URL served by alpha');
 });
 it('shows unavailable machines without controls and clears inventory when no machines remain', async () => {
   rpc.services.mockResolvedValueOnce({ status: 'ok', value: { op: 'list', machines: [{ machineId: 'offline', attachmentId: 'cache', generation: 1, available: false, error: 'Machine offline', services: [] }] } });
@@ -49,7 +68,7 @@ function inventory(source: RuntimeService['source'], state: RuntimeService['stat
   return RuntimeServiceMachineSchema.parse({
     machineId: 'alpha', attachmentId: 'attachment-alpha', generation: 1,
     available, error: available ? null : 'Machine offline',
-    services: [{ name: 'web', source, terminalName: 'web', state, url: null }],
+    services: [{ name: 'web', source, terminalName: 'web', state, url: null, machineUrl: null, ports: [] }],
   });
 }
 function button(label: string) {
@@ -96,7 +115,7 @@ for (const source of RuntimeServiceSchema.shape.source.options) {
     expect(container.querySelector('[aria-label="Service logs"]')?.textContent).toContain('Listening for startup progress');
     expect(button('Start').disabled).toBe(true);
     expect(container.querySelector('[role="status"]')?.textContent).toContain('Starting');
-    await act(async () => { operation.resolve({ status: 'ok', value: { op: 'start', target: inventory(source, 'running'), service: RuntimeServiceSchema.parse({ name: 'web', source, terminalName: 'web', state: 'running', url: null }) } }); });
+    await act(async () => { operation.resolve({ status: 'ok', value: { op: 'start', target: inventory(source, 'running'), service: RuntimeServiceSchema.parse({ name: 'web', source, terminalName: 'web', state: 'running', url: null, machineUrl: null, ports: [] }) } }); });
     expect(button('Start').disabled).toBe(true);
     for (const label of ['Stop', 'Restart', 'Logs', 'Refresh']) expect(button(label).disabled, label).toBe(false);
     expect(container.querySelector('[role="status"]')).toBeNull();

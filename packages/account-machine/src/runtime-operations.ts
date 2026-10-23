@@ -3,8 +3,8 @@ import { daemonClientForProject, type DaemonBrokerClient, type DaemonRequest } f
 import type { DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, runSupervisorCommand, type ExecutorOperationHandler, type LocalAttachment } from '@gitspace/runtime-machine';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
-import type { WorkspaceServiceManager } from './workspace-services.js';
-import { cacheServiceOperation } from './cache-services.js';
+import type { LocalHttpService, WorkspaceServiceManager } from './workspace-services.js';
+import { cacheServiceOperation, runningHttpService } from './cache-services.js';
 import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/services';
 import { createHash } from 'node:crypto';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
@@ -125,6 +125,18 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
         try { return await client.request(request, signal); }
         catch (error) { throw new Error('Supervisor mutation outcome requires reconciliation', { cause: error }); }
       };
+      /** An ad hoc process with a ready port gets its machine URL, and a workspace URL only where a pin points one at it. */
+      const registerProcess = async (name: string, port: number) => {
+        const service: LocalHttpService = { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, source: 'process', name, ports: [{ name: 'http', port }] };
+        await options.services.registerService(service);
+        const [urls] = await options.services.urls(service.projectId, service.workspaceId, [{ source: 'process', name, ports: ['http'] }]);
+        return { url: urls?.url ?? null, machineUrl: urls?.machineUrl ?? null };
+      };
+      if (args.op === 'pin') {
+        const service = await runningHttpService(options.services, local, args.source, args.name);
+        const url = await options.services.pin(service, args.as ?? args.name, args.port);
+        return [{ type: 'text', text: JSON.stringify({ op: 'pin', name: args.name, source: args.source, url }) }];
+      }
       if (args.op === 'start') {
         const processes = await client.request({ op: 'list' }, signal);
         if (processes.op !== 'list') throw new Error('Invalid supervisor list response');
@@ -139,8 +151,8 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
         if (spec.ready) {
           const readiness = await client.request({ op: 'wait', name: spec.name, for: 'ready', timeoutMs: spec.ready.timeoutMs ?? 30_000 }, signal);
           if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');
-          const url = spec.ready.port ? await options.services.registerProcessRoute({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, name: spec.name, portName: 'http', port: spec.ready.port }) : null;
-          return [{ type: 'text', text: JSON.stringify({ op: 'start', daemon: readiness.daemon, url }) }];
+          const urls = spec.ready.port ? await registerProcess(spec.name, spec.ready.port) : { url: null, machineUrl: null };
+          return [{ type: 'text', text: JSON.stringify({ op: 'start', daemon: readiness.daemon, ...urls }) }];
         }
         return [{ type: 'text', text: JSON.stringify(result) }];
       }
@@ -157,13 +169,13 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
       const existing = await client.request({ op: 'describe', name: args.name, ...(args.op === 'status' || args.op === 'describe' || args.op === 'stop' ? { instanceId: args.instanceId, restartCount: args.restartCount } : {}) }, signal);
       if (existing.op !== 'describe' || !await workspaceProcessVisible(local.rootPath, existing)) throw new Error('Private or out-of-workspace processes are not accessible');
       const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : args.op === 'status' || args.op === 'describe' ? existing : await client.request(args, signal);
-      if (args.op === 'stop') await options.services.releaseProcessRoutes(dispatch.workspaceId, args.name);
+      if (args.op === 'stop') await options.services.releaseService(dispatch.workspaceId, 'process', args.name);
       if (args.op === 'restart' && result.op === 'restart') reportExits(client, result.daemon, { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, options.reportProcessExit, watching);
       if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
         const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
         if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');
-        const url = existing.spec.ready.port ? await options.services.registerProcessRoute({ projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, generation: dispatch.generation, name: args.name, portName: 'http', port: existing.spec.ready.port }) : null;
-        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon, url }) }];
+        const urls = existing.spec.ready.port ? await registerProcess(args.name, existing.spec.ready.port) : { url: null, machineUrl: null };
+        return [{ type: 'text', text: JSON.stringify({ op: 'restart', daemon: readiness.daemon, ...urls }) }];
       }
       return [{ type: 'text', text: JSON.stringify(result) }];
   };

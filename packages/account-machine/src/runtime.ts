@@ -14,6 +14,7 @@ import {
 } from './index.js';
 import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
+import { rehydrateServiceRoutes } from './cache-services.js';
 import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import { createServerClock, credentialProtocolBase64, machineLiveNoticeSchema, machineLiveResource, relayNoticeSchema, type MachineLiveNotice, type RelayNoticeTopic } from '@gitspace/protocol';
@@ -205,6 +206,14 @@ export async function startMachineRuntime() {
     authority,
     serviceAccess.trust,
   );
+  /** Re-leases routes after a restart: the attachments' running services, workspace URLs as their stored pointers say. */
+  const rehydrateServices = async () => {
+    await serviceManager.rehydrate();
+    for (const local of machineCheckouts()) {
+      if (local.attachment.state !== 'ready') continue;
+      await rehydrateServiceRoutes(serviceManager, local).catch((error: unknown) => console.error('[gitspace-services]', local.attachment.workspaceId, error));
+    }
+  };
   let startupCommitted = !process.env.GITSPACE_UPDATE_OWNER;
   // Pinned at enrollment, never fetched from the worker: every device grant is
   // verified against this key locally, so the control plane cannot mint callers.
@@ -273,7 +282,7 @@ export async function startMachineRuntime() {
     return { prepared: true, machineId };
   };
   const cancelReplacement = async () => {
-    await serviceManager.rehydrate();
+    await rehydrateServices();
     preparingReplacement = false;
     return { prepared: false, machineId };
   };
@@ -346,7 +355,7 @@ export async function startMachineRuntime() {
     environmentRoot, managedSpaceRoot, machineId, cloud: cloudRuntime, gitRemote, lfs,
     browser: { enabled: true, services: {
       serviceHostname: hostname => hostname.endsWith(`--${process.env.GITSPACE_SERVICE_NAMESPACE}-srv.${process.env.GITSPACE_SERVICE_DOMAIN}`),
-      workspaceServiceHostname: async (hostname, scope) => (await authority.listHostedRoutes(scope.projectId)).some(route => route.workspaceId === scope.workspaceId && route.hostname === hostname),
+      workspaceServiceHostname: async (hostname, scope) => (await authority.listHostedRoutes(scope.projectId)).routes.some(route => route.workspaceId === scope.workspaceId && route.hostname === hostname),
       serviceForward: serviceAccess.forward,
     } },
     prepareAttachment: async (local, signal, progress) => {
@@ -408,7 +417,7 @@ export async function startMachineRuntime() {
   });
   console.log(`GitSpace RPC ready at ${http.url}/rpc generation=${process.env.GITSPACE_GENERATION_HASH ?? 'unknown'} machine=${machineReleaseSha ?? 'local'} runtime=cloud`);
   if (startupCommitted) {
-    await serviceManager.rehydrate();
+    await rehydrateServices();
   } else {
     // Health is available to the updater, but no service or user RPC may run
     // until the whole host's durable transaction has finished.
@@ -417,7 +426,7 @@ export async function startMachineRuntime() {
       await Bun.sleep(100);
     }
     if (stopping) return { environmentRoot, settings, http, stop };
-    await serviceManager.rehydrate();
+    await rehydrateServices();
     if ((await browserRelay.status()).installed) {
       void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
     }

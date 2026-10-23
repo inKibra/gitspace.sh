@@ -19,7 +19,7 @@ async function enrollBrowser() {
 }
 const hostname = `web--space-a--${env.TENANT_ID}-srv.gssh.dev`;
 async function lease() {
-  await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, { hostname, workspaceId: 'space-a', serviceName: 'web', machineId: 'service-machine', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() });
+  await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'web', source: 'declared', machineId: 'service-machine', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'service machine');
 }
 describe('private hosted service access', () => {
   it('rejects URL-parser redirect tricks and reserved callback paths', () => {
@@ -155,5 +155,14 @@ describe('private hosted service access', () => {
     expect(response.status).toBe(503);
     expect(await response.text()).toContain('MACHINE_OFFLINE');
     expect((await exports.default.fetch(new Request('https://relay.test/api/services/fetch?url=' + encodeURIComponent(request.url)))).status).toBe(401);
+  });
+  it('answers a workspace URL whose machine is down with the machine it points at', async () => {
+    const offline = `api--space-a--${env.TENANT_ID}-srv.gssh.dev`;
+    const registry = env.HOSTED_ROUTES.getByName(offline);
+    await registry.lease(env.ACCOUNT_ID, 'project-a', { hostname: offline, workspaceId: 'space-a', serviceName: 'api', source: 'declared', machineId: 'service-machine', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+    expect(await registry.release(env.ACCOUNT_ID, 'service-machine', 1)).toBe(true);
+    const response = await fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, projectId: 'project-a', workspaceId: 'space-a' }, new Request(`https://${offline}/`));
+    expect(response.status).toBe(503);
+    expect(await response.text()).toBe('Service is offline on darktop');
   });
 });
