@@ -58,7 +58,7 @@ async function runAuthorization(root: Identity, placement: RuntimeAccountBrowser
   if (placement.kind !== 'account-relay') throw new Error('Expected a Chrome placement');
   const workspace = await keys(), expiresAt = new Date(Date.now() + 150_000).toISOString(), issuedAt = new Date().toISOString();
   const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId: 'project', workspaceId: 'workspace', publicKey: workspace.publicKey, issuedAt, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }, root.key.privateKey);
-  const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', origins: ['example.com'], expiresAt: new Date(Date.now() + 1_800_000).toISOString() }, workspace.key.privateKey, authority);
+  const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt: new Date(Date.now() + 1_800_000).toISOString() }, workspace.key.privateKey, authority);
   const attemptId = crypto.randomUUID();
   return signRuntimeAccountBrowserAuthorization({ scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'run', source: 'relay', pairingId: placement.pairingId, script }, grant } }, workspace.key.privateKey, authority);
 }

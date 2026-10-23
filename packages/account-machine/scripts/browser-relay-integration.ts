@@ -50,7 +50,7 @@ try {
   await request('/project-update', { projectId: 'project', expectedRevision: 0, preferences: { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, name: 'Primary Chrome', note: 'Local smoke fixture' }] } });
   const placement = RuntimeAccountBrowserPlacementSchema.parse(await (await request('/placement', { projectId: 'project' })).json());
   assert.equal(placement.kind, 'account-relay');
-  const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Account relay fixture', source: 'relay', origins: ['127.0.0.1'], expiresAt }, workspaceKeys.privateKey, authority);
+  const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Account relay fixture', source: 'relay', stepsOnly: [], origins: ['127.0.0.1'], expiresAt }, workspaceKeys.privateKey, authority);
   async function execute(args: RuntimeBrowserArguments, conversationKind: 'main' | 'subagent' = 'main', selectedPlacement = placement, selectedGrant = grant) {
     const id = crypto.randomUUID(), deadlineAt = new Date(Date.now() + 60_000).toISOString();
     const authorization = await signRuntimeAccountBrowserAuthorization({ scope: { projectId: 'project', workspaceId: 'workspace', placement: selectedPlacement, conversationId: 'conversation', conversationKind, taskId: id, requestId: id, attemptId: id }, issuedAt: new Date().toISOString(), expiresAt: deadlineAt, dispatch: { version: 1, tool: 'browser', deadlineAt, replay: 'unsafe' }, command: { type: 'execute', args, grant: selectedGrant } }, workspaceKeys.privateKey, authority);
@@ -85,7 +85,7 @@ try {
   const secondPlacement = RuntimeAccountBrowserPlacementSchema.parse(await (await request('/placement', { projectId: 'project', pairingId: secondPairing.pairingId })).json());
   assert(secondPlacement.kind === 'account-relay');
   assert.equal(secondPlacement.pairingId, secondPairing.pairingId);
-  const secondGrant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement: secondPlacement, groupId: crypto.randomUUID(), groupName: 'Second Chrome fixture', source: 'relay', origins: ['127.0.0.1'], expiresAt }, workspaceKeys.privateKey, authority);
+  const secondGrant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement: secondPlacement, groupId: crypto.randomUUID(), groupName: 'Second Chrome fixture', source: 'relay', stepsOnly: [], origins: ['127.0.0.1'], expiresAt }, workspaceKeys.privateKey, authority);
   const secondOpened = RuntimeToolResultSchema.parse(await (await execute({ action: 'open', source: 'relay', url: `http://127.0.0.1:${site.port}/second` }, 'main', secondPlacement, secondGrant)).json());
   assert.equal(secondOpened.status, 'completed');
   const secondText = secondOpened.content.find(part => part.type === 'text'); assert(secondText?.type === 'text');

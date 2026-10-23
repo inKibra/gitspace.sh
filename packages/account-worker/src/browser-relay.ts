@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
 import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
-import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
@@ -139,7 +139,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       await this.ctx.storage.transaction(async tx => {
         await tx.put(`browser.relay.project:${projectId}`, { revision: current.revision + 1, defaultPairingId: preferences.defaultPairingId, approvals });
         if (removed.length) for (const stored of (await tx.list({ prefix: 'browser.account.group:' })).values()) {
-          const group = RuntimeAccountBrowserGrantSchema.parse(stored), placement = group.placement;
+          const group = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = group.placement;
           if (group.projectId === projectId && placement.kind === 'account-relay' && removed.some(item => item.pairingId === placement.pairingId)) {
             await tx.put(`browser.account.revoked:${group.groupId}`, true);
             await tx.put(`browser.relay.revoke:${placement.pairingId}:${group.groupId}`, { pairingId: placement.pairingId, groupId: group.groupId });
@@ -367,7 +367,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   private async groupReported(pairingId: string, report: RuntimeBrowserGroupReport) {
     const stored = await this.ctx.storage.get(`browser.account.group:${report.groupId}`);
     if (!stored || await this.ctx.storage.get(`browser.account.revoked:${report.groupId}`)) return;
-    const grant = RuntimeAccountBrowserGrantSchema.parse(stored), placement = grant.placement;
+    const grant = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = grant.placement;
     if (placement.kind !== 'account-relay' || placement.pairingId !== pairingId) return;
     const approval = (await this.projectPreferences(grant.projectId)).approvals.find(item => item.pairingId === pairingId);
     const usable = (url: string, site: string | null) => {
@@ -384,7 +384,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   async retireWorkspace(projectId: string, workspaceId: string) {
     await this.ctx.storage.transaction(async tx => {
       for (const stored of (await tx.list({ prefix: 'browser.account.group:' })).values()) {
-        const group = RuntimeAccountBrowserGrantSchema.parse(stored), placement = group.placement;
+        const group = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = group.placement;
         if (group.projectId !== projectId || group.workspaceId !== workspaceId || placement.kind !== 'account-relay' || await tx.get(`browser.account.revoked:${group.groupId}`)) continue;
         await tx.put(`browser.account.revoked:${group.groupId}`, true);
         await tx.put(`browser.relay.revoke:${placement.pairingId}:${group.groupId}`, { pairingId: placement.pairingId, groupId: group.groupId });

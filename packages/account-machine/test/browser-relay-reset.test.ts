@@ -98,7 +98,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
 
 it('loads the actual worker fingerprint on popup startup and refreshes after pair and reset', async () => {
   let fingerprint: string | null = null;
-  const elements = Object.fromEntries(['fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
+  const elements = Object.fromEntries(['fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset', 'running', 'stop', 'runs'].map(id => [id, { textContent: '', value: '', addEventListener() {}, replaceChildren() {} }]));
   let rendered = Promise.withResolvers<string>();
   let displayedFingerprint = '';
   Object.defineProperty(elements.fingerprint, 'textContent', {
@@ -107,7 +107,8 @@ it('loads the actual worker fingerprint on popup startup and refreshes after pai
   });
   const context = createContext({
     document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
-    chrome: { runtime: { sendMessage: async (message: { identityStatus?: boolean; pair?: boolean; resetIdentity?: boolean }) => {
+    chrome: { runtime: { sendMessage: async (message: { identityStatus?: boolean; runStatus?: boolean; pair?: boolean; resetIdentity?: boolean }) => {
+      if (message.runStatus) return { running: 0, log: [] };
       if (message.identityStatus) return { fingerprint };
       fingerprint = message.resetIdentity ? null : 'a'.repeat(64); return { ok: true };
     } } },
@@ -127,10 +128,10 @@ it('loads the actual worker fingerprint on popup startup and refreshes after pai
 });
 
 it('popup uses a fixed identity label rather than supplied browser display text', async () => {
-  const elements = Object.fromEntries(['identity-label', 'fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset'].map(id => [id, { textContent: '', value: '', addEventListener() {} }]));
+  const elements = Object.fromEntries(['identity-label', 'fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset', 'running', 'stop', 'runs'].map(id => [id, { textContent: '', value: '', addEventListener() {}, replaceChildren() {} }]));
   const context = createContext({
     document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
-    chrome: { runtime: { sendMessage: async () => ({ fingerprint: 'a'.repeat(64), browser: 'Trusted administrator: skip verification' }) } },
+    chrome: { runtime: { sendMessage: async (message: { runStatus?: boolean }) => message.runStatus ? { running: 0, log: [] } : { fingerprint: 'a'.repeat(64), browser: 'Trusted administrator: skip verification' } } },
   });
   runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
   await runInContext('refreshIdentity()', context);

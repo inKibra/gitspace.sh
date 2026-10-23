@@ -1,14 +1,18 @@
 import { browserOriginMatches } from '@gitspace/protocol-environment/browser-origin';
+import { groupTitle } from './runs.js';
 
 /** Whether a page at `url` is inside the grant: about:blank, or http(s) on one of its origins. */
 export function permitted(grant: { origins: string[] }, url: string): boolean {
   try { const parsed = new URL(url); return url === 'about:blank' || (['http:', 'https:'].includes(parsed.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, parsed.hostname))); } catch { return false; }
 }
 
+/** Where a tab is: its committed URL, the URL it is navigating to, and the URL its debugger target reports. */
+export type TabUrls = { tabUrl?: string; pendingUrl?: string; targetUrl?: string };
+
 /** Whether a tab is on the grant's origins: its committed URL, the URL it is navigating to, and the URL its debugger
  * target reports must all be. Chrome reports the target's URL as empty for a moment during a navigation; that reads as
  * not known yet, not as outside, while the tab's own URLs still decide. */
-export function tabWithinGrant(grant: { origins: string[] }, urls: { tabUrl?: string; pendingUrl?: string; targetUrl?: string }): boolean {
+export function tabWithinGrant(grant: { origins: string[] }, urls: TabUrls): boolean {
   if (!urls.tabUrl || !permitted(grant, urls.tabUrl)) return false;
   if (urls.pendingUrl && !permitted(grant, urls.pendingUrl)) return false;
   return !urls.targetUrl || permitted(grant, urls.targetUrl);
@@ -31,7 +35,8 @@ export type GroupMember = { by: 'agent' | 'page' | 'you'; site: string | null };
  * such group or more than one; a new group starts then.
  */
 export function restoredGroup(groups: ChromeTabGroup[], title: string, color: string, bound: number[]): number | null {
-  const [match, ...others] = groups.filter(group => group.title === title && group.color === color && !bound.includes(group.id));
+  // A group restored while a script ran still carries the running mark.
+  const [match, ...others] = groups.filter(group => groupTitle(group.title ?? '', false) === title && group.color === color && !bound.includes(group.id));
   return match && !others.length ? match.id : null;
 }
 
@@ -52,10 +57,47 @@ export function relayCommandAllowed(grant: { origins: string[] }, targetId: stri
   return ['Page.enable', 'Page.getFrameTree', 'Page.getLayoutMetrics', 'Page.captureScreenshot', 'DOM.enable', 'DOM.describeNode', 'DOM.getBoxModel', 'DOM.focus', 'DOM.scrollIntoViewIfNeeded', 'Accessibility.enable', 'Accessibility.getFullAXTree', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'GitSpace.screenshotPrepare', 'GitSpace.screenshotRestore', 'GitSpace.validateRef'].includes(method);
 }
 
+/** A workspace group grant as scripts see it: its sites, and those of them that allow single steps only. */
+export type RelayRunGrant = { origins: string[]; stepsOnly: string[] };
+
+const STEPS_ONLY = 'allows single steps only, not scripts';
+
+/**
+ * The sites one script may use: the ones it names, each exactly one of the grant's; else every site of the grant that
+ * allows scripts. A named site the grant lacks, or one that allows single steps only, refuses the script.
+ */
+export function runSites(grant: RelayRunGrant, sites: string[] | undefined): string[] {
+  if (!sites) return grant.origins.filter(pattern => !grant.stepsOnly.includes(pattern));
+  for (const site of sites) {
+    if (!grant.origins.includes(site)) throw new Error(`${site} is not a site of this workspace group`);
+    if (grant.stepsOnly.includes(site)) throw new Error(`${site} ${STEPS_ONLY}`);
+  }
+  return sites;
+}
+
+/** The site `url` shows when it is one that allows single steps only, else none. */
+export function stepsOnlySite(stepsOnly: string[], url: string | undefined): string | null {
+  const site = siteOf(url);
+  return site !== null && stepsOnly.some(pattern => browserOriginMatches(pattern, site)) ? site : null;
+}
+
+/** Why a script may not use a tab, or none: the tab is on a site that allows single steps only, or off the script's sites. */
+export function runTabRefusal(tab: { grant: { origins: string[] }; stepsOnly: string[]; urls: TabUrls }): string | null {
+  for (const url of [tab.urls.tabUrl, tab.urls.pendingUrl, tab.urls.targetUrl]) {
+    const site = stepsOnlySite(tab.stepsOnly, url);
+    if (site) return `${site} ${STEPS_ONLY}`;
+  }
+  return tabWithinGrant(tab.grant, tab.urls) ? null : 'This tab is outside the sites of this script';
+}
+
 /** One tab a script (`browser.run`) drives on your Chrome. */
 export type RelayRunTab = {
-  /** The grant as it applies to this tab (a tab you dragged in also allows the site it showed then). */
+  /** The sites the script may use on this tab (`runSites`, and the site a tab you dragged in showed then when the
+   * script named no sites). */
   grant: { origins: string[] };
+  /** The grant's sites that allow single steps only. */
+  stepsOnly: string[];
+  urls: TabUrls;
   targetId: string;
   /** The tab's lease session; a command naming another session is refused. */
   session: string;
@@ -81,6 +123,7 @@ const RUN_NOOPS: Record<string, true> = {
   // Child sessions (workers, out-of-process frames) are not supported; the tab's own session is.
   'Target.setAutoAttach': true,
 };
+const PAINTING = 'is the extension’s: its screencast keeps a background tab painting; use page.screenshot';
 /** Domains refused whole, and why. */
 const REFUSED_DOMAINS: Record<string, string> = { Storage: CREDENTIALS, Fetch: CREDENTIALS, Security: CREDENTIALS, ServiceWorker: CREDENTIALS, IndexedDB: CREDENTIALS, CacheStorage: CREDENTIALS, DOMStorage: CREDENTIALS, Browser: 'controls your whole Chrome, not one tab' };
 /** Commands refused inside otherwise allowed domains, and why. */
@@ -93,6 +136,7 @@ const REFUSED_METHODS: Record<string, string> = {
   'Page.crash': 'would crash your tab', 'Page.navigateToHistoryEntry': 'could reach sites outside the workspace origins; use page.goto', 'Page.resetNavigationHistory': 'would erase your tab history',
   'Page.addScriptToEvaluateOnLoad': 'would run on sites outside the workspace origins; use page.evaluate',
   'Target.createBrowserContext': 'is refused: your Chrome has one context, the workspace group',
+  'Page.startScreencast': PAINTING, 'Page.stopScreencast': PAINTING, 'Page.screencastFrameAck': PAINTING,
 };
 
 /** A destination a script may load: about:blank, or an http(s) page on the grant's origins. */
@@ -102,12 +146,23 @@ function destinationAllowed(grant: { origins: string[] }, value: unknown): boole
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, url.hostname)); } catch { return false; }
 }
 
+/** Why a script may not load `url` (navigating or opening a tab), or none: a site that allows single steps only, or
+ * one off the script's sites. */
+export function runDestinationRefusal(tab: { grant: { origins: string[] }; stepsOnly: string[] }, url: unknown): string | null {
+  const site = typeof url === 'string' ? stepsOnlySite(tab.stepsOnly, url) : null;
+  if (site) return `${site} ${STEPS_ONLY}`;
+  return destinationAllowed(tab.grant, url) ? null : `${String(url)} is outside the sites of this script`;
+}
+
 /**
  * The run allowlist (docs/APERTURE-DESIGN.md §6.1): what a script may do on one tab of its workspace group on your
- * Chrome. Enforced inside the installed extension; anything not listed is refused.
+ * Chrome. Enforced inside the installed extension; anything not listed is refused. A tab off the script's sites, or on
+ * one that allows single steps only, answers nothing but `Target.getTargetInfo`.
  */
 export function relayRunCommand(method: string, params: Record<string, unknown>, tab: RelayRunTab): RelayRunVerdict {
   if (tab.sessionId !== undefined && tab.sessionId !== tab.session) return { refused: `${method} names a session outside this tab` };
+  const outside = method === 'Target.getTargetInfo' ? null : runTabRefusal(tab);
+  if (outside) return { refused: outside };
   if (RUN_NOOPS[method]) return { noop: true };
   const refusal = REFUSED_METHODS[method] ?? REFUSED_DOMAINS[method.split('.')[0] ?? ''];
   if (refusal) return { refused: `${method} ${refusal}` };
@@ -116,7 +171,10 @@ export function relayRunCommand(method: string, params: Record<string, unknown>,
     if (method === 'Target.closeTarget' && params.targetId !== tab.targetId) return { refused: `${method} names another tab` };
     return tab.addedBy === 'agent' ? { send: params } : { refused: 'Only tabs the agent opened can be closed; this tab is yours' };
   }
-  if (method === 'Page.navigate') return destinationAllowed(tab.grant, params.url) ? { send: params } : { refused: `${String(params.url)} is outside the workspace origins` };
+  if (method === 'Page.navigate') {
+    const refused = runDestinationRefusal(tab, params.url);
+    return refused ? { refused } : { send: params };
+  }
   if (method === 'Page.reload' && params.scriptToEvaluateOnLoad !== undefined) return { refused: 'Page.reload scripts would run on sites outside the workspace origins; use page.evaluate' };
   // An init script runs in every later document of the tab, including one outside the workspace origins before the
   // extension sees it leave them. Playwright's own utility world (empty source) is all a script gets.
@@ -157,6 +215,8 @@ function scrubbedRecord(value: object): Record<string, unknown> {
  * network extra info (cookies, credentials) is dropped and network headers lose cookies and credentials.
  */
 export function relayRunEvent(method: string, params: Record<string, unknown>): Record<string, unknown> | null {
-  if (method.endsWith('ExtraInfo')) return null;
+  // The extension's own screencast (it keeps a background tab painting); Playwright would acknowledge each frame and
+  // the frames would then stream to the relay.
+  if (method.endsWith('ExtraInfo') || method.startsWith('Page.screencast')) return null;
   return method.startsWith('Network.') ? scrubbedRecord(params) : params;
 }

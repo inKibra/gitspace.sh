@@ -1,6 +1,17 @@
-// The extension's popup: shows this Chrome's identity fingerprint, pairs it, and resets it.
+// The extension's popup: shows this Chrome's identity fingerprint, pairs it, and resets it; shows the scripts that run
+// here and the latest that ran, and stops them.
 async function refreshIdentity() { const result = await chrome.runtime.sendMessage({ identityStatus: true }); if (result?.error) throw new Error(result.error); document.getElementById('fingerprint').textContent = result.fingerprint || 'No identity. Pair to generate a key.'; document.getElementById('compatibility').textContent = result.compatibility || ''; }
 async function action(message, success) { const buttons = document.querySelectorAll('button'); buttons.forEach(button => button.disabled = true); try { const result = await chrome.runtime.sendMessage(message()); if (result?.error) throw new Error(result.error); await refreshIdentity(); document.getElementById('code').value = ''; document.getElementById('status').textContent = success; } catch(error) { document.getElementById('status').textContent = error.message; } finally { buttons.forEach(button => button.disabled = false); } }
+/** Asks the worker for its scripts (`runStatus`, or `stopRuns` to stop them first) and shows them. */
+async function refreshRuns(message) {
+  const result = await chrome.runtime.sendMessage(message);
+  if (result?.error) throw new Error(result.error);
+  document.getElementById('running').textContent = result.running ? `${result.running} ${result.running === 1 ? 'script' : 'scripts'} running` : '';
+  // Text only: a group name comes from the workspace.
+  document.getElementById('runs').replaceChildren(...result.log.map(entry => { const item = document.createElement('li'); item.textContent = `${new Date(entry.startedAt).toLocaleString()} · ${entry.workspace.groupName} · ${entry.scriptSha256.slice(0, 12)} · ${entry.commands} commands · ${entry.endReason}`; return item; }));
+}
 void refreshIdentity().catch(error => { document.getElementById('status').textContent = error.message; });
+void refreshRuns({ runStatus: true }).catch(error => { document.getElementById('status').textContent = error.message; });
 document.getElementById('pair').addEventListener('submit', event => { event.preventDefault(); void action(() => { const pairing = JSON.parse(document.getElementById('code').value); if (!pairing.code || !pairing.pairingId || !Number.isSafeInteger(pairing.generation) || pairing.trust?.algorithm !== 'Ed25519' || !pairing.trust.accountId || !pairing.trust.publicKey || Date.parse(pairing.expiresAt) <= Date.now()) throw new Error('Copy fresh pairing data from authenticated GitSpace Settings'); return { pair: pairing }; }, 'Compare the fingerprint above with GitSpace Settings, then confirm there before agents can use this Chrome.'); });
 document.getElementById('reset').addEventListener('click', () => { void action(() => ({ resetIdentity: true }), 'Identity reset. Use Forget paired browser in GitSpace Settings, then get new pairing JSON.'); });
+document.getElementById('stop').addEventListener('click', () => { void refreshRuns({ stopRuns: true }).then(() => { document.getElementById('status').textContent = 'Scripts stopped.'; }, error => { document.getElementById('status').textContent = error.message; }); });

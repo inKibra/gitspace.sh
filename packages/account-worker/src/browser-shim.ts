@@ -167,9 +167,12 @@ export class CdpShimClient {
         if (typeof params.browserContextId !== 'string' || !this.contexts.delete(params.browserContextId)) throw new Error('Browser context does not belong to this client');
         return this.upstream.send(method, params);
       }
-      // Chrome announces an auto-attached page before it answers its creation; Playwright depends on that order.
+      // Chrome announces an auto-attached page before it answers its creation; Playwright depends on that order. Each
+      // page gets its own window, where it is the front tab: headless Chrome does not draw a tab behind another, and
+      // under Playwright's focus emulation such a page gets an animation frame about once a second, so each action
+      // waited 1–2 s for its element to hold still. On your Chrome the relay opens the tab in the group and ignores this.
       case 'Target.createTarget': {
-        const result = await this.upstream.send(method, params);
+        const result = await this.upstream.send(method, { ...params, newWindow: true });
         const targetId = result && typeof result === 'object' && 'targetId' in result && typeof result.targetId === 'string' ? result.targetId : null;
         const info = targetId && this.autoAttach ? targetsOf(await this.upstream.send('Target.getTargets', {})).find(target => target.targetId === targetId) : undefined;
         if (info) await this.attachOnce(info);

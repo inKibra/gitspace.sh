@@ -1,7 +1,7 @@
 import { EnvironmentError, type EnvironmentFailure } from './errors.js';
 import {
   LifecycleMutationSchema, LifecyclePhaseSchema, executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, resolveEnvironmentProfile, selectLifecycleScripts,
-  type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleExecution, type LifecycleMutation,
+  type BrowserSiteLevel, type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleExecution, type LifecycleMutation,
   type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from './schema.js';
 import { SERVICE_INGRESS_EXECUTION_ID, serviceIngressContent } from './service-ingress.js';
@@ -89,10 +89,19 @@ export function emptyLifecycleState(projectId: string, spaceId: string): Lifecyc
     bindings: {}, provisioned: null, destroyedAt: null, runs: [], claim: null };
 }
 
+/** A committed origin's level, null while no approval covers it: single steps only when any approval of it says so. */
+export function browserOriginLevel(state: Pick<LifecycleState, 'approvals'>, hash: string): BrowserSiteLevel | null {
+  const approvals = state.approvals.filter((entry) => entry.executionHash === hash);
+  if (!approvals.length) return null;
+  return approvals.some((entry) => entry.level === 'steps') ? 'steps' : 'scripts';
+}
 /** Only canonical committed origins participate; bundle previews and automatic policy do not grant access. */
 export function approvedBrowserOrigins(state: LifecycleState): string[] {
-  const approved = new Set(state.approvals.map((entry) => entry.executionHash));
-  return state.browserOrigins.filter((entry) => approved.has(entry.hash)).map((entry) => entry.pattern);
+  return state.browserOrigins.filter((entry) => browserOriginLevel(state, entry.hash) !== null).map((entry) => entry.pattern);
+}
+/** The approved origins whose sites allow single steps only, never scripts. */
+export function stepsOnlyBrowserOrigins(state: LifecycleState): string[] {
+  return state.browserOrigins.filter((entry) => browserOriginLevel(state, entry.hash) === 'steps').map((entry) => entry.pattern);
 }
 export function isLifecycleRunActive(run: Pick<LifecycleRun, 'status'>): boolean {
   return run.status === 'accepted' || run.status === 'running' || run.status === 'cancelling';
@@ -280,9 +289,11 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
     case 'approval': {
       if (!actor.lifecycleControl) throw new EnvironmentError('PermissionDenied', 'Execution approval requires lifecycle control authorization');
-      if (input.approved && !state.executions.some((entry) => entry.hash === input.executionHash) && !state.browserOrigins.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review current content before approving');
+      const origin = state.browserOrigins.some((entry) => entry.hash === input.executionHash);
+      if (input.approved && !origin && !state.executions.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review current content before approving');
+      if (input.level && (!input.approved || !origin)) throw new EnvironmentError('InvalidConfiguration', 'Only an approved browser site has a level');
       state.approvals = state.approvals.filter((entry) => entry.scope !== input.scope || entry.executionHash !== input.executionHash);
-      if (input.approved) state.approvals.push({ scope: input.scope, executionHash: input.executionHash, approvedAt: now, approvedBy: actor.actorId });
+      if (input.approved) state.approvals.push({ scope: input.scope, executionHash: input.executionHash, approvedAt: now, approvedBy: actor.actorId, ...(origin ? { level: input.level ?? 'scripts' } : {}) });
       sharedChanged = input.scope === 'project';
       break;
     }

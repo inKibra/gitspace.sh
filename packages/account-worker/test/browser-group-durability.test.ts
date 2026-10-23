@@ -10,7 +10,7 @@ test('group can be revoked after runtime restart and its grant cannot be reused'
   const authority = { body: { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: 'AA==', issuedAt: new Date().toISOString(), expiresAt }, signature: 'AA==' };
   const groupId = crypto.randomUUID();
   const body = { scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'main', taskId: 'task', requestId: 'request', attemptId: 'first' }, issuedAt: new Date().toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' } };
-  const grant = { body: { projectId: 'project', workspaceId: 'workspace', placement, groupId, groupName: 'Workspace', source: 'headless', origins: ['example.com'], expiresAt }, signature: 'AA==', authority };
+  const grant = { body: { projectId: 'project', workspaceId: 'workspace', placement, groupId, groupName: 'Workspace', source: 'headless', stepsOnly: [], origins: ['example.com'], expiresAt }, signature: 'AA==', authority };
   const execute = RuntimeAccountBrowserAuthorizationSchema.parse({ body: { ...body, command: { type: 'execute', args: { action: 'tabs', source: 'headless' }, grant } }, signature: 'AA==', authority });
   await new AccountBrowserRuntime({ storage }).execute(execute, AbortSignal.timeout(5000));
   const restarted = new AccountBrowserRuntime({ storage });

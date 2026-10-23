@@ -125,7 +125,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     return view(spaceId, result.state);
   };
   const approveExecution = server.implement(approveWorkspaceEnvironmentExecutionContract).handler(async ({ input, errors }) => {
-    try { return ok(await approve(input.spaceId, { op: 'approval', scope: input.scope, executionHash: input.executionHash, approved: true })); }
+    try { return ok(await approve(input.spaceId, { op: 'approval', scope: input.scope, executionHash: input.executionHash, approved: true, ...(input.level ? { level: input.level } : {}) })); }
     catch (error) {
       const failure = environmentFailure(error);
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: 'approve lifecycle execution', message: error instanceof Error ? error.message : String(error) }));

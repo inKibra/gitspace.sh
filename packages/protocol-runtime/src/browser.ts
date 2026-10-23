@@ -15,8 +15,10 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('evaluate'), ...tab, expression: z.string().min(1).max(32768) }),
   z.strictObject({ action: z.literal('screenshot'), ...tab }),
   z.strictObject({ action: z.literal('close'), ...tab }),
-  /** A Playwright script, the body of an async function of `{ page, context, browser, state, snapshot }` (docs/APERTURE-DESIGN.md §6.1). */
-  z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536) }),
+  /** A Playwright script, the body of an async function of `{ page, context, browser, state, snapshot }` (docs/APERTURE-DESIGN.md §6.1).
+   * On your Chrome `sites` names the granted sites (exact patterns) the script may use; omitted, every granted site
+   * that allows scripts. The cloud browser ignores it. */
+  z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536), sites: z.array(BrowserOriginPatternSchema).max(32).optional() }),
 ]);
 export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSchema>;
 const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
@@ -29,8 +31,13 @@ export const RuntimeAccountBrowserPlacementSchema = z.discriminatedUnion('kind',
   z.strictObject({ kind: z.literal('account-relay'), accountId: id, pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), approvalId: z.string().uuid().optional() }),
 ]);
 export type RuntimeAccountBrowserPlacement = z.infer<typeof RuntimeAccountBrowserPlacementSchema>;
-export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema });
+/** A group grant. `stepsOnly`: the patterns of `origins` whose sites allow single steps only, never scripts; empty for
+ * the cloud browser. */
+export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema, stepsOnly: z.array(BrowserOriginPatternSchema) });
 export type RuntimeAccountBrowserGrant = z.infer<typeof RuntimeAccountBrowserGrantSchema>;
+/** A group grant as the relay, the browser session and the workspace store it: rows stored before site levels have no
+ * `stepsOnly`, because none of their sites was steps-only. */
+export const RuntimeAccountBrowserGroupRowSchema = RuntimeAccountBrowserGrantSchema.extend({ stepsOnly: RuntimeAccountBrowserGrantSchema.shape.stepsOnly.default([]) });
 export const RuntimeAccountBrowserPreparationSchema = RuntimeAccountBrowserGrantSchema.extend({ id, action: RuntimeBrowserPreparationSchema.shape.action });
 export const RuntimeBrowserApprovalCardSchema = z.union([RuntimeBrowserPreparationSchema, RuntimeAccountBrowserPreparationSchema]);
 export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCardSchema>;

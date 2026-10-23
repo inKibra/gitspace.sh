@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { BrowserOriginPatternSchema, EnvironmentBundleSchema, approvedBrowserOrigins, browserOriginHash, browserOriginMatches, emptyLifecycleState, executionHash, transitionLifecycle, type LifecycleMutation, type LifecycleState } from '../src/index.js';
+import { BrowserOriginPatternSchema, EnvironmentBundleSchema, approvedBrowserOrigins, browserOriginHash, browserOriginMatches, emptyLifecycleState, executionHash, stepsOnlyBrowserOrigins, transitionLifecycle, type LifecycleMutation, type LifecycleState } from '../src/index.js';
 
 const human = { actorId: 'owner-browser', machineId: 'browser', kind: 'browser' as const, lifecycleControl: true };
 const apply = (state: LifecycleState, input: LifecycleMutation, actor = human) => transitionLifecycle({ state, runs: [], actor, now: '2026-10-04T00:00:00.000Z' }, input).state;
@@ -30,6 +30,33 @@ describe('browser origin permissions', () => {
     approved.browserOrigins = approved.browserOrigins.filter(origin => origin.pattern !== 'example.com');
     expect(approvedBrowserOrigins(approved)).toEqual([]);
     expect(approved.executions).toEqual([]);
+  });
+
+  it('keeps each approved site at the level you set, single steps only when any approval says so', async () => {
+    const bank = await browserOriginHash('bank.example'), docs = await browserOriginHash('docs.example');
+    const state = emptyLifecycleState('project', 'workspace');
+    state.browserOrigins = [{ pattern: 'bank.example', hash: bank }, { pattern: 'docs.example', hash: docs }];
+    let approved = apply(apply(state, { op: 'approval', scope: 'project', executionHash: bank, approved: true, level: 'steps' }), { op: 'approval', scope: 'project', executionHash: docs, approved: true });
+    expect(approvedBrowserOrigins(approved)).toEqual(['bank.example', 'docs.example']);
+    expect(stepsOnlyBrowserOrigins(approved)).toEqual(['bank.example']);
+    // A workspace approval allowing scripts does not lift the project's single-steps level.
+    approved = apply(approved, { op: 'approval', scope: 'workspace', executionHash: bank, approved: true, level: 'scripts' });
+    expect(stepsOnlyBrowserOrigins(approved)).toEqual(['bank.example']);
+    approved = apply(approved, { op: 'approval', scope: 'project', executionHash: bank, approved: true, level: 'scripts' });
+    expect(stepsOnlyBrowserOrigins(approved)).toEqual([]);
+    approved = apply(approved, { op: 'approval', scope: 'project', executionHash: docs, approved: true, level: 'steps' });
+    expect(stepsOnlyBrowserOrigins(approved)).toEqual(['docs.example']);
+    approved = apply(approved, { op: 'approval', scope: 'project', executionHash: docs, approved: false });
+    expect(approvedBrowserOrigins(approved)).toEqual(['bank.example']);
+    expect(stepsOnlyBrowserOrigins(approved)).toEqual([]);
+  });
+
+  it('gives levels to browser sites only', async () => {
+    const script = await executionHash({ kind: 'script', command: 'echo hi' });
+    const state = emptyLifecycleState('project', 'workspace');
+    state.executions = [{ id: 'hello', label: 'Hello', kind: 'script', phase: 'workspace/materialize', command: 'echo hi', fileName: null, content: 'echo hi', hash: script }];
+    expect(() => apply(state, { op: 'approval', scope: 'workspace', executionHash: script, approved: true, level: 'steps' })).toThrow('Only an approved browser site has a level');
+    expect(apply(state, { op: 'approval', scope: 'workspace', executionHash: script, approved: true }).approvals.map(entry => entry.level)).toEqual([undefined]);
   });
 
   it('does not approve arbitrary bundle previews, yolo, or non-human mutations', async () => {

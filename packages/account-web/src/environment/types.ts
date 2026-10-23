@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { LifecycleRunPhase } from '@gitspace/protocol-environment';
+import type { BrowserSiteLevel, LifecycleRunPhase } from '@gitspace/protocol-environment';
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import type { MachineStatus } from '../workspace-status.js';
 
@@ -53,7 +53,8 @@ export interface EnvironmentViewModel {
   /** The machine whose results the Setup section shows and whose runs it starts. */
   setupMachineId: string | null;
   steps: readonly EnvironmentStep[];
-  browserOrigins: readonly { hash: string; pattern: string; approved: boolean }[];
+  /** Committed browser sites; `level` is null until a site is approved. */
+  browserOrigins: readonly { hash: string; pattern: string; level: BrowserSiteLevel | null }[];
   /** The routes `.gitspace/services.json` opens to signed callers: approved like a script, never run. */
   signedCallers: readonly { id: string; label: string; approved: boolean }[];
   /** Conflicted paths in the cloud working copy. */
@@ -78,6 +79,8 @@ export interface EnvironmentViewProps {
   onRunPhase(machineId: string, phase: LifecycleRunPhase, options?: { rerun?: boolean; interactive?: boolean; retire?: boolean }): void;
   onApprove(targetId: string): void;
   onRevoke(targetId: string): void;
+  /** Sets an approved browser site to scripts and single steps, or single steps only. */
+  onBrowserLevel(hash: string, level: BrowserSiteLevel): void;
   onOpenScript(scriptId: string): void;
   onOpenLog(runId: string, script: { id: string; label: string }): void;
   onCancelRun(runId: string): void;

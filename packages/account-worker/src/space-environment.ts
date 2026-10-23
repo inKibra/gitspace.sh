@@ -33,7 +33,7 @@ function sharedChange(before: SharedEnvironment, after: SharedEnvironment): Shar
   const values: Record<string, string | null> = {};
   for (const [name, value] of Object.entries(after.values)) if (before.values[name] !== value) values[name] = value;
   for (const name of Object.keys(before.values)) if (!(name in after.values)) values[name] = null;
-  const approvals = after.approvals.filter(approval => !before.approvals.some(entry => entry.executionHash === approval.executionHash && entry.approvedAt === approval.approvedAt && entry.approvedBy === approval.approvedBy));
+  const approvals = after.approvals.filter(approval => !before.approvals.some(entry => entry.executionHash === approval.executionHash && entry.approvedAt === approval.approvedAt && entry.approvedBy === approval.approvedBy && entry.level === approval.level));
   const kept = new Set(after.approvals.map(approval => approval.executionHash));
   const revoked = before.approvals.filter(approval => !kept.has(approval.executionHash)).map(approval => approval.executionHash);
   return Object.keys(values).length || approvals.length || revoked.length ? { values, approvals, revoked } : null;

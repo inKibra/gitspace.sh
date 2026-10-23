@@ -273,9 +273,15 @@ export function parseLifecycleBindingsJson(source: string, secrets: readonly str
   }
   return parsed.data;
 }
+/** What an approved browser site lets agents do on your Chrome: scripts and single steps, or single steps only (a bank,
+ * a production admin). */
+export const BrowserSiteLevelSchema = z.enum(['scripts', 'steps']);
+export type BrowserSiteLevel = z.infer<typeof BrowserSiteLevelSchema>;
+/** `level` is a browser site's, set on every browser-origin approval; approvals stored before levels have none and
+ * allow scripts. */
 export const LifecycleApprovalSchema = z.object({
   scope: z.enum(['project', 'workspace']), executionHash: executionHashSchema,
-  approvedBy: lifecycleIdSchema, approvedAt: z.string(),
+  approvedBy: lifecycleIdSchema, approvedAt: z.string(), level: BrowserSiteLevelSchema.optional(),
 }).strict();
 export const LifecycleIncidentSchema = z.object({
   id: lifecycleIdSchema, kind: z.enum(['domain', 'transport']), message: z.string(), occurredAt: z.string().datetime(),
@@ -318,7 +324,7 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('configure'), bundleJson: z.string().max(262_144), executions: z.array(LifecycleExecutionSchema).max(256).optional() }).strict(),
   z.object({ op: z.literal('profile'), profile: identifierSchema }).strict(),
   z.object({ op: z.literal('value'), scope: z.enum(['global', 'project', 'workspace']), name: environmentNameSchema, value: z.string().max(16_384).nullable() }).strict(),
-  z.object({ op: z.literal('approval'), scope: z.enum(['project', 'workspace']), executionHash: executionHashSchema, approved: z.boolean() }).strict(),
+  z.object({ op: z.literal('approval'), scope: z.enum(['project', 'workspace']), executionHash: executionHashSchema, approved: z.boolean(), level: BrowserSiteLevelSchema.optional() }).strict(),
   z.object({ op: z.literal('policy'), automatic: z.boolean() }).strict(),
   z.object({
     op: z.literal('claim'), runId: lifecycleIdSchema, phase: LifecycleRunPhaseSchema, profile: identifierSchema,

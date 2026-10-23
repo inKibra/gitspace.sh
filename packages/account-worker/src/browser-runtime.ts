@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeAccountBrowserGrantSchema, canonicalBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, canonicalBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { performBrowserAction, type BrowserSemanticTab } from '@gitspace/runtime-machine/browser-semantic';
 import { BrowserOutputStore } from '@gitspace/runtime-machine/browser-output';
 import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
@@ -57,7 +57,7 @@ export class AccountBrowserRuntime {
         for (const groupId of ids) {
           const stored = await this.options.storage.get(`browser.account.group:${groupId}`);
           if (!stored || await this.options.storage.get(`browser.account.revoked:${groupId}`)) continue;
-          const grant = RuntimeAccountBrowserGrantSchema.parse(stored);
+          const grant = RuntimeAccountBrowserGroupRowSchema.parse(stored);
           if (canonicalBrowserAuthorization(grant.placement) !== canonicalBrowserAuthorization(scope.placement)) continue;
           groups.push({ ...grant, state: Date.parse(grant.expiresAt) <= Date.now() ? 'expired' : [...this.tabs.values()].some(tab => tab.grant.groupId === groupId && tab.stale) ? 'fenced' : 'active' });
         }
@@ -65,7 +65,7 @@ export class AccountBrowserRuntime {
       }
       if (command.action !== 'revoke' || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
       const stored = await this.options.storage.get(`browser.account.group:${command.groupId}`);
-      const grant = stored ? RuntimeAccountBrowserGrantSchema.parse(stored) : this.groups.get(command.groupId);
+      const grant = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(command.groupId);
       if (!grant || grant.projectId !== scope.projectId || grant.workspaceId !== scope.workspaceId) throw new Error('Browser group outside workspace');
       await this.options.storage.put(`browser.account.revoked:${grant.groupId}`, true);
       for (const tab of [...this.tabs.values()]) if (tab.grant.groupId === grant.groupId) await this.closeTab(tab);
@@ -81,7 +81,7 @@ export class AccountBrowserRuntime {
     if (await this.options.storage.get(`browser.account.revoked:${grant.groupId}`)) throw new Error('Browser group revoked');
     if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Browser group expired');
     const stored = await this.options.storage.get(`browser.account.group:${grant.groupId}`);
-    const previous = stored ? RuntimeAccountBrowserGrantSchema.parse(stored) : this.groups.get(grant.groupId);
+    const previous = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(grant.groupId);
     // A renewal may move the expiry, the approved origins and the group's name; the workspace, browser and source make
     // it the same group, so anything else under the same id is refused.
     const same = (value: RuntimeAccountBrowserGrant) => canonicalBrowserAuthorization({ projectId: value.projectId, workspaceId: value.workspaceId, placement: value.placement, source: value.source });

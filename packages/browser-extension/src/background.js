@@ -1,8 +1,9 @@
 // The extension's service worker. Bundled by `src/build.ts`; the download prepends the account it belongs to as
 // `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
-import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, siteOf, tabWithinGrant } from './commands.ts';
+import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, siteOf, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
+import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 const allowed = relayCommandAllowed;
@@ -18,8 +19,11 @@ let managingIdentity = false;
 let identityOperations = Promise.resolve();
 const authorizations = new Map();
 /** Scripts (`browser.run`) by attempt id, apart from each group's single-step authorization: a single step during a
- * script does not end it. `targets` are the tabs the script opened or attached to. */
+ * script does not end it. `targets` are the tabs the script opened or attached to; `sites` the sites it may use
+ * (`named` when it named them); `commands` and `refused` count what it sent and what the extension refused. */
 const runs = new Map();
+/** How recent scripts ended, so a stopped script's later commands say why they are refused. */
+const ended = new Map();
 const encode64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 async function authorize(authorization) {
   const identity = await stored('identity'); if (!identity) throw new Error('Human pairing required');
@@ -39,13 +43,21 @@ async function authorize(authorization) {
   };
   tx.oncomplete = replay.resolve; tx.onerror = () => replay.reject(new Error('Authorization replay persistence failed')); tx.onabort = () => replay.reject(new Error('Replayed or fenced authorization, or replay capacity exhausted')); await replay.promise;
   for (const [id, channel] of channels) if (channel.grant.projectId === body.scope.projectId && channel.grant.workspaceId === body.scope.workspaceId && channel.grant.placement.pairingId === body.scope.placement.pairingId && channel.grant.placement.generation < body.scope.placement.generation) { authorizations.delete(channel.grant.groupId); await fence(id); }
-  for (const [attemptId, run] of runs) if (run.body.scope.projectId === body.scope.projectId && run.body.scope.workspaceId === body.scope.workspaceId && run.body.scope.placement.pairingId === body.scope.placement.pairingId && run.body.scope.placement.generation < body.scope.placement.generation) runs.delete(attemptId);
+  for (const [attemptId, run] of runs) if (run.body.scope.projectId === body.scope.projectId && run.body.scope.workspaceId === body.scope.workspaceId && run.body.scope.placement.pairingId === body.scope.placement.pairingId && run.body.scope.placement.generation < body.scope.placement.generation) await endRun(attemptId, 'disconnected');
   const command = body.command;
   const id = command.type === 'execute' ? command.grant.body.groupId : command.type === 'manage' ? 'management' : command.groupId;
   if (command.type === 'execute') {
     if (command.args.source !== 'relay') throw new Error('Relay source required');
     if (command.args.action === 'open' && command.args.url && !permitted(command.grant.body, command.args.url)) throw new Error('Destination outside workspace origins');
-    if (command.args.action === 'run') { runs.set(body.scope.attemptId, { body, targets: new Set() }); return {}; }
+    if (command.args.action === 'run') {
+      const grant = command.grant.body;
+      const sites = runSites(grant, command.args.sites);
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(command.args.script));
+      const scriptSha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      runs.set(body.scope.attemptId, { body, targets: new Set(), sites, named: command.args.sites !== undefined, scriptSha256, startedAt: new Date().toISOString(), commands: 0, refused: 0 });
+      await markRunning(grant.groupId);
+      return {};
+    }
   }
   authorizations.set(id, { body, used: new Set() });
   return {};
@@ -79,8 +91,8 @@ async function retireGroup(groupId, closeTabs = false) {
   // Keep the fence after identity reset, browser restart, and replacement group creation.
   await persist('retired-group:' + groupId, true);
   authorizations.delete(groupId);
-  for (const [attemptId, run] of runs) if (run.body.command.grant.body.groupId === groupId) runs.delete(attemptId);
   for (const [id, channel] of channels) if (channel.grant.groupId === groupId) await fence(id);
+  for (const [attemptId, run] of runs) if (run.body.command.grant.body.groupId === groupId) await endRun(attemptId, 'released');
   const db = await database; const keys = Promise.withResolvers();
   const request = db.transaction('state').objectStore('state').getAllKeys();
   request.onsuccess = () => keys.resolve(request.result); request.onerror = () => keys.reject(request.error);
@@ -148,8 +160,10 @@ async function member(grant, targetId) {
   const target = await targetInfo(targetId);
   const tab = await chrome.tabs.get(target.tabId);
   const scope = scoped(grant, record, tab.id);
-  if (!record || tab.groupId !== record.chromeGroupId || !tabWithinGrant(scope, { tabUrl: tab.url, pendingUrl: tab.pendingUrl, targetUrl: target.url })) throw new Error('Target outside workspace group or origins');
-  return { ...target, scope, addedBy: record.members?.[tab.id]?.by ?? 'you' };
+  const urls = { tabUrl: tab.url, pendingUrl: tab.pendingUrl, targetUrl: target.url };
+  if (!record || tab.groupId !== record.chromeGroupId || !tabWithinGrant(scope, urls)) throw new Error('Target outside workspace group or origins');
+  const entry = record.members?.[tab.id];
+  return { ...target, scope, urls, dragged: entry?.by === 'you' ? entry.site : null, addedBy: entry?.by ?? 'you' };
 }
 async function groupRecords() {
   const db = await database; const keys = Promise.withResolvers();
@@ -222,7 +236,7 @@ async function revoke(id) {
 async function fence(id) { send({ targetId: id, fenced: true }); await revoke(id); }
 async function check(id, expected = channels.get(id)) {
   if (!expected || channels.get(id) !== expected) throw new Error('Unknown or revoked target channel');
-  try { ({ scope: expected.scope, addedBy: expected.addedBy } = await member(expected.grant, expected.targetId)); }
+  try { ({ scope: expected.scope, urls: expected.urls, dragged: expected.dragged, addedBy: expected.addedBy } = await member(expected.grant, expected.targetId)); }
   catch (error) { if (channels.get(id) === expected) await fence(id); throw error; }
   if (channels.get(id) !== expected) throw new Error('Unknown or revoked target channel');
   return expected;
@@ -231,25 +245,66 @@ async function check(id, expected = channels.get(id)) {
 function live(run) { const now = Date.now(); return Date.parse(run.body.expiresAt) > now && Date.parse(run.body.dispatch.deadlineAt) > now; }
 async function activeRun(attemptId) {
   const run = runs.get(attemptId);
-  if (!run) throw new Error('Signed browser script required');
-  if (!live(run)) { await endRun(attemptId); throw new Error('Browser script deadline passed'); }
+  if (!run) throw new Error(ended.get(attemptId) === 'stopped' ? 'You stopped this script in Chrome' : 'Signed browser script required');
+  if (!live(run)) { await endRun(attemptId, 'deadline'); throw new Error('Browser script deadline passed'); }
   return run;
 }
-/** Ends a script. Its tabs stay in the group; the debugger leaves those no other script drives, which drops whatever
- * the script set on them (overrides, interception, bindings). A later single step attaches again. */
-async function endRun(attemptId) {
+/** Ends a script for `reason` and logs it. Its tabs stay in the group; the debugger leaves those no other script
+ * drives, which drops whatever the script set on them (overrides, interception, bindings), and unless the session
+ * released the script itself, the session hears that those tabs are gone. A later single step attaches again. */
+async function endRun(attemptId, reason) {
   const run = runs.get(attemptId);
   runs.delete(attemptId);
   if (!run) return;
-  for (const targetId of run.targets) if (![...runs.values()].some(other => other.targets.has(targetId))) await revoke(targetId);
+  ended.set(attemptId, reason);
+  if (ended.size > 100) ended.delete(ended.keys().next().value);
+  for (const targetId of run.targets) if (channels.has(targetId) && ![...runs.values()].some(other => other.targets.has(targetId))) await (reason === 'released' ? revoke(targetId) : fence(targetId));
+  await logRun(runLogEntry(run, reason, new Date().toISOString())).catch(() => {});
+  await markRunning(run.body.command.grant.body.groupId);
 }
-/** Events of a script's tab go out in order; one membership check covers the events that arrived before it began. */
+/** Adds a script that ended to the local run log (`run-log`), newest first. */
+async function logRun(entry) {
+  const db = await database; const done = Promise.withResolvers(); const tx = db.transaction('state', 'readwrite'); const store = tx.objectStore('state');
+  const request = store.get('run-log');
+  request.onsuccess = () => store.put([entry, ...(request.result || [])].slice(0, RUN_LOG_LIMIT), 'run-log');
+  tx.oncomplete = done.resolve; tx.onerror = () => done.reject(tx.error); tx.onabort = () => done.reject(tx.error);
+  return done.promise;
+}
+/** Marks a workspace group's title while a script runs on it and unmarks it after the last one. Only a group this
+ * extension records in this browser session is touched. */
+function markRunning(groupId) {
+  return serially(async () => {
+    // Only the title: a failure here never fails the script or the membership change after it.
+    try {
+      const { browserEpoch } = await chrome.storage.session.get('browserEpoch');
+      const found = (await groupRecords()).find(({ record }) => record.groupId === groupId && record.browserEpoch === browserEpoch);
+      if (!found) return;
+      const group = await chrome.tabGroups.get(found.record.chromeGroupId);
+      const current = group.title ?? '';
+      const title = groupTitle(current, [...runs.values()].some(run => run.body.command.grant.body.groupId === groupId));
+      if (title !== current) await chrome.tabGroups.update(group.id, { title });
+    } catch {}
+  });
+}
+/** A tab as one script sees it: the script's sites, and the site you dragged the tab in on when the script named none. */
+function runTab(run, tab) {
+  return { grant: { origins: tab.dragged && !run.named ? [...run.sites, tab.dragged] : run.sites }, stepsOnly: run.body.command.grant.body.stepsOnly, urls: tab.urls };
+}
+/** Events of a script's tab go out in order; one membership check covers the events that arrived before it began.
+ * While the tab is off the script's sites, or on one that allows single steps only, its events stay in your Chrome. */
 function forward(id, lease, event) {
   if (lease.forwarding) { lease.forwarding.push(event); return; }
   const pending = [event];
   lease.forwarding = pending;
   void (async () => {
-    try { while (pending.length) { const count = pending.length; await check(id, lease); for (const item of pending.splice(0, count)) send(item); } }
+    try {
+      while (pending.length) {
+        const count = pending.length;
+        await check(id, lease);
+        const shown = ![...runs.values()].some(run => run.targets.has(lease.targetId) && runTabRefusal(runTab(run, lease)));
+        for (const item of pending.splice(0, count)) if (shown) send(item);
+      }
+    }
     catch {}
     finally { if (lease.forwarding === pending) delete lease.forwarding; }
   })();
@@ -372,10 +427,17 @@ async function navigate(lease, params) {
     if (lease.cancelNavigation === cancel) delete lease.cancelNavigation;
   }
 }
-async function groupTabs(grant) {
+/** The tabs of a workspace group; a script (`run`) sees only those on its sites. */
+async function groupTabs(grant, run) {
   const { record } = await groupRecord(grant, true); if (!record) return [];
   const result = [];
-  for (const target of await targets()) { try { await member(grant, target.id); result.push({targetId:target.id, title:(target.title || '').slice(0,500), url:target.url, addedBy:record.members?.[target.tabId]?.by ?? 'you'}); } catch {} }
+  for (const target of await targets()) {
+    try {
+      const tab = await member(grant, target.id);
+      if (run && runTabRefusal(runTab(run, tab))) continue;
+      result.push({targetId:target.id, title:(target.title || '').slice(0,500), url:target.url, addedBy:tab.addedBy});
+    } catch {}
+  }
   return result;
 }
 /** Opens a background tab in the workspace group, recorded as the agent's. */
@@ -387,7 +449,7 @@ async function createAgentTab(grant, url) {
   let targetId;
   try {
     const chromeGroupId = await chrome.tabs.group({tabIds:[tab.id], ...(record ? {groupId:record.chromeGroupId} : {})});
-    await chrome.tabGroups.update(chromeGroupId, {title:grant.groupName, color:groupColor(grant.workspaceId), collapsed:false});
+    await chrome.tabGroups.update(chromeGroupId, {title:groupTitle(grant.groupName, [...runs.values()].some(run => run.body.command.grant.body.groupId === grant.groupId)), color:groupColor(grant.workspaceId), collapsed:false});
     await updateRecord(key, current => ({ groupId: grant.groupId, chromeGroupId, browserEpoch, members: { ...(current?.chromeGroupId === chromeGroupId ? current.members : {}), [tab.id]: { by: 'agent', site: null } } }));
     scheduleReport(grant.groupId);
     const deadline = performance.now()+10000;
@@ -424,10 +486,14 @@ async function runCommand(message) {
   try {
     await previous;
     const run = await activeRun(attemptId);
-    lease = await check(targetId);
-    if (lease.grant.groupId !== run.body.command.grant.body.groupId || !run.targets.has(targetId)) throw new Error('Tab not opened by this script');
-    const verdict = relayRunCommand(method, params, { grant: lease.scope, targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy });
-    if ('refused' in verdict) throw new Error(verdict.refused);
+    run.commands++;
+    let verdict;
+    try {
+      lease = await check(targetId);
+      if (lease.grant.groupId !== run.body.command.grant.body.groupId || !run.targets.has(targetId)) throw new Error('Tab not opened by this script');
+      verdict = relayRunCommand(method, params, { ...runTab(run, lease), targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy });
+      if ('refused' in verdict) throw new Error(verdict.refused);
+    } catch (error) { run.refused++; throw error; }
     lastUsed.set(lease.grant.groupId, Date.now());
     if ('noop' in verdict) return {};
     if (method === 'Target.closeTarget' || method === 'Page.close') { await closeTab(lease); return method === 'Page.close' ? {} : { success: true }; }
@@ -449,9 +515,10 @@ async function execute(message) {
   }
   if (message.operation === 'revoke') { await retireGroup(message.groupId, true); return {}; }
   if (message.operation === 'tabs' && message.attemptId !== undefined) {
-    const grant = (await activeRun(message.attemptId)).body.command.grant.body;
+    const run = await activeRun(message.attemptId);
+    const grant = run.body.command.grant.body;
     if (grant.groupId !== message.groupId) throw new Error('Script workspace group mismatch');
-    return groupTabs(grant);
+    return groupTabs(grant, run);
   }
   if (message.operation === 'tabs') {
     const authorization = authorizations.get(message.groupId);
@@ -465,8 +532,18 @@ async function execute(message) {
     if (message.targetId && message.url) throw new Error('Open an existing tab or a destination, not both');
     const grant = message.grant.body;
     await groupRecord(grant, true);
+    run.commands++;
+    try {
+      const refusal = message.targetId ? runTabRefusal(runTab(run, await member(grant, message.targetId))) : runDestinationRefusal({ grant: { origins: run.sites }, stepsOnly: grant.stepsOnly }, message.url || 'about:blank');
+      if (refusal) throw new Error(refusal);
+    } catch (error) { run.refused++; throw error; }
     const targetId = message.targetId || await createAgentTab(grant, message.url || 'about:blank');
     const channel = await attach(grant, targetId);
+    // Chrome does not draw a tab behind yours, and under the script's focus emulation its animation frames then come
+    // about once a second, so each Playwright action waited 1–2 s for its element to hold still. A screencast keeps
+    // the tab painting in the background without showing it; its frames are never acknowledged, so only the first
+    // few reach the extension, and it ends when the debugger leaves the tab.
+    if (!channel.painting) { channel.painting = true; await chrome.debugger.sendCommand(channel.source, 'Page.startScreencast', { format: 'jpeg', quality: 1, maxWidth: 1, maxHeight: 1 }); }
     run.targets.add(targetId);
     lastUsed.set(grant.groupId, Date.now());
     return { targetId, sessionId: channel.sessionId };
@@ -487,7 +564,7 @@ async function execute(message) {
     lastUsed.set(grant.groupId, Date.now());
     return {targetId,sessionId:channel.sessionId};
   }
-  if (message.operation === 'release') { await endRun(message.attemptId); return {}; }
+  if (message.operation === 'release') { await endRun(message.attemptId, 'released'); return {}; }
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
   // Before any await: the script's commands reach its tab in the order they arrived.
   if (message.attemptId !== undefined) return runCommand(message);
@@ -547,7 +624,7 @@ chrome.tabs.onRemoved.addListener(tabId => { void leave(tabId).catch(() => {}); 
 chrome.tabGroups.onRemoved.addListener(group => { void serially(async () => {
   for (const { key, record } of await groupRecords()) if (record.chromeGroupId === group.id) { await persist(key, null); scheduleReport(record.groupId); }
 }).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } }).catch(() => { socket?.close(); }); });
-async function reset() { authorizations.clear(); runs.clear(); await Promise.all([...channels.keys()].map(revoke)); }
+async function reset() { authorizations.clear(); await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'disconnected'))); await Promise.all([...channels.keys()].map(revoke)); }
 async function connect() {
   if (managingIdentity) return;
   const generation = identityGeneration;
@@ -630,7 +707,15 @@ async function connect() {
   };
   connection.onerror = () => connection.close();
 }
-chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!message.pair && message.resetIdentity !== true && message.identityStatus !== true) || sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return; identityOperations = identityOperations.catch(() => {}).then(async () => {
+/** The popup's scripts view: how many scripts run, the latest of the run log, and Stop scripts, which ends every
+ * script now as a release does; their sessions hear that their tabs are gone and see their commands refused. */
+async function scripts(stop) {
+  if (stop) await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'stopped')));
+  return { running: [...runs.values()].filter(live).length, log: ((await stored('run-log')) || []).slice(0, 10) };
+}
+chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!message.pair && message.resetIdentity !== true && message.identityStatus !== true && message.stopRuns !== true && message.runStatus !== true) || sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
+if (message.stopRuns === true || message.runStatus === true) { void scripts(message.stopRuns === true).then(respond, error => respond({ error: error.message })); return true; }
+identityOperations = identityOperations.catch(() => {}).then(async () => {
   if (message.identityStatus === true) {
     const identity = await stored('identity');
     const digest = identity ? await crypto.subtle.digest('SHA-256', Uint8Array.from(atob(identity.publicKey), c => c.charCodeAt(0))) : undefined;
@@ -662,5 +747,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!messa
   } finally { managingIdentity = false; await connect(); }
 }).catch(error => respond({ error: error.message })); return true; });
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId).catch(() => {}); void collapseIdle().catch(() => {}); void connect(); });
+chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId, 'deadline').catch(() => {}); void collapseIdle().catch(() => {}); void connect(); });
+// A group marked while scripts ran before this worker started has none running now.
+void groupRecords().then(records => { for (const { record } of records) void markRunning(record.groupId); }).catch(() => {});
 connect();

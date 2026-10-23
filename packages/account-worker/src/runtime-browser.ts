@@ -64,7 +64,7 @@ export async function retireWorkspaceBrowsers(storage: { list(options: { prefix:
   for (const key of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).keys()) await storage.delete(key);
   await relay.browserRelayRetireWorkspace(identity.projectId, identity.workspaceId);
 }
-export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedOrigins(): Promise<string[]>; groupName(): Promise<string> };
+export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ origins: string[]; stepsOnly: string[] }>; groupName(): Promise<string> };
 export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
@@ -110,16 +110,22 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const conversation = await options.runtime().browserConversation(input.conversationId);
     const args = RuntimeBrowserArgumentsSchema.parse(input.args);
     if (args.source === 'relay' && !conversation.root) throw new Error('Logged-in Chrome relay is main-agent-only. Subagents must use source:"headless".');
-    const origins = args.source === 'relay' ? [...new Set(await options.approvedOrigins())].sort() : [];
+    const approved = args.source === 'relay' ? await options.approvedSites() : { origins: [], stepsOnly: [] };
+    const sites = { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() };
     if (args.source === 'relay') {
       const url = args.action === 'navigate' || args.action === 'open' ? args.url : undefined;
-      if (!origins.length || url && !origins.some(pattern => browserOriginMatches(pattern, new URL(url).hostname))) throw new Error('Browser origin is not approved. Propose adding the required hostname to browser.origins in .gitspace/bundle.json, commit the environment definition, and ask the user to approve that origin in Environment. Yolo never approves environment changes.');
+      if (!sites.origins.length || url && !sites.origins.some(pattern => browserOriginMatches(pattern, new URL(url).hostname))) throw new Error('Browser origin is not approved. Propose adding the required hostname to browser.origins in .gitspace/bundle.json, commit the environment definition, and ask the user to approve that origin in Environment. Yolo never approves environment changes.');
+      // A script's sites are checked before anything is signed; your Chrome checks them again.
+      for (const site of args.action === 'run' ? args.sites ?? [] : []) {
+        if (!sites.origins.includes(site)) throw new Error(`${site} is not an approved site of this workspace. Name sites exactly as approved: ${sites.origins.join(', ')}.`);
+        if (sites.stepsOnly.includes(site)) throw new Error(`${site} allows single steps only, not scripts. Use single browser steps on it.`);
+      }
     }
-    return { conversation, args, origins };
+    return { conversation, args, sites };
   }
   async function prepare(input: Input) {
-    const { args, origins } = await context(input);
-    if (accountPlacement(args)) return account.prepare(input, args, origins);
+    const { args, sites } = await context(input), origins = sites.origins;
+    if (accountPlacement(args)) return account.prepare(input, args, sites);
     const fingerprint = canonicalBrowserAuthorization({ ...input, signal: undefined, args });
     const key = `runtime.browser.prepare:${input.attemptId}`;
     const prior = await storage.get(key);
@@ -159,8 +165,8 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     return saved.card;
   }
   async function execute(input: Input): Promise<RuntimeToolResult> {
-    const { args, origins } = await context(input);
-    if (accountPlacement(args)) return account.execute(input, args, origins);
+    const { args, sites } = await context(input), origins = sites.origins;
+    if (accountPlacement(args)) return account.execute(input, args, sites);
     const saved = savedPreparation.parse(await storage.get(`runtime.browser.prepare:${input.attemptId}`));
     if (saved.fingerprint !== canonicalBrowserAuthorization({ ...input, signal: undefined, args })) throw new Error('Browser dispatch differs from preparation');
     const card = saved.card;

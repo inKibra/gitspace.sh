@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
+import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState, stepsOnlyBrowserOrigins, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
 import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
@@ -239,7 +239,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
     selectExecution: (args, candidates) => selections.cache(args, candidates),
-    approvedOrigins: async () => approvedBrowserOrigins(await options.environment.refreshBrowserOrigins(identity)),
+    approvedSites: async () => {
+      const state = await options.environment.refreshBrowserOrigins(identity);
+      return { origins: approvedBrowserOrigins(state), stepsOnly: stepsOnlyBrowserOrigins(state) };
+    },
     groupName: async () => {
       const project = await authority().getProject();
       if (!project) throw new Error('Browser workspace project is unavailable');

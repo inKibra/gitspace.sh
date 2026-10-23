@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { emptyLifecycleState, executionHash } from '@gitspace/protocol-environment';
+import { browserOriginHash, emptyLifecycleState, executionHash } from '@gitspace/protocol-environment';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { WorkspaceEnvironmentView } from '@gitspace/protocol/rpc-contract';
 import { LiveEnvironment } from './LiveEnvironment.js';
@@ -164,6 +164,24 @@ it('asks for approval of the routes services.json opens to signed callers, and r
   expect(step('Signed callers').textContent).not.toContain('Needs approval');
   await click('Revoke', step('Signed callers'));
   expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
+});
+
+it('approves a browser site for single steps only, and changes the level of every approval of it', async () => {
+  const hash = await browserOriginHash('bank.example');
+  const unapproved = environment();
+  reads.set('environment', { ...unapproved, lifecycle: { ...unapproved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }] } });
+  await render(snapshot([{ id: 'darktop' }]));
+  await click('Review & approve', step('Browser access'));
+  await click('Approve single steps only');
+  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'steps' });
+  const approved = environment();
+  reads.set('environment', { ...approved, lifecycle: { ...approved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }], approvals: [...approved.lifecycle.approvals, { scope: 'project', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'steps' }, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'scripts' }] } });
+  await render(snapshot([{ id: 'darktop' }]));
+  const level = step('Browser access').querySelector<HTMLSelectElement>('select[aria-label="Level for bank.example"]')!;
+  expect(level.value).toBe('steps');
+  rpc.approve.mockClear();
+  await act(async () => { level.value = 'scripts'; level.dispatchEvent(new Event('change', { bubbles: true })); });
+  expect(rpc.approve.mock.calls).toEqual([[{ spaceId: 'workspace', scope: 'project', executionHash: hash, level: 'scripts' }], [{ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'scripts' }]]);
 });
 
 it('lists secrets and values by name and never renders a value', async () => {

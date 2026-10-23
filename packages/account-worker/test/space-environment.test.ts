@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
-import { EnvironmentError, approvedBrowserOrigins, browserOriginHash, type LifecycleActor, type LifecycleMutation, type LifecycleState } from '@gitspace/protocol-environment';
+import { EnvironmentError, approvedBrowserOrigins, browserOriginHash, stepsOnlyBrowserOrigins, type LifecycleActor, type LifecycleMutation, type LifecycleState } from '@gitspace/protocol-environment';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { SpaceEnvironmentStore } from '../src/space-environment.js';
 import { LiveChanges } from '../src/live-changes.js';
@@ -114,6 +114,21 @@ describe('workspace environment', () => {
     expect(approvedBrowserOrigins(await p.get('future'))).toEqual(['example.com', 'branch.example.com']);
     await p.mutate('project', { op: 'approval', scope: 'project', executionHash: shared.hash, approved: false }, human);
     expect(approvedBrowserOrigins(await p.get('future'))).toEqual(['branch.example.com']);
+  });
+
+  it('stores a site’s level with its approval and shares a project level with every workspace', async () => {
+    const p = await project();
+    const bank = { pattern: 'bank.example', hash: await browserOriginHash('bank.example') };
+    await p.setOrigins('project', [bank]);
+    await p.setOrigins('workspace', [bank]);
+    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: bank.hash, approved: true, level: 'steps' }, human);
+    expect(stepsOnlyBrowserOrigins(await p.get('workspace'))).toEqual(['bank.example']);
+    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: bank.hash, approved: true, level: 'scripts' }, human);
+    expect(approvedBrowserOrigins(await p.get('workspace'))).toEqual(['bank.example']);
+    expect(stepsOnlyBrowserOrigins(await p.get('workspace'))).toEqual([]);
+    await p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: bank.hash, approved: true, level: 'steps' }, human);
+    expect(stepsOnlyBrowserOrigins(await p.get('workspace'))).toEqual(['bank.example']);
+    expect(stepsOnlyBrowserOrigins(await p.get('project'))).toEqual([]);
   });
 
   it('requires new workspace approval after removing and re-adding an origin even with automatic policy', async () => {
