@@ -94,8 +94,8 @@ export class AccountBrowserRuntime {
       }
       return json(await Promise.all([...this.tabs.values()].filter(tab => tab.grant.groupId === grant.groupId && !tab.stale).map(async tab => z.object({ targetInfo: z.unknown() }).parse(await tab.channel.send('Target.getTargetInfo', { targetId: tab.targetId })).targetInfo)));
     }
-    // Scripts never reach the tool runtime: the cloud browser's session object runs them, and your Chrome refuses them.
-    if (args.action === 'run') throw new Error('Browser scripts run in the cloud browser session');
+    // Scripts never reach the tool runtime: the workspace's browser session object runs them, on either browser.
+    if (args.action === 'run') throw new Error('Browser scripts run in the workspace’s browser session');
     let tab = args.targetId ? this.tabs.get(args.targetId) : undefined;
     if (tab && (tab.grant.groupId !== grant.groupId || tab.stale)) throw new Error('Browser target stale or outside group');
     if (tab) tab.grant = grant;

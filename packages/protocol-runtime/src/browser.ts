@@ -81,8 +81,11 @@ export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserP
 /**
  * The Chrome extension's protocol (docs/APERTURE-DESIGN.md §12a), independent of release ids. A release accepts
  * extensions at this protocol and the one before; an extension from before protocols were reported counts as 0.
+ * Protocol 2 adds scripts (`browser.run`) on your Chrome; protocol 1 extensions keep single steps.
  */
-export const BROWSER_EXTENSION_PROTOCOL = 1;
+export const BROWSER_EXTENSION_PROTOCOL = 2;
+/** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
+export const BROWSER_RUN_LIMIT_MS = 120_000;
 /** Whether a release at protocol `current` refuses an extension at `protocol` as too old. */
 export function browserExtensionUpdateRequired(protocol: number, current = BROWSER_EXTENSION_PROTOCOL): boolean {
   return protocol < current - 1;

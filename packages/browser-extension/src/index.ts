@@ -11,6 +11,6 @@ export function extensionFiles(accountUrl: string): Record<string, string> {
     'background.js': `const GITSPACE_ACCOUNT_URL = ${JSON.stringify(accountUrl)};\n${BACKGROUND_SOURCE}`,
     'popup.js': POPUP_SOURCE,
     'popup.html': POPUP_HTML,
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.1.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(accountUrl).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html' } }),
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.2.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(accountUrl).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html' } }),
   };
 }

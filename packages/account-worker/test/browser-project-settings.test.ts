@@ -24,7 +24,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       const { serverNonce } = z.object({ serverNonce: z.string() }).parse(await challenge), identity = await keys(), clientNonce = 'b'.repeat(64);
       const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${serverNonce}:${clientNonce}`))));
       const paired = frame(socket); socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code: pairing.code })); await paired;
-      const readyFrame = frame(socket); socket.send(JSON.stringify({ hello: true, Browser: name, ...hello })); const ready = await readyFrame;
+      const readyFrame = frame(socket); socket.send(JSON.stringify({ hello: true, Browser: name, protocol: BROWSER_EXTENSION_PROTOCOL, ...hello })); const ready = await readyFrame;
       const status = (await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId);
       if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
       await relay.confirm(pairing.pairingId, status.pairedKeyFingerprint);
@@ -42,7 +42,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
         const { serverNonce } = z.object({ serverNonce: z.string() }).parse(await challenge);
         const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${serverNonce}:${clientNonce}`))));
         const paired = frame(browser.socket); browser.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof })); await paired;
-        const ready = frame(browser.socket); browser.socket.send(JSON.stringify({ hello: true, Browser: name })); await ready;
+        const ready = frame(browser.socket); browser.socket.send(JSON.stringify({ hello: true, Browser: name, protocol: BROWSER_EXTENSION_PROTOCOL })); await ready;
         listen(browser.socket);
       }, pauseAuthorization() { const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>(); paused = { reached: () => reached.resolve(), resume: resume.promise }; return { reached: reached.promise, release: () => resume.resolve() }; } };
       function listen(active: WebSocket) { active.addEventListener('message', async event => {
@@ -188,12 +188,16 @@ test('offline project removal survives relay restart and closes groups on hello'
   await expect(recovered.execute(value)).rejects.toThrow(/approv|revoked/i);
 }));
 
-test('the relay records the extension version and protocol each browser reports and answers with its own protocol', () => fixture(async (relay, chrome) => {
-  const legacy = await chrome('Chrome/129');
+test('the relay records the extension version and protocol each browser reports, answers with its own, and refuses one too old', () => fixture(async (relay, chrome) => {
+  const unversioned = await chrome('Chrome/128', { protocol: undefined });
+  const previous = await chrome('Chrome/129', { protocol: BROWSER_EXTENSION_PROTOCOL - 1 });
   const current = await chrome('Chrome/130', { protocol: BROWSER_EXTENSION_PROTOCOL, extension: '5.1.0' });
+  expect(unversioned.ready).toEqual({ updateRequired: { protocol: 0, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } });
+  expect(previous.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL });
   expect(current.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL });
   const extensions = Object.fromEntries((await relay.status()).pairings.map(pairing => [pairing.pairingId, pairing.extension]));
-  expect(extensions[legacy.pairingId]).toEqual({ version: null, protocol: 0, updateRequired: false });
+  expect(extensions[unversioned.pairingId]).toEqual({ version: null, protocol: 0, updateRequired: true });
+  expect(extensions[previous.pairingId]).toEqual({ version: null, protocol: BROWSER_EXTENSION_PROTOCOL - 1, updateRequired: false });
   expect(extensions[current.pairingId]).toEqual({ version: '5.1.0', protocol: BROWSER_EXTENSION_PROTOCOL, updateRequired: false });
 }));
 

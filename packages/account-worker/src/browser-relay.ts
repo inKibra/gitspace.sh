@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
-import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGrantSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
+import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
+import { RelayBrowser } from './relay-browser.js';
 import { extensionFiles } from '@gitspace/browser-extension';
 import { zipSync, strToU8 } from 'fflate';
 
@@ -24,6 +26,13 @@ const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional
 /** Where a workspace's groups are kept for its `gitspace.browsers` document. */
 export type BrowserWorkspaces = { getByName(name: string): { browserGroupReported(identity: { projectId: string; workspaceId: string }, group: RuntimeBrowsersDocumentGroup): Promise<void> } };
 type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
+/** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
+ * once the script connects. */
+type ScriptRun = { authorization: RuntimeAccountBrowserAuthorization; grant: RuntimeAccountBrowserSignedGrant; pairingId: string; attemptId: string; deadline: number; connection: Connection; browser?: RelayBrowser; socket?: WebSocket };
+/** The first extension protocol that runs scripts. */
+const SCRIPT_PROTOCOL = 2;
+/** Where a script's CDP connection reaches the relay object, from the browser session's sandbox binding only. */
+export const BROWSER_SCRIPT_PATH = '/browser-relay/script/';
 /** Every Chrome extension socket. Its attachment holds the socket's whole pairing state, so the relay hibernates between frames. */
 const BROWSER_SOCKET_TAG = 'browser';
 /** An admitted socket must finish pairing, through the extension's hello, within this long. */
@@ -66,6 +75,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   private readonly connections = new Map<string, Connection>();
   /** Sockets whose single pairing proof is being verified. */
   private readonly verifying = new WeakSet<WebSocket>();
+  /** Scripts running on a Chrome, by token: each lives in memory until its run ends, its deadline passes or its Chrome
+   * disconnects. */
+  private readonly scripts = new Map<string, ScriptRun>();
   private readonly runtime: AccountBrowserRuntime;
   constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces }) { this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this }); }
   /** Whether the host's socket is a Chrome extension socket. */
@@ -384,6 +396,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const connection = this.connections.get(pairingId); if (!connection) return; this.connections.delete(pairingId);
     for (const pending of connection.pending.values()) { pending.cancelTimer(); pending.reject(new Error('Browser extension disconnected; effect outcome uncertain')); }
     for (const listeners of connection.listeners.values()) for (const listener of listeners) listener({ method: 'disconnected' });
+    for (const [token, run] of this.scripts) if (run.connection === connection) this.dropScript(token, run, 1011, 'Chrome disconnected');
   }
   private request(pairingId: string, command: Record<string, unknown>) {
     const connection = this.connection(pairingId);
@@ -424,6 +437,84 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const registered = listeners;
     const channel: BrowserChannel = { send: async (method, params = {}, sessionId) => { if (Date.parse(command.grant.body.expiresAt) <= Date.now() || sessionId && sessionId !== opened.sessionId || this.connection(pairingId) !== connection) throw new Error('Browser channel expired or outside session'); await this.dispatchApproval(authorization); return this.request(pairingId, { operation: 'command', targetId: opened.targetId, sessionId: opened.sessionId, method, params }); }, subscribe: listener => { registered.add(listener); return () => { registered.delete(listener); }; }, close: async () => { registered.clear(); } };
     return { targetId: opened.targetId, channel };
+  }
+  /** Begins a script on a Chrome (`browser.run`, docs/APERTURE-DESIGN.md §6.1). The run's authority is checked as for
+   * a single step, the extension stores it by attempt, and the returned token admits the script's CDP connection
+   * (`BROWSER_SCRIPT_PATH`) until the run ends or its deadline passes. */
+  async scriptBegin(authorization: RuntimeAccountBrowserAuthorization): Promise<{ token: string }> {
+    const now = Date.now();
+    for (const [token, run] of this.scripts) if (run.deadline <= now) await this.endScript(token, run, 'Script run expired');
+    const { scope, command } = authorization.body, placement = scope.placement;
+    if (placement.kind !== 'account-relay') throw new Error('Account relay placement required');
+    if (command.type !== 'execute' || command.args.action !== 'run') throw new Error('Browser script authorization required');
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === placement.pairingId);
+    if (!pairing || pairing.state !== 'confirmed') throw new Error('Browser fingerprint confirmation required');
+    const body = await verifyRuntimeAccountBrowserAuthorization(authorization, pairing.trust);
+    if (placement.generation !== pairing.generation) throw new Error('Browser pairing changed');
+    await this.dispatchApproval(authorization);
+    const connection = this.connection(placement.pairingId);
+    if (!connection) throw new Error('Approved Chrome is unavailable: extension is not connected');
+    if ((pairing.extension?.protocol ?? 0) < SCRIPT_PROTOCOL) throw new Error(`Reload the GitSpace extension in Chrome to run scripts there (it needs protocol ${SCRIPT_PROTOCOL})`);
+    const claim = `browser.account.claim:${scope.projectId}:${scope.workspaceId}:${scope.attemptId}`;
+    if (await this.ctx.storage.get(claim)) throw new Error('Browser authorization already consumed');
+    await this.ctx.storage.put(claim, body.expiresAt);
+    await this.request(placement.pairingId, { operation: 'authorize', authorization });
+    const token = [...crypto.getRandomValues(new Uint8Array(32))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    this.scripts.set(token, { authorization, grant: command.grant, pairingId: placement.pairingId, attemptId: scope.attemptId, deadline: Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)), connection });
+    return { token };
+  }
+  /** Ends a script: its CDP connection closes and the extension refuses its attempt from now on. */
+  async scriptEnd(token: string): Promise<void> {
+    const run = this.scripts.get(token);
+    if (run) await this.endScript(token, run, 'Script ended');
+  }
+  /** A script's CDP connection, from its sandbox through `BrowserSessionCdp`: `BROWSER_SCRIPT_PATH<token>/<cursor
+   * label>`. Public requests never reach this path (index.ts forwards only `/ws` and `/tunnel/` to the relay object);
+   * the token admits one connection, only while its run is live. The script sees the workspace group as a browser,
+   * with the ghost cursor on its tabs. */
+  async scriptFetch(request: Request): Promise<Response> {
+    if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected a CDP WebSocket', { status: 426 });
+    const [token = '', label = ''] = new URL(request.url).pathname.slice(BROWSER_SCRIPT_PATH.length).split('/');
+    const run = this.liveScript(token);
+    if (!run || run.browser) return new Response('Unknown or ended script run', { status: 404 });
+    const browser = new RelayBrowser({
+      product: run.connection.product, grant: run.grant, attemptId: run.attemptId,
+      request: async message => {
+        if (this.liveScript(token) !== run) throw new Error('The script run ended');
+        await this.dispatchApproval(run.authorization);
+        return this.request(run.pairingId, message);
+      },
+      listen: (targetId, listener) => {
+        let listeners = run.connection.listeners.get(targetId);
+        if (!listeners) { listeners = new Set(); run.connection.listeners.set(targetId, listeners); }
+        const registered = listeners.add(listener);
+        return () => { registered.delete(listener); };
+      },
+    });
+    run.browser = browser;
+    const shim = await CdpBrowserShim.open(browser);
+    if (this.scripts.get(token) !== run) return new Response('Unknown or ended script run', { status: 404 });
+    const { socket, response } = serveCdpSocket(shim, { cursor: { label: decodeURIComponent(label).slice(0, 64) || 'Agent' } }, () => { void browser.close(); });
+    run.socket = socket;
+    return response;
+  }
+  /** A running script, or none once its run ended, its deadline passed or its Chrome reconnected. */
+  private liveScript(token: string): ScriptRun | undefined {
+    const run = this.scripts.get(token);
+    if (!run) return undefined;
+    if (run.deadline > Date.now() && this.connections.get(run.pairingId) === run.connection) return run;
+    this.ctx.waitUntil(this.endScript(token, run, 'Script run expired'));
+    return undefined;
+  }
+  private async endScript(token: string, run: ScriptRun, reason: string): Promise<void> {
+    this.dropScript(token, run, 1000, reason);
+    // The extension refuses the attempt from now on and lets the run's tabs go; they stay in the workspace group.
+    if (this.connections.get(run.pairingId) === run.connection) await this.request(run.pairingId, { operation: 'release', attemptId: run.attemptId }).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_script_release_failed', pairingId: run.pairingId, error: String(error) })));
+  }
+  private dropScript(token: string, run: ScriptRun, code: number, reason: string): void {
+    this.scripts.delete(token);
+    void run.browser?.close();
+    if (run.socket) closeOpenSocket(run.socket, code, reason);
   }
   private async retryRevocations(pairingId?: string) {
     const prefix = pairingId ? `browser.relay.revoke:${pairingId}:` : 'browser.relay.revoke:';

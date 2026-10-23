@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeAccountBrowserPreparationSchema, RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeAccountBrowserAuthorizationSchema, canonicalBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPlacement, type RuntimeBrowserAuthorityCertificate, type RuntimeBrowserArguments, type RuntimeAccountBrowserAuthorization, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { BROWSER_RUN_LIMIT_MS, RuntimeAccountBrowserPreparationSchema, RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeAccountBrowserAuthorizationSchema, canonicalBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPlacement, type RuntimeBrowserAuthorityCertificate, type RuntimeBrowserArguments, type RuntimeAccountBrowserAuthorization, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { ToolServices } from '@gitspace/runtime-core';
 import type { RuntimeBrowserAuthorityOptions } from './runtime-browser.js';
 
@@ -14,8 +14,7 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     return env.RELAY.getByName(env.RELAY_NAME).browserRelayPlacement(identity.projectId, args.pairingId);
   }
   async function prepare(input: Input, args: RuntimeBrowserArguments, origins: string[]) {
-    if (args.action === 'run' && args.source === 'relay') throw new Error('Scripts on your Chrome arrive with the next extension update; run this script in the cloud browser (source "headless").');
-    if (args.action === 'run' && args.on) throw new Error('Scripts run in the cloud browser; remove "on".');
+    if (args.action === 'run' && args.on) throw new Error('Scripts run in the cloud browser or your Chrome, never on a machine; remove "on".');
     const fingerprint = canonicalBrowserAuthorization({ ...input, signal: undefined, args });
     const key = `runtime.browser.prepare:${input.attemptId}`;
     const current = await placement(args);
@@ -48,7 +47,8 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const prior = await storage.get(grantKey);
     let grant = prior ? RuntimeAccountBrowserSignedGrantSchema.parse(prior) : undefined;
     if (!grant || canonicalBrowserAuthorization(grant.body) !== canonicalBrowserAuthorization(body)) { grant = await signRuntimeAccountBrowserGrant(body, signingKey.privateKey, signingKey.authority); await storage.put(grantKey, grant); }
-    const deadlineAt = new Date(Math.min(Date.parse(body.expiresAt), Date.now() + 60_000)).toISOString();
+    // A script's authority outlasts its run limit, so the run is stopped before its authority lapses.
+    const deadlineAt = new Date(Math.min(Date.parse(body.expiresAt), Date.now() + (args.action === 'run' ? BROWSER_RUN_LIMIT_MS + 30_000 : 60_000))).toISOString();
     const conversation = await options.runtime().browserConversation(input.conversationId);
     const dispatchKey = `runtime.browser.account.dispatch:${input.attemptId}`;
     const stored = await storage.get(dispatchKey);
@@ -57,8 +57,10 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     return dispatch(authorization);
   }
   async function dispatch(authorization: RuntimeAccountBrowserAuthorization) {
-    if (authorization.body.scope.placement.kind === 'cloud') {
-      if (!env.BROWSER_SESSION) throw new Error('Cloud browser unavailable');
+    const { scope, command } = authorization.body;
+    // Scripts run in the workspace's browser session, on either browser; other steps on your Chrome go to the relay.
+    if (scope.placement.kind === 'cloud' || command.type === 'execute' && command.args.action === 'run') {
+      if (!env.BROWSER_SESSION) throw new Error('Browser session unavailable');
       return env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).execute(authorization);
     }
     if (!env.RELAY) throw new Error('Account Chrome relay unavailable');

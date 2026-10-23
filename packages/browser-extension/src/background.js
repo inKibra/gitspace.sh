@@ -1,8 +1,7 @@
 // The extension's service worker. Bundled by `src/build.ts`; the download prepends the account it belongs to as
 // `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
-import { browserOriginMatches } from '@gitspace/protocol-environment/browser-origin';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
-import { relayCommandAllowed } from './commands.ts';
+import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
@@ -18,6 +17,9 @@ let identityGeneration = 0;
 let managingIdentity = false;
 let identityOperations = Promise.resolve();
 const authorizations = new Map();
+/** Scripts (`browser.run`) by attempt id, apart from each group's single-step authorization: a single step during a
+ * script does not end it. `targets` are the tabs the script opened or attached to. */
+const runs = new Map();
 const encode64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 async function authorize(authorization) {
   const identity = await stored('identity'); if (!identity) throw new Error('Human pairing required');
@@ -37,11 +39,13 @@ async function authorize(authorization) {
   };
   tx.oncomplete = replay.resolve; tx.onerror = () => replay.reject(new Error('Authorization replay persistence failed')); tx.onabort = () => replay.reject(new Error('Replayed or fenced authorization, or replay capacity exhausted')); await replay.promise;
   for (const [id, channel] of channels) if (channel.grant.projectId === body.scope.projectId && channel.grant.workspaceId === body.scope.workspaceId && channel.grant.placement.pairingId === body.scope.placement.pairingId && channel.grant.placement.generation < body.scope.placement.generation) { authorizations.delete(channel.grant.groupId); await fence(id); }
+  for (const [attemptId, run] of runs) if (run.body.scope.projectId === body.scope.projectId && run.body.scope.workspaceId === body.scope.workspaceId && run.body.scope.placement.pairingId === body.scope.placement.pairingId && run.body.scope.placement.generation < body.scope.placement.generation) runs.delete(attemptId);
   const command = body.command;
   const id = command.type === 'execute' ? command.grant.body.groupId : command.type === 'manage' ? 'management' : command.groupId;
   if (command.type === 'execute') {
     if (command.args.source !== 'relay') throw new Error('Relay source required');
     if (command.args.action === 'open' && command.args.url && !permitted(command.grant.body, command.args.url)) throw new Error('Destination outside workspace origins');
+    if (command.args.action === 'run') { runs.set(body.scope.attemptId, { body, targets: new Set() }); return {}; }
   }
   authorizations.set(id, { body, used: new Set() });
   return {};
@@ -53,10 +57,19 @@ let socket;
 const channels = new Map();
 const queues = new Map();
 const releases = new Map();
-function send(value) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); }
+/** The relay closes a connection whose frame is longer than this; a frame from it can be longer (a script's injected
+ * source), up to `RELAY_INBOUND_LIMIT`. */
+const RELAY_FRAME_LIMIT = 2_000_000;
+const RELAY_INBOUND_LIMIT = 4_000_000;
+/** A reply too long for the relay becomes that command's error, and such an event is dropped, so the connection lives. */
+function send(value) {
+  if (socket?.readyState !== WebSocket.OPEN) return;
+  const frame = JSON.stringify(value);
+  if (frame.length <= RELAY_FRAME_LIMIT) socket.send(frame);
+  else if (value.id !== undefined) socket.send(JSON.stringify({ id: value.id, error: { message: `Result too large for the relay (${frame.length} characters)` } }));
+}
 async function targets() { return (await chrome.debugger.getTargets()).filter(target => target.type === 'page'); }
 async function targetInfo(id) { const target = (await targets()).find(target => target.id === id); if (!target || !Number.isInteger(target.tabId)) throw new Error('Unknown exact tab target'); return target; }
-function permitted(grant, url) { try { const parsed = new URL(url); return url === 'about:blank' || (['http:', 'https:'].includes(parsed.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, parsed.hostname))); } catch { return false; } }
 const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'];
 /** A workspace keeps one colour wherever its group is recreated. */
 function groupColor(workspaceId) { let hash = 0; for (const character of workspaceId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0; return GROUP_COLORS[hash % GROUP_COLORS.length]; }
@@ -67,6 +80,7 @@ async function retireGroup(groupId, closeTabs = false) {
   // Keep the fence after identity reset, browser restart, and replacement group creation.
   await persist('retired-group:' + groupId, true);
   authorizations.delete(groupId);
+  for (const [attemptId, run] of runs) if (run.body.command.grant.body.groupId === groupId) runs.delete(attemptId);
   for (const [id, channel] of channels) if (channel.grant.groupId === groupId) await fence(id);
   const db = await database; const keys = Promise.withResolvers();
   const request = db.transaction('state').objectStore('state').getAllKeys();
@@ -119,8 +133,8 @@ async function member(grant, targetId) {
   const target = await targetInfo(targetId);
   const tab = await chrome.tabs.get(target.tabId);
   const scope = scoped(grant, record, tab.id);
-  if (!record || tab.groupId !== record.chromeGroupId || !permitted(scope, tab.url) || !permitted(scope, target.url)) throw new Error('Target outside workspace group or origins');
-  return { ...target, scope };
+  if (!record || tab.groupId !== record.chromeGroupId || !tabWithinGrant(scope, { tabUrl: tab.url, pendingUrl: tab.pendingUrl, targetUrl: target.url })) throw new Error('Target outside workspace group or origins');
+  return { ...target, scope, addedBy: record.members?.[tab.id]?.by ?? 'you' };
 }
 async function groupRecords() {
   const db = await database; const keys = Promise.withResolvers();
@@ -193,11 +207,40 @@ async function revoke(id) {
 async function fence(id) { send({ targetId: id, fenced: true }); await revoke(id); }
 async function check(id, expected = channels.get(id)) {
   if (!expected || channels.get(id) !== expected) throw new Error('Unknown or revoked target channel');
-  try { expected.scope = (await member(expected.grant, expected.targetId)).scope; }
+  try { ({ scope: expected.scope, addedBy: expected.addedBy } = await member(expected.grant, expected.targetId)); }
   catch (error) { if (channels.get(id) === expected) await fence(id); throw error; }
   if (channels.get(id) !== expected) throw new Error('Unknown or revoked target channel');
   return expected;
 }
+/** Whether a script is inside its signed deadline. */
+function live(run) { const now = Date.now(); return Date.parse(run.body.expiresAt) > now && Date.parse(run.body.dispatch.deadlineAt) > now; }
+async function activeRun(attemptId) {
+  const run = runs.get(attemptId);
+  if (!run) throw new Error('Signed browser script required');
+  if (!live(run)) { await endRun(attemptId); throw new Error('Browser script deadline passed'); }
+  return run;
+}
+/** Ends a script. Its tabs stay in the group; the debugger leaves those no other script drives, which drops whatever
+ * the script set on them (overrides, interception, bindings). A later single step attaches again. */
+async function endRun(attemptId) {
+  const run = runs.get(attemptId);
+  runs.delete(attemptId);
+  if (!run) return;
+  for (const targetId of run.targets) if (![...runs.values()].some(other => other.targets.has(targetId))) await revoke(targetId);
+}
+/** Events of a script's tab go out in order; one membership check covers the events that arrived before it began. */
+function forward(id, lease, event) {
+  if (lease.forwarding) { lease.forwarding.push(event); return; }
+  const pending = [event];
+  lease.forwarding = pending;
+  void (async () => {
+    try { while (pending.length) { const count = pending.length; await check(id, lease); for (const item of pending.splice(0, count)) send(item); } }
+    catch {}
+    finally { if (lease.forwarding === pending) delete lease.forwarding; }
+  })();
+}
+async function describeTarget(targetId) { const target = await targetInfo(targetId); return { targetInfo: { targetId: target.id, type: 'page', title: target.title, url: target.url, attached: true } }; }
+async function closeTab(lease) { const target = await member(lease.grant, lease.targetId); await chrome.tabs.remove(target.tabId); channels.delete(lease.targetId); }
 async function fixedCall(lease, declaration, args = [], objectId) {
   const params = { functionDeclaration: declaration, arguments: args.map(value => ({ value })), returnByValue: true, ...(objectId ? { objectId } : { executionContextId: await isolatedContext(lease) }) };
   const result = await chrome.debugger.sendCommand(lease.source, 'Runtime.callFunctionOn', params);
@@ -314,6 +357,74 @@ async function navigate(lease, params) {
     if (lease.cancelNavigation === cancel) delete lease.cancelNavigation;
   }
 }
+async function groupTabs(grant) {
+  const { record } = await groupRecord(grant, true); if (!record) return [];
+  const result = [];
+  for (const target of await targets()) { try { await member(grant, target.id); result.push({targetId:target.id, title:(target.title || '').slice(0,500), url:target.url, addedBy:record.members?.[target.tabId]?.by ?? 'you'}); } catch {} }
+  return result;
+}
+/** Opens a background tab in the workspace group, recorded as the agent's. */
+async function createAgentTab(grant, url) {
+  if (!permitted(grant, url)) throw new Error('An allowed destination is required');
+  const {key, record, browserEpoch} = await groupRecord(grant);
+  const tab = await chrome.tabs.create({ url, active: false });
+  agentTabs.add(tab.id);
+  let targetId;
+  try {
+    const chromeGroupId = await chrome.tabs.group({tabIds:[tab.id], ...(record ? {groupId:record.chromeGroupId} : {})});
+    await chrome.tabGroups.update(chromeGroupId, {title:grant.groupName, color:groupColor(grant.workspaceId), collapsed:false});
+    await updateRecord(key, current => ({ groupId: grant.groupId, chromeGroupId, browserEpoch, members: { ...(current?.chromeGroupId === chromeGroupId ? current.members : {}), [tab.id]: { by: 'agent', site: null } } }));
+    scheduleReport(grant.groupId);
+    const deadline = performance.now()+10000;
+    while (!targetId && performance.now()<deadline) { targetId = (await targets()).find(target => target.tabId === tab.id)?.id; if (!targetId) { const pause = Promise.withResolvers(); setTimeout(pause.resolve,25); await pause.promise; } }
+    if (!targetId) throw new Error('New tab target unavailable');
+  } catch(error) { await chrome.tabs.remove(tab.id).catch(() => {}); throw error; }
+  finally { agentTabs.delete(tab.id); }
+  return targetId;
+}
+/** The debugger channel of a tab in the group, attached on first use. */
+async function attach(grant, targetId) {
+  await member(grant, targetId);
+  await releases.get(targetId);
+  let channel = channels.get(targetId);
+  if (channel && channel.grant.groupId !== grant.groupId) { try { await check(targetId, channel); } catch {} await releases.get(targetId); channel = channels.get(targetId); }
+  if (channel && channel.grant.groupId !== grant.groupId) throw new Error('Target already bound to another workspace');
+  if (!channel) {
+    const source = {targetId}; await chrome.debugger.attach(source,'1.3');
+    channel = {grant,targetId,source,sessionId:crypto.randomUUID(),refs:new Set(),document:0}; channels.set(targetId,channel);
+  } else channel.grant = grant;
+  await check(targetId, channel);
+  return channel;
+}
+/** Script commands per tab: each waits only until the one before it reached Chrome. */
+const admissions = new Map();
+/** One command of a script on a tab it opened, checked with the run allowlist (`relayRunCommand`) between membership checks. */
+async function runCommand(message) {
+  const { targetId, attemptId, method, params = {}, sessionId } = message;
+  const previous = admissions.get(targetId);
+  const admitted = Promise.withResolvers();
+  admissions.set(targetId, admitted.promise);
+  let lease;
+  let effect;
+  try {
+    await previous;
+    const run = await activeRun(attemptId);
+    lease = await check(targetId);
+    if (lease.grant.groupId !== run.body.command.grant.body.groupId || !run.targets.has(targetId)) throw new Error('Tab not opened by this script');
+    const verdict = relayRunCommand(method, params, { grant: lease.scope, targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy });
+    if ('refused' in verdict) throw new Error(verdict.refused);
+    lastUsed.set(lease.grant.groupId, Date.now());
+    if ('noop' in verdict) return {};
+    if (method === 'Target.closeTarget' || method === 'Page.close') { await closeTab(lease); return method === 'Page.close' ? {} : { success: true }; }
+    effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
+  } finally {
+    admitted.resolve();
+    if (admissions.get(targetId) === admitted.promise) admissions.delete(targetId);
+  }
+  const result = await effect;
+  await check(targetId, lease);
+  return result;
+}
 async function execute(message) {
   if (message.operation === 'authorize') return authorize(message.authorization);
   if (message.operation === 'prepare') {
@@ -322,15 +433,28 @@ async function execute(message) {
     authorization.used.add('prepare'); return {};
   }
   if (message.operation === 'revoke') { await retireGroup(message.groupId, true); return {}; }
+  if (message.operation === 'tabs' && message.attemptId !== undefined) {
+    const grant = (await activeRun(message.attemptId)).body.command.grant.body;
+    if (grant.groupId !== message.groupId) throw new Error('Script workspace group mismatch');
+    return groupTabs(grant);
+  }
   if (message.operation === 'tabs') {
     const authorization = authorizations.get(message.groupId);
     if (!authorization || authorization.body.command.type !== 'execute' || authorization.body.command.args.action !== 'tabs' || Date.parse(authorization.body.expiresAt) <= Date.now() || Date.parse(authorization.body.dispatch.deadlineAt) <= Date.now() || authorization.used.has('tabs')) throw new Error('Signed group discovery required');
     authorization.used.add('tabs');
-    const grant = authorization.body.command.grant.body;
-    const { record } = await groupRecord(grant, true); if (!record) return [];
-    const result = [];
-    for (const target of await targets()) { try { await member(grant, target.id); result.push({targetId:target.id, title:(target.title || '').slice(0,500), url:target.url, addedBy:record.members?.[target.tabId]?.by ?? 'you'}); } catch {} }
-    return result;
+    return groupTabs(authorization.body.command.grant.body);
+  }
+  if (message.operation === 'open' && message.attemptId !== undefined) {
+    const run = await activeRun(message.attemptId);
+    if (JSON.stringify(run.body.command.grant) !== JSON.stringify(message.grant)) throw new Error('Signed target binding required');
+    if (message.targetId && message.url) throw new Error('Open an existing tab or a destination, not both');
+    const grant = message.grant.body;
+    await groupRecord(grant, true);
+    const targetId = message.targetId || await createAgentTab(grant, message.url || 'about:blank');
+    const channel = await attach(grant, targetId);
+    run.targets.add(targetId);
+    lastUsed.set(grant.groupId, Date.now());
+    return { targetId, sessionId: channel.sessionId };
   }
   if (message.operation === 'open') {
     const signed = message.grant;
@@ -341,39 +465,17 @@ async function execute(message) {
     const args = authorization.body.command.args;
     await groupRecord(grant, true);
     let targetId = args.targetId;
-    if (args.action === 'open' && !targetId) {
-      const url = args.url || 'about:blank';
-      if (!permitted(grant, url)) throw new Error('An allowed destination is required');
-      const {key, record, browserEpoch} = await groupRecord(grant);
-      const tab = await chrome.tabs.create({ url, active: false });
-      agentTabs.add(tab.id);
-      try {
-        const chromeGroupId = await chrome.tabs.group({tabIds:[tab.id], ...(record ? {groupId:record.chromeGroupId} : {})});
-        await chrome.tabGroups.update(chromeGroupId, {title:grant.groupName, color:groupColor(grant.workspaceId), collapsed:false});
-        await updateRecord(key, current => ({ groupId: grant.groupId, chromeGroupId, browserEpoch, members: { ...(current?.chromeGroupId === chromeGroupId ? current.members : {}), [tab.id]: { by: 'agent', site: null } } }));
-        scheduleReport(grant.groupId);
-        const deadline = performance.now()+10000;
-        while (!targetId && performance.now()<deadline) { targetId = (await targets()).find(target => target.tabId === tab.id)?.id; if (!targetId) { const pause = Promise.withResolvers(); setTimeout(pause.resolve,25); await pause.promise; } }
-        if (!targetId) throw new Error('New tab target unavailable');
-      } catch(error) { await chrome.tabs.remove(tab.id).catch(() => {}); throw error; }
-      finally { agentTabs.delete(tab.id); }
-    }
+    if (args.action === 'open' && !targetId) targetId = await createAgentTab(grant, args.url || 'about:blank');
     if (!targetId) throw new Error('An exact workspace target is required');
-    await member(grant, targetId);
-    await releases.get(targetId);
-    let channel = channels.get(targetId);
-    if (channel && channel.grant.groupId !== grant.groupId) { try { await check(targetId, channel); } catch {} await releases.get(targetId); channel = channels.get(targetId); }
-    if (channel && channel.grant.groupId !== grant.groupId) throw new Error('Target already bound to another workspace');
-    if (!channel) {
-      const source = {targetId}; await chrome.debugger.attach(source,'1.3');
-      channel = {grant,targetId,source,sessionId:crypto.randomUUID(),refs:new Set(),document:0}; channels.set(targetId,channel);
-    } else channel.grant = grant;
-    await check(targetId, channel);
+    const channel = await attach(grant, targetId);
     authorization.targetId = targetId;
     lastUsed.set(grant.groupId, Date.now());
     return {targetId,sessionId:channel.sessionId};
   }
+  if (message.operation === 'release') { await endRun(message.attemptId); return {}; }
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
+  // Before any await: the script's commands reach its tab in the order they arrived.
+  if (message.attemptId !== undefined) return runCommand(message);
   const lease = await check(message.targetId);
   const { method, params = {}, sessionId } = message;
   if (!allowed(lease.scope, lease.targetId, lease.sessionId, method, params, sessionId)) throw new Error('Command outside browser grant');
@@ -382,8 +484,8 @@ async function execute(message) {
   await check(message.targetId, lease);
   let result;
   if (method === 'Target.attachToTarget') result = { sessionId: lease.sessionId };
-  else if (method === 'Target.getTargetInfo') { const target = await targetInfo(lease.targetId); result = { targetInfo: { targetId: target.id, type: 'page', title: target.title, url: target.url, attached: true } }; }
-  else if (method === 'Target.closeTarget') { const target = await member(lease.grant,lease.targetId); await chrome.tabs.remove(target.tabId); channels.delete(message.targetId); return { success: true }; }
+  else if (method === 'Target.getTargetInfo') result = await describeTarget(lease.targetId);
+  else if (method === 'Target.closeTarget') { await closeTab(lease); return { success: true }; }
   else if (method === 'GitSpace.validateRef') {
     if (!Number.isSafeInteger(params.backendNodeId)) throw new Error('Invalid node');
     const resolved = await chrome.debugger.sendCommand(lease.source, 'DOM.resolveNode', { backendNodeId: params.backendNodeId, executionContextId: await isolatedContext(lease) });
@@ -410,8 +512,10 @@ async function execute(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.sessionId) return;
   for (const [id, lease] of channels) if (lease.targetId === source.targetId) {
-    if (!['Page.frameNavigated', 'Page.loadEventFired', 'DOM.documentUpdated'].includes(method)) return;
     if (method === 'DOM.documentUpdated' || (method === 'Page.frameNavigated' && !params.frame.parentId)) { lease.document++; lease.refs.clear(); }
+    // A script's tab reports every event of its own session, without network credentials.
+    if ([...runs.values()].some(run => run.targets.has(lease.targetId) && live(run))) { const forwarded = relayRunEvent(method, params); if (forwarded) forward(id, lease, { targetId: id, sessionId: lease.sessionId, method, params: forwarded }); return; }
+    if (!['Page.frameNavigated', 'Page.loadEventFired', 'DOM.documentUpdated'].includes(method)) return;
     void check(id, lease).then(() => send({ targetId: id, sessionId: lease.sessionId, method, params })).catch(() => {});
   }
 });
@@ -428,7 +532,7 @@ chrome.tabs.onRemoved.addListener(tabId => { void leave(tabId).catch(() => {}); 
 chrome.tabGroups.onRemoved.addListener(group => { void serially(async () => {
   for (const { key, record } of await groupRecords()) if (record.chromeGroupId === group.id) { await persist(key, null); scheduleReport(record.groupId); }
 }).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } }).catch(() => { socket?.close(); }); });
-async function reset() { authorizations.clear(); await Promise.all([...channels.keys()].map(revoke)); }
+async function reset() { authorizations.clear(); runs.clear(); await Promise.all([...channels.keys()].map(revoke)); }
 async function connect() {
   if (managingIdentity) return;
   const generation = identityGeneration;
@@ -452,7 +556,7 @@ async function connect() {
   connection.onmessage = async event => {
     let message;
     try {
-      if (event.data.length > 200000 || socket !== connection) throw new Error('Invalid connection');
+      if (event.data.length > RELAY_INBOUND_LIMIT || socket !== connection) throw new Error('Invalid connection');
       message = JSON.parse(event.data);
       if (!authenticated) {
         if (authenticating) throw new Error('Concurrent pairing message');
@@ -491,8 +595,11 @@ async function connect() {
     } catch { connection.close(); return; }
     if (message.operation === 'revoke') for (const channel of channels.values()) if (channel.grant.groupId === message.groupId) channel.cancelNavigation?.();
     const key = 'commands';
-    const operation = (queues.get(key) || Promise.resolve()).catch(() => {}).then(() => { if (socket !== connection || connection.readyState !== WebSocket.OPEN) throw new Error('Disconnected command'); return execute(message); });
-    queues.set(key, operation);
+    const start = () => { if (socket !== connection || connection.readyState !== WebSocket.OPEN) throw new Error('Disconnected command'); return execute(message); };
+    // A script's commands do not wait for one another (it may await one while sending the next); everything else runs one at a time.
+    const scripted = message.operation === 'command' && message.attemptId !== undefined;
+    const operation = scripted ? Promise.resolve().then(start) : (queues.get(key) || Promise.resolve()).catch(() => {}).then(start);
+    if (!scripted) queues.set(key, operation);
     void operation.then(result => { if (socket === connection) send({ id: message.id, result }); }, error => { if (socket === connection) send({ id: message.id, error: { message: String(error.message || error).slice(0, 500) } }); }).finally(() => { if (queues.get(key) === operation) queues.delete(key); });
   };
   connection.onclose = () => {
@@ -540,5 +647,5 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!messa
   } finally { managingIdentity = false; await connect(); }
 }).catch(error => respond({ error: error.message })); return true; });
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); void collapseIdle().catch(() => {}); void connect(); });
+chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId).catch(() => {}); void collapseIdle().catch(() => {}); void connect(); });
 connect();

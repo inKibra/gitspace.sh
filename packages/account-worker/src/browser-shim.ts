@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { BrowserChannel } from './browser-cdp.js';
 
 type Params = Record<string, unknown>;
@@ -158,10 +159,12 @@ export class CdpShimClient {
 
   private drawCursor(method: string, params: Params, sessionId: string): void {
     const label = JSON.stringify(this.options.cursor?.label ?? 'Agent');
-    let expression: string | null = null;
-    if (method === 'Input.dispatchMouseEvent' && typeof params.x === 'number' && typeof params.y === 'number') expression = `window.__gitspaceCursor?.move(${params.x},${params.y},${JSON.stringify(params.type)},${label})`;
-    if (method === 'Input.insertText' || (method === 'Input.dispatchKeyEvent' && params.type === 'keyDown')) expression = `window.__gitspaceCursor?.typing(${label})`;
-    if (expression) void this.upstream.send('Runtime.evaluate', { expression }, sessionId).catch(() => {});
+    let call: string | null = null;
+    if (method === 'Input.dispatchMouseEvent' && typeof params.x === 'number' && typeof params.y === 'number') call = `window.__gitspaceCursor?.move(${params.x},${params.y},${JSON.stringify(params.type)},${label})`;
+    if (method === 'Input.insertText' || (method === 'Input.dispatchKeyEvent' && params.type === 'keyDown')) call = `window.__gitspaceCursor?.typing(${label})`;
+    // The overlay installs itself first where the document lacks it: your Chrome refuses a script's scripts for new
+    // documents, so after a navigation only this puts the cursor back.
+    if (call) void this.upstream.send('Runtime.evaluate', { expression: `${GHOST_CURSOR_SOURCE}\n${call}` }, sessionId).catch(() => {});
   }
 
   /** Detaches this client's sessions and disposes the contexts it made; pages in shared contexts stay. */
@@ -188,6 +191,26 @@ function sessionOf(result: unknown): { sessionId: string } {
 function targetsOf(result: unknown): (Params & { targetId: string })[] {
   if (!result || typeof result !== 'object' || !('targetInfos' in result) || !Array.isArray(result.targetInfos)) return [];
   return result.targetInfos.filter((info): info is Params & { targetId: string } => !!info && typeof info === 'object' && typeof info.targetId === 'string');
+}
+
+const CdpRequest = z.object({ id: z.number().int(), method: z.string().min(1).max(256), params: z.record(z.string(), z.unknown()).optional(), sessionId: z.string().max(256).optional() });
+
+/** A CDP WebSocket served by one client of `shim`, as a script's Playwright connects to it: each command goes to the
+ * client, and its replies and events come back. `closed` runs when the socket closes, as the client lets go of its
+ * sessions. Returns the server end and the upgrade response. */
+export function serveCdpSocket(shim: CdpBrowserShim, options: CdpShimOptions, closed: () => void): { socket: WebSocket; response: Response } {
+  const [client, server] = Object.values(new WebSocketPair());
+  server.accept();
+  const view = shim.client(event => { if (server.readyState === WebSocket.OPEN) server.send(JSON.stringify(event)); }, options);
+  server.addEventListener('message', event => {
+    void (async () => {
+      const message = CdpRequest.parse(JSON.parse(typeof event.data === 'string' ? event.data : ''));
+      try { server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), result: await view.send(message.method, message.params ?? {}, message.sessionId) })); }
+      catch (error) { server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), error: { code: -32000, message: error instanceof Error ? error.message : String(error) } })); }
+    })().catch(() => server.close(1008, 'Invalid CDP message'));
+  });
+  server.addEventListener('close', () => { void view.close(); closed(); });
+  return { socket: server, response: new Response(null, { status: 101, webSocket: client }) };
 }
 
 /** The ghost cursor: an overlay in a closed shadow root that ignores the pointer and is hidden from accessibility, so it

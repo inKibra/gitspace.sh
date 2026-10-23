@@ -95,7 +95,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   }
   const account = createAccountBrowserAuthority(options, signing);
   function accountPlacement(args: RuntimeBrowserArguments) {
-    // Scripts always run in the cloud browser session: no machine browser runs them.
+    // Scripts run in the workspace's browser session, on the cloud browser or your Chrome: no machine browser runs them.
     return args.source === 'relay' || args.action === 'run' || !args.on && !options.runtime().attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('browser.headless'));
   }
   async function signed(input: Input, placement: { machineId: string; attachmentId: string; generation: number }, command: RuntimeBrowserAuthorizationBody['command'], expiresAt: string): Promise<RuntimeToolDispatch> {

@@ -4,7 +4,7 @@ import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durab
 import { createModels } from '@earendil-works/pi-ai';
 import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowsersDocument } from '../src/runtime-browser.js';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
-import { RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
+import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 const harnesses: Harness[] = [];
 afterEach(async () => { vi.useRealTimers(); await Promise.all(harnesses.splice(0).map(harness => harness.close(BACKGROUND_CONTEXT))); });
@@ -125,16 +125,18 @@ test('an expired grant renews in the same group, so the Chrome group outlives it
 });
 
 
-test('a script for the user’s Chrome is refused before approval; a cloud script runs in the workspace’s browser session', async () => {
+test('scripts on either browser run in the workspace’s browser session, with authority that outlasts the run limit', async () => {
   const f = await fixture();
   const relay = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'relay', script: 'return 1;' }), requestId: 'relay-script', attemptId: 'relay-script' };
-  await expect(f.authority.prepare(relay)).rejects.toThrow('next extension update');
   const cloud = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'headless', script: 'return 1;' }), requestId: 'cloud-script', attemptId: 'cloud-script' };
-  await f.authority.prepare(cloud);
-  await f.authority.execute(cloud);
-  // The fixture's machine offers a headless browser; scripts still go to the cloud session.
-  expect(f.sessions.map(({ name, authorization }) => [name, authorization.body.command.type === 'execute' && authorization.body.command.args.action])).toEqual([['account:project:workspace', 'run']]);
+  for (const input of [relay, cloud]) { await f.authority.prepare(input); await f.authority.execute(input); }
+  // The fixture's machine offers a headless browser; scripts still go to the session, and none reaches the relay.
+  expect(f.sessions.map(({ name, authorization }) => [name, authorization.body.scope.placement.kind, authorization.body.command.type === 'execute' && authorization.body.command.args.action])).toEqual([['account:project:workspace', 'account-relay', 'run'], ['account:project:workspace', 'cloud', 'run']]);
   expect(f.dispatches).toHaveLength(0);
+  for (const { authorization: { body } } of f.sessions) {
+    expect(Date.parse(body.dispatch.deadlineAt) - Date.parse(body.issuedAt)).toBeGreaterThan(BROWSER_RUN_LIMIT_MS);
+    expect(Date.parse(body.expiresAt) - Date.parse(body.issuedAt)).toBeGreaterThan(BROWSER_RUN_LIMIT_MS);
+  }
   const pinned = { ...cloud, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'headless', on: 'machine', script: 'return 1;' }), requestId: 'pinned-script', attemptId: 'pinned-script' };
   await expect(f.authority.prepare(pinned)).rejects.toThrow('remove "on"');
 });

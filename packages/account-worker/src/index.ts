@@ -46,7 +46,7 @@ import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
-import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
+import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
@@ -414,6 +414,9 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
   browserRelayRetireWorkspace(projectId: string, workspaceId: string) { return this.browserRelay.retireWorkspace(projectId, workspaceId); }
+  /** A script on a Chrome (`browser.run`) begins with its signed run authority and ends from the browser session. */
+  browserRelayScriptBegin(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.scriptBegin(authorization); }
+  browserRelayScriptEnd(token: string) { return this.browserRelay.scriptEnd(token); }
 
   private presenceLine: Promise<void> = Promise.resolve();
   /** When machine presence is next reconciled against the live sockets. */
@@ -510,6 +513,9 @@ export class UserRelayDO extends BudgetedDurableObject {
     const url = new URL(request.url);
     if (url.pathname === '/ws') return this.acceptSocket(request);
     if (url.pathname.startsWith('/tunnel/')) return this.openTunnel(request);
+    // A script's CDP connection to a Chrome, from the browser session's sandbox binding. The public handler forwards
+    // only `/ws` and `/tunnel/` here, so this path is internal; its token admits a live run alone.
+    if (url.pathname.startsWith(BROWSER_SCRIPT_PATH)) return this.browserRelay.scriptFetch(request);
     return jsonError(404, 'NOT_FOUND', 'Relay route not found');
   }
 

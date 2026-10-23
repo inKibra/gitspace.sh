@@ -1,19 +1,16 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
-import type { RuntimeAccountBrowserAuthorization, RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { BROWSER_RUN_LIMIT_MS, type RuntimeAccountBrowserAuthorization, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { launchCloudBrowser, type BrowserChannel } from './browser-cdp.js';
 import { AccountBrowserRuntime } from './browser-runtime.js';
-import { CdpBrowserShim, type CdpShimClient } from './browser-shim.js';
+import { BROWSER_SCRIPT_PATH } from './browser-relay.js';
+import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
 import { BROWSER_RUNNER_SOURCE } from './generated/browser-runner.js';
 import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 /** A cloud browser nobody has used for this long closes; Browser Run would end it after ten idle minutes anyway. */
 const IDLE_CLOSE_MS = 5 * 60_000;
-/** The longest one script runs before it is stopped. */
-const RUN_LIMIT_MS = 120_000;
-const RUN_STATE_KEY = 'browser.run.state';
-const CdpRequest = z.object({ id: z.number().int(), method: z.string().min(1).max(256), params: z.record(z.string(), z.unknown()).optional(), sessionId: z.string().max(256).optional() });
 const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
 
 /** A client of the shared browser as the agent tools use it: the browser channel shape over a shim client. */
@@ -27,9 +24,10 @@ function shimChannel(shim: CdpBrowserShim, label: string): BrowserChannel {
   };
 }
 
-/** One workspace's cloud browser (docs/APERTURE-DESIGN.md §5): the only object holding its Browser Run connection, so
- * the workspace object sleeps while a browser is open, and this one closes it when unused. The agent's tools and its
- * scripts are clients of one browser through `CdpBrowserShim`. */
+/** One workspace's browser session (docs/APERTURE-DESIGN.md §5): the only object holding its cloud browser's Browser
+ * Run connection, so the workspace object sleeps while a browser is open, and this one closes it when unused. The
+ * agent's tools and its scripts are clients of one browser through `CdpBrowserShim`. Scripts on your Chrome run here
+ * too; their CDP connection goes to the relay, which presents the workspace group as a browser. */
 export class BrowserSessionDO extends BudgetedDurableObject {
   private browser: Promise<CdpBrowserShim> | undefined;
   private upstream: BrowserChannel | undefined;
@@ -90,18 +88,22 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     return this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(authorization.body.expiresAt) - Date.now())));
   }
 
-  /** Runs one agent-written Playwright script in a sandbox whose only way out is a CDP connection to this browser. The
-   * `state` it leaves is kept for the next script. */
+  /** Runs one agent-written Playwright script in a sandbox whose only way out is a CDP connection to the cloud browser
+   * or, for your Chrome, to the relay. The `state` it leaves is kept for the next script on the same browser. */
   private async run(authorization: RuntimeAccountBrowserAuthorization, script: string): Promise<RuntimeToolResult> {
-    const { scope } = authorization.body;
+    const { scope } = authorization.body, placement = scope.placement;
     const name = this.ctx.id.name;
     if (!name) throw new Error('Browser session has no name');
-    await this.shim();
+    const relay = placement.kind === 'account-relay' ? this.env.RELAY.getByName(this.env.RELAY_NAME) : undefined;
+    // Your Chrome: the relay checks the run's authority and admits its connection by this token until the run ends.
+    const relayToken = relay ? (await relay.browserRelayScriptBegin(authorization)).token : undefined;
+    if (!relay) await this.shim();
+    const stateKey = placement.kind === 'account-relay' ? `browser.run.state:relay:${placement.pairingId}` : 'browser.run.state:cloud';
     const run = crypto.randomUUID();
     const sandbox = this.env.CODEMODE_LOADER.load({
       compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], mainModule: 'runner.js',
       modules: { 'runner.js': BROWSER_RUNNER_SOURCE, 'script.js': `export default async function ({ page, context, browser, state }) {\n${script}\n}` },
-      env: { CDP: this.ctx.exports.BrowserSessionCdp({ props: { session: name, run } }) },
+      env: { CDP: this.ctx.exports.BrowserSessionCdp({ props: { session: name, run, ...(relayToken ? { relayToken } : {}) } }) },
       globalOutbound: null,
       limits: { cpuMs: 30_000 },
     });
@@ -109,50 +111,47 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     const stopped = Promise.withResolvers<never>();
     const timer = setTimeout(() => {
       this.endRun(run, 'Script stopped');
-      stopped.reject(new Error(`The script ran longer than ${RUN_LIMIT_MS / 1000} s and was stopped`));
-    }, RUN_LIMIT_MS);
+      stopped.reject(new Error(`The script ran longer than ${BROWSER_RUN_LIMIT_MS / 1000} s and was stopped`));
+    }, BROWSER_RUN_LIMIT_MS);
     let text: string;
-    try { text = await Promise.race([sandbox.getEntrypoint<Runner>().run({ label: scope.conversationKind === 'main' ? 'Agent' : 'Subagent', state: await this.ctx.storage.get(RUN_STATE_KEY) ?? {} }), stopped.promise]); }
-    finally { clearTimeout(timer); }
+    try { text = await Promise.race([sandbox.getEntrypoint<Runner>().run({ label: scope.conversationKind === 'main' ? 'Agent' : 'Subagent', state: await this.ctx.storage.get(stateKey) ?? {} }), stopped.promise]); }
+    finally {
+      clearTimeout(timer);
+      // Cuts the script off your Chrome; a lost end still lapses at the run's deadline.
+      if (relay && relayToken) await relay.browserRelayScriptEnd(relayToken).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_relay_script_end_failed', error: String(error) })));
+    }
     const result = RunResult.parse(JSON.parse(text));
-    if (!result.stateError) await this.ctx.storage.put(RUN_STATE_KEY, result.state);
+    if (!result.stateError) await this.ctx.storage.put(stateKey, result.state);
     const { state: _state, ...reply } = result;
     return { status: 'completed', requestId: scope.requestId, attemptId: scope.attemptId, content: [{ type: 'text', text: JSON.stringify(reply) }] };
   }
 
-  /** A script's CDP connection, from the sandbox through `BrowserSessionCdp`: `/script/<run>/<cursor label>`. */
+  /** A cloud script's CDP connection, from the sandbox through `BrowserSessionCdp`: `/script/<run>/<cursor label>`. */
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected a CDP WebSocket', { status: 426 });
     const [, kind, run, label] = new URL(request.url).pathname.split('/');
     if (kind !== 'script' || !run) return new Response('Unknown browser session path', { status: 404 });
     const shim = await this.shim();
-    const [client, server] = Object.values(new WebSocketPair());
-    server.accept();
     const sockets = this.scripts.get(run) ?? new Set<WebSocket>();
-    this.scripts.set(run, sockets.add(server));
-    const view: CdpShimClient = shim.client(event => { if (server.readyState === WebSocket.OPEN) server.send(JSON.stringify(event)); }, { cursor: { label: decodeURIComponent(label ?? '').slice(0, 64) || 'Agent' } });
-    server.addEventListener('message', event => {
-      void (async () => {
-        const message = CdpRequest.parse(JSON.parse(typeof event.data === 'string' ? event.data : ''));
-        try { server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), result: await view.send(message.method, message.params ?? {}, message.sessionId) })); }
-        catch (error) { server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), error: { code: -32000, message: error instanceof Error ? error.message : String(error) } })); }
-      })().catch(() => server.close(1008, 'Invalid CDP message'));
-    });
-    server.addEventListener('close', () => {
-      sockets.delete(server);
+    const { socket, response } = serveCdpSocket(shim, { cursor: { label: decodeURIComponent(label ?? '').slice(0, 64) || 'Agent' } }, () => {
+      sockets.delete(socket);
       if (!sockets.size && this.scripts.get(run) === sockets) this.scripts.delete(run);
-      void view.close(); void this.used();
+      void this.used();
     });
-    return new Response(null, { status: 101, webSocket: client });
+    this.scripts.set(run, sockets.add(socket));
+    return response;
   }
 }
 
-/** The sandbox's only way out: a CDP connection to its workspace's browser session. It offers `fetch` alone, so code in
- * the sandbox cannot reach the session object's other methods, and it names the run itself (`props`, set by the
- * session), so a script cannot pass for another. Playwright puts the cursor label in the last path segment. */
-export class BrowserSessionCdp extends WorkerEntrypoint<Env, { session: string; run: string }> {
+/** The sandbox's only way out: a CDP connection to its workspace's browser session, or for a script on your Chrome to
+ * the relay, admitted by the run's token. It offers `fetch` alone, so code in the sandbox cannot reach the session
+ * object's other methods, and it names the run itself (`props`, set by the session), so a script cannot pass for
+ * another. Playwright puts the cursor label in the last path segment. */
+export class BrowserSessionCdp extends WorkerEntrypoint<Env, { session: string; run: string; relayToken?: string }> {
   fetch(request: Request): Promise<Response> {
     const label = new URL(request.url).pathname.split('/').at(-1) ?? '';
-    return this.env.BROWSER_SESSION.getByName(this.ctx.props.session).fetch(new Request(`https://browser-session/script/${this.ctx.props.run}/${label}`, request));
+    const { session, run, relayToken } = this.ctx.props;
+    if (relayToken) return this.env.RELAY.getByName(this.env.RELAY_NAME).fetch(new Request(`https://relay${BROWSER_SCRIPT_PATH}${relayToken}/${label}`, request));
+    return this.env.BROWSER_SESSION.getByName(session).fetch(new Request(`https://browser-session/script/${run}/${label}`, request));
   }
 }

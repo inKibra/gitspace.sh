@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
-import { browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
 const sockets: WebSocket[] = [];
@@ -14,7 +14,7 @@ function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socke
 async function connect(relay: HostedBrowserRelay, ip?: string) { const response = await relay.fetch(request(ip)); expect(response.status).toBe(101); if (!response.webSocket) throw new Error('Missing Worker WebSocket'); const socket = response.webSocket; const challenge = frame(socket); socket.accept(); sockets.push(socket); return { socket, challenge: z.object({ serverNonce: z.string() }).parse(await challenge) }; }
 type Connection = { socket: WebSocket; challenge: { serverNonce: string } };
 type Identity = { key: CryptoKeyPair; publicKey: string };
-async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Security fixture Chrome' })); await ready; }
+async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Security fixture Chrome', protocol: BROWSER_EXTENSION_PROTOCOL })); await ready; }
 async function fixture(run: (relay: HostedBrowserRelay, state: DurableObjectState) => Promise<void>) { await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => { try { await run(hostedBrowserRelay(instance), state); } finally { for (const socket of sockets.splice(0)) socket.close(); } }); }
 const trust = { algorithm: 'Ed25519' as const, accountId: env.ACCOUNT_ID, publicKey: 'AA==' };
 
