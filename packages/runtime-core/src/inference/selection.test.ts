@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyAuthFailure, orderedAccounts, type CredentialAccount, type CredentialPin, type VaultAccess } from './selection';
+import { classifyAuthFailure, orderedAccounts, providerResetAt, type CredentialAccount, type VaultAccess } from './selection';
 
 const now = 10_000_000;
 function account(id: string, fields: Partial<CredentialAccount> = {}): CredentialAccount {
@@ -9,26 +9,30 @@ function vault(accounts: readonly CredentialAccount[]): VaultAccess {
   return {
     async list() { return accounts; },
     async resolve() { throw new Error('Selection must not resolve or refresh credentials'); },
+    async recordFailure() { throw new Error('Selection must not record failures'); },
   };
 }
-async function order(accounts: readonly CredentialAccount[], pin: CredentialPin | null = null, conversationId = 'conversation-a') {
-  return orderedAccounts({ profileId: 'profile-a', provider: 'anthropic', conversationId, now, vault: vault(accounts), pins: { async read() { return pin; }, async write() { throw new Error('Reading candidates must not change the durable pin'); } } });
+async function order(accounts: readonly CredentialAccount[], workspaceId = 'workspace-a') {
+  return orderedAccounts({ profileId: 'profile-a', provider: 'anthropic', workspaceId, now, vault: vault(accounts) });
 }
+const workspaces = Array.from({ length: 12 }, (_, index) => `workspace-${index}`);
 
 describe('profile account selection', () => {
-  it('keeps a warm conversation on its admitted account even when another has lower measured usage', async () => {
-    const pinned = account('pinned', { usage: { usedFraction: 0.9, observedAt: now } });
-    const free = account('free', { usage: { usedFraction: 0.1, observedAt: now } });
-    expect((await order([free, pinned], { credentialId: 'pinned', lastUsedAt: now - 1000 }))[0]?.id).toBe('pinned');
-  });
-  it('allows separate durable conversation pins to select different same-provider accounts', async () => {
+  it('starts every request of a workspace on one account and spreads workspaces across accounts', async () => {
     const accounts = [account('first'), account('second')];
-    const [first, second] = await Promise.all([
-      order(accounts, { credentialId: 'first', lastUsedAt: now }, 'conversation-a'),
-      order(accounts, { credentialId: 'second', lastUsedAt: now }, 'conversation-b'),
-    ]);
-    expect(first[0]?.id).toBe('first');
-    expect(second[0]?.id).toBe('second');
+    const chosen = await Promise.all(workspaces.map(async workspaceId => (await order(accounts, workspaceId))[0]?.id));
+    expect(new Set(chosen)).toEqual(new Set(['first', 'second']));
+    expect(await Promise.all(workspaces.map(async workspaceId => (await order(accounts, workspaceId))[0]?.id))).toEqual(chosen);
+  });
+  it('keeps a workspace on its account while a different account cools down', async () => {
+    const accounts = [account('first'), account('second'), account('third')];
+    for (const workspaceId of workspaces) {
+      const [own, ...others] = await order(accounts, workspaceId);
+      for (const cooling of others) {
+        const selected = await order(accounts.map(value => value.id === cooling.id ? { ...value, cooldownUntil: now + 60_000 } : value), workspaceId);
+        expect(selected[0]?.id).toBe(own?.id);
+      }
+    }
   });
   it('retains every account when all usage collectors are unavailable and keeps cold ordering stable', async () => {
     const accounts = [account('first'), account('second'), account('third')];
@@ -36,15 +40,15 @@ describe('profile account selection', () => {
     expect(new Set(selected.map(value => value.id))).toEqual(new Set(['first', 'second', 'third']));
     expect(await order(accounts)).toEqual(selected);
   });
-  it('retires Anthropic idle pins exactly at the one-hour boundary', async () => {
-    const accounts = [account('pinned', { usage: { usedFraction: 0.9, observedAt: now } }), account('available', { usage: { usedFraction: 0.1, observedAt: now } })];
-    expect((await order(accounts, { credentialId: 'pinned', lastUsedAt: now - 3_600_000 }))[0]?.id).toBe('available');
-  });
-  it('does not let a warm pin bypass cooldown or admit a different provider', async () => {
-    const selected = await order([account('cooling', { cooldownUntil: now + 1 }), account('other-provider', { provider: 'cursor' }), account('ready', { cooldownUntil: now })], { credentialId: 'cooling', lastUsedAt: now });
+  it('skips cooling accounts and other providers', async () => {
+    const selected = await order([account('cooling', { cooldownUntil: now + 1 }), account('other-provider', { provider: 'cursor' }), account('ready', { cooldownUntil: now })]);
     expect(selected.map(value => value.id)).toEqual(['ready']);
   });
-  it('ignores stale usage observations when comparing unpinned accounts', async () => {
+  it('says when the first account is back once every account is out', async () => {
+    await expect(order([account('later', { cooldownUntil: now + 7_200_000 }), account('sooner', { cooldownUntil: now + 3_600_000 })]))
+      .rejects.toThrow(`out until ${new Date(now + 3_600_000).toUTCString()}`);
+  });
+  it('ignores stale usage observations when comparing accounts', async () => {
     const accounts = [account('first'), account('second')];
     const baseline = await order(accounts);
     const last = baseline[1];
@@ -84,5 +88,20 @@ describe('provider-aware auth retry classification', () => {
   it('does not rotate accounts for an unrelated transport or provider outage', () => {
     expect(classifyAuthFailure('Service unavailable', 503)).toBe('none');
     expect(classifyAuthFailure('Connection reset')).toBe('none');
+  });
+});
+
+describe('provider reset of a rejected account', () => {
+  it('uses the Claude subscription reset only when that limit rejected the request', () => {
+    const reset = { 'anthropic-ratelimit-unified-reset': String((now + 18_000_000) / 1000), 'retry-after': '30' };
+    expect(providerResetAt({ ...reset, 'anthropic-ratelimit-unified-status': 'rejected' }, now)).toBe(now + 18_000_000);
+    expect(providerResetAt({ ...reset, 'anthropic-ratelimit-unified-status': 'allowed_warning' }, now)).toBe(now + 30_000);
+  });
+  it('reads Retry-After as milliseconds, seconds, or a date, and nothing without one', () => {
+    expect(providerResetAt({ 'retry-after-ms': '1500' }, now)).toBe(now + 1500);
+    expect(providerResetAt({ 'retry-after': '120' }, now)).toBe(now + 120_000);
+    expect(providerResetAt({ 'retry-after': 'Wed, 21 Oct 2099 07:28:00 GMT' }, now)).toBe(Date.parse('Wed, 21 Oct 2099 07:28:00 GMT'));
+    expect(providerResetAt({ 'retry-after': 'soon' }, now)).toBeUndefined();
+    expect(providerResetAt({}, now)).toBeUndefined();
   });
 });

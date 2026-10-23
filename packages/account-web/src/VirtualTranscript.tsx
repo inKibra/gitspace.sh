@@ -43,6 +43,7 @@ const viewStates = new WeakMap<object, ViewState>();
 function estimateHeight(row: TranscriptRow): number {
   const item = row.item;
   if (item.type === 'ask' && item.status === 'pending') return 280;
+  if (item.type === 'workspace-report') return 26;
   if (item.type === 'message' || item.type === 'markdown' || item.type === 'code') return Math.min(640, 64 + Math.ceil(item.text.length / 90) * 20);
   if (item.type === 'image') return 264;
   return 72;
@@ -369,7 +370,10 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
   const rendered = new Map<string, { row: TranscriptRow; top: number; gap: number }>();
   for (let index = first; index <= last; index++) {
     const row = layout.rows[index]!;
-    rendered.set(row.id, { row, top: layout.offsets[index]!, gap: layout.rows[index + 1]?.turnId === row.turnId ? 8 : 24 });
+    const next = layout.rows[index + 1];
+    // Workspace reports in a row stack tightly, one line each.
+    const gap = row.item.type === 'workspace-report' && next?.item.type === 'workspace-report' ? 2 : next?.turnId === row.turnId ? 8 : 24;
+    rendered.set(row.id, { row, top: layout.offsets[index]!, gap });
   }
   for (const [id, held] of pinned.current) {
     if (rendered.has(id)) continue;

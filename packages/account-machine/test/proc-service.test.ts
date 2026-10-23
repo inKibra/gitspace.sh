@@ -20,7 +20,7 @@ test('proc ready.port becomes a private signed machine URL and stop releases its
   const registry = new HostedRoutesFake([{ id: 'machine', label: 'alpha' }]);
   const leases = registry.leases;
   const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal not allowed'); }, stop: async () => { throw new Error('Workspace terminal not allowed'); } }, 'machine', root, 'gssh.dev', 'test', registry.authority('machine'), async () => trust);
-  const [allocated] = await manager.allocateDefinitionPorts('workspace', { name: 'proc-http', command: process.execPath, args: [], cwd: '.', env: {}, ports: [{ name: 'http', protocol: 'http' }] });
+  const [allocated] = await manager.allocateDefinitionPorts('workspace', { name: 'proc-http', command: process.execPath, args: [], cwd: '.', env: {}, ports: [{ name: 'http', protocol: 'http' }], ingress: [] });
   if (!allocated) throw new Error('Missing allocated port');
   const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['proc'], updatedAt: new Date().toISOString() });
   const local = { attachment, rootPath: root, executionSecret: 'secret', prerequisitesComplete: true };

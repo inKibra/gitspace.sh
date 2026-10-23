@@ -119,7 +119,7 @@ test('an ad hoc process named like a declared service gets only its machine URL 
   const { trust, fetchVia } = await trustKeys();
   const alpha = await machine(root, registry, ALPHA, 'alpha', trust);
   const proc = machineProcessOperation({ services: alpha.manager, reportProcessExit: async () => {} });
-  const [allocated] = await alpha.manager.allocateDefinitionPorts('workspace', { name: 'adhoc', command: process.execPath, args: [], cwd: '.', env: {}, ports: [{ name: 'http', protocol: 'http' }] });
+  const [allocated] = await alpha.manager.allocateDefinitionPorts('workspace', { name: 'adhoc', command: process.execPath, args: [], cwd: '.', env: {}, ports: [{ name: 'http', protocol: 'http' }], ingress: [] });
   if (!allocated) throw new Error('Missing allocated port');
   let restarted: WorkspaceServiceManager | null = null;
   try {

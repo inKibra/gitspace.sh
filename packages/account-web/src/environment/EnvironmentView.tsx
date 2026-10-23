@@ -136,7 +136,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   const [editing, setEditing] = useState<{ name: string; value: string } | null>(null);
   const [retiring, setRetiring] = useState(false);
   const setupMachine = model.machines.find(machine => machine.id === model.setupMachineId) ?? null;
-  const approvals = model.steps.flatMap(step => step.scripts).filter(script => !script.approval.approved).length + model.browserOrigins.filter(origin => !origin.approved).length;
+  const approvals = model.steps.flatMap(step => step.scripts).filter(script => !script.approval.approved).length + model.browserOrigins.filter(origin => !origin.approved).length + model.signedCallers.filter(entry => !entry.approved).length;
   const ready = model.machines.filter(machine => machine.ready).length;
   const scriptActions = { onApprove: props.onApprove, onRevoke: props.onRevoke, onOpenScript: props.onOpenScript, onOpenLog: props.onOpenLog, onRunPhase: props.onRunPhase };
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full">
@@ -202,6 +202,13 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             <ul className="flex flex-col">{model.browserOrigins.map(origin => <li key={origin.hash} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
               <StatusDot color={origin.approved ? 'green' : 'orange'} /><code className="min-w-0 flex-1 break-all font-mono">{origin.pattern}</code>
               {origin.approved ? <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(origin.hash)}>Revoke</Button> : <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(origin.hash)}>Review & approve</Button></>}
+            </li>)}</ul>
+          </div> : null}
+          {model.signedCallers.length ? <div aria-label="Setup step Signed callers" className="flex flex-col">
+            <span className="flex min-h-10 items-center text-caption font-medium">Signed callers</span>
+            <ul className="flex flex-col">{model.signedCallers.map(entry => <li key={entry.id} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
+              <StatusDot color={entry.approved ? 'green' : 'orange'} /><span className="min-w-0 flex-1">Routes open to registered credentials in <code className="font-mono">.gitspace/services.json</code></span>
+              {entry.approved ? <><Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onOpenScript(entry.id)}>View</Button><Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(entry.id)}>Revoke</Button></> : <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(entry.id)}>Review & approve</Button></>}
             </li>)}</ul>
           </div> : null}
         </div>

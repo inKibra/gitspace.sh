@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { cloudWorkspaceDefinitionSchema, projectLifecycleSchema, workspaceLifecycleSchema, type CloudProjectSummary, type CloudWorkspaceDefinition, type ProjectLifecycle } from '@gitspace/protocol';
 import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { WorkspaceReportSchema, WorkspaceStatusColorSchema, WorkspaceStatusSummarySchema, type WorkspaceReport, type WorkspaceStatusColor, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { WorkspaceReportSchema, WorkspaceStatusSummarySchema, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** What a workspace object knows about itself: its identity, lifecycle, branch and phase, and the project lifecycle its
  * write policy needs. Runtime access is decided from this record alone; the project authority is read once to seed it. */
@@ -110,16 +110,31 @@ export function readWorkspaceReport(storage: DurableObjectStorage): WorkspaceRep
   return stored?.success ? stored.data : null;
 }
 
-const ProjectWatchSchema = z.object({ name: z.string(), color: WorkspaceStatusColorSchema });
-/** A workspace the project agent started tells the project conversation when its status color changes; `color` is the
- * last one it told, so each state is announced once. */
+const ProjectWatchSchema = z.object({
+  /** The workspace name the report shows. */
+  name: z.string(),
+  /** The project agent's submission: only the turn it starts reports. */
+  requestId: z.string().min(1),
+  onDone: z.enum(['quiet', 'wake']),
+  armedAt: z.number().int(),
+  /** When that turn started; null while the submission waits behind another turn. */
+  startedAt: z.number().int().nullable(),
+});
+/** The one turn of this workspace the project agent started and has not heard back from: it reports once, when it
+ * ends or stops for a person, and a person writing here ends it silently. */
 export type ProjectWatch = z.infer<typeof ProjectWatchSchema>;
 
-export function writeProjectWatch(storage: DurableObjectStorage, name: string, color: WorkspaceStatusColor): void {
-  storage.sql.exec('INSERT INTO workspace_project_watch(id,record) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record', JSON.stringify({ name, color }));
+export function writeProjectWatch(storage: DurableObjectStorage, watch: ProjectWatch): void {
+  storage.sql.exec('INSERT INTO workspace_project_watch(id,record) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record', JSON.stringify(ProjectWatchSchema.parse(watch)));
 }
 
+/** A watch an older release stored (a status color, not a turn) reads as none: it never reports again. */
 export function readProjectWatch(storage: DurableObjectStorage): ProjectWatch | null {
   const row = storage.sql.exec<{ record: string }>('SELECT record FROM workspace_project_watch WHERE id=1').toArray()[0];
-  return row ? ProjectWatchSchema.parse(JSON.parse(row.record)) : null;
+  const stored = row ? ProjectWatchSchema.safeParse(JSON.parse(row.record)) : null;
+  return stored?.success ? stored.data : null;
+}
+
+export function deleteProjectWatch(storage: DurableObjectStorage): void {
+  storage.sql.exec('DELETE FROM workspace_project_watch WHERE id=1');
 }

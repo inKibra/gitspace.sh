@@ -192,10 +192,6 @@ export async function startMachineRuntime() {
     void deliverLiveNotices().catch((error: unknown) => console.error('[gitspace-live]', error));
   };
   const terminals = new WorkspaceHubTerminalCoordinator(machineId, checkouts, undefined, announceLive);
-  const environments = new WorkspaceEnvironmentManager(checkouts, authority, terminals, authority, {
-    machineId,
-    stateRoot: join(environmentRoot, 'lifecycle-runs'),
-  });
   const serviceManager = new WorkspaceServiceManager(
     checkouts,
     terminals,
@@ -206,6 +202,11 @@ export async function startMachineRuntime() {
     authority,
     serviceAccess.trust,
   );
+  const environments = new WorkspaceEnvironmentManager(checkouts, authority, terminals, authority, {
+    machineId,
+    stateRoot: join(environmentRoot, 'lifecycle-runs'),
+    services: serviceManager,
+  });
   /** Re-leases routes after a restart: the attachments' running services, workspace URLs as their stored pointers say. */
   const rehydrateServices = async () => {
     await serviceManager.rehydrate();

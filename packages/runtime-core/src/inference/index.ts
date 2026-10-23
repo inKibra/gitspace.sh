@@ -5,7 +5,7 @@ import { isModelType } from '@earendil-works/pi-ai';
 import type { ProviderResponse } from '@earendil-works/pi-ai';
 import { applyProviderCatalog, limitContextWindows } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
-import { classifyAuthFailure, orderedAccounts, type VaultAccess, type CredentialPins, type ResolvedCredential } from './selection.js';
+import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
 import { admitProfileProviders, contextWindowLimits } from './admission.js';
 import { fitRequestImages, imageLimits } from './image-limits.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
@@ -23,7 +23,8 @@ export * from './vision.js';
 
 export type VaultModelsOptions = {
   profileId: string;
-  conversationId: string;
+  /** Every conversation of a workspace starts on the same account; see `orderedAccounts`. */
+  workspaceId: string;
   vault: VaultAccess;
   pins: CredentialPins;
   modelsStore: ModelsStore;
@@ -31,9 +32,11 @@ export type VaultModelsOptions = {
   settings?: InferenceProfile['settings'];
   fastMode?: boolean;
   pinnedModels?: readonly AnyModel[];
-  conversationForSignal?(signal?: AbortSignal): { conversationId: string; pins: CredentialPins };
 };
 export type VaultModels = Models;
+/** One request on one account. Its transport reports the provider's answer, error statuses included (pi's
+ * `onResponse` misses a rejected Anthropic request), so a failure knows the provider's reset. */
+type Attempt = { fetch: typeof fetch; observe(response: ProviderResponse): void; status?: number; headers: Readonly<Record<string, string>> };
 const noAmbient = { env: async () => undefined, fileExists: async () => false };
 const credentialHeader = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie|host|chatgpt-account-id)$/iu;
 
@@ -129,15 +132,26 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     models.setProvider({ ...(options.fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal }) => { signal.throwIfAborted(); return { ...resolvedAuth, source: 'Profile vault' }; } } } });
     return models;
   }
-  async function accounts(provider: string, scope: { conversationId: string; pins: CredentialPins } = options) {
-    const result = await orderedAccounts({ ...options, ...scope, provider });
-    if (!result.length) throw new Error(`Inference profile has no usable account for ${provider}`);
-    return result;
+  function startAttempt(): Attempt {
+    const attempt: Attempt = {
+      headers: {},
+      observe(response) { attempt.status = response.status; attempt.headers = response.headers; },
+      async fetch(input, init) {
+        const response = await cloudFetch(input, init);
+        attempt.observe({ status: response.status, headers: Object.fromEntries(response.headers.entries()) });
+        return response;
+      },
+    };
+    return attempt;
   }
-  async function* streamAttempts(model: AnyModel, invoke: (models: Models, observe: (status: number) => void, subscription: boolean) => AssistantMessageEventStream, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
+  /** The account is out until the provider's reset when its answer named one; the vault falls back to a used-up usage window or a short backoff. */
+  function failed(candidate: CredentialAccount, kind: 'refresh' | 'rotate', attempt: Attempt, reason: string) {
+    const until = kind === 'rotate' ? providerResetAt(attempt.headers, Date.now()) : undefined;
+    return options.vault.recordFailure({ profileId: options.profileId, credentialId: candidate.id, kind, reason, ...(until === undefined ? {} : { until }) });
+  }
+  async function* streamAttempts(model: AnyModel, invoke: (models: Models, attempt: Attempt, subscription: boolean) => AssistantMessageEventStream, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
     canonical(model);
-    const scope = options.conversationForSignal?.(signal) ?? options;
-    const candidates = await accounts(model.provider, scope);
+    const candidates = await orderedAccounts({ ...options, provider: model.provider });
     for (let index = 0; index < candidates.length; index++) {
       const candidate = candidates[index]!;
       for (let refresh = 0; refresh < 2; refresh++) {
@@ -147,48 +161,54 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           if (refresh === 1 && index < candidates.length - 1 && !signal?.aborted) break;
           throw error;
         }
-        await scope.pins.write(model.provider, { credentialId: candidate.id, lastUsedAt: Date.now() });
-        let status: number | undefined;
+        await options.pins.write(model.provider, { credentialId: candidate.id });
+        const attempt = startAttempt();
         let published = false;
         let failure: Extract<AssistantMessageEvent, { type: 'error' }> | undefined;
         const deferred: AssistantMessageEvent[] = [];
-        for await (const event of invoke(models, value => { status = value; }, candidate.type === 'oauth')) {
+        for await (const event of invoke(models, attempt, candidate.type === 'oauth')) {
           if (event.type === 'error') { failure = event; break; }
           if (event.type === 'start') { deferred.push(event); continue; }
           if (!published) { for (const start of deferred) yield start; deferred.length = 0; published = true; }
           yield event;
         }
-        if (!failure) { await scope.pins.write(model.provider, { credentialId: candidate.id, lastUsedAt: Date.now() }); return; }
-        const policy = classifyAuthFailure(failure.error.errorMessage ?? '', status);
-        if (published || signal?.aborted || policy === 'none') { for (const start of deferred) yield start; yield failure; return; }
-        if (policy === 'refresh' && refresh === 0 && candidate.type === 'oauth') continue;
-        if (index === candidates.length - 1) { for (const start of deferred) yield start; yield failure; return; }
-        await options.vault.recordFailure?.({ profileId: options.profileId, credentialId: candidate.id, kind: policy });
-        break;
+        if (!failure) return;
+        const message = failure.error.errorMessage ?? '';
+        const policy = classifyAuthFailure(message, attempt.status);
+        if (!signal?.aborted && !published && policy === 'refresh' && refresh === 0 && candidate.type === 'oauth') continue;
+        const more = index < candidates.length - 1;
+        if (!signal?.aborted && !published && policy !== 'none' && more) { await failed(candidate, policy, attempt, message); break; }
+        for (const start of deferred) yield start;
+        if (signal?.aborted || policy !== 'rotate') { yield failure; return; }
+        // Published output is never replayed on another account: the turn ends here, and the account stays out so
+        // the next request (pi's own retry of this turn, or the next turn) starts on another one.
+        const out = await failed(candidate, policy, attempt, message);
+        const note = `${out.label} ran out until ${new Date(out.until).toUTCString()}${published && more ? '; the next turn uses another account' : ''}.`;
+        yield { ...failure, error: { ...failure.error, errorMessage: message ? `${message}\n\n${note}` : note } };
+        return;
       }
     }
   }
-  async function resultAttempts<T extends AssistantImages | ClassifierResult>(model: AnyModel, invoke: (models: Models, observe: (status: number) => void) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async function resultAttempts<T extends AssistantImages | ClassifierResult>(model: AnyModel, invoke: (models: Models, attempt: Attempt) => Promise<T>, signal?: AbortSignal): Promise<T> {
     canonical(model);
-    const scope = options.conversationForSignal?.(signal) ?? options;
-    const candidates = await accounts(model.provider, scope);
+    const candidates = await orderedAccounts({ ...options, provider: model.provider });
     for (let index = 0; index < candidates.length; index++) {
       const candidate = candidates[index]!;
       for (let refresh = 0; refresh < 2; refresh++) {
-        let status: number | undefined;
         let models: Models;
         try { models = await bound(model.provider, candidate.id, refresh === 1, signal); }
         catch (error) {
           if (refresh === 1 && index < candidates.length - 1 && !signal?.aborted) break;
           throw error;
         }
-        await scope.pins.write(model.provider, { credentialId: candidate.id, lastUsedAt: Date.now() });
-        const result = await invoke(models, value => { status = value; });
-        if (result.stopReason !== 'error') { await scope.pins.write(model.provider, { credentialId: candidate.id, lastUsedAt: Date.now() }); return result; }
-        const policy = classifyAuthFailure(result.errorMessage ?? '', status);
+        await options.pins.write(model.provider, { credentialId: candidate.id });
+        const attempt = startAttempt();
+        const result = await invoke(models, attempt);
+        if (result.stopReason !== 'error') return result;
+        const policy = classifyAuthFailure(result.errorMessage ?? '', attempt.status);
         if (signal?.aborted || policy === 'none') return result;
         if (policy === 'refresh' && refresh === 0 && candidate.type === 'oauth') continue;
-        await options.vault.recordFailure?.({ profileId: options.profileId, credentialId: candidate.id, kind: policy });
+        await failed(candidate, policy, attempt, result.errorMessage ?? '');
         if (index === candidates.length - 1) return result;
         break;
       }
@@ -216,7 +236,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     getAvailable: async provider => (await available(provider)).filter(model => isModelType(model, 'chat')),
     getAvailableOfType: async (type, provider) => (await available(provider)).filter(model => isModelType(model, type)),
     getAllAvailable: available,
-    getAuth: async (provider, overrides) => { rejectOverrides(overrides); const id = typeof provider === 'string' ? provider : provider.provider; if (typeof provider !== 'string') canonical(provider); const candidate = (await accounts(id))[0]!; const models = await bound(id, candidate.id); return typeof provider === 'string' ? models.getAuth(provider) : models.getAuth(provider); },
+    getAuth: async (provider, overrides) => { rejectOverrides(overrides); const id = typeof provider === 'string' ? provider : provider.provider; if (typeof provider !== 'string') canonical(provider); const candidate = (await orderedAccounts({ ...options, provider: id }))[0]!; const models = await bound(id, candidate.id); return typeof provider === 'string' ? models.getAuth(provider) : models.getAuth(provider); },
     login: async () => { throw new Error('Login requires the signed profile management endpoint'); },
     logout: async () => { throw new Error('Logout requires the signed profile management endpoint'); },
     refresh: async refresh => {
@@ -227,20 +247,20 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       return lazyStream(model, async () => {
         rejectOverrides(request);
         const fitted = fitRequestImages(context, imageLimits(model));
-        return streamAttempts(model, (models, observe, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, fitted, Object.assign({}, request, {
-          fetch: cloudFetch, onPayload: claude.onPayload,
-          onResponse: async (response: ProviderResponse, selected: Model<Api>) => { observe(response.status); await request?.onResponse?.(response, selected); },
+        return streamAttempts(model, (models, attempt, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, fitted, Object.assign({}, request, {
+          fetch: attempt.fetch, onPayload: claude.onPayload,
+          onResponse: async (response: ProviderResponse, selected: Model<Api>) => { attempt.observe(response); await request?.onResponse?.(response, selected); },
         })), request?.signal);
       });
     },
     complete: (model, context, request) => facade.stream(model, context, request).result(),
-    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); const fitted = fitRequestImages(context, imageLimits(model)); return streamAttempts(model, (models, observe, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, fitted, { ...request, fetch: cloudFetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); }),
+    streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); const fitted = fitRequestImages(context, imageLimits(model)); return streamAttempts(model, (models, attempt, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, fitted, { ...request, fetch: attempt.fetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); }),
     completeSimple: (model, context, request) => facade.streamSimple(model, context, request).result(),
     streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await options.pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
     fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),
     cancelDeferred: async (model, handle, request) => { rejectOverrides(request); canonical(model); const pin = await options.pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); await (await bound(model.provider, pin.credentialId, false, request?.signal)).cancelDeferred(model, handle, { ...request, fetch: cloudFetch }); },
-    generateImages: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (models, observe) => models.generateImages(model, context, { ...request, fetch: cloudFetch, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); },
-    classify: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (models, observe) => models.classify(model, context, { ...request, fetch: cloudFetch, onResponse: async (response, selected) => { observe(response.status); await request?.onResponse?.(response, selected); } }), request?.signal); },
+    generateImages: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (models, attempt) => models.generateImages(model, context, { ...request, fetch: attempt.fetch, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); },
+    classify: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (models, attempt) => models.classify(model, context, { ...request, fetch: attempt.fetch, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); },
   };
   await facade.refresh({ allowNetwork: false });
   return facade;

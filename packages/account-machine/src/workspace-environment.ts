@@ -7,19 +7,21 @@ import {
   resolveExecutionApproval, deriveLifecycleExecutions, isInteractiveLifecycleScript, skippedInteractiveScriptLine,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
-  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleIncident,
+  parseIngressFile, parseServiceIngressContent, serviceIngressContent, SERVICE_INGRESS_EXECUTION_ID,
+  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type HostedIngressCredential, type LifecycleIncident, type ServiceIngressGroup,
   type EnvironmentLifecycleAuthority, type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from '@gitspace/protocol-environment';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
 import type { WorkspaceCheckouts, WorkspaceLifecyclePlanResult, WorkspaceLifecyclePlanStep } from './workspace-hub.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
+import { parseServiceDefinitions, readServicesJson, serviceUrlEnvironment, type WorkspaceServiceManager } from './workspace-services.js';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import type { RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 
 
 export interface EnvironmentExecutionView {
   id: string;
-  kind: 'check' | 'script';
+  kind: 'check' | 'script' | 'ingress';
   label: string;
   command: string;
   content: string;
@@ -59,8 +61,8 @@ export class WorkspaceEnvironmentManager {
     private readonly checkouts: WorkspaceCheckouts,
     private readonly secrets: EnvironmentSecretMaterializer | undefined,
     private readonly runner: EnvironmentLifecycleRunner | undefined,
-    private readonly authority: EnvironmentLifecycleAuthority & Pick<CloudSpaceCheckpointAuthority, 'listProjectWorkspaces'>,
-    private readonly options: { machineId: string; stateRoot: string },
+    private readonly authority: EnvironmentLifecycleAuthority & Pick<CloudSpaceCheckpointAuthority, 'listProjectWorkspaces' | 'registerHostedIngress'>,
+    private readonly options: { machineId: string; stateRoot: string; services: Pick<WorkspaceServiceManager, 'workspaceUrls'> },
   ) {}
 
   /** The checkout a lifecycle operation reads: the named attachment, else this machine's held checkout. */
@@ -105,6 +107,7 @@ export class WorkspaceEnvironmentManager {
         const command = join(space.rootPath, '.gitspace', 'lifecycle', phase, fileName);
         return { command, content: await readFile(command, 'utf8') };
       },
+      services: () => readServicesJson(space.rootPath),
     }) : null;
     const executions: EnvironmentExecutionView[] = (derived ?? lifecycle.executions).map((execution) => ({
       ...execution, phase: execution.phase ?? undefined, fileName: execution.fileName ?? undefined, approval: approval(execution.hash), ...(execution.kind === 'script' ? { interactive: isInteractiveLifecycleScript(execution.content) } : {}),
@@ -245,7 +248,8 @@ export class WorkspaceEnvironmentManager {
   private async runApproved(spaceId: string, phase: LifecycleRunPhase, rerun: boolean, workingDirectory?: string, request?: { runId: string; interactive?: boolean; deadlineAt?: string; accepted: (run: LifecycleRun) => void }, attachment?: LocalAttachment): Promise<readonly EnvironmentExecutionResult[]> {
     const space = this.space(spaceId, attachment);
     const current = await this.view(spaceId, workingDirectory !== undefined, attachment);
-    const phaseExecutions = current.executions.filter((execution) => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase);
+    // The `ingress` execution is approved, never run.
+    const phaseExecutions = current.executions.filter((execution): execution is EnvironmentExecutionView & { kind: 'check' | 'script' } => execution.kind !== 'ingress' && (phase === 'checks' ? execution.kind === 'check' : execution.phase === phase));
     // Without a terminal, interactive scripts are skipped and recorded instead of refusing the whole phase.
     const skipped = request?.interactive ? [] : phaseExecutions.filter((execution) => execution.interactive);
     const planned = phaseExecutions.filter((execution) => !skipped.includes(execution));
@@ -258,6 +262,9 @@ export class WorkspaceEnvironmentManager {
       holder: true,
       detached: workingDirectory !== undefined, runnerAvailable: this.runner !== undefined, attachment: attachment !== undefined,
     });
+    const checkout = workingDirectory ?? space.rootPath;
+    // The workspace URLs of the checkout's declared services; a broken services.json refuses the run before its claim.
+    const serviceUrls = serviceUrlEnvironment(this.options.services.workspaceUrls(spaceId, parseServiceDefinitions(await readServicesJson(checkout))));
     const secretNames = planned.length > 0 ? [...current.effective.secrets] : [];
     const steps = await Promise.all(planned.map(async (execution): Promise<WorkspaceLifecyclePlanStep> => {
       const content = workingDirectory ? execution.content : execution.kind === 'script' ? await readFile(execution.command, 'utf8') : execution.command;
@@ -288,6 +295,8 @@ export class WorkspaceEnvironmentManager {
     }
     if (state.claim?.status !== 'claimed') throw new EnvironmentError('RunConflict', state.claim?.reason ?? 'Lifecycle execution is awaiting approval');
     const directory = await mkdtemp(join(tmpdir(), 'gitspace-lifecycle-'));
+    // Only `cloud/provision` and `workspace/materialize` scripts register signed callers.
+    const ingressFile = phase === 'cloud/provision' || phase === 'workspace/materialize' ? join(directory, 'ingress.json') : null;
     let secretValues: Record<string, string> = {};
     let started = false;
     let stopped = false;
@@ -349,6 +358,8 @@ export class WorkspaceEnvironmentManager {
         GITSPACE_WORKSPACE_GENERATION: '', GITSPACE_ENVIRONMENT_PROFILE: current.selectedProfile,
         GITSPACE_WORKSPACE_SOURCE_COMMIT: definition?.sourceCommit ?? '',
         GITSPACE_LIFECYCLE_BINDINGS: JSON.stringify(state.bindings), GITSPACE_LIFECYCLE_OUTPUT: join(directory, 'output.json'),
+        ...(ingressFile ? { GITSPACE_LIFECYCLE_INGRESS: ingressFile } : {}),
+        ...serviceUrls,
       };
       await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'start', runId });
       if (skippedOutput) await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, output: skippedOutput, incidents }).catch(reportTransportFailure);
@@ -410,6 +421,12 @@ export class WorkspaceEnvironmentManager {
     let bindings: Record<string, string> = {};
     try { bindings = await this.readBindings(directory, redactions); }
     catch (error) { failure ??= error; }
+    if (ingressFile && !failure && result?.exitCode === 0) {
+      try { await this.registerIngress({ current, spaceId, runId, checkout, ingressFile, secretValues }); }
+      catch (error) {
+        failure = environmentFailure(error) ? error : new EnvironmentError('ExecutionFailed', `Signed caller registration failed: ${error instanceof Error ? error.message : String(error)}`, { runId });
+      }
+    }
     const sanitize = (output: string) => sanitizeLifecycleOutput(output, redactions);
     const finalLog = sanitize(logPending);
     for (let offset = 0; offset < finalLog.length; offset += 16_000) {
@@ -437,5 +454,46 @@ export class WorkspaceEnvironmentManager {
   private async readBindings(directory: string, secrets: readonly string[]): Promise<Record<string, string>> {
     const source = await readFile(join(directory, 'output.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"bindings":{}}' : Promise.reject(error));
     return parseLifecycleBindingsJson(source, secrets);
+  }
+
+  /**
+   * Registers the signed callers a succeeded `cloud/provision` or `workspace/materialize` run wrote to `ingress.json`: one
+   * registration per workspace URL with declared routes, only while those routes (re-read from the checkout) are approved.
+   * A bearer names a secret of the profile and is sent as the SHA-256 of its value.
+   */
+  private async registerIngress(input: { current: WorkspaceEnvironmentView; spaceId: string; runId: string; checkout: string; ingressFile: string; secretValues: Readonly<Record<string, string>> }): Promise<void> {
+    const { current, spaceId } = input;
+    const source = await readFile(input.ingressFile, 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (source === null) return;
+    const { credentials } = parseIngressFile(source);
+    const services = await readServicesJson(input.checkout);
+    const content = serviceIngressContent(services);
+    if (content === null) {
+      if (credentials.length > 0) throw new EnvironmentError('InvalidConfiguration', 'ingress.json registers credentials, but .gitspace/services.json declares no ingress routes');
+      return;
+    }
+    const hash = await executionHash({ kind: 'ingress', command: content });
+    if (!current.lifecycle.approvals.some((approval) => approval.executionHash === hash)) {
+      throw new EnvironmentError('ApprovalRequired', 'The signed caller routes in .gitspace/services.json need approval before credentials are registered', { executionId: SERVICE_INGRESS_EXECUTION_ID });
+    }
+    const definitions = parseServiceDefinitions(services);
+    const groups = parseServiceIngressContent(content);
+    const hosted = credentials.map((credential): { group: ServiceIngressGroup; credential: HostedIngressCredential } => {
+      const port = credential.port ?? definitions.find((service) => service.name === credential.service)?.ports.find((item) => item.protocol === 'http')?.name;
+      const group = groups.find((item) => item.service === credential.service && item.port === port);
+      if (!group) throw new EnvironmentError('InvalidConfiguration', `ingress.json names ${credential.service}${port ? ` port ${port}` : ''}, which declares no ingress routes`, { service: credential.service });
+      if (credential.kind === 'oidc') return { group, credential: { kind: 'oidc', issuer: credential.issuer, subjects: credential.subjects, forwardAuthorization: credential.forwardAuthorization ?? false } };
+      if (credential.kind === 'jwt') return { group, credential: { kind: 'jwt', issuer: credential.issuer, keys: credential.keys, subjects: credential.subjects, forwardAuthorization: credential.forwardAuthorization ?? false } };
+      const value = current.effective.secrets.includes(credential.secret) ? input.secretValues[credential.secret] : undefined;
+      if (value === undefined) throw new EnvironmentError('InvalidConfiguration', `ingress.json bearer secret ${credential.secret} is not a secret of the ${current.selectedProfile} profile`, { secret: credential.secret });
+      return { group, credential: { kind: 'bearer', secret: credential.secret, sha256: new Bun.CryptoHasher('sha256').update(value).digest('hex') } };
+    });
+    const urls = this.options.services.workspaceUrls(spaceId, definitions);
+    const registrations = groups.map((group) => {
+      const hostname = urls.find((url) => url.service === group.service && url.port === group.port)?.hostname;
+      if (!hostname) throw new EnvironmentError('InvalidConfiguration', 'Signed callers need public service routing, which this machine does not have', { service: group.service });
+      return { hostname, service: group.service, port: group.port, credentials: hosted.filter((item) => item.group === group).map((item) => item.credential) };
+    });
+    await this.authority.registerHostedIngress({ projectId: current.projectId, workspaceId: spaceId, runId: input.runId, ingress: content, registrations });
   }
 }

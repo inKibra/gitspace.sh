@@ -21,8 +21,6 @@ test('a declared service gets its workspace URL and a machine URL naming the mac
     const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal is not allowed'); }, stop: async () => { throw new Error('Workspace terminal is not allowed'); } }, BETA, root, 'gssh.dev', 'test', registry.authority(BETA));
     const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache', machineId: BETA, generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['read', 'service'], updatedAt: new Date().toISOString() });
     const local = { attachment, rootPath: join(root, 'checkout'), executionSecret: 'secret', prerequisitesComplete: true };
-    const definitions = manager.parseDefinitions(JSON.parse(await Bun.file(join(local.rootPath, '.gitspace/services.json')).text()));
-    expect(definitions[0]?.name).toBe('web');
     const started = RuntimeServiceSchema.parse(await cacheServiceOperation(manager, local, { op: 'start', name: 'web' }));
     expect(started).toMatchObject({ name: 'web', state: 'ready', url: 'https://web--workspace--test-srv.gssh.dev', machineUrl: 'https://web--beta-1a2b--workspace--test-srv.gssh.dev' });
     const listed = RuntimeServiceSchema.array().parse(await cacheServiceOperation(manager, local, { op: 'list' }));
@@ -38,20 +36,20 @@ test('a declared service gets its workspace URL and a machine URL naming the mac
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('declared services resolve their command through bundle terminal.path and receive terminal.env', async () => {
+test('declared services resolve their command through bundle terminal.path and receive terminal.env, their name and the workspace URLs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cache-service-bundle-'));
   const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal is not allowed'); }, stop: async () => { throw new Error('Workspace terminal is not allowed'); } }, BETA, root, 'gssh.dev', 'test', new HostedRoutesFake([{ id: BETA, label: 'beta' }]).authority(BETA));
   try {
     const checkout = join(root, 'checkout');
     await mkdir(join(checkout, '.gitspace'), { recursive: true });
     await mkdir(join(checkout, 'node_modules/.bin'), { recursive: true });
-    await writeFile(join(checkout, 'node_modules/.bin/bundle-web'), `#!/bin/sh\necho "mode=$BUNDLE_MODE"\nexec '${process.execPath}' -e 'Bun.serve({hostname:"127.0.0.1",port:Number(process.env.PORT),fetch:()=>new Response("ok")})'\n`, { mode: 0o755 });
+    await writeFile(join(checkout, 'node_modules/.bin/bundle-web'), `#!/bin/sh\necho "mode=$BUNDLE_MODE name=$GITSPACE_SERVICE_NAME url=$GITSPACE_SERVICE_URL_WEB"\nexec '${process.execPath}' -e 'Bun.serve({hostname:"127.0.0.1",port:Number(process.env.PORT),fetch:()=>new Response("ok")})'\n`, { mode: 0o755 });
     await writeFile(join(checkout, '.gitspace/services.json'), JSON.stringify({ services: [{ name: 'web', command: 'bundle-web', ports: [{ name: 'http' }] }] }));
     await writeFile(join(checkout, '.gitspace/bundle.json'), JSON.stringify({ version: 1, profiles: { base: {} }, terminal: { path: ['node_modules/.bin'], env: { BUNDLE_MODE: 'preview' } } }));
     const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'cache-bundle', machineId: 'machine-b', generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['read', 'service'], updatedAt: new Date().toISOString() });
     const local = { attachment, rootPath: checkout, executionSecret: 'secret', prerequisitesComplete: true };
     expect(RuntimeServiceSchema.parse(await cacheServiceOperation(manager, local, { op: 'start', name: 'web' })).state).toBe('ready');
-    expect(await cacheServiceOperation(manager, local, { op: 'logs', name: 'web', source: 'declared' })).toMatchObject({ text: expect.stringContaining('mode=preview') });
+    expect(await cacheServiceOperation(manager, local, { op: 'logs', name: 'web', source: 'declared' })).toMatchObject({ text: expect.stringContaining('mode=preview name=web url=https://web--workspace--test-srv.gssh.dev') });
     await cacheServiceOperation(manager, local, { op: 'stop', name: 'web', source: 'declared' });
   } finally { await manager.dispose(); await rm(root, { recursive: true, force: true }); }
 });

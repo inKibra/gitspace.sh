@@ -25,7 +25,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
   const current: InferenceProfile = { version: INFERENCE_PROFILE_VERSION, id: DEFAULT_INFERENCE_PROFILE_ID, name: 'Default', revision: 1, settings: defaultModel === null ? {} : { modelRoles: { default: defaultModel } }, createdAt: stamp, updatedAt: stamp };
   const state: InferenceState = { version: INFERENCE_PROFILE_VERSION, revision: 1, profiles: [current], assignments: [] };
   const inference: InferenceController = { state, loading: false, pending: false, error: null, refresh: noop, create: async () => state, update: async () => state, remove: async () => state, assign: async () => state };
-  const section: ProvidersSectionProps = { providers, usage: null, usageStatus: 'idle', onShow: () => undefined, onRefreshUsage: noop, onSignIn: noop, onSignOut: noop, onSetApiKey: noop, login: { flow: null, respond: noop, cancel: noop } };
+  const section: ProvidersSectionProps = { providers, usage: null, usageStatus: 'idle', onShow: () => undefined, onRefreshUsage: noop, onSignIn: noop, onDisableAccount: noop, onEnableAccount: noop, onRemoveAccount: noop, onSetApiKey: noop, login: { flow: null, respond: noop, cancel: noop } };
   const gate = onboardingInferenceGate({ profile: current, models, modelsReady, modelsError: null, providers: section });
   return <SettingsPage
     mode="onboarding" settings={settings} machines={[]} runtimeSettings={[]} runtimeGeneration={1}

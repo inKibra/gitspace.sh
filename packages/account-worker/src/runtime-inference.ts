@@ -13,7 +13,7 @@ export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args:
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
 const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional(), role: z.string().optional() });
 type Admission = z.infer<typeof admissionSchema>;
-const pinSchema = z.object({ credentialId: z.string(), lastUsedAt: z.number() });
+const pinSchema = z.object({ credentialId: z.string() });
 const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stringify([kind, ...parts])}`;
 
 /** Only the Workspace DO calls this factory; no bearer or refresh token enters runtime state. `retrying` names the
@@ -38,7 +38,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         write: (name, value) => ctx.storage.put(key('catalog', name), value),
         delete: async name => { await ctx.storage.delete(key('catalog', name)); },
       });
-      pending = createVaultModels({ profileId: profile.id, conversationId, settings: profile.settings, fastMode, ...(admission ? { pinnedModels: [admission.model] } : {}), modelsStore: catalog, pins: pinsFor(profile.id, conversationId), vault: {
+      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, fastMode, ...(admission ? { pinnedModels: [admission.model] } : {}), modelsStore: catalog, pins: pinsFor(profile.id, conversationId), vault: {
         list: (profileId, provider) => vault().cloudCredentialAccounts(profileId, provider),
         resolve: input => { input.signal?.throwIfAborted(); return vault().cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
         recordFailure: input => vault().cloudCredentialFailure(input),
@@ -145,14 +145,14 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const currentAssignment = resolved.assignmentRevision;
         const readonly = async (): Promise<never> => { throw new Error('Passive inference catalogs cannot mutate state or resolve credentials'); };
         const currentModels = await createVaultModels({
-          profileId: currentProfile.id, conversationId: 'catalog', settings: currentProfile.settings,
+          profileId: currentProfile.id, workspaceId: identity.workspaceId, settings: currentProfile.settings,
           modelsStore: createDurableModelsStore({
             read: name => ctx.storage.get<unknown>(key('catalog', name)), write: readonly, delete: readonly,
           }),
           pins: { read: async () => null, write: readonly },
           vault: {
             list: async (_profileId, provider) => resolved.accounts.filter(account => provider === undefined || account.provider === provider),
-            resolve: readonly,
+            resolve: readonly, recordFailure: readonly,
           },
         });
         router.register(currentModels, 'catalog');

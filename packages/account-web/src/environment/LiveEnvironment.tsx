@@ -115,6 +115,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
     setupMachineId: machineId ?? null,
     steps: [...SETUP_STEPS, ...OPTIONAL_STEPS.filter(phase => remote.executions.some(item => item.phase === phase))].map((phase: LifecycleRunPhase) => ({ phase, label: STEP_LABEL[phase], scripts: remote.executions.filter(item => phase === 'checks' ? item.kind === 'check' : item.kind === 'script' && item.phase === phase).map(script) })),
     browserOrigins: remote.lifecycle.browserOrigins.map(origin => ({ hash: origin.hash, pattern: origin.pattern, approved: remote.lifecycle.approvals.some(approval => approval.executionHash === origin.hash) })),
+    signedCallers: remote.executions.filter(item => item.kind === 'ingress').map(item => ({ id: item.id, label: item.label, approved: item.approval !== null })),
     conflicts: workspaceStatus(snapshot).cloud.conflicts,
     secrets: remote.effective.secrets.map(name => ({ name, source: remote.secretMetadata.find(secret => secret.name === name)?.source ?? 'project', granted: remote.configuredSecrets.includes(name) })),
     values: Object.entries(remote.values.effective).map(([name, value]) => ({ name, value, source: name in remote.values.workspace ? 'workspace' : name in remote.values.project ? 'project' : name in remote.values.global ? 'account' : 'default' })),

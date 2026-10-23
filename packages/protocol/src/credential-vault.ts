@@ -58,6 +58,8 @@ export const controlOperationSchema = z.enum([
   'project.routes.lease',
   'project.routes.pin',
   'project.routes.release',
+  /** Replaces a workspace's signed-caller credentials, during this machine's approved provision or materialize run. */
+  'project.routes.ingress',
   'project.events.append',
   'devices.list',
   /** Issues people filed with GitSpace from their workspaces, read and resolved by the GitSpace agent. */

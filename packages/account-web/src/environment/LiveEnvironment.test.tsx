@@ -145,6 +145,27 @@ it('lists the named setup steps with approvals and interactive scripts', async (
   expect(rpc.runChecks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop', runId: expect.any(String) });
 });
 
+it('asks for approval of the routes services.json opens to signed callers, and revokes it', async () => {
+  const content = JSON.stringify([{ service: 'api', port: 'http', routes: [{ method: 'POST', path: '/webhooks/*' }] }], null, 2);
+  const hash = await executionHash({ kind: 'ingress', command: content });
+  const ingress = { id: 'ingress', kind: 'ingress' as const, label: 'Signed callers', command: '.gitspace/services.json', hash, content, phase: null, fileName: null };
+  const unapproved = environment();
+  reads.set('environment', { ...unapproved, executions: [...unapproved.executions, { ...ingress, approval: null }] });
+  await render(snapshot([{ id: 'darktop' }]));
+  expect(document.querySelector('[aria-label="Overview"] [role="status"]')?.textContent).toContain('2 need approval');
+  expect(step('Signed callers').textContent).toContain('Needs approval');
+  await click('Review & approve', step('Signed callers'));
+  expect(document.body.textContent).toContain('/webhooks/*');
+  await click('Approve this content');
+  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
+  const approved = environment();
+  reads.set('environment', { ...approved, executions: [...approved.executions, { ...ingress, approval: 'workspace' }], lifecycle: { ...approved.lifecycle, approvals: [...approved.lifecycle.approvals, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp }] } });
+  await render(snapshot([{ id: 'darktop' }]));
+  expect(step('Signed callers').textContent).not.toContain('Needs approval');
+  await click('Revoke', step('Signed callers'));
+  expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
+});
+
 it('lists secrets and values by name and never renders a value', async () => {
   await render(snapshot([{ id: 'darktop' }]));
   const values = document.querySelector('[aria-label="Values"]')!;

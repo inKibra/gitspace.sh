@@ -421,3 +421,28 @@ it('holds the nested reading anchor while a remounted execution fetches its firs
   const restored = container.querySelector<HTMLElement>(`[aria-label="Build execution history"] [data-transcript-row="${heldId}"]`)!;
   expect(restored.getBoundingClientRect().top).toBe(heldOffset);
 });
+
+it('draws workspace reports as one-line rows that stack tightly, link to their workspace and unfold their excerpt on click', async () => {
+  const report = (index: number, outcome: 'finished' | 'failed', excerpt: string): TranscriptRow => ({
+    id: `report-${index}`, ordinal: index, turnId: 'project-turn', turnStatus: 'done', truncated: false, contentBytes: 200,
+    item: { id: `report-${index}`, type: 'workspace-report', projectId: 'project-a', workspaceId: `space-${index}`, name: `FEAT-${index}`, requestId: `start:${index}`, outcome, excerpt },
+  });
+  const answer: TranscriptRow = { id: 'answer', ordinal: 3, turnId: 'project-turn', turnStatus: 'done', truncated: false, contentBytes: 100, item: { id: 'answer', type: 'message', role: 'assistant', text: 'Both reported back.' } };
+  await render(historyFor([report(1, 'finished', 'Plan drafted for the bucket move.'), report(2, 'failed', 'Model request failed'), answer]));
+  const first = container.querySelector<HTMLElement>('[data-transcript-row="report-1"]')!;
+  expect(first.querySelector('[data-workspace-report="finished"]')?.textContent).toBe('FEAT-1finishedPlan drafted for the bucket move.');
+  // Consecutive reports stack tightly; the last keeps the turn's spacing before the reply.
+  expect(first.style.paddingBottom).toBe('2px');
+  expect(container.querySelector<HTMLElement>('[data-transcript-row="report-2"]')!.style.paddingBottom).toBe('8px');
+  // Folded to one line until clicked; then the whole excerpt shows below the row.
+  const toggle = first.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(first.querySelector('p')).toBeNull();
+  await act(() => toggle.click());
+  expect(first.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true');
+  expect(first.querySelector('p')?.textContent).toBe('Plan drafted for the bucket move.');
+  // The name opens that workspace in the project.
+  await act(() => first.querySelector<HTMLAnchorElement>('a')!.click());
+  const location = new URL(window.location.href);
+  expect([location.pathname, location.searchParams.get('project'), location.searchParams.get('workspace')]).toEqual(['/', 'project-a', 'space-1']);
+});

@@ -150,6 +150,7 @@ describe('private hosted service access', () => {
     const request = new Request(`https://${hostname}/private`);
     expect((await fetchInternalService(env, { kind: 'device', accountId: 'foreign', deviceId: 'machine-b' }, request)).status).toBe(403);
     expect((await fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, projectId: 'project-a', workspaceId: 'space-b' }, request)).status).toBe(403);
+    expect((await fetchInternalService(env, { kind: 'ingress', accountId: env.ACCOUNT_ID, workspaceId: 'space-b', credential: 'bearer' }, request)).status).toBe(403);
     // A registered but disconnected machine is reached through the internal relay, not Internet fetch.
     const response = await fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, projectId: 'project-a', workspaceId: 'space-a' }, request);
     expect(response.status).toBe(503);

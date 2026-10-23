@@ -1,5 +1,5 @@
 import { providerErrorText } from './provider-error.js';
-import type { AskBlock, MessageImage, RichContentBlock, ToolCallBlock, TransportBlock, TurnBlock } from './model.js';
+import { WORKSPACE_REPORT_ENTRY, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock } from './model.js';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
 import { parseConversationEvents } from './conversation-events.js';
@@ -401,6 +401,8 @@ export class TranscriptProjector {
           if (this.#current?.hasContent) this.#commit('done');
           const turn = this.#ensureTurn(event);
           events.forEach((note, index) => {
+            // A workspace report shows as its own row, from the entry delivering it appended.
+            if (note.kind === 'workspace') return;
             const lines = note.text.split('\n');
             const detail = lines.slice(0, 2).join('\n').slice(0, 240);
             this.#write({ id: `${turn.id}:event:${event.ordinal}:${index}`, type: 'interruption', reason: 'event', title: note.source, detail, ...(detail.length < note.text.length ? { body: note.text } : {}) });
@@ -416,6 +418,11 @@ export class TranscriptProjector {
       const turn = this.#ensureTurn(event);
       if (message.role === 'custom' && message.customType === 'gitspace.machine-notice' && message.display === true) {
         this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: typeof message.title === 'string' ? message.title : 'Machine', detail: contentText(message.content) });
+        return;
+      }
+      if (message.role === 'custom' && message.customType === WORKSPACE_REPORT_ENTRY && message.display === true) {
+        const report = workspaceTurnReportSchema.safeParse(message.details);
+        if (report.success) this.#write({ id: `${turn.id}:workspace:${event.ordinal}`, type: 'workspace-report', ...report.data });
         return;
       }
       if (message.role === 'custom' && message.customType === 'gitspace-instructions-changed' && message.display === true) {

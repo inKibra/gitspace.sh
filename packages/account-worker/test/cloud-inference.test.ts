@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { env, runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
 import { http, HttpResponse } from 'msw';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { orderedAccounts, type VaultAccess } from '@gitspace/runtime-core/inference';
 import { network } from './network.js';
 import { parse as parseYaml } from 'yaml';
 
@@ -21,6 +22,15 @@ async function seedVault(credentials: Array<{ id: string; provider: 'anthropic' 
   }
   await vault.ensureInference();
   return userId;
+}
+
+/** Selection as a workspace's runtime sees this vault. */
+function selection(vault: { cloudCredentialAccounts: VaultAccess['list'] }): VaultAccess {
+  return {
+    list: (profileId, provider) => vault.cloudCredentialAccounts(profileId, provider),
+    async resolve() { throw new Error('Selection never resolves credentials'); },
+    async recordFailure() { throw new Error('Selection never records failures'); },
+  };
 }
 
 describe('Cloud inference credential authority', () => {
@@ -81,16 +91,16 @@ describe('Cloud inference credential authority', () => {
     const client = (await vault.cloudCredentialAccounts(profile.id))[0]!;
     await runInDurableObject(vault, async instance => {
       await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: client.id })).rejects.toThrow();
+      await expect(instance.disableProviderAccount('default', 'openai', client.id)).rejects.toThrow('Account is unavailable');
     });
-    await vault.logoutBrowserCredentials('default', 'openai', client.id);
     expect((await vault.cloudResolveCredential({ profileId: profile.id, credentialId: client.id })).credential).toEqual({ type: 'api_key', key: 'client-secret' });
     const encrypted = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec('SELECT sealed_json FROM inference_credentials').toArray());
     expect(JSON.stringify(encrypted)).not.toContain('client-secret');
-    await vault.logoutBrowserCredentials('default', 'openai', original.id);
+    await vault.disableProviderAccount('default', 'openai', original.id);
     await vault.putBrowserApiKey('default', 'openai', 'replacement');
     const replacement = (await vault.cloudCredentialAccounts('default'))[0]!;
     expect(replacement.id).not.toBe(original.id);
-    await vault.logoutBrowserCredentials('default', 'openai', original.id);
+    await vault.removeProviderAccount('default', 'openai', original.id);
     expect((await vault.cloudResolveCredential({ profileId: 'default', credentialId: replacement.id, forceRefresh: true })).credential).toEqual({ type: 'api_key', key: 'replacement' });
     await vault.deleteInferenceProfile({ profileId: profile.id, expectedRevision: 0 });
     await runInDurableObject(vault, async instance => {
@@ -98,23 +108,24 @@ describe('Cloud inference credential authority', () => {
     });
   });
 
-  it('disables an active account on the first logout and permanently removes it on the second', async () => {
+  it('keeps a disabled account until its owner removes it, and removes it only then', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([
       { id: 'kept', provider: 'openai-codex', access: 'access-kept', accountId: 'account-kept' },
       { id: 'removed', provider: 'openai-codex', access: 'access-removed', accountId: 'account-removed' },
     ]));
     const [kept, removed] = await vault.cloudCredentialAccounts('default');
-    await vault.cloudCredentialFailure({ profileId: 'default', credentialId: removed!.id, kind: 'refresh' });
+    await vault.cloudCredentialFailure({ profileId: 'default', credentialId: removed!.id, kind: 'refresh', reason: 'Unauthorized' });
     const codexAccounts = async () => (await vault.cloudProviders('default')).find(provider => provider.id === 'openai-codex')!.accounts.map(account => ({ id: account.id, disabled: account.disabled }));
 
-    await vault.logoutBrowserCredentials('default', 'openai-codex', removed!.id);
+    await vault.disableProviderAccount('default', 'openai-codex', removed!.id);
+    await vault.disableProviderAccount('default', 'openai-codex', removed!.id);
     expect(await codexAccounts()).toEqual([{ id: kept!.id, disabled: false }, { id: removed!.id, disabled: true }]);
     await runInDurableObject(vault, async (instance, state) => {
       await expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: removed!.id })).rejects.toThrow();
       expect(state.storage.sql.exec("SELECT state FROM inference_credentials WHERE id = 'removed'").toArray()).toEqual([{ state: 'disabled' }]);
     });
 
-    await vault.logoutBrowserCredentials('default', 'openai-codex', removed!.id);
+    await vault.removeProviderAccount('default', 'openai-codex', removed!.id);
     expect(await codexAccounts()).toEqual([{ id: kept!.id, disabled: false }]);
     expect((await vault.cloudCredentialAccounts('default')).map(account => account.id)).toEqual([kept!.id]);
     await runInDurableObject(vault, (_instance, state) => {
@@ -126,11 +137,75 @@ describe('Cloud inference credential authority', () => {
     expect((await vault.cloudCredentialAccounts('default', 'openai')).map(account => account.id)).not.toContain(removed!.id);
   });
 
+  it('enables a disabled account under its id, ends its cooldown, and selects it again', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'first', provider: 'anthropic', access: 'access-first', email: 'first@example.com' },
+      { id: 'second', provider: 'anthropic', access: 'access-second', email: 'second@example.com' },
+    ]));
+    const chosen = async () => (await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId: 'workspace', vault: selection(vault) }))[0]?.id;
+    const own = await chosen();
+    if (!own) throw new Error('Expected a selected account');
+    await vault.cloudCredentialFailure({ profileId: 'default', credentialId: own, kind: 'rotate', until: Date.now() + 3_600_000, reason: 'rate_limit_error' });
+    await vault.disableProviderAccount('default', 'anthropic', own);
+    expect((await vault.cloudCredentialAccounts('default')).map(account => account.id)).not.toContain(own);
+    await vault.enableProviderAccount('default', 'anthropic', own);
+    expect((await vault.cloudProviders('default')).find(provider => provider.id === 'anthropic')!.accounts.find(account => account.id === own)).toMatchObject({ disabled: false, outUntil: null });
+    expect(await chosen()).toBe(own);
+
+    // An API key enabled again replaces the key stored meanwhile: one key per provider, as an upload leaves it.
+    await vault.putBrowserApiKey('default', 'openai', 'old-key');
+    const [old] = await vault.cloudCredentialAccounts('default', 'openai');
+    await vault.disableProviderAccount('default', 'openai', old!.id);
+    await vault.putBrowserApiKey('default', 'openai', 'new-key');
+    await vault.enableProviderAccount('default', 'openai', old!.id);
+    expect((await vault.cloudCredentialAccounts('default', 'openai')).map(account => account.id)).toEqual([old!.id]);
+  });
+
+  it('keeps an account out until the provider reset it named, capped at a week, and selects it again after', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'first', provider: 'anthropic', access: 'access-first', email: 'first@example.com' },
+      { id: 'second', provider: 'anthropic', access: 'access-second', email: 'second@example.com' },
+    ]));
+    const [first, second] = await vault.cloudCredentialAccounts('default');
+    const reset = Date.now() + 5 * 3_600_000;
+    expect(await vault.cloudCredentialFailure({ profileId: 'default', credentialId: first!.id, kind: 'rotate', until: reset, reason: 'rate_limit_error' })).toEqual({ label: 'first@example.com', until: reset });
+    expect((await vault.cloudCredentialAccounts('default')).find(account => account.id === first!.id)?.cooldownUntil).toBe(reset);
+    expect((await vault.cloudProviders('default')).find(provider => provider.id === 'anthropic')!.accounts.find(account => account.id === first!.id))
+      .toMatchObject({ outUntil: new Date(reset).toISOString(), outReason: 'rate_limit_error' });
+    const usable = async (now: number) => (await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId: 'workspace', vault: selection(vault), now })).map(account => account.id);
+    expect(await usable(reset - 1)).toEqual([second!.id]);
+    expect(await usable(reset)).toContain(first!.id);
+    const week = Date.now() + 7 * 24 * 3_600_000;
+    const capped = await vault.cloudCredentialFailure({ profileId: 'default', credentialId: second!.id, kind: 'rotate', until: Date.now() + 30 * 24 * 3_600_000, reason: 'weekly limit' });
+    expect(capped.until).toBeGreaterThanOrEqual(week);
+    expect(capped.until).toBeLessThanOrEqual(Date.now() + 7 * 24 * 3_600_000);
+  });
+
+  it('skips an account whose usage window is used up until that window resets, before any request fails', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'first', provider: 'anthropic', access: 'access-first', email: 'first@example.com' },
+      { id: 'second', provider: 'anthropic', access: 'access-second', email: 'second@example.com' },
+    ]));
+    const [first, second] = await vault.cloudCredentialAccounts('default');
+    const reset = new Date(Math.ceil((Date.now() + 2 * 3_600_000) / 1000) * 1000).toISOString();
+    network.use(http.get('https://api.anthropic.com/api/oauth/usage', ({ request }) => HttpResponse.json(request.headers.get('authorization') === 'Bearer access-first'
+      ? { five_hour: { utilization: 100, resets_at: reset }, seven_day: { utilization: 40, resets_at: reset } }
+      : { five_hour: { utilization: 10, resets_at: reset } })));
+    await vault.cloudUsage('default', 'anthropic', true);
+    expect((await vault.cloudCredentialAccounts('default')).find(account => account.id === first!.id)?.cooldownUntil).toBe(Date.parse(reset));
+    expect((await vault.cloudProviders('default')).find(provider => provider.id === 'anthropic')!.accounts.map(account => ({ id: account.id, outUntil: account.outUntil, outReason: account.outReason })))
+      .toEqual([{ id: first!.id, outUntil: reset, outReason: '5 hours usage limit reached' }, { id: second!.id, outUntil: null, outReason: null }]);
+    for (const workspaceId of ['workspace-0', 'workspace-1', 'workspace-2', 'workspace-3']) {
+      expect((await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId, vault: selection(vault) })).map(account => account.id)).toEqual([second!.id]);
+    }
+    expect((await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId: 'workspace-0', vault: selection(vault), now: Date.parse(reset) })).map(account => account.id)).toContain(first!.id);
+  });
+
   it('signing out a whole provider only disables its accounts', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'only', provider: 'openai-codex', access: 'access-only', accountId: 'account-only' }]));
     const [account] = await vault.cloudCredentialAccounts('default');
-    await vault.logoutBrowserCredentials('default', 'openai-codex', null);
-    await vault.logoutBrowserCredentials('default', 'openai-codex', null);
+    await vault.logoutBrowserCredentials('default', 'openai-codex');
+    await vault.logoutBrowserCredentials('default', 'openai-codex');
     expect((await vault.cloudProviders('default')).find(provider => provider.id === 'openai-codex')).toMatchObject({ hasAuth: false, accounts: [{ id: account!.id, disabled: true }] });
     expect(await vault.cloudCredentialAccounts('default')).toEqual([]);
   });
@@ -352,7 +427,7 @@ describe('Cloud inference credential authority', () => {
       const deadline = Date.now() + 2000;
       while (!started && !settled && Date.now() < deadline) await scheduler.wait(5);
       expect(started).toBe(true);
-      await vault.logoutBrowserCredentials('default', 'openai-codex', account.id);
+      await vault.disableProviderAccount('default', 'openai-codex', account.id);
     } finally {
       released = true;
       expect(await refresh).toEqual({ rejected: true });

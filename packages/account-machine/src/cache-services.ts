@@ -1,10 +1,8 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { daemonClientForProject, type DaemonResponse } from '@gitspace/supervisor';
-import { checkoutPath, checkoutTerminalEnvironment, inheritedCommandEnvironment, type LocalAttachment } from '@gitspace/runtime-machine';
+import { checkoutPath, type LocalAttachment } from '@gitspace/runtime-machine';
 import { RuntimeServiceOperationSchema, type RuntimeService } from '@gitspace/protocol-runtime/services';
 import type { z } from 'zod';
-import type { LocalHttpService, WorkspaceServiceManager } from './workspace-services.js';
+import { parseServiceDefinitions, readServicesJson, type LocalHttpService, type WorkspaceServiceManager } from './workspace-services.js';
 import { workspaceProcessVisible } from './workspace-process.js';
 
 /** A declared service or visible ad hoc process of the attachment, with its `http` ports (port numbers once known). */
@@ -20,8 +18,7 @@ interface LocalServiceEntry {
 async function inventory(manager: WorkspaceServiceManager, local: LocalAttachment) {
   const { attachment } = local;
   if (attachment.state !== 'ready') throw new Error('Services require a ready attachment');
-  const source: unknown = JSON.parse(await readFile(join(local.rootPath, '.gitspace/services.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"services":[]}' : Promise.reject(error)));
-  const definitions = manager.parseDefinitions(source);
+  const definitions = parseServiceDefinitions(await readServicesJson(local.rootPath));
   const client = await daemonClientForProject(local.rootPath);
   const owner = `workspace:${attachment.projectId}:${attachment.workspaceId}`;
   const listed = await client.request({ op: 'list' });
@@ -121,9 +118,7 @@ export async function cacheServiceOperation(manager: WorkspaceServiceManager, lo
   if (operation.op === 'restart' && current.state !== 'stopped') await client.request({ op: 'stop', name: current.terminalName });
   const cwd = await checkoutPath(local.rootPath, definition.cwd);
   const ports = await manager.allocateDefinitionPorts(attachment.workspaceId, definition);
-  const env: Record<string, string> = { ...await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()), ...definition.env, GITSPACE_PORTS_JSON: JSON.stringify(Object.fromEntries(ports.map(port => [port.name, port.port]))) };
-  if (ports[0]) env.PORT = String(ports[0].port);
-  for (const port of ports) env[`GITSPACE_PORT_${port.name.toUpperCase().replace(/[^A-Z0-9]/gu, '_')}`] = String(port.port);
+  const env = await manager.serviceEnvironment(local.rootPath, attachment.workspaceId, definitions, definition, ports);
   const ready = ports[0] ? { port: ports[0].port, host: '127.0.0.1', timeoutMs: 30_000 } : undefined;
   const started = await client.request({ op: 'start', owner, spec: { name: current.terminalName, application: definition.command, args: definition.args, cwd, env, pty: false, restart: 'no', persist: true, detached: false, ready } });
   if (started.op !== 'start') throw new Error('Invalid supervisor start response');

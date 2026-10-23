@@ -7,14 +7,14 @@ import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
-import { GITSPACE_SOURCE_REPOSITORY, hostedServiceRouteSchema } from '@gitspace/protocol/project-authority';
+import { GITSPACE_SOURCE_REPOSITORY, hostedServiceRouteSchema, hostedServiceUrlKind } from '@gitspace/protocol/project-authority';
 import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { readAdvertisedRefs } from '@gitspace/runtime-workspace-do';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
-import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation } from '@gitspace/provider-auth';
+import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation, type UsageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
-import type { CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
+import type { AccountFailure, CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
 import type { ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
 import { ProviderLoginEventCodec } from '@gitspace/protocol';
 import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js';
@@ -70,7 +70,7 @@ import {
   inferenceDeleteInputSchema, inferenceAssignInputSchema,
   type InferenceProfile, type InferenceState,
 } from '@gitspace/protocol/inference';
-import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
+import { HostedIngressRegistrationSchema, LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, executionHash, parseServiceIngressContent, type LifecycleState } from '@gitspace/protocol-environment';
 import { LiveChanges } from './live-changes.js';
 import { migratedRoleSettings } from './inference-role-migration.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
@@ -250,6 +250,24 @@ function credentialIdentity(credential: StoredVaultCredential): string | null {
     return org ? (base ? `${base}|org:${org}` : `org:${org}`) : base;
   }
   return account ? `account:${account}` : email ? `email:${email}` : project ? `project:${project}` : null;
+}
+
+type SignedInAccount = z.infer<typeof SignedInAccountSchema>;
+/** How an account is named to its owner, on the providers screen and in a turn it ran out of. */
+function accountLabel(id: string, account: SignedInAccount | null): string {
+  return account?.email ?? account?.identity ?? (account?.type === 'api_key' ? 'API key' : `Account ${id}`);
+}
+
+type AccountHealthRow = { credential_id: string; cooldown_until: number; cooldown_reason: string | null; report_json: string | null };
+/** An account's latest usage observation, and until when inference skips it and why: the later of a failure's
+ * cooldown and the reset of a usage window it has used up. */
+function accountHealth(row: AccountHealthRow | undefined, now: number): { usage?: UsageObservation; out: { until: number; reason: string } | null } {
+  if (!row) return { out: null };
+  const usage = row.report_json ? usageObservation(providerUsageReportSchema.parse(JSON.parse(row.report_json))) : undefined;
+  const out = usage?.exhausted && usage.exhausted.until > row.cooldown_until
+    ? { until: usage.exhausted.until, reason: `${usage.exhausted.label} usage limit reached` }
+    : { until: row.cooldown_until, reason: row.cooldown_reason ?? 'The provider refused this account' };
+  return { ...(usage ? { usage } : {}), out: out.until > now ? out : null };
 }
 
 
@@ -1475,12 +1493,11 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     if (!config) throw new Error('Vault is not configured');
     this.ensureCloudAccountHealth();
     const rows = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", profileId).toArray();
+    const now = Date.now();
     const result = await Promise.all(rows.filter(row => provider === undefined || row.provider === provider).map(async row => {
       const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
-      const health = this.ctx.storage.sql.exec<{ cooldown_until: number; report_json: string | null }>('SELECT cooldown_until, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id)).toArray()[0];
-      const report = health?.report_json ? providerUsageReportSchema.parse(JSON.parse(health.report_json)) : null;
-      const usage = report ? usageObservation(report) : undefined;
-      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), ...(health ? { cooldownUntil: health.cooldown_until } : {}), ...(usage ? { usage } : {}) };
+      const { usage, out } = accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id)).toArray()[0], now);
+      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}) };
     }));
     this.assertProfileAccess(profileId);
     return result;
@@ -1518,6 +1535,9 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     this.assertProfileAccess(profileId);
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
+    this.ensureCloudAccountHealth();
+    const health = new Map(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ?', profileId).toArray().map(row => [row.credential_id, row]));
+    const now = Date.now();
     const rows = this.ctx.storage.sql.exec<ProfileCredentialRow & { account_json: string | null }>('SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at, account_json FROM inference_credentials WHERE profile_id = ? ORDER BY rowid', profileId).toArray();
     const accounts = await Promise.all(rows.map(async row => {
       let account = row.account_json === null ? null : SignedInAccountSchema.parse(JSON.parse(row.account_json));
@@ -1540,7 +1560,10 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
         hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
-        accounts: owned.map(account => ({ id: account.id, type: account.type, label: account.email ?? account.identity ?? (account.type === 'api_key' ? 'API key' : `Account ${account.id}`), email: account.email, disabled: account.disabled })) };
+        accounts: owned.map(account => {
+          const { out } = accountHealth(health.get(account.id), now);
+          return { id: account.id, type: account.type, label: accountLabel(account.id, account), email: account.email, disabled: account.disabled, outUntil: out ? new Date(out.until).toISOString() : null, outReason: out?.reason ?? null };
+        }) };
     });
   }
 
@@ -1580,16 +1603,29 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return result;
   }
 
+  private cloudAccountHealthReady = false;
   private ensureCloudAccountHealth(): void {
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS cloud_account_health(profile_id TEXT NOT NULL, credential_id TEXT NOT NULL, cooldown_until INTEGER NOT NULL DEFAULT 0, observed_at INTEGER NOT NULL DEFAULT 0, report_json TEXT, error TEXT, PRIMARY KEY(profile_id, credential_id))');
+    if (this.cloudAccountHealthReady) return;
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS cloud_account_health(profile_id TEXT NOT NULL, credential_id TEXT NOT NULL, cooldown_until INTEGER NOT NULL DEFAULT 0, observed_at INTEGER NOT NULL DEFAULT 0, report_json TEXT, error TEXT, cooldown_reason TEXT, PRIMARY KEY(profile_id, credential_id))');
+    // Health recorded before a cooldown kept its reason.
+    if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(cloud_account_health)').toArray().some(column => column.name === 'cooldown_reason')) this.ctx.storage.sql.exec('ALTER TABLE cloud_account_health ADD COLUMN cooldown_reason TEXT');
+    this.cloudAccountHealthReady = true;
   }
 
-  async cloudCredentialFailure(input: { profileId: string; credentialId: string; kind: 'refresh' | 'rotate'; retryAfterMs?: number }): Promise<void> {
+  /** Takes an account out until the provider's reset when it named one, up to a week (a used-up weekly window), else
+   * for a short backoff; a used-up usage window keeps it out longer. Answers its label and when it is usable again. */
+  async cloudCredentialFailure(input: AccountFailure): Promise<{ label: string; until: number }> {
     await this.ensureInference();
     this.assertProfileAccess(input.profileId);
     this.ensureCloudAccountHealth();
-    const until = Date.now() + Math.max(1_000, Math.min(input.retryAfterMs ?? (input.kind === 'rotate' ? 60_000 : 5_000), 60 * 60_000));
-    this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until) VALUES (?, ?, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET cooldown_until = MAX(cooldown_until, excluded.cooldown_until)', input.profileId, input.credentialId, until);
+    const now = Date.now();
+    const until = input.until === undefined ? now + (input.kind === 'rotate' ? 60_000 : 5_000) : Math.max(now + 1_000, Math.min(input.until, now + 7 * 24 * 3_600_000));
+    const reason = input.reason.slice(0, 500) || (input.kind === 'rotate' ? 'The provider refused this account' : 'The provider rejected its sign-in');
+    this.ctx.storage.sql.exec(`INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, cooldown_reason) VALUES (?, ?, ?, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET
+      cooldown_reason = CASE WHEN excluded.cooldown_until >= cooldown_until THEN excluded.cooldown_reason ELSE cooldown_reason END, cooldown_until = MAX(cooldown_until, excluded.cooldown_until)`, input.profileId, input.credentialId, until, reason);
+    const { out } = accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', input.profileId, input.credentialId).toArray()[0], now);
+    const account = this.ctx.storage.sql.exec<{ account_json: string | null }>('SELECT account_json FROM inference_credentials WHERE profile_id = ? AND rowid = ?', input.profileId, Number(input.credentialId)).toArray()[0]?.account_json;
+    return { label: accountLabel(input.credentialId, account ? SignedInAccountSchema.parse(JSON.parse(account)) : null), until: out?.until ?? until };
   }
 
   async cloudSetApiKey(input: { profileId: string; providerId: string; key: string }): Promise<void> {
@@ -1863,27 +1899,61 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     await this.ctx.blockConcurrencyWhile(() => this.uploadCredential(profileId, { provider, credential: { type: 'api_key', key } }));
   }
 
-  /** Signing out a provider disables its active accounts; a specific account is disabled first and removed when it is already inactive. */
-  async logoutBrowserCredentials(profileId: string, provider: string, credentialId: string | null): Promise<void> {
+  /** Signing out a provider disables its active accounts; none is removed. */
+  async logoutBrowserCredentials(profileId: string, provider: string): Promise<void> {
     await this.ensureInference();
     this.requireInferenceProfile(profileId);
-    if (credentialId === null) {
-      const rows = this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active'", profileId, provider).toArray();
-      this.ctx.storage.transactionSync(() => {
-        for (const row of rows) this.disableCredentialRow(profileId, row.row_id);
-      });
-      return;
-    }
+    const rows = this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active'", profileId, provider).toArray();
+    this.ctx.storage.transactionSync(() => {
+      for (const row of rows) this.disableCredentialRow(profileId, row.row_id);
+    });
+  }
+
+  private providerAccount(profileId: string, provider: string, credentialId: string): { row_id: number; state: string; account_json: string | null } {
     const rowId = Number(credentialId);
-    if (!Number.isSafeInteger(rowId) || rowId <= 0) return;
+    const row = Number.isSafeInteger(rowId) && rowId > 0
+      ? this.ctx.storage.sql.exec<{ row_id: number; state: string; account_json: string | null }>('SELECT rowid AS row_id, state, account_json FROM inference_credentials WHERE profile_id = ? AND provider = ? AND rowid = ?', profileId, provider, rowId).toArray()[0]
+      : undefined;
+    if (!row) throw new Error('Account is unavailable');
+    return row;
+  }
+
+  /** Inference stops using the account; its credential is kept for `enableProviderAccount`. */
+  async disableProviderAccount(profileId: string, provider: string, credentialId: string): Promise<void> {
+    await this.ensureInference();
+    this.requireInferenceProfile(profileId);
+    this.ctx.storage.transactionSync(() => { this.disableCredentialRow(profileId, this.providerAccount(profileId, provider, credentialId).row_id); });
+  }
+
+  /** Inference may use a disabled account again, under the same id. As an upload would, it supersedes another active
+   * account of the same signed-in identity, or another API key. A failure's cooldown ends; a used-up usage window
+   * still holds until its reset. */
+  async enableProviderAccount(profileId: string, provider: string, credentialId: string): Promise<void> {
+    await this.ensureInference();
+    this.requireInferenceProfile(profileId);
     this.ensureCloudAccountHealth();
     this.ctx.storage.transactionSync(() => {
-      const row = this.ctx.storage.sql.exec<{ id: string; state: string }>('SELECT id, state FROM inference_credentials WHERE profile_id = ? AND provider = ? AND rowid = ?', profileId, provider, rowId).toArray()[0];
-      if (!row) return;
-      if (row.state === 'active') {
-        this.disableCredentialRow(profileId, rowId);
-        return;
+      const row = this.providerAccount(profileId, provider, credentialId);
+      if (row.state === 'active') return;
+      this.ctx.storage.sql.exec("UPDATE inference_credentials SET state = 'active', updated_at = ? WHERE profile_id = ? AND rowid = ?", new Date().toISOString(), profileId, row.row_id);
+      this.ctx.storage.sql.exec('UPDATE cloud_account_health SET cooldown_until = 0, cooldown_reason = NULL WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id));
+      const account = row.account_json === null ? null : SignedInAccountSchema.parse(JSON.parse(row.account_json));
+      const others = this.ctx.storage.sql.exec<{ row_id: number; account_json: string | null }>("SELECT rowid AS row_id, account_json FROM inference_credentials WHERE profile_id = ? AND provider = ? AND state = 'active' AND rowid != ?", profileId, provider, row.row_id).toArray();
+      for (const other of others) {
+        const current = other.account_json === null ? null : SignedInAccountSchema.parse(JSON.parse(other.account_json));
+        if (account && current && (account.type === 'api_key' ? current.type === 'api_key' : account.identity !== null && current.identity === account.identity)) this.disableCredentialRow(profileId, other.row_id);
       }
+      this.credentialsChanged(profileId);
+    });
+  }
+
+  /** Deletes an account's credential for good; only its owner's explicit Remove does this. */
+  async removeProviderAccount(profileId: string, provider: string, credentialId: string): Promise<void> {
+    await this.ensureInference();
+    this.requireInferenceProfile(profileId);
+    this.ensureCloudAccountHealth();
+    this.ctx.storage.transactionSync(() => {
+      const { row_id: rowId } = this.providerAccount(profileId, provider, credentialId);
       this.ctx.storage.sql.exec('DELETE FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
       this.ctx.storage.sql.exec('DELETE FROM inference_credentials WHERE profile_id = ? AND rowid = ?', profileId, rowId);
       // Account ids are rowids: never hand a removed account's id to a later upload.
@@ -3660,6 +3730,35 @@ const worker = {
                 await env.HOSTED_ROUTES.getByName(hostname).release(body.userId, body.machineId, generation);
               }
               value = released;
+              break;
+            }
+            // Signed callers: the machine running an approved provision or materialize script on the workspace replaces its registrations,
+            // one per workspace URL with approved declared routes. The hosted route registries decide; the project mirrors which URLs to end at archive or delete.
+            case 'project.routes.ingress': {
+              const input = HostedIngressRegistrationSchema.parse(body.payload);
+              if (input.projectId !== projectId) throw new Error('Signed caller registration names another project');
+              if (!(await authority.listWorkspaces()).some(item => item.id === input.workspaceId && item.archivedAt === null)) throw new Error('Signed callers are registered only on an active workspace of this project');
+              const state = await env.SPACE_AUTHORITY.getByName(`${body.userId}:${input.workspaceId}`).getLifecycleState({ projectId, workspaceId: input.workspaceId });
+              const run = state.runs.find(item => item.id === input.runId);
+              if (!run || run.machineId !== body.machineId || run.status !== 'running' || (run.phase !== 'cloud/provision' && run.phase !== 'workspace/materialize')) throw new Error('Signed callers are registered only by this machine\'s running provision or materialize run');
+              const approved = await executionHash({ kind: 'ingress', command: input.ingress });
+              if (!state.approvals.some(approval => approval.executionHash === approved)) throw new Error('Signed caller routes are not approved');
+              const declared = new Map(parseServiceIngressContent(input.ingress).map(group => [`${group.service} ${group.port}`, group.routes]));
+              const registrations = input.registrations.flatMap(item => {
+                const routes = declared.get(`${item.service} ${item.port}`);
+                return routes ? [{ ...item, routes }] : [];
+              });
+              const named = new Set(input.registrations.map(item => `${item.service} ${item.port}`));
+              const hostnames = input.registrations.map(item => item.hostname);
+              if (registrations.length !== input.registrations.length || named.size !== registrations.length || named.size !== declared.size) throw new Error('Signed callers register each declared service port once');
+              if (new Set(hostnames).size !== hostnames.length || hostnames.some(hostname => hostedServiceUrlKind(hostname) !== 'workspace' || !hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`))) throw new Error('Signed callers are registered on distinct workspace URLs');
+              const mirrored = await authority.addHostedIngress(input.workspaceId, hostnames);
+              const registeredAt = new Date().toISOString();
+              await Promise.all(registrations.map(item => env.HOSTED_ROUTES.getByName(item.hostname).registerIngress(body.userId, input.workspaceId, item.routes, item.credentials, registeredAt)));
+              const ended = mirrored.filter(hostname => !hostnames.includes(hostname));
+              await Promise.all(ended.map(hostname => env.HOSTED_ROUTES.getByName(hostname).clearIngress(body.userId, input.workspaceId)));
+              await authority.removeHostedIngress(input.workspaceId, ended);
+              value = { hostnames };
               break;
             }
             case 'project.events.append':

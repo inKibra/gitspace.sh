@@ -124,6 +124,23 @@ export const executionBlockSchema = base.extend({
   hasFailures: z.boolean(),
 });
 
+/** How a turn a workspace ran for its project agent came out: it answered, failed, or stopped for a person. */
+export const workspaceTurnReportSchema = z.object({
+  projectId: z.string().min(1),
+  workspaceId: z.string().min(1),
+  name: z.string(),
+  /** The project agent's submission that started the turn. */
+  requestId: z.string().min(1),
+  outcome: z.enum(['finished', 'failed', 'asked', 'approval']),
+  /** The reply, the failure or the question, at most 280 characters. */
+  excerpt: z.string().nullable(),
+});
+/** One compact row in the project conversation: the report of a turn the project agent started. */
+export const workspaceReportBlockSchema = base.extend({ type: z.literal('workspace-report'), ...workspaceTurnReportSchema.shape });
+/** The entry kind, and custom transcript message type, of a workspace turn report; a delivered conversation event of
+ * kind `workspace` appends the same entry. */
+export const WORKSPACE_REPORT_ENTRY = 'gitspace.workspace';
+
 export const turnItemSchema = z.discriminatedUnion('type', [
   messageBlockSchema,
   thinkingBlockSchema,
@@ -135,6 +152,7 @@ export const turnItemSchema = z.discriminatedUnion('type', [
   previewBlockSchema,
   referenceBlockSchema,
   executionBlockSchema,
+  workspaceReportBlockSchema,
   ...richContentSchema.options,
 ]);
 
@@ -178,3 +196,5 @@ export type TurnItem = z.infer<typeof turnItemSchema>;
 export type SideAgentBlock = z.infer<typeof sideAgentBlockSchema>;
 export type TurnBlock = z.infer<typeof turnBlockSchema>;
 export type TransportBlock = z.infer<typeof transportBlockSchema>;
+export type WorkspaceTurnReport = z.infer<typeof workspaceTurnReportSchema>;
+export type WorkspaceReportBlock = z.infer<typeof workspaceReportBlockSchema>;

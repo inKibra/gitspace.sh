@@ -13,8 +13,8 @@ import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
-import { readProjectWatch, readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceReport, storeWorkspaceStatus, writeProjectWatch, type ProjectWatch } from './workspace-metadata.js';
-import type { WorkspaceReport } from '@gitspace/protocol-workspace';
+import { readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceReport, storeWorkspaceStatus } from './workspace-metadata.js';
+import { projectWatchHooks, reconcileProjectWatch } from './project-watch.js';
 import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
@@ -114,6 +114,7 @@ export async function createAccountWorkspaceRuntime(
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
   const qa = createRuntimeQaServices(env, identity);
+  const watch = projectWatchHooks(ctx.storage, identity, (report, onDone) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: identity.projectId }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, error }))));
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
@@ -123,14 +124,11 @@ export async function createAccountWorkspaceRuntime(
       // The sidebar's row: sent to every tab only when the status changed.
       if (storeWorkspaceStatus(ctx.storage, status)) waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       storeWorkspaceReport(ctx.storage, report);
-      const watch = readProjectWatch(ctx.storage);
-      if (watch && status.primaryColor !== watch.color) {
-        writeProjectWatch(ctx.storage, watch.name, status.primaryColor);
-        const line = projectNotice(watch, report);
-        if (line) waitUntil('project notice', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeProjectNotice({ projectId: identity.projectId, workspaceId: identity.projectId }, line).catch((error: unknown) => console.error('Project notice was not sent', { workspaceId: identity.workspaceId, error })));
-      }
+      watch.published(report);
       waitUntil('browser notice', notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
     },
+    turnChanged: watch.turnChanged,
+    personPrompted: watch.personPrompted,
     snapshotChanged: machineIds => {
       waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
       // The environment is derived from the workspace's files: derive it when they change, not when it is read.
@@ -170,23 +168,8 @@ export async function createAccountWorkspaceRuntime(
     },
   });
   waitUntil('wake', runtime.wake());
+  waitUntil('project watch', reconcileProjectWatch(ctx.storage, runtime, watch).catch((error: unknown) => console.error('Project watch was not reconciled', { workspaceId: identity.workspaceId, error })));
   return runtime;
-}
-
-/** The line a watched workspace sends its project conversation when its status color changes, or null for a change
- * nobody needs to hear (work starting). "Finished" counts only after work, so starting a workspace never announces it. */
-export function projectNotice(watch: ProjectWatch, report: WorkspaceReport): string | null {
-  const name = `Workspace ${watch.name}`;
-  switch (report.summary.primaryColor) {
-    case 'red': return `${name} failed: ${report.failure ?? 'open it to see why'}`;
-    case 'orange':
-      if (report.waitingOn?.kind === 'approval') return `${name} needs approval: ${report.waitingOn.prompt}`;
-      return report.waitingOn?.kind === 'ask' ? `${name} asked: ${report.waitingOn.prompt}` : `${name} has a sync conflict.`;
-    case 'blue':
-      if (watch.color !== 'green') return null;
-      return `${name} finished its turn${report.lastReply ? `: ${report.lastReply}` : '.'}`;
-    case 'green': case 'dim': return null;
-  }
 }
 
 /** Every machine executes through the tenant relay tunnel; a missing tunnel fails at once. */

@@ -1,14 +1,15 @@
-import type { AskBlock, ExecutionBlock, MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TranscriptItem, TransportBlock, TurnBlock } from '@gitspace/blocks';
+import type { AskBlock, ExecutionBlock, MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TranscriptItem, TransportBlock, TurnBlock, WorkspaceReportBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer } from '@gitspace/protocol';
 import { RuntimeBrowserExecutionSchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
-import { AskUserQuestions, Badge, Button, ChatMessage, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
+import { AskUserQuestions, Badge, badgeColors, Button, ChatMessage, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
 import { AlertCircle, ChevronDown, ChevronRight, GitBranch01, Link03, ShieldTick, Terminal, Users01 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceLink } from './ResourceNavigation.js';
 import { TranscriptImage } from './resource-media.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { glyph } from './glyph.js';
+import { navigateProductUrl, setProductRoute } from './routes.js';
 import { useState, type ReactNode } from 'react';
 
 function RichContent({ block }: { block: RichContentBlock }) {
@@ -128,6 +129,41 @@ function Execution({ block, state, onStateChange, renderHistory }: { block: Exec
 }
 
 const PERMISSION_BADGE: Record<string, 'green' | 'red' | 'amber' | 'gray'> = { pending: 'amber', 'allowed-once': 'green', 'allowed-always': 'green', denied: 'red' };
+const REPORT_OUTCOME: Record<WorkspaceReportBlock['outcome'], { label: string; color: keyof typeof badgeColors }> = {
+  finished: { label: 'finished', color: 'blue' },
+  failed: { label: 'failed', color: 'red' },
+  asked: { label: 'asked', color: 'orange' },
+  approval: { label: 'needs approval', color: 'orange' },
+};
+
+/** A turn a workspace ran for the project agent, in one line: the workspace (a link to it), how the turn came out, and
+ * its reply, failure or question folded to one line until clicked. */
+function WorkspaceReportRow({ item, state, onStateChange }: { item: WorkspaceReportBlock } & ItemInteractionProps) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = state?.open ?? localOpen;
+  const outcome = REPORT_OUTCOME[item.outcome];
+  const href = `/?project=${encodeURIComponent(item.projectId)}&workspace=${encodeURIComponent(item.workspaceId)}`;
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return <div className="min-w-0 text-caption text-muted-foreground" data-workspace-report={item.outcome}>
+    <div className="flex min-h-6 min-w-0 items-center gap-2">
+      <span className="status-dot" style={{ color: badgeColors[outcome.color] }} aria-hidden />
+      <a className="shrink-0 font-medium text-foreground underline-offset-4 hover:underline" href={href} onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        navigateProductUrl(setProductRoute(new URL(href, window.location.href), 'agent'));
+      }}>{item.name}</a>
+      <span className="shrink-0">{outcome.label}</span>
+      {item.excerpt ? <button
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]"
+        aria-expanded={open}
+        aria-label={open ? 'Hide details' : undefined}
+        onClick={() => { setLocalOpen(!open); onStateChange?.({ open: !open }); }}
+      ><Chevron width={14} height={14} strokeWidth={1.5} className="shrink-0" />{open ? null : <span className="min-w-0 truncate">{item.excerpt}</span>}</button> : null}
+    </div>
+    {open && item.excerpt ? <p className="whitespace-pre-wrap pb-1 pl-4 [overflow-wrap:anywhere]">{item.excerpt}</p> : null}
+  </div>;
+}
 
 function Notice({ icon, title, detail, body, badge }: { icon: ReactNode; title: string; detail?: string; body?: string; badge?: ReactNode }) {
   const shape = useShape();
@@ -271,6 +307,8 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
       </ThinkingSteps>;
     case 'interruption':
       return <Notice icon={<AlertCircle width={16} height={16} strokeWidth={1.5} />} title={item.title} detail={item.detail} body={item.body} badge={item.recovered ? <Badge variant="dot" color="green">recovered</Badge> : item.reason === 'machine' || item.reason === 'event' ? undefined : <Badge variant="dot" color="red">{item.reason}</Badge>} />;
+    case 'workspace-report':
+      return <WorkspaceReportRow item={item} state={state} onStateChange={onStateChange} />;
     case 'preview':
       return <Notice icon={<Link03 width={16} height={16} strokeWidth={1.5} />} title={item.label} detail={`${item.serviceName} · ${item.status}`} badge={item.route ? <Button variant="tertiary" size="compact" asChild><a href={item.route}>Open preview</a></Button> : undefined} />;
     case 'reference':

@@ -14,11 +14,12 @@ it('dispatches the signal-bound admission even when the picker changes the model
   };
   const provider: Provider = { id: 'test', name: 'Test', getModels: () => [original, next], auth: { apiKey: { name: 'Local fake', resolve: async () => ({ auth: { apiKey: 'unused' }, source: 'test' }) } }, stream: dispatch, streamSimple: dispatch };
   const models = await createVaultModels({
-    profileId: 'profile', conversationId: 'conversation', providers: [provider], modelsStore: new InMemoryModelsStore(),
+    profileId: 'profile', workspaceId: 'workspace', providers: [provider], modelsStore: new InMemoryModelsStore(),
     pins: { read: async () => null, write: async () => {} },
     vault: {
       list: async () => [{ id: 'key', provider: 'test', type: 'api_key', revision: 1, expiresAt: null, identity: 'test' }],
       resolve: async () => ({ id: 'key', provider: 'test', revision: 1, credential: { type: 'api_key', key: 'local-fake' } }),
+      recordFailure: async () => { throw new Error('This request never fails'); },
     },
   });
   const first = new AbortController();

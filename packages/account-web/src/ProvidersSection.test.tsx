@@ -1,7 +1,10 @@
+// @vitest-environment happy-dom
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Dialog } from '@gitspace/ui';
-import type { ProviderUsage, ProviderView } from '@gitspace/protocol';
+import type { ProviderAccount, ProviderUsage, ProviderView } from '@gitspace/protocol';
 import { ProvidersSection, SignInFlowView, formatUsageAmount, formatUsageReset, type ProviderLoginFlow, type ProvidersSectionProps } from './ProvidersSection.js';
 
 const rejects = async (): Promise<never> => { throw new Error('not called during render'); };
@@ -10,7 +13,10 @@ const noop = (): void => undefined;
 function provider(overrides: Partial<ProviderView> & Pick<ProviderView, 'id' | 'name'>): ProviderView {
   return { credentialProvider: overrides.id, available: true, loginable: true, supportsOAuth: true, supportsApiKey: false, authKind: 'none', hasAuth: false, source: null, accounts: [], hasUsage: false, ...overrides };
 }
-const anthropic = provider({ id: 'anthropic', name: 'Anthropic', authKind: 'oauth', supportsApiKey: true, hasAuth: true, source: 'oauth', hasUsage: true, accounts: [{ id: 'cred-1', type: 'oauth', label: 'Claude Max', email: 'dev@example.com', disabled: false }] });
+function account(overrides: Partial<ProviderAccount> & Pick<ProviderAccount, 'id' | 'label'>): ProviderAccount {
+  return { type: 'oauth', email: null, disabled: false, outUntil: null, outReason: null, ...overrides };
+}
+const anthropic = provider({ id: 'anthropic', name: 'Anthropic', authKind: 'oauth', supportsApiKey: true, hasAuth: true, source: 'oauth', hasUsage: true, accounts: [account({ id: 'cred-1', label: 'Claude Max', email: 'dev@example.com' })] });
 const openai = provider({ id: 'openai', name: 'OpenAI', supportsOAuth: false, supportsApiKey: true, loginable: false });
 const codex = provider({ id: 'openai-codex', name: 'OpenAI Codex' });
 const hidden = provider({ id: 'ollama', name: 'Ollama', available: false, loginable: false, supportsOAuth: false });
@@ -38,7 +44,9 @@ function props(overrides: Partial<ProvidersSectionProps> = {}): ProvidersSection
     onShow: noop,
     onRefreshUsage: rejects,
     onSignIn: rejects,
-    onSignOut: rejects,
+    onDisableAccount: rejects,
+    onEnableAccount: rejects,
+    onRemoveAccount: rejects,
     onSetApiKey: rejects,
     login: { flow: null, respond: rejects, cancel: rejects },
     ...overrides,
@@ -75,12 +83,12 @@ describe('ProvidersSection', () => {
 
   it('shows shared credentials and usage once while keeping distinct accounts and providers', () => {
     const accounts: ProviderView['accounts'] = [
-      { id: 'personal', type: 'oauth', label: 'same@example.com · Personal', email: 'same@example.com', disabled: false },
-      { id: 'team', type: 'oauth', label: 'same@example.com · Team', email: 'same@example.com', disabled: false },
+      account({ id: 'personal', label: 'same@example.com · Personal', email: 'same@example.com' }),
+      account({ id: 'team', label: 'same@example.com · Team', email: 'same@example.com' }),
     ];
     const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts });
     const device = provider({ ...connected, id: 'openai-codex-device', name: 'Codex device code', credentialProvider: connected.id });
-    const separate = provider({ ...anthropic, accounts: [{ id: 'claude', type: 'oauth', label: 'same@example.com · Claude', email: 'same@example.com', disabled: false }] });
+    const separate = provider({ ...anthropic, accounts: [account({ id: 'claude', label: 'same@example.com · Claude', email: 'same@example.com' })] });
     const html = renderToStaticMarkup(<ProvidersSection {...props({
       providers: [device, separate, connected],
       usage: { ...usage, reports: [{ ...usage.reports[0]!, provider: connected.id }], errors: [] },
@@ -90,21 +98,6 @@ describe('ProvidersSection', () => {
     expect(html).toContain('aria-label="Disable same@example.com · Personal"');
     expect(html).toContain('aria-label="Disable same@example.com · Team"');
     expect(html.match(/62% used/g)).toHaveLength(1);
-  });
-
-  it('disables an active account and removes an already disabled one from the same button', () => {
-    const accounts: ProviderView['accounts'] = [
-      { id: 'active', type: 'oauth', label: 'live@example.com', email: 'live@example.com', disabled: false },
-      { id: 'off', type: 'oauth', label: 'old@example.com', email: 'old@example.com', disabled: true },
-    ];
-    const html = renderToStaticMarkup(<ProvidersSection {...props({ providers: [provider({ ...codex, hasAuth: true, accounts })] })} />);
-    expect(html).toContain('aria-label="Disable live@example.com"');
-    expect(html).toContain('aria-label="Remove old@example.com"');
-    expect(html).not.toContain('aria-label="Remove live@example.com"');
-    expect(html).not.toContain('aria-label="Disable old@example.com"');
-    const disabled = renderToStaticMarkup(<ProvidersSection {...props({ providers: [provider({ ...codex, accounts: [accounts[1]!] })] })} />);
-    expect(disabled).toContain('Disabled');
-    expect(disabled).toContain('aria-label="Remove old@example.com"');
   });
 
   it('renders usage limits with meters and resets without errors for disconnected providers', () => {
@@ -120,7 +113,7 @@ describe('ProvidersSection', () => {
   });
 
   it('identifies the connected Codex account without usage instead of showing a successful fetch time', () => {
-    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [{ id: 'codex', type: 'oauth', label: 'bradleat@inkibra.com', email: 'bradleat@inkibra.com', disabled: false }] });
+    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [account({ id: 'codex', label: 'bradleat@inkibra.com', email: 'bradleat@inkibra.com' })] });
     const html = renderToStaticMarkup(<ProvidersSection {...props({
       providers: [connected],
       usageStatus: 'ready',
@@ -134,8 +127,8 @@ describe('ProvidersSection', () => {
 
   it('keeps partial reports visible and identifies missing accounts and provider and aggregate errors once across aliases', () => {
     const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [
-      { id: 'personal', type: 'oauth', label: 'personal@example.com', email: 'personal@example.com', disabled: false },
-      { id: 'team', type: 'oauth', label: 'team@example.com', email: 'team@example.com', disabled: false },
+      account({ id: 'personal', label: 'personal@example.com', email: 'personal@example.com' }),
+      account({ id: 'team', label: 'team@example.com', email: 'team@example.com' }),
     ] });
     const device = provider({ ...connected, id: 'openai-codex-device', name: 'Codex device code', credentialProvider: connected.id });
     const html = renderToStaticMarkup(<ProvidersSection {...props({
@@ -221,6 +214,69 @@ describe('ProvidersSection', () => {
     expect(formatUsageReset('2026-09-01T13:15:00.000Z', now)).toBe('resets in 3h 15m');
     expect(formatUsageReset('not a date', now)).toBeNull();
     expect(formatUsageReset(null, now)).toBeNull();
+  });
+});
+
+describe('ProvidersSection account controls', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+  });
+  afterEach(async () => {
+    await act(() => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+  const accountRow = (id: string): Element | null => container.querySelector(`[data-account="${id}"]`);
+  const labelled = (label: string): HTMLButtonElement | null => container.querySelector(`button[aria-label="${label}"]`);
+  const render = (accounts: readonly ProviderAccount[], overrides: Partial<ProvidersSectionProps> = {}) =>
+    act(() => root.render(<ProvidersSection {...props({ providers: [provider({ ...codex, hasAuth: true, accounts: [...accounts] })], ...overrides })} />));
+  const live = account({ id: 'live', label: 'live@example.com' });
+  const off = account({ id: 'off', label: 'old@example.com', disabled: true });
+
+  it('gives each account on a provider its own state and Disable or Enable control', async () => {
+    const onDisableAccount = vi.fn(async (): Promise<void> => undefined);
+    const onEnableAccount = vi.fn(async (): Promise<void> => undefined);
+    await render([live, off], { onDisableAccount, onEnableAccount });
+    expect(accountRow('live')?.textContent).toContain('Active');
+    expect(accountRow('off')?.textContent).toContain('Disabled');
+    expect(labelled('Remove live@example.com')).not.toBeNull();
+    expect(labelled('Remove old@example.com')).not.toBeNull();
+    expect(labelled('Enable live@example.com')).toBeNull();
+    expect(labelled('Disable old@example.com')).toBeNull();
+    await act(async () => labelled('Disable live@example.com')!.click());
+    expect(onDisableAccount).toHaveBeenCalledWith('openai-codex', 'live');
+    await act(async () => labelled('Enable old@example.com')!.click());
+    expect(onEnableAccount).toHaveBeenCalledWith('openai-codex', 'off');
+    expect(onDisableAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes an account only after the user confirms', async () => {
+    const confirm = vi.fn((_message: string): boolean => false);
+    vi.stubGlobal('confirm', confirm);
+    const onRemoveAccount = vi.fn(async (): Promise<void> => undefined);
+    await render([live, off], { onRemoveAccount });
+    await act(async () => labelled('Remove live@example.com')!.click());
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('live@example.com'));
+    expect(onRemoveAccount).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await act(async () => labelled('Remove live@example.com')!.click());
+    expect(onRemoveAccount).toHaveBeenCalledExactlyOnceWith('openai-codex', 'live');
+  });
+
+  it('marks an account out only while its outUntil is in the future', async () => {
+    const out = account({ id: 'out', label: 'out@example.com', outUntil: new Date(Date.now() + 3_600_000).toISOString(), outReason: 'Weekly usage used up' });
+    const recovered = account({ id: 'recovered', label: 'back@example.com', outUntil: new Date(Date.now() - 60_000).toISOString(), outReason: 'Rate limited' });
+    await render([out, recovered, live]);
+    expect(accountRow('out')?.textContent).toContain('Out until ');
+    expect(accountRow('out')?.textContent).not.toContain('Active');
+    expect(accountRow('recovered')?.textContent).toContain('Active');
+    expect(accountRow('recovered')?.textContent).not.toContain('Out until');
+    expect(accountRow('live')?.textContent).toContain('Active');
   });
 });
 

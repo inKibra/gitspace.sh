@@ -22,6 +22,7 @@ import {
   SIGNED_REQUEST_MAX_AGE_MS,
   machineAnnouncesResource,
   machineLiveResource,
+  hostedServiceUrlKind,
   type LiveUnwatchedMessage,
   type RelayNotice,
   type RelayNoticeMessage,
@@ -43,6 +44,7 @@ import { handleMcpRequest } from './mcp-server.js';
 import { z } from 'zod';
 import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
+import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, type ServiceSession, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, browserRelayArchive } from './browser-relay.js';
 import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
@@ -986,6 +988,9 @@ export default {
       return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(object.size), etag: object.httpEtag } });
     }
     if (isHostedServiceHostname(env, url.hostname)) {
+      // A declared route of a workspace URL admits signed callers by credential alone: no origin check, cookie or sign-in.
+      const resolved = hostedServiceUrlKind(url.hostname) === 'workspace' ? await env.HOSTED_ROUTES.getByName(url.hostname).resolve(request.method, url.pathname) : undefined;
+      if (resolved?.ingress && resolved.ingress.tenant === env.ACCOUNT_ID) return serveIngress(env, request, resolved.ingress, resolved);
       const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(request.method) || request.headers.get('upgrade')?.toLowerCase() === 'websocket';
       if (unsafe) {
         const origin = request.headers.get('origin');
@@ -1008,7 +1013,7 @@ export default {
         return new Response(null, { status: 303, headers });
       }
       const session = await relay.serviceValidate(serviceCookie(request, SERVICE_COOKIE), url.hostname);
-      if (session) return fetchInternalService(env, { kind: 'device', accountId: env.ACCOUNT_ID, deviceId: session.deviceId }, request, session);
+      if (session) return fetchInternalService(env, { kind: 'device', accountId: env.ACCOUNT_ID, deviceId: session.deviceId }, request, session, resolved);
       if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') return jsonError(401, 'SERVICE_LOGIN_REQUIRED', 'Open this service in the browser to approve access');
       const state = crypto.randomUUID();
       const approval = new URL('/service-access', env.ACCOUNT_URL);

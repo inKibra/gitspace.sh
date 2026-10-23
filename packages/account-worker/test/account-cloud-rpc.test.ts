@@ -6,7 +6,7 @@ import { workspaceStatusMessageSchema } from '@gitspace/protocol/account-directo
 import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
-import { executionHash, loadEnvironmentBundle, type LifecycleRun } from '@gitspace/protocol-environment';
+import { executionHash, loadEnvironmentBundle, serviceIngressContent, type LifecycleRun } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
@@ -205,6 +205,27 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     });
     expect(await rpc('environment.get', { spaceId })).toMatchObject({ status: 'ok', value: {
       executions: [{ content: blobs[id('d')], hash: await executionHash({ kind: 'script', command: blobs[id('d')]! }), approval: null }],
+    } });
+  });
+
+  it('derives the routes a checkpoint\'s services.json opens to signed callers as one execution to approve', async () => {
+    emptyCommittedSource();
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { spaceId, placement } = await inspectorWorkspace(fixture.userId);
+    const id = (digit: string) => digit.repeat(40);
+    const checkpoint = { checkpointRef: `refs/gitspace/spaces/${spaceId}/checkpoints`, headCommit: id('1'), branch: 'review', indexCommit: id('2'), trackedWorktreeCommit: id('3'), worktreeCommit: id('4'), indexTree: id('5'), worktreeTree: id('6') };
+    const services = JSON.stringify({ services: [{ name: 'api', command: 'bun run api', ports: [{ name: 'http' }], ingress: [{ method: 'POST', path: '/hooks/*' }] }] });
+    const blobs: Record<string, string> = { [id('a')]: services };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
+    flatTreeReader(tree => tree === checkpoint.worktreeTree ? { '.gitspace/services.json': id('a') } : undefined, oid => blobs[oid]);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readBlob').mockImplementation(async (_repository, oid) => blobs[oid] === undefined ? null : new Blob([blobs[oid]]));
+    await runInDurableObject(placement, (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
+      state.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+    });
+    const content = serviceIngressContent(services)!;
+    expect(parse(await (await SELF.fetch(fixture.request(single('environment.get', { spaceId })))).text())).toMatchObject({ status: 'ok', value: {
+      executions: [{ id: 'ingress', kind: 'ingress', command: '.gitspace/services.json', content, hash: await executionHash({ kind: 'ingress', command: content }), approval: null }],
     } });
   });
 
@@ -439,7 +460,7 @@ describe('account cloud RPC without machines', () => {
     expect(parse(savedBody)).toMatchObject({ status: 'ok', value: { provider: { id: 'openai', hasAuth: true } } });
     const accounts = await fixture.vault.cloudCredentialAccounts('default');
     expect((await fixture.vault.cloudResolveCredential({ profileId: 'default', credentialId: accounts[0]!.id })).credential).toEqual({ type: 'api_key', key });
-    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai', credentialId: accounts[0]!.id })));
+    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai' })));
     expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: false, accounts: [{ id: accounts[0]!.id, disabled: true }] } } });
     expect(await fixture.vault.cloudCredentialAccounts('default')).toEqual([]);
   });
@@ -462,11 +483,15 @@ describe('account cloud RPC without machines', () => {
     expect(body).not.toContain('refresh-personal');
     expect(body).not.toContain('access-personal');
     const first = codex.accounts[0]!, second = codex.accounts[1]!;
-    const logout = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai-codex', credentialId: first.id })));
-    expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: first.id, disabled: true }, { id: second.id, disabled: false }] } } });
+    const change = async (path: 'providers.account.disable' | 'providers.account.enable' | 'providers.account.remove') =>
+      parse(await (await SELF.fetch(fixture.request(single(path, { profileId: 'default', providerId: 'openai-codex', credentialId: first.id })))).text());
+    expect(await change('providers.account.disable')).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: first.id, disabled: true }, { id: second.id, disabled: false }] } } });
     expect((await fixture.vault.cloudCredentialAccounts('default', 'openai-codex')).map(account => account.id)).toEqual([second.id]);
-    const removal = await SELF.fetch(fixture.request(single('providers.logout', { profileId: 'default', providerId: 'openai-codex', credentialId: first.id })));
-    expect(parse(await removal.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: second.id, disabled: false }] } } });
+    expect(await change('providers.account.enable')).toMatchObject({ status: 'ok', value: { provider: { accounts: [{ id: first.id, disabled: false }, { id: second.id, disabled: false }] } } });
+    expect((await fixture.vault.cloudCredentialAccounts('default', 'openai-codex')).map(account => account.id)).toEqual([first.id, second.id]);
+    await change('providers.account.disable');
+    expect(await change('providers.account.disable')).toMatchObject({ status: 'ok', value: { provider: { accounts: [{ id: first.id, disabled: true }, { id: second.id, disabled: false }] } } });
+    expect(await change('providers.account.remove')).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: second.id, disabled: false }] } } });
   });
 
   it('manages inference profiles with typed conflicts and refuses account API clients provider/profile writes', async () => {
@@ -485,7 +510,10 @@ describe('account cloud RPC without machines', () => {
       ['inference.update', { profileId: profile.id, expectedRevision: 1, name: 'Unauthorized', settings: {} }],
       ['inference.delete', { profileId: profile.id, expectedRevision: 1 }],
       ['providers.apiKey.set', { profileId: profile.id, providerId: 'openai', key: 'not-stored' }],
-      ['providers.logout', { profileId: profile.id, providerId: 'openai', credentialId: null }],
+      ['providers.logout', { profileId: profile.id, providerId: 'openai' }],
+      ['providers.account.disable', { profileId: profile.id, providerId: 'openai', credentialId: '1' }],
+      ['providers.account.enable', { profileId: profile.id, providerId: 'openai', credentialId: '1' }],
+      ['providers.account.remove', { profileId: profile.id, providerId: 'openai', credentialId: '1' }],
     ] as const) {
       expect(parse(await (await SELF.fetch(api.request(single(path, input)))).text())).toMatchObject({ status: 'error' });
     }

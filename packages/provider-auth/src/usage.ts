@@ -91,6 +91,8 @@ export type UsageObservation = UsageWindowObservation & {
   observedAt: number;
   primary?: UsageWindowObservation;
   secondary?: UsageWindowObservation;
+  /** A shared window is used up: the account cannot serve until `until`, the latest such window's reset. */
+  exhausted?: { until: number; label: string };
 };
 
 /** Only shared gates inform account selection; feature quotas and credit-funded plan caps do not. */
@@ -100,6 +102,7 @@ export function usageObservation(report: ProviderUsageReport): UsageObservation 
   let observation: UsageObservation | undefined;
   let primary: UsageWindowObservation | undefined;
   let secondary: UsageWindowObservation | undefined;
+  let exhausted: UsageObservation['exhausted'];
   for (const limit of report.limits) {
     if (limit.scope !== 'account' || limit.status === 'credit-overage') continue;
     const resetsAt = limit.resetsAt === null ? undefined : Date.parse(limit.resetsAt);
@@ -109,8 +112,9 @@ export function usageObservation(report: ProviderUsageReport): UsageObservation 
     if (fraction === undefined || !Number.isFinite(fraction)) continue;
     const window: UsageWindowObservation = { usedFraction: Math.max(0, Math.min(1, fraction)), ...(resetsAt === undefined ? {} : { resetsAt }) };
     if (!observation || window.usedFraction > observation.usedFraction) observation = { ...window, observedAt };
+    if (window.usedFraction >= 1 && resetsAt !== undefined && (!exhausted || resetsAt > exhausted.until)) exhausted = { until: resetsAt, label: limit.label };
     if ((report.provider === 'anthropic' && limit.id === 'five_hour') || (report.provider === 'openai-codex' && limit.id === '0:primary')) primary = window;
     if ((report.provider === 'anthropic' && limit.id === 'seven_day') || (report.provider === 'openai-codex' && limit.id === '0:secondary')) secondary = window;
   }
-  return observation ? { ...observation, ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}) } : undefined;
+  return observation ? { ...observation, ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}), ...(exhausted ? { exhausted } : {}) } : undefined;
 }

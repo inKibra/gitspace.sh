@@ -666,16 +666,21 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
               return completed(input, { ...row, base: { branch: project.baseBranch, error: error instanceof Error ? error.message : String(error) } });
             }
           }
+          case 'progress': {
+            // Stored rows, plus the running turn's newest messages; the workspace's runtime opens only while it runs.
+            const target = await authority().getWorkspace(args.workspaceId);
+            if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
+            return completed(input, { workspaceId: target.id, name: target.name, ...await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectProgress({ projectId: identity.projectId, workspaceId: target.id }) });
+          }
           case 'start': {
             // Only the project agent starts workspaces; workspaces starting each other could loop without a person.
             if (identity.workspaceId !== baseWorkspaceId) throw new Error('Only the project agent (the project\'s base workspace) can start other workspaces');
             const target = await authority().getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
             if (target.lifecycle !== 'active') throw new Error(`Workspace ${target.name} is ${target.lifecycle}; only an active workspace can be started`);
-            await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).watchFromProject(target.name);
-            // The attempt names the request, so a retried call delivers the instruction once.
-            const accepted = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).runtimeSubmit({
-              projectId: identity.projectId, workspaceId: target.id, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`,
+            // The attempt names the request, so a retried call delivers the instruction once; only the turn it starts reports.
+            const accepted = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).runtimeStartFromProject({ projectId: identity.projectId, workspaceId: target.id }, {
+              name: target.name, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`, onDone: args.onDone,
             });
             return completed(input, { workspaceId: target.id, name: target.name, ...accepted });
           }

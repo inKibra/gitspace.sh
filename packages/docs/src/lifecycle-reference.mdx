@@ -189,6 +189,11 @@ The runner supplies these identity variables as strings:
 | `GITSPACE_WORKSPACE_GENERATION` | Current checkout generation |
 | `GITSPACE_ENVIRONMENT_PROFILE` | Selected profile name |
 | `GITSPACE_MACHINE_TOOLS` | Private, stable machine tool directory; its `bin` directory takes precedence over tools on the inherited `PATH` |
+| `GITSPACE_SERVICE_URL_<NAME>` | Workspace URL (`https://…`) of each `http` port of each service in `.gitspace/services.json`. `<NAME>` is the port's URL name upper-cased, other characters as `_`: `GITSPACE_SERVICE_URL_WEB` for service `web`'s first `http` port, `GITSPACE_SERVICE_URL_WEB_ADMIN` for its port `admin` |
+| `GITSPACE_SERVICE_URLS_JSON` | The same URLs as a JSON object keyed by URL name (`{"web":"https://…","web-admin":"https://…"}`); `{}` without declared `http` ports |
+| `GITSPACE_LIFECYCLE_INGRESS` | `cloud/provision` and `workspace/materialize` only: where to write `ingress.json` (see [Signed callers](#signed-callers)) |
+
+Services started from `.gitspace/services.json` receive the same two URL variables, with `GITSPACE_SERVICE_NAME`, `PORT`, `GITSPACE_PORTS_JSON`, and `GITSPACE_PORT_<NAME>`. A URL is not a secret: only an approved browser or a [signed caller](#signed-callers) gets through it.
 
 `GITSPACE_LIFECYCLE_BINDINGS` contains a JSON object of durable, non-secret resource bindings. Parse it as JSON; do not source or evaluate it as shell code.
 
@@ -220,6 +225,63 @@ Each run keeps its logs and output in a separate temporary directory. Cleanup re
 Lifecycle `.sh` files execute their approved bytes with `/bin/bash`, without login startup files. Command checks use `/bin/sh`. The working directory is the checkout root; `$0` is the script's path in that checkout. Use `$0`, not `BASH_SOURCE`, when locating helpers beside an entry script.
 
 A cloud provisioning success remains separate from individual run attempts. A failed explicit rerun retains the last successful provision and any partial bindings. Closing or evicting the local checkout does not remove those records.
+
+## Signed callers
+
+A workspace URL normally admits only a browser you approved: other requests are redirected to sign-in, and requests from other origins are refused. To let a webhook sender or another service call specific routes, declare them in `.gitspace/services.json` and register a credential from a lifecycle script. Signed callers apply to workspace URLs (`<service>--<workspace>--<account>-srv`) only; machine URLs never admit them.
+
+Each service may list up to 64 routes in `ingress`:
+
+```json
+{
+  "services": [{
+    "name": "api",
+    "command": "bun",
+    "args": ["run", "start"],
+    "ports": [{ "name": "http" }, { "name": "admin" }],
+    "ingress": [
+      { "method": "POST", "path": "/webhooks/*" },
+      { "method": "GET", "path": "/status", "port": "admin" }
+    ]
+  }]
+}
+```
+
+| Field | Rules |
+| --- | --- |
+| `method` | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, or `*` for any method. A WebSocket upgrade is a `GET` |
+| `path` | An exact path (`/status`) or a prefix ending in `/*` (`/webhooks/*` matches `/webhooks/` and every path below it, not `/webhooks`; `/*` matches every path). No `..`, `.`, empty segments, other wildcards, query, or `/__gitspace` paths |
+| `port` | An `http` port of the service; defaults to its first. Each port is its own workspace URL |
+
+The routes of every service form one **Signed callers** entry in Environment, approved by the SHA-256 of their canonical content like a script. Reordering routes keeps the approval; any other change needs a new one. The entry never runs. Until it is approved, nothing is registered.
+
+A request whose method and path match a declared route never redirects: without a valid credential it is a `401` with `{"error":"INGRESS_UNAUTHORIZED","reason":"…"}`. A valid credential's header is removed and everything else (body, headers, query, WebSocket upgrades) reaches the service unchanged. Other paths on the same URL keep the browser sign-in.
+
+### Registering credentials
+
+Only an approved `cloud/provision` or `workspace/materialize` script registers credentials, by writing JSON to the path in `GITSPACE_LIFECYCLE_INGRESS` (`ingress.json` in the run's output directory):
+
+```json
+{
+  "credentials": [
+    { "kind": "oidc", "service": "api", "issuer": "https://broker.example.com", "subjects": ["webhooks/stripe", "webhooks/*"] },
+    { "kind": "jwt", "service": "api", "port": "admin", "issuer": "status-poller", "keys": { "keys": [{ "kty": "OKP", "crv": "Ed25519", "x": "…" }] }, "subjects": ["poller"] },
+    { "kind": "bearer", "service": "api", "secret": "STRIPE_FORWARD_TOKEN" }
+  ]
+}
+```
+
+After the phase's scripts succeed, the machine checks the file (at most 64 KiB; each credential names a service and `http` port with declared routes; the routes are approved) and replaces the workspace's registrations with it; a phase that writes no file leaves them unchanged. An invalid file or unapproved routes fail the run. GitSpace keeps registrations with the workspace URL, apart from the machine serving it, and ends them when the workspace is archived or deleted. Agents cannot register: the account accepts a registration only from the machine running that approved phase, for approved routes.
+
+| Kind | Checked |
+| --- | --- |
+| `oidc` | A JWT signed by the issuer's keys. GitSpace reads `<issuer>/.well-known/openid-configuration` (its `issuer` must equal the registered one) and its `jwks_uri`, over HTTPS on a public DNS name (no IP addresses, `localhost`, or GitSpace hosts), within 5 seconds and 64 KiB, cached about 10 minutes and refetched for an unknown `kid` at most every 30 seconds |
+| `jwt` | The same JWT checks with the public keys given in `keys` (a JWKS; private key members reject) |
+| `bearer` | A static token equal to the named secret, which must be one of the profile's secrets. Only its SHA-256 leaves the machine. Rotating the secret and running the phase again keeps the previous token valid too, until the next rotation |
+
+A JWT must use EdDSA, ES256, or RS256 and carry `iss` equal to the issuer, `aud` equal to the workspace URL (`https://<service>--<workspace>--<account>-srv.gssh.dev`), `exp`, `iat` at most 5 minutes old, and a `sub` matching one of `subjects` (`*` matches any characters). When present, `htm` must equal the request method and `htu` the request URL without query.
+
+The caller sends the token as `Authorization: Bearer <token>` or `GitSpace-Ingress: <token>`. Set `"forwardAuthorization": true` on an `oidc` or `jwt` credential when the service checks its own `Authorization` header; the caller then uses `GitSpace-Ingress`, and `Authorization` reaches the service. GitSpace counts admissions and refusals per workspace URL and keeps the last refusal's reason.
 
 ## Agent API and durable logs
 

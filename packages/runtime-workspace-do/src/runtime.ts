@@ -1,7 +1,7 @@
-import { providerErrorText } from '@gitspace/blocks';
+import { providerErrorText, WORKSPACE_REPORT_ENTRY, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { createWithdrawnNotices } from './withdrawn-notices.js';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
-import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication } from '@earendil-works/pi-durable';
+import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication, SubmissionRecord } from '@earendil-works/pi-durable';
 import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
@@ -27,7 +27,11 @@ import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat, type WithdrawnNotices } from './transcript.js';
 import { createRunningMarks } from './running-marks.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void };
+/** The main conversation's turn for an input submitted with a request id. */
+export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
+/** One message of a turn, its text cut short. */
+export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: string };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
 /** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. A sync capture
  * uploads the machine's changes. */
@@ -63,6 +67,13 @@ export type WorkspaceRuntime = {
    * start one. A `key` posts it at most once. */
   /** A line in the main conversation that does not start a turn; `source` labels it (default Machine). */
   notice(text: string, key?: string, source?: string): Promise<void>;
+  /** The main-conversation turn of the input submitted with `requestId`; null when there is none. */
+  turn(requestId: string): Promise<RuntimeTurn | null>;
+  /** The newest `limit` messages of that turn, oldest first, each cut short. */
+  turnItems(requestId: string, limit: number): Promise<RuntimeTurnItem[]>;
+  /** Project base workspace: a workspace's report of a turn the project agent started. Quiet, a line the agent reads on
+   * its next turn; wake, an event that starts one (after the current one when it is busy). */
+  workspaceReport(report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
    * or an environment run dispatched to the cache machine its arguments name. */
@@ -80,6 +91,34 @@ export type WorkspaceRuntime = {
   publish(): void;
 };
 type StoredTask = TaskRecord<JsonValue, JsonValue, JsonValue>;
+type InputSubmission = Extract<SubmissionRecord, { type: 'input' }>;
+type ModelMessage = NonNullable<EntryRecord['model']>[number];
+/** A turn report's reply, failure or question. */
+const REPORT_CHARACTERS = 280;
+/** Each message `turnItems` returns. */
+const TURN_ITEM_CHARACTERS = 400;
+const REPORT_VERB: Record<WorkspaceTurnReport['outcome'], string> = { finished: 'finished', failed: 'failed', asked: 'asked', approval: 'needs approval' };
+/** Why an unanswered input's turn ended, when pi recorded no detail. */
+const UNANSWERED: Record<string, string> = { aborted: 'it was stopped before it finished', reset: 'its context was reset before it answered', no_model: 'no model was available' };
+function textParts(content: ModelMessage['content']): string {
+  if (typeof content === 'string') return content;
+  const texts: string[] = [];
+  for (const part of content) if (part.type === 'text') texts.push(part.text);
+  return texts.join('\n');
+}
+/** A message of a turn as `turnItems` shows it; none for the system prompt a model request recorded. */
+function turnItem(message: ModelMessage): RuntimeTurnItem[] {
+  const cut = (text: string) => text.length <= TURN_ITEM_CHARACTERS ? text : `${text.slice(0, TURN_ITEM_CHARACTERS)}…`;
+  if (message.role === 'toolResult') return [{ role: 'tool', text: cut(`${message.toolName}: ${textParts(message.content)}`) }];
+  if (message.role === 'user') return [{ role: 'user', text: cut(textParts(message.content)) }];
+  if (message.role !== 'assistant') return [];
+  const parts: string[] = [];
+  for (const part of message.content) {
+    if (part.type === 'text') parts.push(part.text);
+    else if (part.type === 'toolCall') parts.push(`[${part.name} ${JSON.stringify(part.arguments)}]`);
+  }
+  return [{ role: 'assistant', text: cut(parts.join('\n')) }];
+}
 // Retain the persisted document kind so acknowledged cache notices are not emitted again.
 const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
 /** One-time: a sync failure was announced on every retry while each error carried a fresh reference, about 250 notices
@@ -413,12 +452,32 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     line = next;
     options.waitUntil(next);
   }
+  async function turnOf(record: InputSubmission): Promise<RuntimeTurn> {
+    if (record.status === 'queued') return { state: 'queued' };
+    if (record.status === 'placed') return { state: 'running' };
+    if (record.status === 'done') {
+      const answer = (await storage.entry(runtime.root.id, record.answer, BACKGROUND_CONTEXT))?.entry;
+      const reply = (answer?.model ?? []).flatMap(message => message.role === 'assistant' ? [textParts(message.content)] : []).join('\n').trim();
+      return { state: 'ended', outcome: 'finished', text: reply ? reply.slice(0, REPORT_CHARACTERS) : null };
+    }
+    const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED[record.reason] ?? record.reason;
+    return { state: 'ended', outcome: 'failed', text: why.slice(0, REPORT_CHARACTERS) };
+  }
+  /** pi settles a run's inputs as the run ends, so a submission names exactly the turn it started. */
+  function turnChanged(record: SubmissionRecord) {
+    const report = options.turnChanged;
+    if (!report || record.type !== 'input' || record.requestId === undefined || record.conversationId !== runtime.root.id) return;
+    const requestId = record.requestId;
+    if (record.status === 'placed') report(requestId, { state: 'running' });
+    else if (record.status === 'done' || record.status === 'unanswered') options.waitUntil(turnOf(record).then(turn => report(requestId, turn)).catch(options.onReport));
+  }
   harness.subscribeCommits(publication => {
     for (const change of publication.changes) {
       if (change.type === 'entry') dirtyConversations.add(change.value.conversationId);
       else if (change.type === 'conversation') dirtyConversations.add(change.value.id);
       else if (change.type === 'task') dirtyTasks.set(Number(change.value.id), change.value);
       else if ((change.type === 'document' || change.type === 'document.copy') && change.conversationId !== undefined) dirtyConversations.add(change.conversationId);
+      else if (change.type === 'submission') turnChanged(change.value);
     }
     publish();
   });
@@ -486,6 +545,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     lfsRoots: () => cloudFiles.lfsRoots(),
     reconcileLfsSources: objects => cloudFiles.reconcileLfsSources(objects),
     async session(conversationId, command, canApprove = false, deviceId) {
+      if (deviceId !== undefined && command.type === 'prompt') options.personPrompted?.();
       const clearsDraft = deviceId !== undefined && command.type === 'prompt' && command.draftRevision !== undefined && (conversationId === undefined || conversationId === String(runtime.root.id));
       const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume'].includes(command.type);
       const result = await controls.execute(conversationId, command, canApprove);
@@ -494,6 +554,25 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       return result;
     },
     notice,
+    async turn(requestId) {
+      const record = await storage.submissionByRequest(runtime.root.id, requestId, BACKGROUND_CONTEXT);
+      return record?.type === 'input' ? turnOf(record) : null;
+    },
+    async turnItems(requestId, limit) {
+      const record = await storage.submissionByRequest(runtime.root.id, requestId, BACKGROUND_CONTEXT);
+      if (record?.type !== 'input' || record.entry === undefined) return [];
+      // The turn runs from its placed input to its answer; entries after the answer belong to later turns.
+      // Twice the entries: the system prompts requests recorded show nothing.
+      const page = await runtime.root.entries({ minEntryId: record.entry, ...(record.status === 'done' ? { maxEntryId: record.answer } : {}) }, limit * 2, undefined, BACKGROUND_CONTEXT);
+      return page.items.filter(entry => !withdrawn.has(String(entry.id))).reverse().flatMap(entry => (entry.model ?? []).flatMap(turnItem)).slice(-limit);
+    },
+    async workspaceReport(report, onDone) {
+      const text = `Workspace ${report.name} ${REPORT_VERB[report.outcome]}${report.excerpt ? `: ${report.excerpt}` : '.'}`;
+      const event = { requestId: `workspace:${report.workspaceId}:${report.requestId}`, sender: { id: report.workspaceId, name: report.name }, text, payload: report };
+      if (onDone === 'wake') await runtime.lifecycle.deliver({ ...event, conversationId: String(runtime.root.id), kind: 'workspace' });
+      else await harness.commit(tx => tx.appendEntry(runtime.root.id, { kind: WORKSPACE_REPORT_ENTRY, data: event, model: [{ role: 'user', content: text, timestamp: Date.now() }] }), BACKGROUND_CONTEXT);
+      publish(); await line;
+    },
     noticeWhenReady(input) {
       options.storage.sql.exec('INSERT OR IGNORE INTO runtime_attach_notices(attachment_id,generation,conversation_id,label) VALUES(?,?,?,?)', input.attachmentId, input.generation, input.conversationId, input.label);
     },
@@ -529,6 +608,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       return result;
     },
     async submit(input: RuntimeSubmitInput, deviceId) {
+      if (deviceId !== undefined) options.personPrompted?.();
       const target = await conversation(input.conversationId);
       if ((await harness.snapshot(AgentDefinitionContextDoc, target.id, BACKGROUND_CONTEXT))?.child) throw new Error('User messages must target the workspace main conversation');
       await controls.loadDefinitions(target);

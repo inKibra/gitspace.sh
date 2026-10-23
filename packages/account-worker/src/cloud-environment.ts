@@ -61,6 +61,7 @@ export async function refreshCloudEnvironment(input: {
         if (content === null) throw new EnvironmentError('InvalidConfiguration', `Lifecycle script ${command} is not a file`);
         return { command, content };
       },
+      services: () => text('.gitspace/services.json'),
     });
     return { source, bundle, executions };
   };

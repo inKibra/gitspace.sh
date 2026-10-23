@@ -3,7 +3,7 @@ import { Harness, MemoryStorage, createRegistry, type Conversation } from '@eare
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, type AssistantMessage } from '@earendil-works/pi-ai';
 import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
-import type { TranscriptRow } from '@gitspace/blocks';
+import { formatConversationEvents, type TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
 
 const context = BACKGROUND_CONTEXT;
@@ -102,5 +102,28 @@ test('withdrawn notices leave the transcript while the other notices stay', asyn
     expect(text).not.toContain('Sync with Darktop failed');
     expect(text).toContain('Machine Darktop went offline.');
     expect(text).toContain('answer 1');
+  });
+});
+
+test('workspace turn reports show as compact rows, never as the user\'s messages or as event notices', async () => {
+  await fixture(async (_harness, storage, root) => {
+    await turn(root, 0, 0);
+    const report = (requestId: string, outcome: string, excerpt: string, text: string) => ({ requestId: `workspace:feat-33:${requestId}`, text, sender: { id: 'feat-33', name: 'FEAT-33' }, payload: { projectId: 'project', workspaceId: 'feat-33', name: 'FEAT-33', requestId, outcome, excerpt } });
+    // Quiet: the line is the project agent's context and starts nothing.
+    const quiet = report('start:a', 'finished', 'Plan drafted.', 'Workspace FEAT-33 finished: Plan drafted.');
+    await root.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.workspace', data: quiet, model: [{ role: 'user', content: quiet.text, timestamp: 2 }] }), context);
+    // Wake: a display entry, then the event that starts the agent's turn and carries the line to the model.
+    const wake = report('start:b', 'failed', 'Model request failed', 'Workspace FEAT-33 failed: Model request failed');
+    await root.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.workspace', data: wake }), context);
+    await root.commit(async tx => {
+      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: formatConversationEvents([{ kind: 'workspace', source: 'FEAT-33', text: wake.text }]), timestamp: 3 }] });
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Retrying FEAT-33.' }], 3)] });
+    }, context);
+    const { rows } = await createTranscriptReader(storage, none).page(root.id, { generation: null, before: null, after: null, around: null });
+    expect(rows.map(row => row.item.type === 'message' ? `${row.item.role}: ${row.item.text}` : row.item.type === 'workspace-report' ? `${row.item.name} ${row.item.outcome}: ${row.item.excerpt}` : row.item.type))
+      .toEqual(['user: prompt 0', 'assistant: answer 0', 'FEAT-33 finished: Plan drafted.', 'FEAT-33 failed: Model request failed', 'assistant: Retrying FEAT-33.']);
+    expect(rows.find(row => row.item.type === 'workspace-report')?.item).toMatchObject({ projectId: 'project', workspaceId: 'feat-33', requestId: 'start:a' });
+    // The agent's answer to the event is a turn of its own.
+    expect(new Set(rows.map(row => row.turnId)).size).toBe(2);
   });
 });

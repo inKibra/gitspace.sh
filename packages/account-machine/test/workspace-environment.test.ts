@@ -3,10 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol';
-import { executionHash, transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleActor, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
+import { executionHash, serviceIngressContent, transitionLifecycle, type EnvironmentLifecycleAuthority, type HostedIngressRegistration, type LifecycleActor, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
 import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceEnvironmentManager, type EnvironmentLifecycleRunner } from '../src/workspace-environment.js';
+import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
+import { HostedRoutesFake } from './hosted-routes-fake.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -16,6 +18,12 @@ afterEach(() => {
 class Ledger implements EnvironmentLifecycleAuthority {
   readonly workspaces: CloudWorkspaceDefinition[] = [];
   async listProjectWorkspaces() { return structuredClone(this.workspaces); }
+  /** Each signed-caller registration with its run's status when it arrived. */
+  readonly registrations: Array<{ input: HostedIngressRegistration; status: string | undefined }> = [];
+  async registerHostedIngress(input: HostedIngressRegistration) {
+    this.registrations.push({ input: structuredClone(input), status: this.state.runs.find((run) => run.id === input.runId)?.status });
+    return { hostnames: input.registrations.map((registration) => registration.hostname) };
+  }
   readonly bindingWritten = Promise.withResolvers<void>();
   private readonly records = new Map<string, LifecycleRunRecord>();
   readonly state: LifecycleState = {
@@ -85,12 +93,27 @@ function fixture(script: string, phase = 'cloud/provision') {
       return { terminalName: 'runner', exitCode: 0, output: results.map((result) => result.output).join(''), steps: results };
     },
   };
+  const services = new WorkspaceServiceManager(checkouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine-a', join(root, 'services'), 'gssh.dev', 'test', new HostedRoutesFake([{ id: 'machine-a', label: 'alpha' }]).authority('machine-a'));
   const manager = new WorkspaceEnvironmentManager(checkouts, {
     async listEffectiveSecrets() { return [{ projectId: 'project-a', name: 'TOKEN', revision: 1, updatedAt: '2026-09-01T00:00:00.000Z', updatedBy: 'human-browser', source: 'project' }]; },
     async materializeProjectSecrets() { materializations += 1; return { TOKEN: 'private-provider-credential' }; },
-  }, runner, ledger, { machineId: 'machine-a', stateRoot: join(root, 'runs') });
+  }, runner, ledger, { machineId: 'machine-a', stateRoot: join(root, 'runs'), services });
   return { root, checkout, scriptPath, ledger, manager, materializations: () => materializations, beforeRun: (callback: () => void) => { beforeRun = callback; } };
 }
+
+/** `api` takes signed callers on both of its `http` ports; `web-app` has a workspace URL and no declared routes. */
+const SIGNED_SERVICES = {
+  services: [
+    { name: 'api', command: 'bun', ports: [{ name: 'http' }, { name: 'admin' }, { name: 'db', protocol: 'tcp' }], ingress: [{ method: 'POST', path: '/hooks/*' }, { method: 'GET', path: '/status', port: 'admin' }] },
+    { name: 'web-app', command: 'bun', ports: [{ name: 'http' }] },
+  ],
+};
+/** Registers a bearer (by secret name) for `api` and an OIDC issuer for its `admin` port, and records the workspace URLs it was told. */
+const REGISTERING_SCRIPT = `cat > "$GITSPACE_LIFECYCLE_INGRESS" <<'EOF'
+{"credentials":[{"kind":"bearer","service":"api","secret":"TOKEN"},{"kind":"oidc","service":"api","port":"admin","issuer":"https://issuer.example.com","subjects":["repo:*"]}]}
+EOF
+printf '%s\\n' "$GITSPACE_SERVICE_URL_API" "$GITSPACE_SERVICE_URL_API_ADMIN" "$GITSPACE_SERVICE_URL_WEB_APP" "$GITSPACE_SERVICE_URLS_JSON" > urls.txt
+`;
 
 async function approveActive(manager: WorkspaceEnvironmentManager, ledger: Ledger) {
   ledger.state.approvals = (await manager.view('workspace-a')).executions.map((execution) => ({
@@ -240,5 +263,44 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     expect(readFileSync(join(context.checkout, 'prepared.txt'), 'utf8')).toBe('ready');
     expect(context.ledger.state.bundleJson).toBeNull();
     expect(context.ledger.state.runs.find((run) => run.phase === 'machine/prepare')).toMatchObject({ status: 'succeeded', attachment: { attachmentId: 'cache', generation: 1 } });
+  });
+
+  it('registers the signed callers an approved materialize script wrote, a bearer only as its secret\'s hash, and tells scripts the workspace URLs', async () => {
+    const context = fixture(REGISTERING_SCRIPT, 'workspace/materialize');
+    writeFileSync(join(context.checkout, '.gitspace', 'services.json'), JSON.stringify(SIGNED_SERVICES));
+    await approveActive(context.manager, context.ledger);
+    await context.manager.runPhase('workspace-a', 'workspace/materialize');
+    const [api, apiAdmin, webApp, all] = readFileSync(join(context.checkout, 'urls.txt'), 'utf8').split('\n');
+    expect([api, apiAdmin, webApp]).toEqual(['https://api--workspace-a--test-srv.gssh.dev', 'https://api-admin--workspace-a--test-srv.gssh.dev', 'https://web-app--workspace-a--test-srv.gssh.dev']);
+    expect(JSON.parse(all ?? '')).toEqual({ api, 'api-admin': apiAdmin, 'web-app': webApp });
+    const run = context.ledger.state.runs.find((entry) => entry.phase === 'workspace/materialize');
+    expect(run?.status).toBe('succeeded');
+    expect(context.ledger.registrations).toEqual([{
+      status: 'running',
+      input: {
+        projectId: 'project-a', workspaceId: 'workspace-a', runId: run?.id ?? '', ingress: serviceIngressContent(JSON.stringify(SIGNED_SERVICES)) ?? '',
+        registrations: [
+          { hostname: 'api-admin--workspace-a--test-srv.gssh.dev', service: 'api', port: 'admin', credentials: [{ kind: 'oidc', issuer: 'https://issuer.example.com', subjects: ['repo:*'], forwardAuthorization: false }] },
+          { hostname: 'api--workspace-a--test-srv.gssh.dev', service: 'api', port: 'http', credentials: [{ kind: 'bearer', secret: 'TOKEN', sha256: new Bun.CryptoHasher('sha256').update('private-provider-credential').digest('hex') }] },
+        ],
+      },
+    }]);
+    expect(JSON.stringify(context.ledger.registrations)).not.toContain('private-provider-credential');
+  });
+
+  it.each([
+    ['are not approved', false],
+    ['were widened by the script after approval', true],
+  ])('registers nothing when the signed caller routes %s, and the run fails waiting for approval', async (_label, widen) => {
+    const widened = { services: SIGNED_SERVICES.services.map((service) => ({ ...service, ingress: [{ method: '*', path: '/*' }] })) };
+    const context = fixture(widen ? `${REGISTERING_SCRIPT}cat > .gitspace/services.json <<'EOF'\n${JSON.stringify(widened)}\nEOF\n` : REGISTERING_SCRIPT, 'workspace/materialize');
+    writeFileSync(join(context.checkout, '.gitspace', 'services.json'), JSON.stringify(SIGNED_SERVICES));
+    await approveActive(context.manager, context.ledger);
+    const ingress = (await context.manager.view('workspace-a')).executions.find((execution) => execution.kind === 'ingress');
+    expect(ingress?.approval).toBe('workspace');
+    if (!widen) context.ledger.state.approvals = context.ledger.state.approvals.filter((approval) => approval.executionHash !== ingress?.hash);
+    await expect(context.manager.runPhase('workspace-a', 'workspace/materialize')).rejects.toMatchObject({ code: 'ApprovalRequired' });
+    expect(context.ledger.registrations).toEqual([]);
+    expect(context.ledger.state.runs.find((run) => run.phase === 'workspace/materialize')).toMatchObject({ status: 'failed', failure: { code: 'ApprovalRequired' } });
   });
 });

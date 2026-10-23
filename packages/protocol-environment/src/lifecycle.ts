@@ -4,6 +4,7 @@ import {
   type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleExecution, type LifecycleMutation,
   type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from './schema.js';
+import { SERVICE_INGRESS_EXECUTION_ID, serviceIngressContent } from './service-ingress.js';
 
 export const LIFECYCLE_PHASES = LifecyclePhaseSchema.options;
 export const BUILT_IN_CHECKS: Readonly<Record<string, string>> = {
@@ -142,13 +143,16 @@ export function effectiveEnvironmentValues(bundle: EnvironmentBundle, profile: E
 }
 
 /** Every checkout reader derives executions here: a hash approved from one checkout's view is the hash
- * any runner recomputes from identical `.gitspace/lifecycle/<phase>/<file>` content. */
+ * any runner recomputes from identical `.gitspace/lifecycle/<phase>/<file>` content. The signed-caller routes of
+ * `.gitspace/services.json` are one `ingress` execution: approved like a script, never run. */
 export async function deriveLifecycleExecutions(input: {
   bundle: EnvironmentBundle;
   selectedProfile: string;
   /** Entry names directly inside `.gitspace/lifecycle/<phase>`; absent directories list nothing. */
   list(phase: LifecyclePhase): Promise<readonly string[]>;
   read(phase: LifecyclePhase, fileName: string): Promise<{ command: string; content: string }>;
+  /** `.gitspace/services.json`, or null when absent. */
+  services(): Promise<string | null>;
 }): Promise<LifecycleExecution[]> {
   const { bundle, selectedProfile } = input;
   const checks = await Promise.all(resolveEnvironmentProfile(bundle, selectedProfile).checks.map(async (id): Promise<LifecycleExecution> => {
@@ -165,7 +169,12 @@ export async function deriveLifecycleExecutions(input: {
       return { id: `${phase}:${fileName}`, kind: 'script', label: fileName, command, hash: await executionHash({ kind: 'script', command: content }), phase, fileName, content };
     }),
   )));
-  return [...checks, ...scripts.flat()];
+  const ingress = serviceIngressContent(await input.services());
+  const declared: LifecycleExecution[] = ingress === null ? [] : [{
+    id: SERVICE_INGRESS_EXECUTION_ID, kind: 'ingress', label: 'Signed callers', command: '.gitspace/services.json',
+    hash: await executionHash({ kind: 'ingress', command: ingress }), phase: null, fileName: null, content: ingress,
+  }];
+  return [...checks, ...scripts.flat(), ...declared];
 }
 export function projectEnvironmentState(lifecycle: LifecycleState) {
   const bundle = lifecycle.bundleJson === null ? loadEnvironmentBundle({ version: 1, profiles: { base: {} } }) : parseEnvironmentBundleJson(lifecycle.bundleJson);

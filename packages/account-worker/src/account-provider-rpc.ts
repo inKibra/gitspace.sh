@@ -1,6 +1,7 @@
-import { type GitSpaceRpcContext, type VerifiedDevice } from '@gitspace/protocol';
+import type { GitSpaceRpcContext, ProviderView, VerifiedDevice } from '@gitspace/protocol';
 import {
   listProvidersContract, setProviderApiKeyContract, logoutProviderContract,
+  disableProviderAccountContract, enableProviderAccountContract, removeProviderAccountContract,
   startProviderLoginContract, providerLoginEventsContract, respondProviderLoginContract,
   cancelProviderLoginContract, providerUsageContract, listAvailableModelsContract,
 } from '@gitspace/protocol/rpc-contract';
@@ -13,6 +14,16 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 export function providerCloudProcedures(env: Env, userId: string, requireAdministration: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const vault = env.CREDENTIALS.getByName(userId);
+  /** Changes the accounts of the provider's credential store, then answers the provider as it now is. */
+  async function changed(input: { profileId: string; providerId: string }, change: (credentialProvider: string) => Promise<void>): Promise<ProviderView> {
+    await requireAdministration();
+    const selected = (await vault.cloudProviders(input.profileId)).find(entry => entry.id === input.providerId);
+    if (!selected) throw new Error('Provider is unavailable');
+    await change(selected.credentialProvider);
+    const provider = (await vault.cloudProviders(input.profileId)).find(entry => entry.id === input.providerId);
+    if (!provider) throw new Error('Provider is unavailable');
+    return provider;
+  }
   const list = server.implement(listProvidersContract).handler(async ({ input, errors }) => {
     try { return ok({ providers: await vault.cloudProviders(input.profileId) }); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list providers', message: message(error) })); }
@@ -27,15 +38,20 @@ export function providerCloudProcedures(env: Env, userId: string, requireAdminis
     } catch (error) { return err(errors.OperationFailed({ operation: 'set provider API key', message: message(error) })); }
   });
   const logout = server.implement(logoutProviderContract).handler(async ({ input, errors }) => {
-    try {
-      await requireAdministration();
-      const selected = (await vault.cloudProviders(input.profileId)).find(entry => entry.id === input.providerId);
-      if (!selected) throw new Error('Provider is unavailable');
-      await vault.logoutBrowserCredentials(input.profileId, selected.credentialProvider, input.credentialId);
-      const provider = (await vault.cloudProviders(input.profileId)).find(entry => entry.id === input.providerId);
-      if (!provider) throw new Error('Provider is unavailable');
-      return ok({ provider });
-    } catch (error) { return err(errors.OperationFailed({ operation: 'sign out provider', message: message(error) })); }
+    try { return ok({ provider: await changed(input, provider => vault.logoutBrowserCredentials(input.profileId, provider)) }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'sign out provider', message: message(error) })); }
+  });
+  const disable = server.implement(disableProviderAccountContract).handler(async ({ input, errors }) => {
+    try { return ok({ provider: await changed(input, provider => vault.disableProviderAccount(input.profileId, provider, input.credentialId)) }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'disable provider account', message: message(error) })); }
+  });
+  const enable = server.implement(enableProviderAccountContract).handler(async ({ input, errors }) => {
+    try { return ok({ provider: await changed(input, provider => vault.enableProviderAccount(input.profileId, provider, input.credentialId)) }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'enable provider account', message: message(error) })); }
+  });
+  const remove = server.implement(removeProviderAccountContract).handler(async ({ input, errors }) => {
+    try { return ok({ provider: await changed(input, provider => vault.removeProviderAccount(input.profileId, provider, input.credentialId)) }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'remove provider account', message: message(error) })); }
   });
   const start = server.implement(startProviderLoginContract).handler(async ({ input, errors }) => {
     try { await requireAdministration(); return ok(await vault.cloudLoginStart(input)); }
@@ -61,5 +77,5 @@ export function providerCloudProcedures(env: Env, userId: string, requireAdminis
     try { return ok({ models: await vault.cloudModels(input.profileId) }); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list available models', message: message(error) })); }
   });
-  return { list, apiKey: { set }, logout, login: { start, events, respond, cancel }, usage, models };
+  return { list, apiKey: { set }, logout, account: { disable, enable, remove }, login: { start, events, respond, cancel }, usage, models };
 }

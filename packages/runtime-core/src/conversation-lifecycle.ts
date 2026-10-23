@@ -8,7 +8,7 @@ import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
 
-export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
+export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
 /** How the transcript labels each delivered event. */
 const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent) => string> = {
@@ -16,6 +16,7 @@ const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent)
   'command-completed': event => `Background command ${event.requestId.replace(/^job-completion:/u, '')}`,
   'process-exited': () => 'Process',
   'machine-ready': () => 'Machine',
+  workspace: event => event.sender?.name ?? 'Workspace',
 };
 type StoredEvent = { event: ConversationEvent; delivered: boolean; consumed: boolean };
 export const ConversationLifecycleDoc = defineDoc<{ stopped: boolean; events: StoredEvent[] }>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [] }) });

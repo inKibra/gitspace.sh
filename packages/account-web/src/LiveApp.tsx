@@ -712,7 +712,9 @@ function GitSpaceProduct() {
   const startProviderLogin = useResultMutation(rpcClient.providers.login.start);
   const respondProviderLogin = useResultMutation(rpcClient.providers.login.respond);
   const cancelProviderLogin = useResultMutation(rpcClient.providers.login.cancel);
-  const logoutProvider = useResultMutation(rpcClient.providers.logout);
+  const disableProviderAccount = useResultMutation(rpcClient.providers.account.disable);
+  const enableProviderAccount = useResultMutation(rpcClient.providers.account.enable);
+  const removeProviderAccount = useResultMutation(rpcClient.providers.account.remove);
   const setProviderApiKey = useResultMutation(rpcClient.providers.apiKey.set);
   const [loginFlow, setLoginFlow] = useState<(ProviderLoginFlow & { done: boolean }) | null>(null);
   const loginStream = useRef<AbortController | null>(null);
@@ -955,8 +957,18 @@ function GitSpaceProduct() {
     loginStream.current = null;
     setLoginFlow(null);
   };
-  const signOutProvider = async (providerId: string, credentialId: string | null): Promise<void> => {
-    const result = await logoutProvider.mutateAsync({ profileId, providerId, credentialId });
+  const disableAccount = async (providerId: string, credentialId: string): Promise<void> => {
+    const result = await disableProviderAccount.mutateAsync({ profileId, providerId, credentialId });
+    if (result.status === 'error') throw result.error;
+    await refreshProviders();
+  };
+  const enableAccount = async (providerId: string, credentialId: string): Promise<void> => {
+    const result = await enableProviderAccount.mutateAsync({ profileId, providerId, credentialId });
+    if (result.status === 'error') throw result.error;
+    await refreshProviders();
+  };
+  const removeAccount = async (providerId: string, credentialId: string): Promise<void> => {
+    const result = await removeProviderAccount.mutateAsync({ profileId, providerId, credentialId });
     if (result.status === 'error') throw result.error;
     await refreshProviders();
   };
@@ -981,7 +993,9 @@ function GitSpaceProduct() {
     onShow: () => setUsageProfile(profileId),
     onRefreshUsage: refreshUsage,
     onSignIn: signInProvider,
-    onSignOut: signOutProvider,
+    onDisableAccount: disableAccount,
+    onEnableAccount: enableAccount,
+    onRemoveAccount: removeAccount,
     onSetApiKey: saveProviderApiKey,
     login: { flow: loginFlow?.profileId === profileId ? loginFlow : null, respond: respondLogin, cancel: dismissLogin, reconnect: () => { if (loginFlow) connectProviderLogin(loginFlow); } },
   };

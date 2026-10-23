@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createAssistantMessageEventStream,
   InMemoryModelsStore,
@@ -14,7 +14,7 @@ import {
   type TranscriptContext,
 } from '@earendil-works/pi-ai';
 import { createVaultModels, type VaultModelsOptions } from './index';
-import type { CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
+import type { AccountFailure, CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
 import { describeCloudProviders, listCloudModels } from './admission';
 
 const providerId = 'vault-test-provider';
@@ -38,19 +38,23 @@ const pool: readonly CredentialAccount[] = ['alpha', 'beta'].map(id => ({
 }));
 
 type RequestEffect = { key: string; prompt: string };
-type ProviderReply = { status: number; error?: string };
+/** `fetch`: answered like pi's Anthropic adapter, which reports a rejected request to the transport's fetch only. */
+type ProviderReply = { status: number; error?: string; headers?: Record<string, string>; afterText?: string; transport?: 'fetch' };
 
-function pinned(accountId: string): CredentialPins {
-  let value: CredentialPin = { credentialId: accountId, lastUsedAt: Date.now() };
+function served(): CredentialPins {
+  let value: CredentialPin | null = null;
   return {
     async read() { return value; },
     async write(_provider, next) { value = next; },
   };
 }
 
+afterEach(() => { vi.restoreAllMocks(); });
+
+/** `workspace-b` starts on alpha, `workspace-a` on beta. */
 async function fixture(options: {
   reply?: (request: RequestEffect) => Promise<ProviderReply>;
-  conversationForSignal?: VaultModelsOptions['conversationForSignal'];
+  workspaceId?: string;
   settings?: VaultModelsOptions['settings'];
   chats?: readonly Model<Api>[];
 } = {}) {
@@ -58,11 +62,19 @@ async function fixture(options: {
   const resolutions: { accountId: string; refresh: boolean }[] = [];
   const imageEffects: string[] = [];
   const classifierEffects: string[] = [];
-  const pins = pinned('alpha');
+  const failures: AccountFailure[] = [];
+  const out = new Map<string, number>();
+  const pins = served();
   const vault: VaultAccess = {
     async list(profileId, provider) {
       if (profileId !== 'profile') throw new Error('Unexpected profile');
-      return provider === undefined || provider === providerId ? pool : [];
+      return provider === undefined || provider === providerId ? pool.map(account => ({ ...account, cooldownUntil: out.get(account.id) ?? 0 })) : [];
+    },
+    async recordFailure(input) {
+      failures.push(input);
+      const until = input.until ?? Date.now() + 60_000;
+      out.set(input.credentialId, until);
+      return { label: input.credentialId, until };
     },
     async resolve(input) {
       if (input.profileId !== 'profile' || !pool.some(account => account.id === input.credentialId)) {
@@ -92,8 +104,11 @@ async function fixture(options: {
         if (!user || typeof user.content !== 'string') throw new Error('Expected a text test request');
         const effect = { key: request.apiKey, prompt: user.content };
         effects.push(effect);
-        const reply = options.reply ? await options.reply(effect) : { status: 200 };
-        await request.onResponse?.({ status: reply.status, headers: {} }, model);
+        const reply: ProviderReply = options.reply ? await options.reply(effect) : { status: 200 };
+        if (reply.transport === 'fetch') {
+          const response = await request.fetch?.('https://vault-provider.invalid/v1/messages', { method: 'POST' });
+          if (!response?.ok) throw new Error(`${response?.status} ${await response?.text()}`);
+        } else await request.onResponse?.({ status: reply.status, headers: reply.headers ?? {} }, model);
         stream.push({ type: 'start', partial: output });
         if (reply.status >= 400) throw new Error(reply.error ?? `HTTP ${reply.status}`);
         const block = { type: 'text' as const, text: '' };
@@ -102,6 +117,7 @@ async function fixture(options: {
         block.text = effect.key;
         stream.push({ type: 'text_delta', contentIndex: 0, delta: effect.key, partial: output });
         stream.push({ type: 'text_end', contentIndex: 0, content: effect.key, partial: output });
+        if (reply.afterText) throw new Error(reply.afterText);
         stream.push({ type: 'done', reason: 'stop', message: output });
       } catch (error) {
         output.stopReason = 'error';
@@ -141,9 +157,8 @@ async function fixture(options: {
     },
   };
   const models = await createVaultModels({
-    profileId: 'profile', conversationId: 'conversation', vault, pins,
+    profileId: 'profile', workspaceId: options.workspaceId ?? 'workspace-b', vault, pins,
     modelsStore: new InMemoryModelsStore(), providers: [provider],
-    ...(options.conversationForSignal ? { conversationForSignal: options.conversationForSignal } : {}),
     ...(options.settings ? { settings: options.settings } : {}),
   });
   const chatModel = models.getModel(providerId, chat.id);
@@ -152,7 +167,7 @@ async function fixture(options: {
   if (!chatModel || !imageModel || !classifierModel) throw new Error('Test provider was not admitted');
   // Initialization may resolve auth to restore the catalog; assertions below observe dispatch only.
   resolutions.length = 0;
-  return { models, chatModel, imageModel, classifierModel, effects, resolutions, imageEffects, classifierEffects, pins };
+  return { models, chatModel, imageModel, classifierModel, effects, resolutions, imageEffects, classifierEffects, pins, failures };
 }
 
 const context = { messages: [{ role: 'user' as const, content: 'request', timestamp: 0 }] };
@@ -184,34 +199,46 @@ describe('vault-bound provider dispatch', () => {
     expect((await test.models.completeSimple(deep, context)).stopReason).toBe('stop');
   });
 
-  it('isolates concurrent conversation accounts when every usage observation is unavailable', async () => {
-    const first = new AbortController();
-    const second = new AbortController();
-    const firstPins = pinned('alpha');
-    const secondPins = pinned('beta');
-    const bothEntered = Promise.withResolvers<void>();
-    let entered = 0;
-    const test = await fixture({
-      conversationForSignal(signal) {
-        if (signal === first.signal) return { conversationId: 'first', pins: firstPins };
-        if (signal === second.signal) return { conversationId: 'second', pins: secondPins };
-        throw new Error('Missing conversation request scope');
-      },
-      async reply() {
-        if (++entered === 2) bothEntered.resolve();
-        await bothEntered.promise;
-        return { status: 200 };
-      },
-    });
-    const [a, b] = await Promise.all([
-      test.models.completeSimple(test.chatModel, { messages: [{ role: 'user', content: 'first', timestamp: 0 }] }, { signal: first.signal }),
-      test.models.completeSimple(test.chatModel, { messages: [{ role: 'user', content: 'second', timestamp: 0 }] }, { signal: second.signal }),
+  it('starts every conversation of a workspace on one account and another workspace on the other', async () => {
+    // The runtime builds one collection per conversation; each here is one conversation.
+    const conversations = await Promise.all([fixture({ workspaceId: 'workspace-b' }), fixture({ workspaceId: 'workspace-b' }), fixture({ workspaceId: 'workspace-a' })]);
+    const answers = await Promise.all(conversations.map(test => test.models.completeSimple(test.chatModel, context)));
+    expect(answers.map(answer => answer.content)).toEqual([
+      [{ type: 'text', text: 'alpha:original' }], [{ type: 'text', text: 'alpha:original' }], [{ type: 'text', text: 'beta:original' }],
     ]);
-    expect(a.content).toEqual([{ type: 'text', text: 'alpha:original' }]);
-    expect(b.content).toEqual([{ type: 'text', text: 'beta:original' }]);
-    expect(test.effects.toSorted((left, right) => left.prompt.localeCompare(right.prompt))).toEqual([
-      { prompt: 'first', key: 'alpha:original' }, { prompt: 'second', key: 'beta:original' },
-    ]);
+  });
+
+  it('keeps an account its Claude subscription limit rejected out until the reset, then uses it again', async () => {
+    let now = 1_000_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const reset = 1_000_000_000 + 5 * 3600;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json(
+      { type: 'error', error: { type: 'rate_limit_error', message: 'This request would exceed your account\'s rate limit.' } },
+      { status: 429, headers: { 'anthropic-ratelimit-unified-status': 'rejected', 'anthropic-ratelimit-unified-reset': String(reset) } },
+    ));
+    let limited = true;
+    const test = await fixture({ async reply(request) {
+      return limited && request.key.startsWith('alpha:') ? { status: 429, transport: 'fetch' } : { status: 200 };
+    } });
+    expect((await test.models.completeSimple(test.chatModel, context)).content).toEqual([{ type: 'text', text: 'beta:original' }]);
+    expect(test.failures).toMatchObject([{ credentialId: 'alpha', kind: 'rotate', until: reset * 1000 }]);
+    now = reset * 1000 - 1;
+    expect((await test.models.completeSimple(test.chatModel, context)).content).toEqual([{ type: 'text', text: 'beta:original' }]);
+    limited = false;
+    now = reset * 1000;
+    expect((await test.models.completeSimple(test.chatModel, context)).content).toEqual([{ type: 'text', text: 'alpha:original' }]);
+    expect(test.effects.map(effect => effect.key)).toEqual(['alpha:original', 'beta:original', 'beta:original', 'alpha:original']);
+  });
+
+  it('ends a turn whose account runs out mid-answer without replaying it, and starts the next request on the other account', async () => {
+    const test = await fixture({ async reply(request) {
+      return request.key.startsWith('alpha:') ? { status: 200, afterText: 'You have reached your usage limit.' } : { status: 200 };
+    } });
+    const interrupted = await test.models.completeSimple(test.chatModel, context);
+    expect(interrupted).toMatchObject({ stopReason: 'error', content: [{ type: 'text', text: 'alpha:original' }] });
+    expect(interrupted.errorMessage).toMatch(/^You have reached your usage limit\.\n\nalpha ran out until .+; the next turn uses another account\.$/u);
+    expect(test.effects.map(effect => effect.key)).toEqual(['alpha:original']);
+    expect((await test.models.completeSimple(test.chatModel, context)).content).toEqual([{ type: 'text', text: 'beta:original' }]);
   });
 
   it('refreshes a rejected OAuth token on the same account before considering a sibling', async () => {

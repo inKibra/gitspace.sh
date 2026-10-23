@@ -1,4 +1,4 @@
-import type { ProviderLoginEvent, ProviderUsage, ProviderUsageLimit, ProviderUsageReport, ProviderView } from '@gitspace/protocol';
+import type { ProviderAccount, ProviderLoginEvent, ProviderUsage, ProviderUsageLimit, ProviderUsageReport, ProviderView } from '@gitspace/protocol';
 import {
   Badge,
   Button,
@@ -25,7 +25,7 @@ import {
   ThinkingIndicator,
   Tooltip,
 } from '@gitspace/ui';
-import { ChevronDown, CpuChip01, RefreshCcw01, XClose } from '@untitledui/icons';
+import { ChevronDown, CpuChip01, RefreshCcw01 } from '@untitledui/icons';
 import { useEffect, useState, type ReactNode } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
@@ -53,7 +53,9 @@ export interface ProvidersSectionProps {
   onShow(): void;
   onRefreshUsage(): Promise<void>;
   onSignIn(providerId: string): Promise<void>;
-  onSignOut(providerId: string, credentialId: string | null): Promise<void>;
+  onDisableAccount(providerId: string, credentialId: string): Promise<void>;
+  onEnableAccount(providerId: string, credentialId: string): Promise<void>;
+  onRemoveAccount(providerId: string, credentialId: string): Promise<void>;
   onSetApiKey(providerId: string, key: string): Promise<void>;
   login: ProviderLoginProps;
 }
@@ -62,7 +64,7 @@ const PROVIDER_ICON = glyph(CpuChip01);
 const COMPACT_NUMBER = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 const UNIT_SUFFIX: Readonly<Record<string, string>> = { tokens: ' tokens', requests: ' requests', minutes: ' min', bytes: ' bytes' };
 
-function icon(Icon: typeof XClose): ReactNode { return <Icon width={16} height={16} strokeWidth={1.5} />; }
+function icon(Icon: typeof CpuChip01): ReactNode { return <Icon width={16} height={16} strokeWidth={1.5} />; }
 function errorMessage(error: unknown): string { return rpcErrorMessage(error, 'Provider account operation'); }
 
 function formatAmount(value: number, unit: string): string {
@@ -136,12 +138,40 @@ function providerBadge(provider: ProviderView): { color: 'green' | 'gray' | 'amb
   return provider.hasAuth ? { color: 'green', label: 'Connected' } : { color: 'gray', label: 'Not signed in' };
 }
 function providerDescription(provider: ProviderView): string {
-  if (provider.accounts.length) return provider.accounts.map((account) => account.label).join(', ');
+  if (provider.accounts.length) return provider.accounts.length === 1 ? '1 account' : `${provider.accounts.length} accounts`;
   if (provider.hasAuth) return provider.source ? `Connected via ${provider.source}` : 'Connected';
   return 'Not connected';
 }
+function accountState(account: ProviderAccount, now: number): { color: 'green' | 'gray' | 'amber'; label: string; reason: string | null } {
+  if (account.disabled) return { color: 'gray', label: 'Disabled', reason: null };
+  const outUntil = account.outUntil === null ? Number.NaN : Date.parse(account.outUntil);
+  if (outUntil > now) return { color: 'amber', label: `Out until ${new Date(outUntil).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`, reason: account.outReason };
+  return { color: 'green', label: 'Active', reason: null };
+}
 
-function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAccounts, usageStatus, now, pending, onSignIn, onAddKey, onSignOut, index }: {
+function AccountRow({ account, providerId, now, pending, onDisable, onEnable, onRemove }: {
+  account: ProviderAccount;
+  providerId: string;
+  now: number;
+  pending: string | null;
+  onDisable(): void;
+  onEnable(): void;
+  onRemove(): void;
+}) {
+  const state = accountState(account, now);
+  const badge = <Badge variant="dot" color={state.color}>{state.label}</Badge>;
+  const toggle = account.disabled ? 'enable' : 'disable';
+  return <li className="flex items-center justify-between gap-3" data-account={account.id}>
+    <span className="min-w-0 truncate text-caption text-foreground">{account.label}</span>
+    <span className="flex shrink-0 items-center gap-2">
+      {state.reason ? <Tooltip content={state.reason}>{badge}</Tooltip> : badge}
+      <Button variant="secondary" size="compact" type="button" aria-label={`${account.disabled ? 'Enable' : 'Disable'} ${account.label}`} disabled={pending !== null} loading={pending === `${toggle}:${providerId}:${account.id}`} onClick={account.disabled ? onEnable : onDisable}>{account.disabled ? 'Enable' : 'Disable'}</Button>
+      <Button variant="ghost" size="compact" type="button" aria-label={`Remove ${account.label}`} disabled={pending !== null} loading={pending === `remove:${providerId}:${account.id}`} onClick={onRemove}>Remove</Button>
+    </span>
+  </li>;
+}
+
+function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAccounts, usageStatus, now, pending, onSignIn, onAddKey, onDisableAccount, onEnableAccount, onRemoveAccount, index }: {
   provider: ProviderView;
   signInMethods: readonly ProviderView[];
   reports: readonly ProviderUsageReport[];
@@ -152,14 +182,16 @@ function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAcc
   pending: string | null;
   onSignIn(providerId: string): void;
   onAddKey(): void;
-  onSignOut(credentialId: string): void;
+  onDisableAccount(account: ProviderAccount): void;
+  onEnableAccount(account: ProviderAccount): void;
+  onRemoveAccount(account: ProviderAccount): void;
   index?: number;
 }) {
   const badge = providerBadge(provider);
   const showUsage = provider.hasAuth;
   const signInLabel = provider.accounts.length ? 'Add account' : 'Sign in';
   const signingIn = signInMethods.some((method) => pending === `login:${method.id}`);
-  return <Card size="compact" index={index} className={showUsage ? 'flex-wrap' : undefined} data-provider={provider.id}>
+  return <Card size="compact" index={index} className={showUsage || provider.accounts.length ? 'flex-wrap' : undefined} data-provider={provider.id}>
     <CardMedia icon={PROVIDER_ICON} />
     <CardHeader><CardTitle>{provider.name}</CardTitle><CardDescription>{providerDescription(provider)}</CardDescription></CardHeader>
     <CardFooter className="gap-2">
@@ -175,11 +207,22 @@ function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAcc
             </DropdownContent>
           </DropdownMenu>
         : signInMethods.map((method) => <Button key={method.id} variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} onClick={() => onSignIn(method.id)}>{signInLabel}</Button>)}
-      {provider.accounts.map((account) => {
-        const action = `${account.disabled ? 'Remove' : 'Disable'} ${account.label}`;
-        return <Tooltip key={account.id} content={action}><Button variant="ghost" size="icon-compact" type="button" aria-label={action} disabled={pending !== null} loading={pending === `logout:${provider.id}:${account.id}`} onClick={() => onSignOut(account.id)}>{icon(XClose)}</Button></Tooltip>;
-      })}
     </CardFooter>
+    {provider.accounts.length
+      // Same inset as the usage block: media tile (32px) + gap (10px).
+      ? <ul aria-label={`${provider.name} accounts`} className="flex basis-full flex-col gap-2 pb-3 pl-[42px] pr-3">
+          {provider.accounts.map((account) => <AccountRow
+            key={account.id}
+            account={account}
+            providerId={provider.id}
+            now={now}
+            pending={pending}
+            onDisable={() => onDisableAccount(account)}
+            onEnable={() => onEnableAccount(account)}
+            onRemove={() => onRemoveAccount(account)}
+          />)}
+        </ul>
+      : null}
     {showUsage ? <UsageReports reports={reports} errors={usageErrors} missingAccounts={missingAccounts} supported={provider.hasUsage} status={usageStatus} now={now} /> : null}
   </Card>;
 }
@@ -285,7 +328,7 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
   </>;
 }
 
-export function ProvidersSection({ providers, loading = false, error, usage, usageStatus, usageError, onShow, onRefreshUsage, onSignIn, onSignOut, onSetApiKey, login }: ProvidersSectionProps) {
+export function ProvidersSection({ providers, loading = false, error, usage, usageStatus, usageError, onShow, onRefreshUsage, onSignIn, onDisableAccount, onEnableAccount, onRemoveAccount, onSetApiKey, login }: ProvidersSectionProps) {
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [apiKeyFor, setApiKeyFor] = useState<ProviderView | null>(null);
@@ -365,7 +408,12 @@ export function ProvidersSection({ providers, loading = false, error, usage, usa
             pending={pending}
             onSignIn={(providerId) => void run(`login:${providerId}`, () => onSignIn(providerId))}
             onAddKey={() => setApiKeyFor(provider)}
-            onSignOut={(credentialId) => void run(`logout:${provider.id}:${credentialId}`, () => onSignOut(provider.id, credentialId))}
+            onDisableAccount={(account) => void run(`disable:${provider.id}:${account.id}`, () => onDisableAccount(provider.id, account.id))}
+            onEnableAccount={(account) => void run(`enable:${provider.id}:${account.id}`, () => onEnableAccount(provider.id, account.id))}
+            onRemoveAccount={(account) => {
+              if (!window.confirm(`Remove ${account.label} from ${provider.name}? This cannot be undone. Signing in again creates a new account.`)) return;
+              void run(`remove:${provider.id}:${account.id}`, () => onRemoveAccount(provider.id, account.id));
+            }}
           />)}
         </CardGroup>}
     {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}

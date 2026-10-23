@@ -210,7 +210,7 @@ export function resolveEnvironmentValues(input: {
   return { ...input.global, ...input.project, ...input.workspace };
 }
 
-export async function executionHash(payload: { kind: 'check' | 'script'; command: string }): Promise<string> {
+export async function executionHash(payload: { kind: LifecycleExecution['kind']; command: string }): Promise<string> {
   const encoded = new TextEncoder().encode(`${payload.kind}\n${payload.command}`);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded));
   return `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
@@ -241,7 +241,7 @@ const lifecycleResultsSchema = z.array(z.object({
   startedAt: z.string().datetime().optional(), finishedAt: z.string().datetime().nullable().optional(),
 }).strict()).max(128);
 export const LifecycleExecutionSchema = z.object({
-  id: lifecycleIdSchema, kind: z.enum(['check', 'script']), label: z.string().max(256),
+  id: lifecycleIdSchema, kind: z.enum(['check', 'script', 'ingress']), label: z.string().max(256),
   command: z.string().max(65_536), hash: executionHashSchema, phase: LifecyclePhaseSchema.nullable(),
   fileName: z.string().max(512).nullable(), content: z.string().max(131_072),
 }).strict();

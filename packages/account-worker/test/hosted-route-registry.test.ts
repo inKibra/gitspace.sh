@@ -81,3 +81,21 @@ it('an ad hoc process cannot claim a workspace URL, and a cleared workspace URL 
   expect(await registry.get()).toBeNull();
   expect(await registry.offline()).toBeNull();
 });
+
+it('keeps a workspace URL\'s signed callers with the workspace it serves and answers them only on declared routes', async () => {
+  const routes = [{ method: 'POST' as const, path: '/hooks/*' }];
+  const pointed = env.HOSTED_ROUTES.getByName('registry-ingress-pointed');
+  await pointed.lease('tenant-a', 'project', route(1, WORKSPACE_URL), 'alpha');
+  const unpointed = env.HOSTED_ROUTES.getByName('registry-ingress-unpointed');
+  await unpointed.registerIngress('tenant-a', 'workspace', routes, [], new Date().toISOString());
+  for (const registry of [pointed, unpointed]) await runInDurableObject(registry, (owner: HostedRouteRegistryDO) => {
+    expect(() => owner.registerIngress('tenant-a', 'another-workspace', routes, [], new Date().toISOString())).toThrow();
+    expect(() => owner.registerIngress('tenant-b', 'workspace', routes, [], new Date().toISOString())).toThrow();
+  });
+  await pointed.registerIngress('tenant-a', 'workspace', routes, [], new Date().toISOString());
+  expect(await pointed.resolve('POST', '/hooks/a')).toMatchObject({ route: { machineId: 'machine-a' }, offline: null, ingress: { tenant: 'tenant-a', workspaceId: 'workspace', credentials: [] } });
+  expect((await pointed.resolve('GET', '/hooks/a')).ingress).toBeNull();
+  expect((await pointed.resolve('POST', '/other')).ingress).toBeNull();
+  await pointed.clear('tenant-a', 'workspace');
+  expect(await pointed.resolve('POST', '/hooks/a')).toEqual({ route: null, offline: null, ingress: null });
+});

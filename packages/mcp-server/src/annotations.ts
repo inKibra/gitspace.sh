@@ -203,8 +203,26 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   },
   "providers.logout": {
     "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "providers.account.disable": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "providers.account.enable": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "providers.account.remove": {
+    "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": false,
+    "idempotentHint": true,
     "openWorldHint": false
   },
   "providers.apiKey.set": {

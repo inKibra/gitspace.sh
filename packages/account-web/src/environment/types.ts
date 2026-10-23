@@ -54,6 +54,8 @@ export interface EnvironmentViewModel {
   setupMachineId: string | null;
   steps: readonly EnvironmentStep[];
   browserOrigins: readonly { hash: string; pattern: string; approved: boolean }[];
+  /** The routes `.gitspace/services.json` opens to signed callers: approved like a script, never run. */
+  signedCallers: readonly { id: string; label: string; approved: boolean }[];
   /** Conflicted paths in the cloud working copy. */
   conflicts: readonly string[];
   secrets: readonly { name: string; source: 'account' | 'project'; granted: boolean }[];

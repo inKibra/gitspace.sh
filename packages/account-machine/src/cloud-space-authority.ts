@@ -30,7 +30,7 @@ import {
 import type { CheckpointBlobStore } from './checkpoint-blobs.js';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
 import { cloudResponseRay, withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
-import { EnvironmentError, EnvironmentFailureSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
+import { EnvironmentError, EnvironmentFailureSchema, type EnvironmentLifecycleAuthority, type HostedIngressRegistration, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 
 export class CloudSpaceAuthorityError extends Error {
   constructor(readonly code: string, message: string, readonly details: Record<string, unknown> = {}) {
@@ -369,6 +369,11 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
 
   releaseHostedRoute(projectId: string, hostname: string, generation: number): Promise<boolean> {
     return this.call('project.routes.release', { projectId, hostname, generation });
+  }
+
+  /** Replaces the workspace's signed-caller registrations, from its running `cloud/provision` or `workspace/materialize` run. */
+  registerHostedIngress(input: HostedIngressRegistration): Promise<{ hostnames: string[] }> {
+    return this.call('project.routes.ingress', input);
   }
 
   listMachineDefinitions(): Promise<FleetMachineDefinition[]> {

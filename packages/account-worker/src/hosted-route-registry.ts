@@ -1,4 +1,6 @@
+import { z } from 'zod';
 import { hostedServicePointerSchema, hostedServiceRouteSchema, hostedServiceUrlKind, type HostedRouteLease, type HostedServicePointer, type HostedServiceRoute } from '@gitspace/protocol';
+import { HostedIngressCredentialSchema, ServiceIngressRouteSchema, serviceIngressMatches, type HostedIngressCredential, type ServiceIngressRoute } from '@gitspace/protocol-environment';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 interface HostedRouteRow extends Record<string, SqlStorageValue> {
@@ -13,6 +15,13 @@ interface HostedPointerRow extends Record<string, SqlStorageValue> {
   pointer_json: string;
 }
 
+interface HostedIngressRow extends Record<string, SqlStorageValue> {
+  tenant: string;
+  workspace_id: string;
+  routes_json: string;
+  credentials_json: string;
+}
+
 export interface ResolvedHostedRoute extends HostedServiceRoute {
   tenant: string;
 }
@@ -22,6 +31,34 @@ export interface HostedRouteOffline {
   tenant: string;
   machine: string;
 }
+
+const [OidcCredentialSchema, JwtCredentialSchema] = HostedIngressCredentialSchema.options;
+/** A registered credential as kept: a bearer keeps its current hash and, through one rotation, the previous one. */
+const StoredIngressCredentialSchema = z.discriminatedUnion('kind', [
+  OidcCredentialSchema,
+  JwtCredentialSchema,
+  z.object({ kind: z.literal('bearer'), secret: z.string(), hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).min(1).max(2) }).strict(),
+]);
+export type StoredIngressCredential = z.infer<typeof StoredIngressCredentialSchema>;
+
+/** The signed callers a workspace URL admits on a request's method and path. */
+export interface HostedIngress {
+  tenant: string;
+  workspaceId: string;
+  credentials: StoredIngressCredential[];
+}
+
+/** What a hostname answers: its live route, else the machine it is offline on. */
+export interface HostedRouteTarget {
+  route: ResolvedHostedRoute | null;
+  offline: HostedRouteOffline | null;
+}
+
+export interface HostedRouteResolution extends HostedRouteTarget {
+  ingress: HostedIngress | null;
+}
+
+export type HostedIngressAdmission = { admitted: true; at: string } | { admitted: false; at: string; reason: string };
 
 function targets(pointer: HostedServicePointer, route: HostedServiceRoute): boolean {
   return pointer.workspaceId === route.workspaceId && pointer.machineId === route.machineId && pointer.serviceName === route.serviceName && pointer.source === route.source && pointer.portName === route.portName;
@@ -44,6 +81,18 @@ export class HostedRouteRegistryDO extends BudgetedDurableObject {
           tenant TEXT NOT NULL,
           project_id TEXT NOT NULL,
           pointer_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ingress (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          tenant TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          routes_json TEXT NOT NULL,
+          credentials_json TEXT NOT NULL,
+          registered_at TEXT NOT NULL,
+          admitted INTEGER NOT NULL DEFAULT 0,
+          rejected INTEGER NOT NULL DEFAULT 0,
+          last_admitted_at TEXT,
+          last_failure_json TEXT
         )
       `);
     });
@@ -96,6 +145,49 @@ export class HostedRouteRegistryDO extends BudgetedDurableObject {
     return live && targets(stored.pointer, live) ? null : { tenant: stored.tenant, machine: stored.pointer.machineLabel };
   }
 
+  /** One read per request: the target, and the signed callers when the request falls under a declared route of the workspace the URL serves. */
+  resolve(method: string, pathname: string, now = new Date().toISOString()): HostedRouteResolution {
+    const route = this.get(now);
+    const offline = this.offline(now);
+    const row = this.ctx.storage.sql.exec<HostedIngressRow>('SELECT tenant, workspace_id, routes_json, credentials_json FROM ingress WHERE id=1').toArray()[0];
+    if (!row || !serviceIngressMatches(z.array(ServiceIngressRouteSchema).parse(JSON.parse(row.routes_json)), method, pathname)) return { route, offline, ingress: null };
+    const stored = this.storedPointer();
+    if (stored && (stored.tenant !== row.tenant || stored.pointer.workspaceId !== row.workspace_id)) return { route, offline, ingress: null };
+    return { route, offline, ingress: { tenant: row.tenant, workspaceId: row.workspace_id, credentials: z.array(StoredIngressCredentialSchema).parse(JSON.parse(row.credentials_json)) } };
+  }
+
+  /** Replaces a workspace URL's declared routes and credentials, keeping its counts. A bearer registered again under its secret with a new hash keeps the old one for rotation. */
+  registerIngress(tenant: string, workspaceId: string, routes: ServiceIngressRoute[], credentials: HostedIngressCredential[], registeredAt: string): void {
+    const stored = this.storedPointer();
+    const row = this.ctx.storage.sql.exec<HostedIngressRow>('SELECT tenant, workspace_id, routes_json, credentials_json FROM ingress WHERE id=1').toArray()[0];
+    if ((stored && (stored.tenant !== tenant || stored.pointer.workspaceId !== workspaceId)) || (row && (row.tenant !== tenant || row.workspace_id !== workspaceId))) throw new Error('Signed callers belong to the workspace this URL serves');
+    const previous = row ? z.array(StoredIngressCredentialSchema).parse(JSON.parse(row.credentials_json)) : [];
+    const kept = credentials.map((credential): StoredIngressCredential => {
+      if (credential.kind !== 'bearer') return credential;
+      const before = previous.find((entry): entry is Extract<StoredIngressCredential, { kind: 'bearer' }> => entry.kind === 'bearer' && entry.secret === credential.secret);
+      const hashes = !before ? [credential.sha256] : before.hashes[0] === credential.sha256 ? before.hashes : [credential.sha256, before.hashes[0]];
+      return { kind: 'bearer', secret: credential.secret, hashes };
+    });
+    this.ctx.storage.sql.exec(
+      `INSERT INTO ingress(id, tenant, workspace_id, routes_json, credentials_json, registered_at) VALUES (1, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET routes_json=excluded.routes_json, credentials_json=excluded.credentials_json, registered_at=excluded.registered_at`,
+      tenant,
+      workspaceId,
+      JSON.stringify(routes),
+      JSON.stringify(kept),
+      registeredAt,
+    );
+  }
+
+  clearIngress(tenant: string, workspaceId: string): void {
+    this.ctx.storage.sql.exec('DELETE FROM ingress WHERE id=1 AND tenant=? AND workspace_id=?', tenant, workspaceId);
+  }
+
+  recordIngressAdmission(admission: HostedIngressAdmission): void {
+    if (admission.admitted) this.ctx.storage.sql.exec('UPDATE ingress SET admitted=admitted+1, last_admitted_at=? WHERE id=1', admission.at);
+    else this.ctx.storage.sql.exec('UPDATE ingress SET rejected=rejected+1, last_failure_json=? WHERE id=1', JSON.stringify({ at: admission.at, reason: admission.reason }));
+  }
+
   release(tenant: string, machineId: string, generation: number): boolean {
     return this.ctx.storage.sql.exec(
       `UPDATE active_route SET lease_expires_at='1970-01-01T00:00:00.000Z'
@@ -108,7 +200,7 @@ export class HostedRouteRegistryDO extends BudgetedDurableObject {
     ).toArray().length > 0;
   }
 
-  /** Ends a deleted or archived workspace's URL: its pointer goes and its route stops answering. */
+  /** Ends a deleted or archived workspace's URL: its pointer and signed callers go and its route stops answering. */
   clear(tenant: string, workspaceId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM pointer WHERE id=1 AND tenant=? AND json_extract(pointer_json, '$.workspaceId')=?", tenant, workspaceId);
     this.ctx.storage.sql.exec(
@@ -116,6 +208,7 @@ export class HostedRouteRegistryDO extends BudgetedDurableObject {
       tenant,
       workspaceId,
     );
+    this.clearIngress(tenant, workspaceId);
   }
 
   private storedPointer(): { tenant: string; pointer: HostedServicePointer } | null {

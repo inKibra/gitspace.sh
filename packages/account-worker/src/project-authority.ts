@@ -911,6 +911,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
           workspace_id TEXT NOT NULL,
           pointer_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS hosted_ingress(
+          hostname TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS project_mcp_grants(
           project_id TEXT NOT NULL,
           connection_id TEXT NOT NULL,
@@ -1814,13 +1818,30 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
   }
 
-  /** Ends workspace URLs (one workspace's, or every one when null): the registry drops each pointer, then the mirror. */
+  /** Mirrors the workspace URLs a workspace registered signed callers on (a URL another workspace holds stays its); returns all of this workspace's. */
+  addHostedIngress(workspaceId: string, hostnames: string[]): string[] {
+    return this.commit('service', workspaceId, () => {
+    for (const hostname of hostnames) this.ctx.storage.sql.exec('INSERT INTO hosted_ingress(hostname, workspace_id) VALUES(?,?) ON CONFLICT(hostname) DO NOTHING', hostname, workspaceId);
+    return this.ctx.storage.sql.exec<{ hostname: string }>('SELECT hostname FROM hosted_ingress WHERE workspace_id=? ORDER BY hostname', workspaceId).toArray().map(row => row.hostname);
+    });
+  }
+
+  removeHostedIngress(workspaceId: string, hostnames: string[]): void {
+    this.commit('service', workspaceId, () => {
+    for (const hostname of hostnames) this.ctx.storage.sql.exec('DELETE FROM hosted_ingress WHERE hostname=? AND workspace_id=?', hostname, workspaceId);
+    });
+  }
+
+  /** Ends workspace URLs (one workspace's, or every one when null): each registry drops the pointer and signed callers, then the mirrors. */
   private async clearHostedPointers(workspaceId: string | null): Promise<void> {
     const rows = (workspaceId === null
-      ? this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers')
-      : this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers WHERE workspace_id=?', workspaceId)).toArray();
+      ? this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers UNION SELECT hostname, workspace_id FROM hosted_ingress')
+      : this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers WHERE workspace_id=? UNION SELECT hostname, workspace_id FROM hosted_ingress WHERE workspace_id=?', workspaceId, workspaceId)).toArray();
     await Promise.all(rows.map(row => this.env.HOSTED_ROUTES.getByName(row.hostname).clear(this.env.ACCOUNT_ID, row.workspace_id)));
-    for (const row of rows) this.ctx.storage.sql.exec('DELETE FROM hosted_pointers WHERE hostname=?', row.hostname);
+    for (const row of rows) {
+      this.ctx.storage.sql.exec('DELETE FROM hosted_pointers WHERE hostname=? AND workspace_id=?', row.hostname, row.workspace_id);
+      this.ctx.storage.sql.exec('DELETE FROM hosted_ingress WHERE hostname=? AND workspace_id=?', row.hostname, row.workspace_id);
+    }
   }
 
   getMcpGrant(connectionId: string): ProjectMcpGrant | null {

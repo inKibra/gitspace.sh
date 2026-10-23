@@ -328,7 +328,7 @@ export type ConfigurationValuesView = InputOf<typeof ConfigurationValuesViewCode
 
 export const EnvironmentExecutionViewCodec = wire.object({
   id: wire.string,
-  kind: wire.enum(['check', 'script']),
+  kind: wire.enum(['check', 'script', 'ingress']),
   label: wire.string,
   command: wire.string,
   hash: wire.string,
@@ -1152,6 +1152,10 @@ export const ProviderAccountCodec = wire.object({
   label: wire.string,
   email: wire.nullable(wire.string),
   disabled: wire.boolean,
+  /** Inference skips this account until then (ISO time): a provider limit or failure cooldown, or a usage window that is used up. Null when it is usable now. */
+  outUntil: wire.nullable(wire.string),
+  /** Why it is skipped until `outUntil`. */
+  outReason: wire.nullable(wire.string),
 });
 export type ProviderAccount = InputOf<typeof ProviderAccountCodec>;
 export const ProviderViewCodec = wire.object({
@@ -1239,9 +1243,32 @@ export const cancelProviderLoginContract = gitspaceRpc
   .output(wire.object({}))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** Signs out a whole provider: every active account of its credential store is disabled, none removed. */
 export const logoutProviderContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ profileId: wire.string, providerId: wire.string, credentialId: wire.nullable(wire.string) }))
+  .input(wire.object({ profileId: wire.string, providerId: wire.string }))
+  .output(wire.object({ provider: ProviderViewCodec }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+const ProviderAccountInputCodec = wire.object({ profileId: wire.string, providerId: wire.string, credentialId: wire.string });
+/** Stops inference from using one account; its credential is kept so it can be enabled again. */
+export const disableProviderAccountContract = gitspaceRpc
+  .procedure()
+  .input(ProviderAccountInputCodec)
+  .output(wire.object({ provider: ProviderViewCodec }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+/** Lets inference use a disabled account again, under the same account id. */
+export const enableProviderAccountContract = gitspaceRpc
+  .procedure()
+  .input(ProviderAccountInputCodec)
+  .output(wire.object({ provider: ProviderViewCodec }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+/** Deletes one account's credential permanently; signing in again creates a new account. */
+export const removeProviderAccountContract = gitspaceRpc
+  .procedure()
+  .input(ProviderAccountInputCodec)
   .output(wire.object({ provider: ProviderViewCodec }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
@@ -2151,6 +2178,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       cancel: cancelProviderLoginContract,
     },
     logout: logoutProviderContract,
+    account: { disable: disableProviderAccountContract, enable: enableProviderAccountContract, remove: removeProviderAccountContract },
     apiKey: { set: setProviderApiKeyContract },
     usage: providerUsageContract,
     models: listAvailableModelsContract,

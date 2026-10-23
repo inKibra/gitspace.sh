@@ -1,6 +1,6 @@
 import { CompactionEntry, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { TranscriptProjector, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
+import { TranscriptProjector, WORKSPACE_REPORT_ENTRY, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
@@ -33,7 +33,8 @@ export interface WithdrawnNotices {
 const MACHINE_NOTICE = 'gitspace.machine-notice';
 /** A compaction summary is context the model reads as a user message; it shows as the compaction, not as the user's. */
 const COMPACTION = CompactionEntry.kind;
-const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== COMPACTION && entry.model?.[0]?.role === 'user';
+/** A workspace's turn report reaches the project agent as context (quiet) but shows as one compact row. */
+const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== COMPACTION && entry.kind !== WORKSPACE_REPORT_ENTRY && entry.model?.[0]?.role === 'user';
 
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
 export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices): TranscriptEvent[] {
@@ -44,6 +45,7 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
       const title = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) && typeof entry.data.source === 'string' ? entry.data.source : 'Machine';
       return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     }
+    if (entry.kind === WORKSPACE_REPORT_ENTRY) return { ordinal: base + index, kind: 'message_end', payload: { message: workspaceReportMessage(entry), entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: { entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     let message = source;
     if (source.role === 'toolResult' && source.details && typeof source.details === 'object' && 'executorResultReference' in source.details) {
@@ -57,12 +59,21 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
   });
 }
 
-/** Display-only Gitspace entries rendered as custom transcript messages. */
+/** A workspace turn report as the custom message the transcript draws as a row; its data carries the report. */
+function workspaceReportMessage(entry: EntryRecord) {
+  const data = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) ? entry.data : undefined;
+  return { role: 'custom', customType: WORKSPACE_REPORT_ENTRY, display: true, content: typeof data?.text === 'string' ? data.text : '', details: data?.payload ?? null };
+}
+
+/** Display-only Gitspace entries rendered as custom transcript messages. A workspace report delivered as an event
+ * (it starts a turn) is display-only: the event's own input carries it to the model. */
 function noticeEvent(entry: EntryRecord): TranscriptEventInput | undefined {
+  const ordinal = Number(entry.id) * ENTRY_ORDINALS + (entry.model?.length ?? 0);
+  if (entry.kind === WORKSPACE_REPORT_ENTRY) return entry.model?.length ? undefined : { sessionId: '', ordinal, kind: 'message_end', payload: { message: workspaceReportMessage(entry) } };
   const data = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) ? entry.data : undefined;
   const text = entry.kind === 'gitspace.model-fallback' ? data?.message : entry.kind === 'gitspace.cron-overdue' ? data?.text : undefined;
   if (text === undefined) return undefined;
-  return { sessionId: '', ordinal: Number(entry.id) * ENTRY_ORDINALS + (entry.model?.length ?? 0), kind: 'message_end', payload: { message: { role: 'custom', customType: entry.kind, display: true, content: typeof text === 'string' ? text : '' } } };
+  return { sessionId: '', ordinal, kind: 'message_end', payload: { message: { role: 'custom', customType: entry.kind, display: true, content: typeof text === 'string' ? text : '' } } };
 }
 
 /** Newest-first entries at or below `maxEntry` (inclusive), one bounded page at a time. */

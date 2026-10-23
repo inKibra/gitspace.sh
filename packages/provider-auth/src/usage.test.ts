@@ -36,3 +36,12 @@ it('preserves shared primary and secondary windows without treating model exhaus
     secondary: { usedFraction: 0.75, resetsAt: Date.parse('2099-01-07T00:00:00.000Z') },
   });
 });
+it('reports an account as used up until the latest reset among its exhausted shared windows', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+    five_hour: { utilization: 100, resets_at: '2099-01-01T01:00:00.000Z' },
+    seven_day: { utilization: 100, resets_at: '2099-01-07T00:00:00.000Z' },
+    seven_day_opus: { utilization: 100, resets_at: '2099-02-01T00:00:00.000Z' },
+  }));
+  const report = await collectUsage({ ...credential, provider: 'anthropic' }, fetcher);
+  expect(usageObservation(report)?.exhausted).toEqual({ until: Date.parse('2099-01-07T00:00:00.000Z'), label: '7 days' });
+});

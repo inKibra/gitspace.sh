@@ -8,7 +8,7 @@ import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInp
 import { RuntimeBrowsersDocumentSchema, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
 import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
@@ -24,7 +24,9 @@ import { CheckoutSourceFactsSchema, RuntimeAttachmentController, executorCapabil
 import { notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
-import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeProjectWatch, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
+import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
+import { projectProgress, startFromProject, type ProjectProgress } from './project-watch.js';
+import { workspaceTurnReportSchema, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { z } from 'zod';
 import type { CloudProjectSummary, CloudWorkspaceDefinition, ProjectLifecycle, WorkspaceLifecycle } from '@gitspace/protocol';
 import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
@@ -178,10 +180,24 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return readWorkspaceReport(this.ctx.storage);
   }
 
-  /** The project agent started this workspace: from now on each status change it should hear reaches the project
-   * conversation, starting from the color it has now. */
-  watchFromProject(name: string): void {
-    writeProjectWatch(this.ctx.storage, name, readWorkspaceStatus(this.ctx.storage)?.primaryColor ?? 'dim');
+  /** The project agent's instruction to this workspace: the turn it starts reports once to the project conversation. */
+  async runtimeStartFromProject(raw: unknown, input: { name: string; requestId: string; text: string; onDone: 'quiet' | 'wake' }): Promise<RuntimeAccepted> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const runtime = await this.getRuntime(identity);
+    return startFromProject(this.ctx.storage, runtime, RuntimeSubmitInputSchema.parse({ ...identity, requestId: input.requestId, text: input.text }), { name: input.name, onDone: input.onDone });
+  }
+
+  /** The turn the project agent started here, for the project agent; the runtime opens only while that turn runs. */
+  async projectProgress(raw: unknown): Promise<ProjectProgress> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    return projectProgress(this.ctx.storage, () => this.getRuntime(identity));
+  }
+
+  /** Base workspace only: a workspace's report of a turn the project agent started. */
+  async runtimeWorkspaceReport(raw: unknown, report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    if (String(identity.workspaceId) !== String(identity.projectId)) throw new Error('Workspace reports go to the project base workspace');
+    await (await this.getRuntime(identity)).workspaceReport(workspaceTurnReportSchema.parse(report), onDone);
   }
 
   /** Base workspace only: a line in the project conversation that does not start a turn. */

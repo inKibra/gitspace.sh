@@ -125,6 +125,33 @@ describe('WorkspaceServiceManager', () => {
       expect(output).toBe('mode=preview region=service\n');
     } finally { await manager.dispose(); }
   });
+
+  it('tells a declared service every declared http port\'s workspace URL, and refuses invalid signed caller routes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-service-urls-'));
+    roots.push(root);
+    const workspace = join(root, 'workspace');
+    mkdirSync(join(workspace, '.gitspace'), { recursive: true });
+    const web = { name: 'web', command: 'bun', ports: [{ name: 'http' }, { name: 'admin' }], ingress: [{ method: 'POST', path: '/hooks/*' }] };
+    writeFileSync(join(workspace, '.gitspace', 'services.json'), JSON.stringify({ services: [web, { name: 'web-api', command: 'bun', ports: [{ name: 'http' }] }, { name: 'db', command: 'bun', ports: [{ name: 'pg', protocol: 'tcp' }] }] }));
+    let env: Record<string, string> = {};
+    const terminals = {
+      list: async () => [],
+      startService: async (spaceId: string, serviceName: string, _application: string, _args: string[], _cwd: string, received: Record<string, string>) => {
+        env = received;
+        return terminal(spaceId, `gitspace-svc-${spaceId}-${serviceName}`, 'exited', `gitspace:${spaceId}:service:${serviceName}`);
+      },
+      stop: async () => terminal('space-a', 'gitspace-svc-space-a-web-api', 'exited', 'gitspace:space-a:service:web-api'),
+    };
+    const manager = new WorkspaceServiceManager(checkouts(workspace), terminals, 'machine-a', join(root, 'runtime'), 'gssh.dev', 'brad', new HostedRoutesFake([{ id: 'machine-a', label: 'alpha' }]).authority('machine-a'));
+    try {
+      await manager.start('space-a', 'web-api');
+      const urls = { web: 'https://web--space-a--brad-srv.gssh.dev', 'web-admin': 'https://web-admin--space-a--brad-srv.gssh.dev', 'web-api': 'https://web-api--space-a--brad-srv.gssh.dev' };
+      expect(env).toMatchObject({ GITSPACE_SERVICE_NAME: 'web-api', GITSPACE_SERVICE_URL_WEB: urls.web, GITSPACE_SERVICE_URL_WEB_ADMIN: urls['web-admin'], GITSPACE_SERVICE_URL_WEB_API: urls['web-api'] });
+      expect(JSON.parse(env.GITSPACE_SERVICE_URLS_JSON ?? '')).toEqual(urls);
+      writeFileSync(join(workspace, '.gitspace', 'services.json'), JSON.stringify({ services: [{ ...web, ingress: [{ method: 'GET', path: '/../private' }] }] }));
+      await expect(manager.start('space-a', 'web')).rejects.toMatchObject({ code: 'InvalidConfiguration' });
+    } finally { await manager.dispose(); }
+  });
 });
 
 describe('loopback service forwarding boundary', () => {

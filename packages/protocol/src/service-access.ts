@@ -24,6 +24,8 @@ export const SERVICE_FORWARD_ORIGIN_HEADER = 'x-gitspace-forward-origin';
 export const ServiceCallerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('cloud'), accountId: z.string().min(1), projectId: z.string().min(1), workspaceId: z.string().min(1) }),
   z.object({ kind: z.literal('device'), accountId: z.string().min(1), deviceId: z.string().min(1) }),
+  /** A signed caller admitted on a declared route of a workspace URL by a credential that workspace registered. */
+  z.object({ kind: z.literal('ingress'), accountId: z.string().min(1), workspaceId: z.string().min(1), credential: z.enum(['oidc', 'jwt', 'bearer']) }),
 ]);
 export type ServiceCaller = z.infer<typeof ServiceCallerSchema>;
 export const ServiceAssertionBodySchema = z.object({

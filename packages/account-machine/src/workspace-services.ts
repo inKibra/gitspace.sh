@@ -5,6 +5,7 @@ import type { HostedRouteLease, HostedRoutes, HostedServiceRoute } from '@gitspa
 import { SERVICE_ASSERTION_HEADER, stripGitSpaceCredentials, verifyServiceAssertion } from '@gitspace/protocol/service-access';
 import type { WorkspaceCheckouts, WorkspaceTerminalView } from './workspace-hub.js';
 import { checkoutTerminalEnvironment, inheritedCommandEnvironment } from '@gitspace/runtime-machine';
+import { resolveServiceIngress, type ServiceIngressGroup } from '@gitspace/protocol-environment';
 
 const MIN_SERVICE_PORT = 17_000;
 const MAX_SERVICE_PORT = 47_000;
@@ -26,6 +27,7 @@ const ALLOWED_SERVICE_FIELDS: Readonly<Record<string, true>> = {
   cwd: true,
   env: true,
   ports: true,
+  ingress: true,
 };
 export interface WorkspaceServiceDefinition {
   name: string;
@@ -34,6 +36,15 @@ export interface WorkspaceServiceDefinition {
   cwd: string;
   env: Record<string, string>;
   ports: WorkspaceServicePortDefinition[];
+  /** Routes open to signed callers, per `http` port; empty when undeclared. */
+  ingress: ServiceIngressGroup[];
+}
+/** A declared `http` port's workspace URL; `name` is its URL's service part. */
+export interface WorkspaceServiceUrl {
+  service: string;
+  port: string;
+  name: string;
+  hostname: string;
 }
 interface ServiceTerminalCoordinator {
   list(spaceId: string): Promise<WorkspaceTerminalView[]>;
@@ -157,7 +168,26 @@ function parseService(value: unknown): WorkspaceServiceDefinition {
     return { name: port.name, protocol };
   });
   if (new Set(ports.map((port) => port.name)).size !== ports.length) throw new Error(`Service ${record.name} repeats a port name`);
-  return { name: record.name, command: record.command, args: record.args === undefined ? [] : validateStringArray(record.args, `Service ${record.name} args`), cwd, env: envRecord, ports };
+  const ingress = record.ingress === undefined ? [] : resolveServiceIngress({ name: record.name, ports }, record.ingress);
+  return { name: record.name, command: record.command, args: record.args === undefined ? [] : validateStringArray(record.args, `Service ${record.name} args`), cwd, env: envRecord, ports, ingress };
+}
+/** A checkout's `.gitspace/services.json`, or null when it has none. */
+export async function readServicesJson(rootPath: string): Promise<string | null> {
+  return readFile(join(rootPath, '.gitspace', 'services.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+}
+/** The declared services of a `.gitspace/services.json` (none when absent). */
+export function parseServiceDefinitions(source: string | null): WorkspaceServiceDefinition[] {
+  if (source === null) return [];
+  const parsed: unknown = JSON.parse(source);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !('services' in parsed) || !Array.isArray(parsed.services)) throw new Error('.gitspace/services.json must contain a services array');
+  const services = parsed.services.map(parseService);
+  if (new Set(services.map((service) => service.name)).size !== services.length) throw new Error('.gitspace/services.json repeats a service name');
+  return services;
+}
+/** `GITSPACE_SERVICE_URL_<NAME>` per workspace URL (`web-admin` → `WEB_ADMIN`) and `GITSPACE_SERVICE_URLS_JSON`, name → URL. */
+export function serviceUrlEnvironment(urls: readonly WorkspaceServiceUrl[]): Record<string, string> {
+  const byName = Object.fromEntries(urls.map(url => [url.name, `https://${url.hostname}`]));
+  return { ...Object.fromEntries(Object.entries(byName).map(([name, url]) => [`GITSPACE_SERVICE_URL_${name.toUpperCase().replace(/[^A-Z0-9]/gu, '_')}`, url])), GITSPACE_SERVICE_URLS_JSON: JSON.stringify(byName) };
 }
 
 export class WorkspaceServiceManager {
@@ -176,11 +206,28 @@ export class WorkspaceServiceManager {
     private readonly routeAuthority: HostedRouteAuthority,
     private readonly trust?: () => Promise<{ accountId: string; publicKey: string }>,
   ) {}
-  parseDefinitions(source: unknown): WorkspaceServiceDefinition[] {
-    if (!source || typeof source !== 'object' || !('services' in source) || !Array.isArray(source.services)) throw new Error('Service definitions require services array');
-    const definitions = source.services.map(parseService);
-    if (new Set(definitions.map(item => item.name)).size !== definitions.length) throw new Error('Duplicate service name');
-    return definitions;
+  /** Every declared `http` port's workspace URL in a workspace; none without public routing. */
+  workspaceUrls(workspaceId: string, definitions: readonly WorkspaceServiceDefinition[]): WorkspaceServiceUrl[] {
+    const { publicDomain: domain, publicNamespace: namespace } = this;
+    if (!domain || !namespace) return [];
+    return definitions.flatMap(definition => {
+      const http = definition.ports.filter(port => port.protocol === 'http').map(port => port.name);
+      return http.map(port => {
+        const name = portService(definition.name, http, port);
+        return { service: definition.name, port, name, hostname: serviceHostname(domain, namespace, workspaceId, name, null) };
+      });
+    });
+  }
+  /** A declared service's environment: the checkout's terminal environment, its own `env`, then its ports and every workspace URL. */
+  async serviceEnvironment(rootPath: string, workspaceId: string, definitions: readonly WorkspaceServiceDefinition[], definition: WorkspaceServiceDefinition, ports: ReadonlyArray<{ name: string; port: number }>): Promise<Record<string, string>> {
+    const env: Record<string, string> = {
+      ...await checkoutTerminalEnvironment(rootPath, inheritedCommandEnvironment()), ...definition.env,
+      GITSPACE_SERVICE_NAME: definition.name, GITSPACE_PORTS_JSON: JSON.stringify(Object.fromEntries(ports.map(port => [port.name, port.port]))),
+      ...serviceUrlEnvironment(this.workspaceUrls(workspaceId, definitions)),
+    };
+    if (ports[0]) env.PORT = String(ports[0].port);
+    for (const port of ports) env[`GITSPACE_PORT_${port.name.toUpperCase().replace(/[^A-Z0-9]/gu, '_')}`] = String(port.port);
+    return env;
   }
   allocateDefinitionPorts(spaceId: string, definition: WorkspaceServiceDefinition) { return this.allocatedPorts(spaceId, definition, true); }
   /** The ports this machine already allocated for a declared service; none are allocated. */
@@ -244,16 +291,6 @@ export class WorkspaceServiceManager {
     }
   }
 
-  async definitions(spaceId: string): Promise<WorkspaceServiceDefinition[]> {
-    const { rootPath } = this.held(spaceId);
-    const source = await readFile(join(rootPath, '.gitspace', 'services.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"services":[]}' : Promise.reject(error));
-    const parsed: unknown = JSON.parse(source);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !('services' in parsed) || !Array.isArray(parsed.services)) throw new Error('.gitspace/services.json must contain a services array');
-    const services = parsed.services.map(parseService);
-    if (new Set(services.map((service) => service.name)).size !== services.length) throw new Error('.gitspace/services.json repeats a service name');
-    return services;
-  }
-
   async rehydrate(): Promise<void> {
     for (const spaceId of this.checkouts.list()) await this.list(spaceId).catch(() => undefined);
     if (!this.leaseTimer) {
@@ -270,7 +307,7 @@ export class WorkspaceServiceManager {
 
   async list(spaceId: string): Promise<ServiceView[]> {
     const space = this.held(spaceId);
-    const [definitions, terminals] = await Promise.all([this.definitions(spaceId), this.terminals.list(spaceId)]);
+    const [definitions, terminals] = await Promise.all([readServicesJson(space.rootPath).then(parseServiceDefinitions), this.terminals.list(spaceId)]);
     const serviceTerminals = terminals.filter((terminal) => terminal.kind === 'service');
     return Promise.all(definitions.map(async (definition) => {
       const terminal = serviceTerminals.find((candidate) => candidate.owner === `gitspace:${spaceId}:service:${definition.name}`) ?? null;
@@ -298,15 +335,13 @@ export class WorkspaceServiceManager {
 
   async start(spaceId: string, serviceName: string): Promise<ServiceView> {
     const space = this.held(spaceId);
-    const definition = (await this.definitions(spaceId)).find((service) => service.name === serviceName);
+    const definitions = parseServiceDefinitions(await readServicesJson(space.rootPath));
+    const definition = definitions.find((service) => service.name === serviceName);
     if (!definition) throw new Error(`Service ${serviceName} is not configured`);
     const cwd = resolve(space.rootPath, definition.cwd);
     if (!inside(space.rootPath, cwd)) throw new Error(`Service ${serviceName} cwd escapes the workspace`);
     const ports = await this.allocatedPorts(spaceId, definition, true);
-    const portMap = Object.fromEntries(ports.map((port) => [port.name, port.port]));
-    const env: Record<string, string> = { ...await checkoutTerminalEnvironment(space.rootPath, inheritedCommandEnvironment()), ...definition.env, GITSPACE_SERVICE_NAME: definition.name, GITSPACE_PORTS_JSON: JSON.stringify(portMap) };
-    if (ports[0]) env.PORT = String(ports[0].port);
-    for (const port of ports) env[`GITSPACE_PORT_${port.name.toUpperCase().replace(/[^A-Z0-9]/gu, '_')}`] = String(port.port);
+    const env = await this.serviceEnvironment(space.rootPath, spaceId, definitions, definition, ports);
     await this.terminals.startService(spaceId, definition.name, definition.command, definition.args, cwd, env);
     const started = (await this.list(spaceId)).find((service) => service.id === definition.name);
     if (!started) throw new Error(`Service ${serviceName} is not configured`);
