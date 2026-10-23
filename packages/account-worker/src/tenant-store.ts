@@ -118,8 +118,9 @@ export class TenantStore {
   }
 
   private async store(name: string, scope: string, value: Uint8Array | ReadableStream<Uint8Array>, declared: { sha256: Sha256; size: number }, options: { onlyIfAbsent?: boolean }): Promise<TenantObjectMetadata | null> {
+    // R2 applies no SSE-C to an empty body (and then refuses reads that name a key), so an empty object has none.
     const putOptions: R2PutOptions = {
-      ssecKey: await this.ssecKey(scope), customMetadata: declaredMetadata(scope, declared), sha256: declared.sha256.slice(7),
+      ...(declared.size === 0 ? {} : { ssecKey: await this.ssecKey(scope) }), customMetadata: declaredMetadata(scope, declared), sha256: declared.sha256.slice(7),
       ...(options.onlyIfAbsent ? { onlyIf: { etagDoesNotMatch: '*' } } : {}),
     };
     const stored = value instanceof Uint8Array
@@ -131,7 +132,15 @@ export class TenantStore {
   async get(name: string, scope: string, options: { range?: TenantRange } = {}): Promise<TenantObject | null> {
     const range = options.range;
     if (range && (!Number.isSafeInteger(range.offset) || !Number.isSafeInteger(range.length) || range.offset < 0 || range.length < 1)) throw new Error('Tenant object range is invalid');
-    const object = await this.bucket.get(this.key(name), { ssecKey: await this.ssecKey(scope), ...(range ? { range } : {}) });
+    const object = await this.bucket.get(this.key(name), { ssecKey: await this.ssecKey(scope), ...(range ? { range } : {}) })
+      .catch(async (error: unknown) => {
+        // An empty object carries no key (see `store`); R2 answers a keyed read of it with 10034. Read it plainly, and
+        // only an object that really is empty is accepted.
+        if (!String(error).includes('(10034)')) throw error;
+        const plain = await this.bucket.get(this.key(name));
+        if (plain && plain.size !== 0) { await plain.body.cancel(); throw error; }
+        return plain;
+      });
     if (!object) return null;
     let metadata: TenantObjectMetadata;
     try { metadata = storedMetadata(object, scope); }

@@ -1,6 +1,8 @@
 /**
  * R2 as SSE-C behaves in production; Miniflare's R2 binding drops `ssecKey`. An object written with a key reads, ranges
- * and takes parts only with that same key, as R2 refuses any other.
+ * and takes parts only with that same key, as R2 refuses any other. As in production (probed 2026-10-23), an empty body
+ * is stored without encryption whatever key the put names, and R2 answers a read naming a key with error 10034, as it
+ * answers a read naming none of an encrypted object.
  */
 export function ssecBucket(bucket: R2Bucket): R2Bucket {
   const keys = new Map<string, string>();
@@ -12,12 +14,15 @@ export function ssecBucket(bucket: R2Bucket): R2Bucket {
   return {
     head: (key: string) => bucket.head(key),
     async get(key: string, options?: R2GetOptions) {
-      opened(key, options?.ssecKey);
+      const stored = keys.get(key);
+      if (stored === 'empty' && options?.ssecKey !== undefined) throw new Error('get: The encryption parameters are not applicable to this object. (10034)');
+      if (stored !== undefined && stored !== 'empty' && stored !== 'none' && options?.ssecKey === undefined) throw new Error('get: The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object. (10034)');
+      if (stored !== 'empty') opened(key, options?.ssecKey);
       return bucket.get(key, options);
     },
     async put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob, options?: R2PutOptions) {
       const stored = await bucket.put(key, value, options);
-      if (stored) keys.set(key, fingerprint(options?.ssecKey));
+      if (stored) keys.set(key, stored.size === 0 ? 'empty' : fingerprint(options?.ssecKey));
       return stored;
     },
     async createMultipartUpload(key: string, options?: R2MultipartOptions) {

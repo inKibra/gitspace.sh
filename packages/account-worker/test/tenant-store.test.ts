@@ -60,6 +60,13 @@ describe('tenant store', () => {
     await expect(store.head('projects/p/spaces/s/state.bin', 'space:other')).rejects.toThrow(TenantObjectIntegrityError);
   });
 
+  it('reads back an empty file, which R2 stores without encryption', async () => {
+    const { store } = await fixture();
+    const empty = new Uint8Array(0);
+    expect(await store.put('projects/p/spaces/s/empty.txt', 'space:s', empty)).toEqual({ scope: 'space:s', sha256: sha256(empty), size: 0 });
+    expect(await store.bytes('projects/p/spaces/s/empty.txt', 'space:s', 10)).toEqual(empty);
+  });
+
   it('reads an object only with the key of the scope it was written in', async () => {
     const { store, bucket } = await fixture();
     await store.put('projects/p/spaces/s/state.bin', 'space:s', new TextEncoder().encode('scoped'));
