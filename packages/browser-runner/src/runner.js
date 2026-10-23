@@ -1,6 +1,6 @@
 // Runs one agent-written Playwright script inside a Worker Loader sandbox (docs/APERTURE-DESIGN.md §6.1). The sandbox
 // has no network of its own: `env.CDP` is its only way out, a WebSocket to the browser through GitSpace's CDP layer.
-// `./script.js` is the agent's script, an async function of `{ page, context, browser, state }`.
+// `./script.js` is the agent's script, an async function of `{ page, context, browser, state, snapshot }`.
 import { connect } from '@cloudflare/playwright';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import script from './script.js';
@@ -36,7 +36,10 @@ export default class Runner extends WorkerEntrypoint {
       const [context] = browser.contexts();
       if (!context) throw new Error('The browser session has no default context');
       const page = context.pages().at(-1) ?? await context.newPage();
-      const value = await script({ page, context, browser, state });
+      // The page's accessibility tree as YAML with `[ref=eN]` marks; `page.locator('aria-ref=eN')` finds the element,
+      // within the same run (the refs live in this connection's injected script).
+      const snapshot = async (target = page) => (await target._snapshotForAI()).full;
+      const value = await script({ page, context, browser, state, snapshot });
       let returned;
       try { returned = JSON.parse(JSON.stringify(value === undefined ? null : value)); } catch { returned = String(value); }
       return finish({ ok: true, value: returned });

@@ -102,7 +102,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     const run = crypto.randomUUID();
     const sandbox = this.env.CODEMODE_LOADER.load({
       compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], mainModule: 'runner.js',
-      modules: { 'runner.js': BROWSER_RUNNER_SOURCE, 'script.js': `export default async function ({ page, context, browser, state }) {\n${script}\n}` },
+      modules: { 'runner.js': BROWSER_RUNNER_SOURCE, 'script.js': `export default async function ({ page, context, browser, state, snapshot }) {\n${script}\n}` },
       env: { CDP: this.ctx.exports.BrowserSessionCdp({ props: { session: name, run, ...(relayToken ? { relayToken } : {}) } }) },
       globalOutbound: null,
       limits: { cpuMs: 30_000 },
