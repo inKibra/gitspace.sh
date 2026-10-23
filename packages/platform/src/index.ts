@@ -43,6 +43,20 @@ function tenantFromHostname(hostname: string, suffix: string): TenantDispatchTar
   return tenantIdSchema.safeParse(label).success ? { tenant: label, service: false } : null;
 }
 
+/**
+ * `*.gitspace.sh` labels that reach this Worker through the zone's wildcard route but are not tenants: `www` goes to the
+ * site at the apex. (`api.gitspace.sh` has its own route and custom domain on the auth Worker, so it never arrives here.)
+ */
+const PLATFORM_RESERVED_GITSPACE_LABELS = new Set(['www']);
+const GITSPACE_ZONE_HOSTNAME = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.(gitspace\.sh)$/u;
+
+/** Sends a reserved platform hostname to the platform's own site for the zone; null for a tenant hostname. */
+function canonicalPlatformRedirect(url: URL): Response | null {
+  const match = GITSPACE_ZONE_HOSTNAME.exec(url.hostname.toLowerCase());
+  if (!match || !PLATFORM_RESERVED_GITSPACE_LABELS.has(match[1]!)) return null;
+  return Response.redirect(new URL(`${url.pathname}${url.search}`, `https://${match[2]!}`).toString(), 308);
+}
+
 function platformError(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status });
 }
@@ -474,6 +488,9 @@ export default {
     if (operatorAccessMatch) return handleOperatorTenant(request, env, operatorAccessMatch[1]!, true);
     const operatorTenantMatch = OPERATOR_TENANT_PATH.exec(url.pathname);
     if (operatorTenantMatch) return handleOperatorTenant(request, env, operatorTenantMatch[1]!);
+
+    const canonical = canonicalPlatformRedirect(url);
+    if (canonical) return canonical;
 
     const target = tenantFromHostname(url.hostname, env.TENANT_HOST_SUFFIX) ?? tenantFromHostname(url.hostname, '.gitspace.sh');
     if (!target) return platformError(404, 'TENANT_NOT_FOUND', 'Tenant hostname is not registered');
