@@ -64,6 +64,7 @@ import type {
   WorkflowNode,
   WorkflowView,
 } from '@gitspace/protocol';
+import { DRIVE_FILE_MAX_BYTES } from '@gitspace/protocol';
 import type { GitLfsHeldBack, WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import {
   AlertCircle,
@@ -97,7 +98,7 @@ import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
 import { GuideShareButton, type GuideShareHandlers } from './GuideShare.js';
 import { ArtifactUploadButton, ArtifactUploadList, useArtifactUploads, type ArtifactUploads } from './ArtifactUploads.js';
-import type { ArtifactUploadClient } from './artifact-upload.js';
+import { formatBytes, type ArtifactUploadClient } from './artifact-upload.js';
 import { syncRepositoryTreePaths } from './repository-tree-paths.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
@@ -705,7 +706,7 @@ function ArtifactsSurface({ references, onOpen, actions, uploads }: { references
   ><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div ref={list} className="flex flex-col gap-3 p-4">
     {uploads ? <div className="flex flex-wrap items-center gap-2">
       <ArtifactUploadButton onFiles={uploads.add} disabledReason={runtimeAvailable ? null : openWorkspaceFirst} />
-      <p className="text-caption text-muted-foreground">Files are saved to <span className="font-mono">uploads/</span> in this workspace, up to 16 MiB each. You can also drop files here.</p>
+      <p className="text-caption text-muted-foreground">Files are saved to <span className="font-mono">uploads/</span> in this workspace, up to {formatBytes(DRIVE_FILE_MAX_BYTES)} each. You can also drop files here.</p>
     </div> : null}
     {uploads ? <ArtifactUploadList uploads={uploads} /> : null}
     {!references.length ? <EmptyState icon={ic(Archive, 22)} title="No artifacts" description="Published workspace and project files appear here, whether or not they are attached as evidence." /> : <>

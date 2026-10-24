@@ -10,6 +10,7 @@ import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgume
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
+import { workspaceDrive } from './workspace-drive.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { parseResourceUri, resourceMediaType, selectResourceText } from '@gitspace/protocol/resource-uri';
@@ -250,6 +251,16 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const workspace = await authority().getWorkspace(identity.workspaceId);
       if (!workspace) throw new Error('Browser workspace is unavailable');
       return workspace.name;
+    },
+    drive: () => workspaceDrive(env, identity),
+    // The machine stores the file itself (drive_transfer); the drive then names it, as space_artifacts fromMachine does.
+    fromMachine: async ({ conversationId, machineId, machinePath, path, mediaType }) => {
+      const drive = workspaceDrive(env, identity), target = await drive.machineTarget(path), id = crypto.randomUUID();
+      const result = await executeMachine({ tool: 'drive_transfer', args: RuntimeJsonSchema.parse({ direction: 'fromMachine', path: machinePath, scopeId: target.scopeId, on: machineId }), conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' });
+      if (result.status === 'failed') throw new Error(result.error.message);
+      const text = result.content.find(item => item.type === 'text');
+      if (result.status !== 'completed' || text?.type !== 'text') throw new Error('The machine did not report the file it stored');
+      await drive.record(target.path, mediaType, RuntimeDriveTransferStoredSchema.parse(JSON.parse(text.text)));
     },
   });
   const active = new Map<string, AbortController>();
@@ -710,8 +721,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             if (!conversation.root) throw new Error('Only the main workspace conversation moves files between the drive and a machine');
             const on = args.on === undefined ? {} : { on: args.on };
             if (args.method === 'toMachine') {
-              const { scopeId, blobHash, size } = await artifacts.locate(args.url);
-              return executeMachine({ ...input, tool: 'drive_transfer', args: RuntimeJsonSchema.parse({ direction: 'toMachine', path: args.path, scopeId, blobHash, size, ...on }) });
+              const located = await artifacts.locate(args.url);
+              return executeMachine({ ...input, tool: 'drive_transfer', args: RuntimeJsonSchema.parse({ direction: 'toMachine', path: args.path, ...located, ...on }) });
             }
             const target = await artifacts.machineTarget(args.url);
             const result = await executeMachine({ ...input, tool: 'drive_transfer', args: RuntimeJsonSchema.parse({ direction: 'fromMachine', path: args.path, scopeId: target.scopeId, ...on }) });

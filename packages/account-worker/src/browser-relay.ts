@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
-import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, RuntimeBrowserCaptureSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserCapture, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
@@ -9,6 +9,8 @@ import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
 import { RelayBrowser } from './relay-browser.js';
 import { extensionFiles } from '@gitspace/browser-extension';
 import { zipSync, strToU8 } from 'fflate';
+import { captureName, readCapture, writeCapture, type CaptureDrive } from './browser-capture.js';
+import { BROWSER_DOWNLOAD, BrowserDownloadSchema, BrowserUploads, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
 
 export function browserRelayArchive(endpoint: string): Uint8Array {
   return zipSync(Object.fromEntries(Object.entries(extensionFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
@@ -27,15 +29,33 @@ const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), def
   name: z.string().optional() })) });
 type StoredPairing = z.infer<typeof Pairing>;
 const Proof = z.object({ pairing: z.literal('client'), pairingId: z.string().uuid(), clientNonce: z.string().regex(/^[a-f0-9]{64}$/), publicKey: z.string().max(128), proof: z.string().max(128), code: z.string().max(256).optional() });
-const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), group: RuntimeBrowserGroupReportSchema.optional() });
+/** A capture you started on your Chrome (its popup or in-page Capture: `tabCapture` video, or frames), announced
+ * before its files upload; `end` follows once every file completed, or says why it failed. */
+const CaptureAnnouncement = z.discriminatedUnion('event', [
+  z.object({ event: z.literal('start'), captureId: z.string().uuid(), groupId: z.string().uuid(), targetId: z.string().min(1).max(256), track: z.enum(['video', 'frames']), sound: z.boolean(), page: z.object({ url: z.string(), title: z.string() }), startedAt: z.iso.datetime() }),
+  z.object({ event: z.literal('end'), captureId: z.string().uuid(), state: z.enum(['saved', 'failed']), reason: z.string().nullable(), endedAt: z.iso.datetime(), tracks: RuntimeBrowserCaptureSchema.shape.tracks }),
+]);
+const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), group: RuntimeBrowserGroupReportSchema.optional(), capture: CaptureAnnouncement.optional() });
+/** A capture recording on a Chrome: the workspace it belongs to and the files that finished uploading (name → size). */
+const CaptureRow = z.object({ pairingId: z.string().uuid(), projectId: z.string(), workspaceId: z.string(), track: z.enum(['video', 'frames']), capture: RuntimeBrowserCaptureSchema, files: z.record(z.string(), z.number().int().nonnegative()) });
+type CaptureRow = z.infer<typeof CaptureRow>;
+const CAPTURE = 'browser.relay.capture:';
+const CaptureStarted = z.object({ url: z.string(), title: z.string() });
+const CaptureStopped = z.object({ count: z.number().int().nonnegative(), width: z.number().int().nonnegative(), height: z.number().int().nonnegative() }).partial();
+/** The drive as the relay uses it: capture records and the files your Chrome uploads. */
+export type BrowserRelayDrive = CaptureDrive & BrowserUploadDrive;
 /** Where a workspace's groups are kept for its `gitspace.browsers` document. */
 export type BrowserWorkspaces = { getByName(name: string): { browserGroupReported(identity: { projectId: string; workspaceId: string }, group: RuntimeBrowsersDocumentGroup): Promise<void> } };
 type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
  * once the script connects. */
 type ScriptRun = { authorization: RuntimeAccountBrowserAuthorization; grant: RuntimeAccountBrowserSignedGrant; pairingId: string; attemptId: string; deadline: number; connection: Connection; browser?: RelayBrowser; socket?: WebSocket };
-/** The first extension protocol that shows tab previews. */
-const PREVIEW_PROTOCOL = 3;
+/** The first extension protocol that records captures and uploads downloads into the drive. */
+const CAPTURE_PROTOCOL = 4;
+/** A capture stop waits this long for the extension to finish uploading the frames. */
+const CAPTURE_STOP_MS = 120_000;
+/** A script's release waits this long for the extension to finish uploading its downloads. */
+const RELEASE_MS = 90_000;
 const PreviewReply = z.object({ image: z.string().max(600_000).nullable(), reason: z.string().max(256).nullable() });
 const NO_CHROME = 'No Chrome is paired with this account. Ask the user to pair one in Plugins → Browsers.';
 const UNCONFIRMED = 'A Chrome is paired with this account but its fingerprint is not confirmed yet. Ask the user to confirm it in Plugins → Browsers.';
@@ -87,8 +107,40 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   /** Scripts running on a Chrome, by token: each lives in memory until its run ends, its deadline passes or its Chrome
    * disconnects. */
   private readonly scripts = new Map<string, ScriptRun>();
+  /** Single steps on a Chrome by attempt, while their authority lasts: a download one starts uploads under it. */
+  private readonly steps = new Map<string, { pairingId: string; groupId: string; deadline: number }>();
   private readonly runtime: AccountBrowserRuntime;
-  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces }) { this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this }); }
+  private readonly uploads: BrowserUploads;
+  /** `drive` opens a workspace's drive, for capture records and the files your Chrome uploads. */
+  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces }, private readonly drive: (identity: { projectId: string; workspaceId: string }) => BrowserRelayDrive) {
+    this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this });
+    this.uploads = new BrowserUploads(ctx.storage, {
+      pairing: async pairingId => {
+        const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId);
+        return pairing?.state === 'confirmed' ? { generation: pairing.generation, publicKey: pairing.publicKey } : undefined;
+      },
+      group: async (pairingId, groupId) => {
+        const stored = await ctx.storage.get(`browser.account.group:${groupId}`);
+        if (!stored || await ctx.storage.get(`browser.account.revoked:${groupId}`)) return undefined;
+        const group = RuntimeAccountBrowserGroupRowSchema.parse(stored);
+        return group.placement.kind === 'account-relay' && group.placement.pairingId === pairingId ? { projectId: group.projectId, workspaceId: group.workspaceId } : undefined;
+      },
+      attempt: (pairingId, groupId, attemptId) => {
+        const step = this.steps.get(attemptId);
+        if (step && step.pairingId === pairingId && step.groupId === groupId && step.deadline > Date.now()) return true;
+        return [...this.scripts.keys()].some(token => { const run = this.liveScript(token); return run?.pairingId === pairingId && run.attemptId === attemptId && run.grant.body.groupId === groupId; });
+      },
+      capture: async (pairingId, groupId, captureId) => {
+        const stored = await ctx.storage.get(`${CAPTURE}${captureId}`);
+        const row = stored ? CaptureRow.parse(stored) : undefined;
+        return row?.pairingId === pairingId && row.capture.target?.groupId === groupId;
+      },
+      captured: async (captureId, file, size) => {
+        const stored = await ctx.storage.get(`${CAPTURE}${captureId}`);
+        if (stored) { const row = CaptureRow.parse(stored); await ctx.storage.put(`${CAPTURE}${captureId}`, { ...row, files: { ...row.files, [file]: size } } satisfies CaptureRow); }
+      },
+    }, drive);
+  }
   /** Whether the host's socket is a Chrome extension socket. */
   owns(socket: WebSocket) { return this.ctx.getTags(socket).includes(BROWSER_SOCKET_TAG); }
   private sockets() {
@@ -407,6 +459,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const connection = this.connection(state.pairingId);
     if (connection?.socket !== socket) throw new Error('Stale browser connection');
     if (message.group) { const report = message.group; this.ctx.waitUntil(this.groupReported(state.pairingId, report).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_group_report_failed', groupId: report.groupId, error: String(error) })))); return; }
+    if (message.capture) { const announcement = message.capture; this.ctx.waitUntil(this.captureAnnounced(state.pairingId, announcement).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_capture_announcement_failed', captureId: announcement.captureId, error: String(error) })))); return; }
     if (message.id !== undefined) { const pending = connection.pending.get(message.id); if (!pending) return; connection.pending.delete(message.id); pending.cancelTimer(); if (message.error) pending.reject(new Error(message.error.message)); else pending.resolve(message.result); }
     else if (message.targetId) for (const listener of connection.listeners.get(message.targetId) ?? []) listener(message.fenced ? { method: 'disconnected' } : { method: message.method, params: message.params, sessionId: message.sessionId });
   }
@@ -456,11 +509,11 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     for (const listeners of connection.listeners.values()) for (const listener of listeners) listener({ method: 'disconnected' });
     for (const [token, run] of this.scripts) if (run.connection === connection) this.dropScript(token, run, 1011, 'Chrome disconnected');
   }
-  private request(pairingId: string, command: Record<string, unknown>) {
+  private request(pairingId: string, command: Record<string, unknown>, timeoutMs = 30_000) {
     const connection = this.connection(pairingId);
     if (!connection) throw new Error('Account Chrome extension is not connected');
     const id = ++connection.sequence, deferred = Promise.withResolvers<unknown>();
-    const timer = setTimeout(() => { connection.pending.delete(id); deferred.reject(new Error('Browser relay timeout; effect outcome uncertain')); }, 30_000);
+    const timer = setTimeout(() => { connection.pending.delete(id); deferred.reject(new Error('Browser relay timeout; effect outcome uncertain')); }, timeoutMs);
     connection.pending.set(id, { ...deferred, cancelTimer: () => clearTimeout(timer) }); connection.socket.send(JSON.stringify({ ...command, id })); return deferred.promise;
   }
   async execute(authorization: RuntimeAccountBrowserAuthorization) {
@@ -483,6 +536,12 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const connection = this.connection(placement.pairingId);
     if (!connection) throw new Error('Account Chrome extension is not connected');
     if (!connection.authorized.has(authorization.body.scope.attemptId)) { await this.request(placement.pairingId, { operation: 'authorize', authorization }); connection.authorized.add(authorization.body.scope.attemptId); }
+    // A single step's download uploads under its attempt while the step's authority lasts.
+    const { body } = authorization, now = Date.now();
+    if (body.command.type === 'execute' && body.command.args.action !== 'run') {
+      for (const [attemptId, step] of this.steps) if (step.deadline <= now) this.steps.delete(attemptId);
+      this.steps.set(body.scope.attemptId, { pairingId: placement.pairingId, groupId: body.command.grant.body.groupId, deadline: Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)) });
+    }
     return { pairingId: placement.pairingId, connection };
   }
   async tabs(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal) { const { pairingId } = await this.authorize(authorization, signal); const command = authorization.body.command; if (command.type === 'manage') throw new Error('Tabs authorization required'); await this.dispatchApproval(authorization); return this.request(pairingId, { operation: 'tabs', groupId: command.type === 'execute' ? command.grant.body.groupId : command.groupId }); }
@@ -491,11 +550,84 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   async preview(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<z.infer<typeof PreviewReply>> {
     const { scope, command } = authorization.body, placement = scope.placement;
     if (command.type !== 'manage' || command.action !== 'preview' || !command.groupId || !command.targetId || placement.kind !== 'account-relay') throw new Error('Preview authorization required');
-    const pairing = (await this.registry()).pairings.find(item => item.pairingId === placement.pairingId);
-    if ((pairing?.extension?.protocol ?? 0) < PREVIEW_PROTOCOL) return { image: null, reason: 'Update the GitSpace extension in Chrome to see previews' };
     const { pairingId } = await this.authorize(authorization, signal);
     return PreviewReply.parse(await this.request(pairingId, { operation: 'preview', groupId: command.groupId, targetId: command.targetId }));
   }
+  /** Records a tab you started capturing from the Browser tab (`captureStart`), or stops a capture on this Chrome,
+   * yours from the extension included (`captureStop`). The extension records the tab's screencast frames and uploads
+   * them through the upload API; a stop returns once they are in the drive. */
+  async capture(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeBrowserCapture> {
+    const { scope, command } = authorization.body, placement = scope.placement;
+    if (command.type !== 'manage' || (command.action !== 'captureStart' && command.action !== 'captureStop') || !command.groupId || !command.captureId || placement.kind !== 'account-relay') throw new Error('Capture authorization required');
+    const { captureId, groupId } = command, drive = this.drive(scope);
+    const registry = await this.registry(), pairing = registry.pairings.find(item => item.pairingId === placement.pairingId);
+    if (command.action === 'captureStop') {
+      const stored = await this.ctx.storage.get(`${CAPTURE}${captureId}`);
+      if (!stored) {
+        const capture = await readCapture(drive, captureId);
+        if (!capture) throw new Error('Unknown capture');
+        return capture.state === 'recording' ? writeCapture(drive, { ...capture, endedAt: new Date().toISOString(), state: 'failed', reason: 'The recording on this Chrome was lost' }) : capture;
+      }
+      const row = CaptureRow.parse(stored);
+      if (row.pairingId !== placement.pairingId || row.projectId !== scope.projectId || row.workspaceId !== scope.workspaceId) throw new Error('Capture outside this Chrome');
+      const { pairingId } = await this.authorize(authorization, signal);
+      let stopped: z.infer<typeof CaptureStopped>;
+      try { stopped = CaptureStopped.parse(await this.request(pairingId, { operation: 'captureStop', captureId }, CAPTURE_STOP_MS)); }
+      catch (error) { return await this.finishCapture(captureId, { state: 'failed', reason: error instanceof Error ? error.message : String(error), endedAt: new Date().toISOString(), tracks: {} }) ?? await readCapture(drive, captureId) ?? row.capture; }
+      // A video ends with the extension's `end` once its file is in; frames end here.
+      if (row.track === 'video') return await readCapture(drive, captureId) ?? row.capture;
+      const frames = stopped.count && stopped.width && stopped.height ? { path: 'frames.bin', index: 'frames.json', count: stopped.count, width: stopped.width, height: stopped.height } : undefined;
+      return await this.finishCapture(captureId, { state: frames ? 'saved' : 'failed', reason: frames ? null : 'The tab showed nothing to record', endedAt: new Date().toISOString(), tracks: frames ? { frames } : {} }) ?? await readCapture(drive, captureId) ?? row.capture;
+    }
+    if ((pairing?.extension?.protocol ?? 0) < CAPTURE_PROTOCOL) throw new Error('Update the GitSpace extension in Chrome to record captures');
+    if (!command.targetId) throw new Error('A capture names its tab');
+    const group = await this.ctx.storage.get(`browser.account.group:${groupId}`);
+    if (!group || await this.ctx.storage.get(`browser.account.revoked:${groupId}`)) throw new Error('This tab’s group has ended');
+    const grant = RuntimeAccountBrowserGroupRowSchema.parse(group);
+    if (grant.projectId !== scope.projectId || grant.workspaceId !== scope.workspaceId || grant.placement.kind !== 'account-relay' || grant.placement.pairingId !== placement.pairingId) throw new Error('Browser group outside this Chrome');
+    const { pairingId } = await this.authorize(authorization, signal);
+    const page = CaptureStarted.parse(await this.request(pairingId, { operation: 'captureStart', captureId, groupId, targetId: command.targetId }));
+    const startedAt = new Date().toISOString(), browser = pairing ? (await this.names([pairing]))(pairing) : 'Chrome';
+    const capture = RuntimeBrowserCaptureSchema.parse({ version: 1, captureId, name: captureName(page.title, startedAt), by: 'you', source: 'relay', browser, target: { groupId, targetId: command.targetId }, page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) }, startedAt, endedAt: null, state: 'recording', reason: null, tracks: {} });
+    await this.ctx.storage.put(`${CAPTURE}${captureId}`, { pairingId, projectId: scope.projectId, workspaceId: scope.workspaceId, track: 'frames', capture, files: {} } satisfies CaptureRow);
+    return writeCapture(drive, capture);
+  }
+  /** A capture you started in the extension began (`start`: listed as recording from now) or ended (`end`). */
+  private async captureAnnounced(pairingId: string, announcement: z.infer<typeof CaptureAnnouncement>): Promise<void> {
+    if (announcement.event === 'end') {
+      const stored = await this.ctx.storage.get(`${CAPTURE}${announcement.captureId}`);
+      if (stored && CaptureRow.parse(stored).pairingId === pairingId) await this.finishCapture(announcement.captureId, { state: announcement.state, reason: announcement.reason?.slice(0, 1024) ?? null, endedAt: announcement.endedAt, tracks: announcement.tracks });
+      return;
+    }
+    if (await this.ctx.storage.get(`${CAPTURE}${announcement.captureId}`)) return;
+    const group = await this.ctx.storage.get(`browser.account.group:${announcement.groupId}`);
+    if (!group || await this.ctx.storage.get(`browser.account.revoked:${announcement.groupId}`)) return;
+    const grant = RuntimeAccountBrowserGroupRowSchema.parse(group), pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId);
+    if (grant.placement.kind !== 'account-relay' || grant.placement.pairingId !== pairingId || !pairing) return;
+    const capture = RuntimeBrowserCaptureSchema.parse({ version: 1, captureId: announcement.captureId, name: captureName(announcement.page.title, announcement.startedAt), by: 'you', source: 'relay', browser: (await this.names([pairing]))(pairing),
+      target: { groupId: announcement.groupId, targetId: announcement.targetId }, page: { url: announcement.page.url.slice(0, 8192), title: announcement.page.title.slice(0, 500) },
+      startedAt: announcement.startedAt, endedAt: null, state: 'recording', reason: null, tracks: {} });
+    await this.ctx.storage.put(`${CAPTURE}${announcement.captureId}`, { pairingId, projectId: grant.projectId, workspaceId: grant.workspaceId, track: announcement.track, capture, files: {} } satisfies CaptureRow);
+    await writeCapture(this.drive(grant), capture);
+  }
+  /** Saves a capture once: its tracks are those whose files completed; saved with none, it failed. Null when another
+   * stop already saved it. */
+  private async finishCapture(captureId: string, outcome: Pick<RuntimeBrowserCapture, 'state' | 'reason' | 'endedAt' | 'tracks'>): Promise<RuntimeBrowserCapture | null> {
+    const stored = await this.ctx.storage.get(`${CAPTURE}${captureId}`);
+    if (!stored) return null;
+    await this.ctx.storage.delete(`${CAPTURE}${captureId}`);
+    const row = CaptureRow.parse(stored), { image, frames, video } = outcome.tracks;
+    const tracks = {
+      ...(image && row.files['image.jpg'] !== undefined ? { image: { ...image, path: 'image.jpg' } } : {}),
+      ...(frames && row.files['frames.bin'] !== undefined && row.files['frames.json'] !== undefined ? { frames: { ...frames, path: 'frames.bin', index: 'frames.json' } } : {}),
+      ...(video && row.files['video.webm'] !== undefined ? { video: { ...video, path: 'video.webm' } } : {}),
+    };
+    const saved = outcome.state === 'saved' && Object.keys(tracks).length > 0;
+    const reason = saved ? outcome.reason : outcome.reason ?? (outcome.state === 'saved' ? 'The recording’s files did not reach the drive' : 'The recording failed');
+    return writeCapture(this.drive(row), { ...row.capture, endedAt: outcome.endedAt ?? new Date().toISOString(), state: saved ? 'saved' : 'failed', reason, tracks: saved ? tracks : {} });
+  }
+  /** One step of an upload from a Chrome (`browser-upload.ts`). */
+  upload(step: BrowserUploadStep) { return this.uploads.step(step); }
   async open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal) {
     const { pairingId, connection } = await this.authorize(authorization, signal);
     const command = authorization.body.command; if (command.type !== 'execute') throw new Error('Browser execution authorization required');
@@ -532,10 +664,19 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     this.scripts.set(token, { authorization, grant: command.grant, pairingId: placement.pairingId, attemptId: scope.attemptId, deadline: Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)), connection });
     return { token };
   }
-  /** Ends a script: its CDP connection closes and the extension refuses its attempt from now on. */
-  async scriptEnd(token: string): Promise<void> {
+  /** Ends a script: its CDP connection closes and the extension refuses its attempt from now on, having finished
+   * uploading the run's downloads, which are returned (workspace-relative drive paths). */
+  async scriptEnd(token: string): Promise<{ downloads: { path: string; size: number; mediaType: string }[] }> {
     const run = this.scripts.get(token);
-    if (run) await this.endScript(token, run, 'Script ended');
+    if (!run) return { downloads: [] };
+    await this.endScript(token, run, 'Script ended');
+    const downloads: { path: string; size: number; mediaType: string }[] = [];
+    for (const [key, stored] of await this.ctx.storage.list({ prefix: `${BROWSER_DOWNLOAD}${run.attemptId}:` })) {
+      const { path, size, mediaType } = BrowserDownloadSchema.parse(stored);
+      downloads.push({ path, size, mediaType });
+      await this.ctx.storage.delete(key);
+    }
+    return { downloads };
   }
   /** A script's CDP connection, from its sandbox through `BrowserSessionCdp`: `BROWSER_SCRIPT_PATH<token>/<cursor
    * label>`. Public requests never reach this path (index.ts forwards only `/ws` and `/tunnel/` to the relay object);
@@ -578,7 +719,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   private async endScript(token: string, run: ScriptRun, reason: string): Promise<void> {
     this.dropScript(token, run, 1000, reason);
     // The extension refuses the attempt from now on and lets the run's tabs go; they stay in the workspace group.
-    if (this.connections.get(run.pairingId) === run.connection) await this.request(run.pairingId, { operation: 'release', attemptId: run.attemptId }).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_script_release_failed', pairingId: run.pairingId, error: String(error) })));
+    if (this.connections.get(run.pairingId) === run.connection) await this.request(run.pairingId, { operation: 'release', attemptId: run.attemptId }, RELEASE_MS).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_script_release_failed', pairingId: run.pairingId, error: String(error) })));
   }
   private dropScript(token: string, run: ScriptRun, code: number, reason: string): void {
     this.scripts.delete(token);

@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { artifactObjectKey, createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, signDeviceInvite, TENANT_OBJECT_PART_BYTES, type ArtifactManifest } from '@gitspace/protocol';
+import { artifactObjectKey, createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, DRIVE_FILE_MAX_BYTES, signDeviceInvite, TENANT_OBJECT_PART_BYTES, type ArtifactManifest } from '@gitspace/protocol';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES, gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
@@ -12,6 +12,9 @@ import { tenantRootPrivateKey } from './setup.js';
 import { createHash } from 'node:crypto';
 import { tenantObjectKey, tenantStore } from '../src/tenant-store.js';
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
+import { pattern, streamedSha256 } from './drive-bytes.js';
+
+const sha256 = (bytes: Uint8Array) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
 async function fixture() {
   const userId = env.ACCOUNT_ID;
@@ -393,7 +396,7 @@ describe('user artifact flows', () => {
       const part = bytes.subarray(offset, offset + ARTIFACT_UPLOAD_CHUNK_BYTES);
       return { offset, sha256: createHash('sha256').update(part).digest('hex'), data: Buffer.from(part).toString('base64') };
     };
-    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'capture 10:30.bin', size: bytes.length, mediaType: 'application/octet-stream' });
+    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'capture 10:30.bin', size: bytes.length, sha256: sha256(bytes).slice(7), mediaType: 'application/octet-stream' });
     if (begun.status === 'error') throw begun.error;
     expect(begun.value).toMatchObject({ url: 'drive://workspace/uploads/capture%2010%3A30.bin', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
     const upload = { ...request, uploadId: begun.value.uploadId };
@@ -408,7 +411,7 @@ describe('user artifact flows', () => {
 
     const committed = await client.inspector.artifacts.uploadCommit(upload);
     if (committed.status === 'error') throw committed.error;
-    expect(committed.value).toMatchObject({ url: 'drive://workspace/uploads/capture%2010%3A30.bin', path: 'uploads/capture 10:30.bin', size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
+    expect(committed.value).toMatchObject({ url: 'drive://workspace/uploads/capture%2010%3A30.bin', path: 'uploads/capture 10:30.bin', hash: sha256(bytes), size: bytes.length, mediaType: 'application/octet-stream', scope: 'workspace', workspaceId });
     // A ':' in the name is encoded, so it is not read as a `:raw` or line selector.
     const stored = await readBytes(client.inspector.artifacts.read({ ...request, url: committed.value.url, hash: committed.value.hash }));
     expect(stored).toEqual(Buffer.from(bytes));
@@ -419,6 +422,45 @@ describe('user artifact flows', () => {
     expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(bytes.subarray(ARTIFACT_UPLOAD_CHUNK_BYTES - 2, ARTIFACT_UPLOAD_CHUNK_BYTES + 2));
     expect(await client.inspector.artifacts.uploadAbort(upload)).toMatchObject({ status: 'ok', value: { aborted: false } });
 
-    await expect(client.inspector.artifacts.uploadBegin({ ...request, fileName: 'huge.bin', size: 17 * 1024 * 1024, mediaType: null })).rejects.toThrow('less than or equal to 16777216');
+    // Bytes that miss the digest declared at begin are never published.
+    const mismatched = new Uint8Array([1, 2, 3]);
+    const declared = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'mismatched.bin', size: 3, sha256: '0'.repeat(64), mediaType: null });
+    if (declared.status === 'error') throw declared.error;
+    const other = { ...request, uploadId: declared.value.uploadId };
+    expect(await client.inspector.artifacts.uploadChunk({ ...other, offset: 0, sha256: sha256(mismatched).slice(7), data: Buffer.from(mismatched).toString('base64') })).toMatchObject({ status: 'ok' });
+    expect(await client.inspector.artifacts.uploadCommit(other)).toMatchObject({ status: 'error' });
+    const listed = await client.inspector.artifacts.list(request);
+    if (listed.status === 'error') throw listed.error;
+    expect(listed.value.artifacts.map(artifact => artifact.path)).toEqual(['uploads/capture 10:30.bin']);
+
+    await expect(client.inspector.artifacts.uploadBegin({ ...request, fileName: 'huge.bin', size: DRIVE_FILE_MAX_BYTES + 1, sha256: '0'.repeat(64), mediaType: null })).rejects.toThrow(`less than or equal to ${DRIVE_FILE_MAX_BYTES}`);
   });
+
+  it('commits a browser upload larger than one part, sending each full part as its chunks arrive', async () => {
+    const { client, workspaceId, origin } = await fixture();
+    const request = { spaceId: workspaceId, expectedGeneration: 0 };
+    const size = TENANT_OBJECT_PART_BYTES + ARTIFACT_UPLOAD_CHUNK_BYTES + 7;
+    const digest = createHash('sha256');
+    for (let offset = 0; offset < size; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) digest.update(pattern(offset, Math.min(ARTIFACT_UPLOAD_CHUNK_BYTES, size - offset)));
+    const hash = digest.digest('hex');
+    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'screen.webm', size, sha256: hash, mediaType: 'video/webm' });
+    if (begun.status === 'error') throw begun.error;
+    const upload = { ...request, uploadId: begun.value.uploadId };
+    for (let offset = 0; offset < size; offset += ARTIFACT_UPLOAD_CHUNK_BYTES) {
+      const part = pattern(offset, Math.min(ARTIFACT_UPLOAD_CHUNK_BYTES, size - offset));
+      const sent = await client.inspector.artifacts.uploadChunk({ ...upload, offset, sha256: createHash('sha256').update(part).digest('hex'), data: Buffer.from(part).toString('base64') });
+      if (sent.status === 'error') throw sent.error;
+    }
+    const committed = await client.inspector.artifacts.uploadCommit(upload);
+    if (committed.status === 'error') throw committed.error;
+    expect(committed.value).toMatchObject({ path: 'uploads/screen.webm', hash: `sha256:${hash}`, size, mediaType: 'video/webm' });
+    const minted = await client.inspector.artifacts.file({ ...request, url: committed.value.url, hash: null });
+    if (minted.status === 'error') throw minted.error;
+    const url = new URL(minted.value.url, origin);
+    const boundary = await worker.fetch(new Request(url, { headers: { range: `bytes=${TENANT_OBJECT_PART_BYTES - 3}-${TENANT_OBJECT_PART_BYTES + 2}` } }), env);
+    expect([boundary.status, boundary.headers.get('content-range'), new Uint8Array(await boundary.arrayBuffer())]).toEqual([206, `bytes ${TENANT_OBJECT_PART_BYTES - 3}-${TENANT_OBJECT_PART_BYTES + 2}/${size}`, pattern(TENANT_OBJECT_PART_BYTES - 3, 6)]);
+    const whole = await worker.fetch(new Request(url), env);
+    expect([whole.status, whole.headers.get('content-length')]).toEqual([200, String(size)]);
+    expect(await streamedSha256(whole.body!)).toBe(`sha256:${hash}`);
+  }, 180_000);
 });

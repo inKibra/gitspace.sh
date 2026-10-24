@@ -463,7 +463,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const beginUpload = server.implement(inspectorBeginArtifactUploadContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
-      return ok(await new InspectorCloudArtifacts(env, userId, source).beginUpload(input.fileName, input.size, input.mediaType));
+      return ok(await new InspectorCloudArtifacts(env, userId, source).beginUpload(input.fileName, input.size, input.sha256, input.mediaType));
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));

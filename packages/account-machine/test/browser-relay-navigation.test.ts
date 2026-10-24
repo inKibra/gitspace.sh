@@ -34,7 +34,7 @@ function harness(timeout = 60_000, sameDocument = false, destination = 'https://
         onEvent: { addListener: (listener: EventListener) => listeners.add(listener), removeListener: (listener: EventListener) => listeners.delete(listener) }, onDetach: { addListener() {} },
       },
       tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get: async () => ({ groupId, url }), onUpdated: { addListener: (listener: Updated) => { updated = listener; } } },
-      tabGroups: { onRemoved: { addListener() {} } }, alarms: { create() {}, onAlarm: { addListener() {} } },
+      tabGroups: { onRemoved: { addListener() {} } }, downloads: { onCreated: { addListener() {} } }, alarms: { create() {}, onAlarm: { addListener() {} } },
     },
   });
   runInContext(extensionFiles('http://127.0.0.1:9224')['background.js'], context);

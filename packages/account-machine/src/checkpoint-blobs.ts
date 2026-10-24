@@ -18,9 +18,10 @@ export interface CheckpointBlobStore {
 /** Objects too large to hold whole: uploads above one request travel in uniform parts. */
 export interface StreamingBlobStore extends CheckpointBlobStore {
   /** Uploads exactly `size` bytes with SHA-256 `hash` from the source; returns the hash. */
-  putStream(key: string, source: AsyncIterable<Uint8Array>, expected: { size: number; hash: string }): Promise<BlobHash>;
-  /** The object's bytes; the last pull fails unless they match the recorded and the expected hash and size. */
-  getStream(key: string, expected: { hash: string; size: number }): Promise<AsyncIterable<Uint8Array> | null>;
+  putStream(key: string, source: AsyncIterable<Uint8Array>, expected: { size: number; hash: string }, workspace?: DataWorkspace): Promise<BlobHash>;
+  /** The object's bytes; the last pull fails unless they match the recorded hash and size, and the expected hash when
+   * one is given. */
+  getStream(key: string, expected: { hash?: string; size: number }, workspace?: DataWorkspace): Promise<AsyncIterable<Uint8Array> | null>;
 }
 
 export function hashBytes(bytes: Uint8Array): BlobHash {

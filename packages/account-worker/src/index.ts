@@ -47,6 +47,8 @@ import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostna
 import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
+import { BROWSER_UPLOAD_PATH, serveBrowserUpload, type BrowserUploadStep } from './browser-upload.js';
+import { workspaceDrive } from './workspace-drive.js';
 import { RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
@@ -56,9 +58,8 @@ export {
   SpaceContextDO, TenantReleasesDO, UserMcpConnectionsDO, UserProjectIndexDO,
   UserSettingsDO, UserSkillsDO, UserStorageDO,
 } from './application.js';
-export { BrowserSessionCdp, BrowserSessionDO } from './browser-session.js';
+export { BrowserSessionCdp, BrowserSessionDO, BrowserSessionFiles } from './browser-session.js';
 export { StorageMigrationDO } from './storage-migration.js';
-
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';
 
@@ -317,7 +318,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
     return view.serviceDeviceAuthority(deviceId, Date.now());
   });
-  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env);
+  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity));
   async serviceApprove(input: { hostname: string; deviceId: string; state: string; returnTo: string }) {
     const ticket = await this.serviceSessions.approve(input);
     await this.scheduleMachineCheck();
@@ -435,6 +436,8 @@ export class UserRelayDO extends BudgetedDurableObject {
   /** A script on a Chrome (`browser.run`) begins with its signed run authority and ends from the browser session. */
   browserRelayScriptBegin(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.scriptBegin(authorization); }
   browserRelayScriptEnd(token: string) { return this.browserRelay.scriptEnd(token); }
+  /** One step of a file upload from a Chrome extension (`serveBrowserUpload`). */
+  browserRelayUpload(step: BrowserUploadStep) { return this.browserRelay.upload(step); }
 
   private presenceLine: Promise<void> = Promise.resolve();
   /** When machine presence is next reconciled against the live sockets. */
@@ -1051,6 +1054,8 @@ export default {
       return new Response(null, { status: 303, headers: { location: approval.href, 'cache-control': 'no-store', 'set-cookie': `${SERVICE_STATE_COOKIE}=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300` } });
     }
     if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).fetch(request);
+    // Files from your Chrome (downloads, captures) come over HTTPS signed by its pairing key, never over its WebSocket.
+    if (url.pathname === BROWSER_UPLOAD_PATH || url.pathname.startsWith(`${BROWSER_UPLOAD_PATH}/`)) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), drive: identity => workspaceDrive(env, identity) });
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|rename|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');

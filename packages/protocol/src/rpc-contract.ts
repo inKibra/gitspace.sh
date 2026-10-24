@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { CloudImageChoiceCodec, CloudImageSelectionCodec, CloudImageStateCodec } from './cloud-image.js';
 import { StreamCursorCodec, streamCodec } from './stream-codec.js';
 import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
+import { DRIVE_FILE_MAX_BYTES } from './artifact-storage.js';
 import {
   ProjectCronDraftCodec,
   ProjectCronRunViewCodec,
@@ -1710,19 +1711,19 @@ export const inspectorWriteArtifactContract = gitspaceRpc
   .errors(inspectorMutationErrors)
   .mutation();
 
-/** Committed uploads are read back through the 16 MiB cloud artifact read cap. */
-export const ARTIFACT_UPLOAD_MAX_BYTES = 16 * 1024 * 1024;
 /** Raw bytes per chunk. Base64 plus the envelope must stay under the result-rpc
  * client's 1 MiB request cap and the account Worker's 512 KiB space-routed body cap. */
 export const ARTIFACT_UPLOAD_CHUNK_BYTES = 256 * 1024;
 const artifactUploadRequestFields = { spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), uploadId: wire.string };
 
-/** Reserves `uploads/<fileName>` in the space's writable mount; the file is listed only after commit. */
+/** Reserves `uploads/<fileName>` in the space's writable mount; the file is listed only after commit. `sha256` is the
+ * whole file's hexadecimal SHA-256 (`Sha256State` hashes a large `File` slice by slice): the file is stored under it as
+ * it arrives, up to `DRIVE_FILE_MAX_BYTES`, and commit refuses bytes that do not match it. */
 export const inspectorBeginArtifactUploadContract = gitspaceRpc
   .procedure()
   .input(wire.object({
     spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), fileName: wire.string,
-    size: wire.integer({ min: 1, max: ARTIFACT_UPLOAD_MAX_BYTES }), mediaType: wire.nullable(wire.string),
+    size: wire.integer({ min: 1, max: DRIVE_FILE_MAX_BYTES }), sha256: wire.string, mediaType: wire.nullable(wire.string),
   }))
   .output(wire.object({ uploadId: wire.string, url: wire.string, chunkBytes: wire.integer({ min: 1 }) }))
   .errors(inspectorMutationErrors)

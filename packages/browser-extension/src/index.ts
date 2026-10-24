@@ -1,4 +1,4 @@
-import { BACKGROUND_SOURCE, POPUP_SOURCE } from './bundle.generated.js';
+import { BACKGROUND_SOURCE, OFFSCREEN_SOURCE, POPUP_SOURCE } from './bundle.generated.js';
 
 export { relayCommandAllowed } from './commands.js';
 export { verifyRelayAuthorization } from './authorization.js';
@@ -38,6 +38,8 @@ code{display:block;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;wor
 form{display:flex;gap:6px;margin:8px 0}form label{flex:1}
 input{width:100%;font:inherit;font-size:12px;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:5px 8px}
 #runs li{font-size:11px;color:var(--muted);padding:3px 0;border-top:1px solid var(--line)}
+.rec{display:inline-flex;align-items:center;gap:5px;color:var(--red);font-weight:700;font-size:12px}.rec::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--red)}
+#tab-capture{margin-top:4px}#tab-capture .muted{flex:1}
 #message{margin:0 16px 12px;font-size:12px;color:var(--muted)}#message:empty{display:none}
 </style></head><body>
 <header><svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0f1115"/><path d="M9 10.5l6 5.5-6 5.5M17.5 21.5H23" fill="none" stroke="#3fb950" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -46,7 +48,9 @@ input{width:100%;font:inherit;font-size:12px;color:inherit;background:var(--bg);
 <p class="connection" role="status"><span class="dot"></span><span id="connection-text"></span></p>
 <p id="compatibility" class="alert" role="alert" hidden></p>
 <section class="card"><h2>Using this Chrome</h2><ul id="groups"></ul><p id="no-groups" class="muted">No workspace is using this Chrome.</p></section>
-<section id="this-tab" class="card" hidden><h2>This tab</h2><div class="row"><span id="tab-dot" class="dot"></span><span id="tab-group" class="grow name"></span><button id="ungroup" type="button">Remove from group</button></div></section>
+<section id="this-tab" class="card" hidden><h2>This tab</h2><div class="row"><span id="tab-dot" class="dot"></span><span id="tab-group" class="grow name"></span><button id="ungroup" type="button">Remove from group</button></div>
+<div id="tab-capture" class="row"><span id="capture-state" class="muted"></span><button id="capture" type="button">Capture</button></div></section>
+<section id="recordings-card" class="card" hidden><h2>Recording</h2><ul id="recordings"></ul></section>
 <div class="actions"><button id="snooze" type="button">Off for 1 hour</button></div>
 <details id="identity" class="card"><summary>Identity &amp; pairing</summary>
 <p class="muted">Browser identity — compare this fingerprint with the one GitSpace shows when you pair. Extension public key fingerprint (SHA-256):</p><code id="fingerprint"></code>
@@ -57,12 +61,15 @@ input{width:100%;font:inherit;font-size:12px;color:inherit;background:var(--bg);
 <p id="message" role="status"></p>
 <script src="popup.js"></script></body></html>`;
 
-/** The unpacked extension for one account: the service worker reaches the account it was downloaded from. */
+/** The unpacked extension for one account: the service worker reaches the account it was downloaded from; the
+ * offscreen document records the tabs you capture. */
 export function extensionFiles(accountUrl: string): Record<string, string> {
   return {
     'background.js': `const GITSPACE_ACCOUNT_URL = ${JSON.stringify(accountUrl)};\n${BACKGROUND_SOURCE}`,
     'popup.js': POPUP_SOURCE,
     'popup.html': POPUP_HTML,
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.3.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage'], host_permissions: [`${new URL(accountUrl).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
+    'offscreen.js': OFFSCREEN_SOURCE,
+    'offscreen.html': '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace recorder</title></head><body><script src="offscreen.js"></script></body></html>',
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.4.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen'], host_permissions: [`${new URL(accountUrl).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
   };
 }

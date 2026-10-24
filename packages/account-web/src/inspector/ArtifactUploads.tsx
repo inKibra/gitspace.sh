@@ -10,8 +10,9 @@ export interface ArtifactUploadRow {
   id: string;
   name: string;
   size: number;
+  /** Bytes hashed while `hashing`, bytes acknowledged after. */
   received: number;
-  status: 'uploading' | 'committing' | 'failed';
+  status: 'hashing' | 'uploading' | 'committing' | 'failed';
   error: string | null;
   retryable: boolean;
 }
@@ -62,11 +63,12 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
     const resume = entry.resumable && entry.session ? entry.session : undefined;
     if (!resume && entry.session) settle(entry.client.abort(entry.session.uploadId));
     if (!resume) entry.session = null;
-    update(id, { status: resume?.received === entry.file.size ? 'committing' : 'uploading', error: null, received: resume?.received ?? 0 });
+    update(id, { status: resume ? resume.received === entry.file.size ? 'committing' : 'uploading' : 'hashing', error: null, received: resume?.received ?? 0 });
     try {
       const artifact = await uploadArtifactFile(entry.client, entry.file, {
         signal: controller.signal,
         resume,
+        onHashed: (hashed) => update(id, { received: hashed }),
         onSession: (session) => {
           entry.session = session;
           update(id, { received: session.received, status: session.received === entry.file.size ? 'committing' : 'uploading' });
@@ -110,7 +112,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
       for (const file of files) {
         const id = crypto.randomUUID();
         const rejection = uploadRejection(file);
-        setRows((current) => [...current, { id, name: file.name, size: file.size, received: 0, status: rejection ? 'failed' : 'uploading', error: rejection, retryable: false }]);
+        setRows((current) => [...current, { id, name: file.name, size: file.size, received: 0, status: rejection ? 'failed' : 'hashing', error: rejection, retryable: false }]);
         if (rejection) continue;
         const entry: PendingUpload = { file, client: serialized, controller: null, session: null, resumable: false };
         pending.current.set(id, entry);
@@ -154,7 +156,7 @@ export function ArtifactUploadList({ uploads }: { uploads: ArtifactUploads }) {
     return <Card key={row.id} size="compact">
       <CardHeader>
         <CardTitle className="truncate">{row.name}</CardTitle>
-        <CardDescription className="tabular-nums">{`${formatBytes(row.received)} of ${formatBytes(row.size)} · ${percent}%${row.status === 'committing' ? ' · finishing' : ''}`}</CardDescription>
+        <CardDescription className="tabular-nums">{`${row.status === 'hashing' ? 'Preparing · ' : ''}${formatBytes(row.received)} of ${formatBytes(row.size)} · ${percent}%${row.status === 'committing' ? ' · finishing' : ''}`}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
         {/* FLUID-GAP: progress meter — the registry has no read-only progress bar; the fill width is the acknowledged byte ratio. */}

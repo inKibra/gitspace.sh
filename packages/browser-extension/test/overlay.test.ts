@@ -3,7 +3,7 @@ import { Window, type ShadowRoot } from 'happy-dom';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { browserOverlayFunction } from '../src/overlay.js';
 
-const show = { show: { mode: 'run', name: 'Checkout', color: '#1a73e8', binding: '__gitspaceStop' } };
+const show = { show: { mode: 'run', name: 'Checkout', color: '#1a73e8', binding: '__gitspaceStop', capture: 'ready' } };
 const windows: Window[] = [];
 afterEach(async () => { for (const window of windows.splice(0)) await window.happyDOM.close(); });
 
@@ -26,7 +26,7 @@ describe('the in-page overlay', () => {
     const element = host();
     if (!element) throw new Error('No overlay');
     expect(element.getAttribute('aria-hidden')).toBe('true');
-    expect([...roots[0]?.querySelectorAll('button, a, input, [tabindex]') ?? []].map(node => node.getAttribute('tabindex'))).toEqual(['-1']);
+    expect([...roots[0]?.querySelectorAll('button, a, input, [tabindex]') ?? []].map(node => node.getAttribute('tabindex'))).toEqual(['-1', '-1']);
     call(browserScreenshotPrepareFunction, []);
     expect(window.getComputedStyle(element).visibility).toBe('hidden');
     call(browserScreenshotRestoreFunction);
@@ -40,11 +40,30 @@ describe('the in-page overlay', () => {
     Object.assign(window, { __gitspaceStop: (payload: string) => { stops.push(payload); } });
     window.document.addEventListener('click', event => { clicks.push(event.type); });
     call(browserOverlayFunction, show);
-    const stop = roots[0]?.querySelector('button');
+    const stop = [...roots[0]?.querySelectorAll('button') ?? []].find(button => button.textContent === 'Stop');
     if (!stop) throw new Error('No Stop');
     stop.click();
     expect(stops).toEqual(['stop']);
     expect(clicks).toEqual([]);
+  });
+
+  it('Capture starts a capture where the account saves them; while it records, REC shows and Stop capture ends it', () => {
+    const { window, roots, call } = page();
+    const presses: string[] = [];
+    Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
+    const buttons = () => [...roots[0]?.querySelectorAll('button') ?? []];
+    const shown = () => buttons().filter(button => button.style.display !== 'none').map(button => button.textContent);
+    call(browserOverlayFunction, { show: { ...show.show, capture: 'none' } });
+    expect(shown()).toEqual(['Stop']);
+    call(browserOverlayFunction, show);
+    expect(shown()).toEqual(['Capture', 'Stop']);
+    buttons().find(button => button.textContent === 'Capture')?.click();
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'capture', capture: 'recording' } });
+    expect(roots[0]?.textContent).toContain('REC');
+    // Recording alone, the agent's Stop is not offered.
+    expect(shown()).toEqual(['Stop capture']);
+    buttons().find(button => button.textContent === 'Stop capture')?.click();
+    expect(presses).toEqual(['capture', 'captureStop']);
   });
 
   it('replaces one a previous debugger session left and leaves when removed', () => {

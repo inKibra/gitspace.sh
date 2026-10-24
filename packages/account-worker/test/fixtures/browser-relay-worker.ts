@@ -5,8 +5,9 @@ import { z } from 'zod';
 
 type FixtureEnv = { RELAY: DurableObjectNamespace<BrowserRelayFixture> };
 export class BrowserRelayFixture extends DurableObject<FixtureEnv> {
-  // This fixture hosts the relay alone, with no workspaces: group reports have nowhere to go and are dropped.
-  private readonly browser = new AccountBrowserRelay(this.ctx, { ACCOUNT_ID: 'account', SPACE_AUTHORITY: { getByName: () => ({ browserGroupReported: async () => {} }) } });
+  // This fixture hosts the relay alone, with no workspaces: group reports have nowhere to go and are dropped, and there
+  // is no drive for captures or uploads.
+  private readonly browser = new AccountBrowserRelay(this.ctx, { ACCOUNT_ID: 'account', SPACE_AUTHORITY: { getByName: () => ({ browserGroupReported: async () => {} }) } }, () => { throw new Error('This fixture has no drive'); });
   async fetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === '/api/browser-relay/extension') return this.browser.fetch(request);

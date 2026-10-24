@@ -42,6 +42,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
     debugger: { detach, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
     tabs: { query: async () => [], onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated: { addListener() {} } },
     tabGroups: { onRemoved: { addListener() {} } },
+    downloads: { onCreated: { addListener() {} } },
     alarms: { create() {}, onAlarm: { addListener() {} } },
   };
   const context = createContext({ chrome, indexedDB, WebSocket: Socket, crypto, TextEncoder, TextDecoder, URL, atob, btoa, setTimeout: () => 0, clearTimeout() {}, console });
@@ -109,7 +110,7 @@ function popupPage(answer: (message: Record<string, unknown>) => unknown) {
   runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
   return { context, elements, rendered: async () => { await rendered.promise; for (let turn = 0; turn < 10; turn++) await Promise.resolve(); rendered = Promise.withResolvers<void>(); } };
 }
-const popupState = (fingerprint: string | null) => ({ enabled: true, reenableAt: null, account: 'account.gitspace.test', connection: 'connected', fingerprint, compatibility: null, groups: [], activeTab: null, log: [] });
+const popupState = (fingerprint: string | null) => ({ enabled: true, reenableAt: null, account: 'account.gitspace.test', connection: 'connected', fingerprint, compatibility: null, groups: [], activeTab: null, recordings: [], log: [] });
 
 it('loads the actual worker fingerprint on popup startup and refreshes after pair and reset', async () => {
   let fingerprint: string | null = null;
@@ -150,6 +151,7 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
       debugger:{getTargets:async()=>[...tabs].map(([id,tab])=>({id:String(id),tabId:id,type:'page',title:'Page',url:tab.url})),onEvent:{addListener(){}},onDetach:{addListener(){}}},
       tabs:{onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get:async(id:number)=>tabs.get(id),onUpdated:{addListener(){}}},
       tabGroups:{onRemoved:{addListener(){}}},
+      downloads:{onCreated:{addListener(){}}},
       alarms:{create(){},onAlarm:{addListener(){}}},
     },grant,expiresAt,
   });
@@ -198,6 +200,7 @@ it('after a browser restart adopts the one restored group of the workspace, else
       debugger:{onEvent:{addListener(){}},onDetach:{addListener(){}}},
       tabs:{query:async({groupId}:{groupId:number})=>tabs.filter(tab=>tab.groupId===groupId),onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated:{addListener(){}}},
       tabGroups:{get:async()=>{if(!exists) throw new Error('Deleted');return {id:7};},query:async()=>groups,onRemoved:{addListener(){}}},
+      downloads:{onCreated:{addListener(){}}},
       alarms:{create(){},onAlarm:{addListener(){}}},
     },
   });

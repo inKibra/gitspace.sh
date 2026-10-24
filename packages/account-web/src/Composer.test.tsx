@@ -54,7 +54,7 @@ it('uploads attachments that are not sent inline and links them in the prompt', 
 
   const textarea = await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report (1).pdf', { type: 'application/pdf' }));
 
-  expect(uploads.begin).toHaveBeenCalledWith({ fileName: 'report (1).pdf', size: 10, mediaType: 'application/pdf' });
+  expect(uploads.begin).toHaveBeenCalledWith({ fileName: 'report (1).pdf', size: 10, sha256: '01d448afd928065458cf670b60f5a594d735af0172c8d67f22a81680132681ca', mediaType: 'application/pdf' });
   expect(uploads.commit).toHaveBeenCalledWith('report (1).pdf');
   expect(onSend.mock.calls.map(([text]) => text)).toEqual(['Summarize this\n\n<attachment name="report (1).pdf" url="drive://workspace/uploads/report%20(1).pdf" type="application/pdf" size="10" />']);
   expect(textarea.value).toBe('');

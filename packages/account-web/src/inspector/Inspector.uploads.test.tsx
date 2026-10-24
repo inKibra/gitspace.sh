@@ -2,7 +2,8 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES, rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { DRIVE_FILE_MAX_BYTES } from '@gitspace/protocol';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { Inspector, type InspectorProps } from './Inspector.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
 
@@ -139,16 +140,16 @@ describe('Inspector artifact uploads', () => {
     expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/b.zip"]')?.hasAttribute('data-selected')).toBe(true);
   });
 
-  it('rejects files over 16 MiB without beginning an upload', async () => {
+  it('rejects files over the drive file limit without beginning an upload', async () => {
     const uploads = client(acknowledge);
     props.artifactUpload = uploads;
     await render();
     const file = new File([], 'huge.zip');
-    Object.defineProperty(file, 'size', { value: ARTIFACT_UPLOAD_MAX_BYTES + 1 });
+    Object.defineProperty(file, 'size', { value: DRIVE_FILE_MAX_BYTES + 1 });
 
     await choose(file);
 
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('uploads are limited to 16 MiB');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('uploads are limited to 1 GiB');
     expect(uploads.begin).not.toHaveBeenCalled();
     await click('Dismiss huge.zip');
     expect(container.querySelector('[role="alert"]')).toBeNull();

@@ -1,13 +1,18 @@
 // The extension's service worker. Bundled by `src/build.ts`; the download prepends the account it belongs to as
 // `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
+import { CAPTURE_MAX_MS, CAPTURE_SCREENCAST, jpegSize, ScreencastRecorder } from '@gitspace/runtime-machine/browser-screencast';
 import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, siteOf, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 import { drawToolbarIcon } from './icon.ts';
 import { browserOverlayFunction } from './overlay.ts';
+import { base64Bytes, downloadBlobReadFunction, inputFilesChunkFunction, inputFilesPrepareFunction, inputFilesSetFunction } from './page-files.ts';
+import { TabScreencast } from './screencast.ts';
+import { Upload, uploadSignature } from './upload.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
+const ACCOUNT_ORIGIN = new URL(GITSPACE_ACCOUNT_URL).origin;
 const allowed = relayCommandAllowed;
 const prepareScreenshot = browserScreenshotPrepareFunction;
 const restoreScreenshot = browserScreenshotRestoreFunction;
@@ -67,6 +72,10 @@ async function authorize(authorization) {
   return {};
 }
 const EXTENSION_PROTOCOL = BROWSER_EXTENSION_PROTOCOL;
+/** The protocol the connected account speaks (0 while not connected). Captures, downloads saved to the drive and
+ * uploads into pages need an account at protocol 4; with one at 3, downloads stay Chrome's and Capture says why not. */
+let accountProtocol = 0;
+const MEDIA_PROTOCOL = 4;
 /** Set when the account refuses this extension, or this extension refuses the account, as incompatible. */
 let incompatible = false;
 let socket;
@@ -232,11 +241,13 @@ async function collapseIdle() {
     await chrome.tabGroups.update(found.record.chromeGroupId, { collapsed: true });
   }
 }
-/** Lets a tab's debugger channel go: its overlay leaves the page first, since the page keeps it after the debugger. */
+/** Lets a tab's debugger channel go: its overlay leaves the page first, since the page keeps it after the debugger.
+ * A capture recording the tab's screencast ends with what it recorded. */
 async function revoke(id) {
   const channel = channels.get(id); channels.delete(id);
   if (!channel) return releases.get(id);
   channel.cancelNavigation?.();
+  for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: GitSpace no longer uses this tab', true);
   const release = (async () => { if (channel.overlay) await overlayStep(channel, () => overlayCall(channel, { remove: true })); await chrome.debugger.detach(channel.source); })().catch(() => {});
   releases.set(id, release);
   try { await release; } finally { if (releases.get(id) === release) releases.delete(id); }
@@ -266,7 +277,19 @@ async function endRun(attemptId, reason) {
   if (!run) return;
   ended.set(attemptId, reason);
   if (ended.size > 100) ended.delete(ended.keys().next().value);
-  for (const targetId of run.targets) if (channels.has(targetId) && ![...runs.values()].some(other => other.targets.has(targetId))) await (reason === 'released' ? revoke(targetId) : fence(targetId));
+  for (const targetId of run.targets) {
+    const channel = channels.get(targetId);
+    if (!channel || [...runs.values()].some(other => other.targets.has(targetId))) continue;
+    // A tab being captured keeps its debugger for the capture's screencast, which lets it go when it ends; it stops
+    // painting for the script.
+    if ([...captures.values()].some(capture => capture.channel === channel)) {
+      if (channel.painting) { void channel.screencast.remove(channel.painting).catch(() => {}); channel.painting = null; }
+      channel.heldForCapture = true;
+      if (reason !== 'released') send({ targetId, fenced: true });
+      continue;
+    }
+    await (reason === 'released' ? revoke(targetId) : fence(targetId));
+  }
   // A tab a single step still uses keeps its overlay, without the script's glow.
   for (const targetId of run.targets) { const channel = channels.get(targetId); if (channel) void overlay(channel); }
   updateToolbar();
@@ -305,16 +328,18 @@ function markRunning(groupId) {
     } catch {}
   });
 }
-/** The isolated world of the in-page overlay (`overlay.ts`), and the binding its Stop calls there. */
+/** The isolated world of the in-page overlay (`overlay.ts`), and the binding its buttons call there: `stop` (the
+ * agent), `capture` and `captureStop`. */
 const OVERLAY_WORLD = 'gitspace-overlay';
 const OVERLAY_BINDING = '__gitspaceStop';
 /** The longest one overlay step may take: a page held by a dialog never answers, and the agent never waits on it. */
 const OVERLAY_STEP_MS = 1000;
-/** What a tab's overlay shows: a script running on it, a single step using it now, or nothing. */
+/** What a tab's overlay shows: a script running on it, a single step using it now, a capture recording it, or nothing. */
 function overlayMode(channel) {
   if ([...runs.values()].some(run => run.targets.has(channel.targetId) && live(run))) return 'run';
   const step = authorizations.get(channel.grant.groupId);
-  return step?.body.command.type === 'execute' && step.targetId === channel.targetId && Date.parse(step.body.expiresAt) > Date.now() && Date.parse(step.body.dispatch.deadlineAt) > Date.now() ? 'step' : null;
+  if (step?.body.command.type === 'execute' && step.targetId === channel.targetId && Date.parse(step.body.expiresAt) > Date.now() && Date.parse(step.body.dispatch.deadlineAt) > Date.now()) return 'step';
+  return captureOn(channel.tabId) ? 'capture' : null;
 }
 /** Overlay steps of one tab run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing else. */
 function overlayStep(channel, operation) {
@@ -342,14 +367,16 @@ async function overlayCall(channel, command) {
   try { return await call(); } catch { channel.overlay.contextId = null; return call(); }
 }
 /** Brings a tab's overlay up to date (`extra`: the agent's pointer, or hiding it for a script's screenshot): shown
- * while the agent uses the tab, removed after. */
+ * while the agent uses the tab or a capture records it, removed after. Its Capture button shows only when the account
+ * saves captures. */
 function overlay(channel, extra = {}) {
   return overlayStep(channel, async () => {
     if (channels.get(channel.targetId) !== channel) return;
     const mode = overlayMode(channel);
     if (!mode) { if (channel.overlay) { try { await overlayCall(channel, { remove: true }); } finally { delete channel.overlay; } } return; }
     channel.overlay ??= { contextId: null };
-    await overlayCall(channel, { show: { mode, name: channel.grant.groupName, color: GROUP_HEX[groupColor(channel.grant.workspaceId)], binding: OVERLAY_BINDING }, ...extra });
+    const capture = captureOn(channel.tabId) ? 'recording' : accountProtocol >= MEDIA_PROTOCOL ? 'ready' : 'none';
+    await overlayCall(channel, { show: { mode, name: channel.grant.groupName, color: GROUP_HEX[groupColor(channel.grant.workspaceId)], binding: OVERLAY_BINDING, capture }, ...extra });
   });
 }
 /** A tab as one script sees it: the script's sites, and the site you dragged the tab in on when the script named none. */
@@ -525,7 +552,8 @@ async function createAgentTab(grant, url) {
   finally { agentTabs.delete(tab.id); }
   return targetId;
 }
-/** The debugger channel of a tab in the group, attached on first use. */
+/** The debugger channel of a tab in the group, attached on first use, with the tab's one screencast. With an account
+ * that saves downloads, Page events are on from the start, so a download the agent starts is seen. */
 async function attach(grant, targetId) {
   await member(grant, targetId);
   await releases.get(targetId);
@@ -534,7 +562,8 @@ async function attach(grant, targetId) {
   if (channel && channel.grant.groupId !== grant.groupId) throw new Error('Target already bound to another workspace');
   if (!channel) {
     const source = {targetId}; await chrome.debugger.attach(source,'1.3');
-    channel = {grant,targetId,source,sessionId:crypto.randomUUID(),refs:new Set(),document:0}; channels.set(targetId,channel);
+    channel = {grant,targetId,source,sessionId:crypto.randomUUID(),refs:new Set(),document:0,screencast:new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)),painting:null}; channels.set(targetId,channel);
+    if (accountProtocol >= MEDIA_PROTOCOL) await chrome.debugger.sendCommand(source, 'Page.enable');
   } else channel.grant = grant;
   await check(targetId, channel);
   return channel;
@@ -557,7 +586,7 @@ async function runCommand(message) {
     try {
       lease = await check(targetId);
       if (lease.grant.groupId !== run.body.command.grant.body.groupId || !run.targets.has(targetId)) throw new Error('Tab not opened by this script');
-      verdict = relayRunCommand(method, params, { ...runTab(run, lease), targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy });
+      verdict = relayRunCommand(method, params, { ...runTab(run, lease), targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy, account: ACCOUNT_ORIGIN });
       if ('refused' in verdict) throw new Error(verdict.refused);
     } catch (error) { run.refused++; throw error; }
     lastUsed.set(lease.grant.groupId, Date.now());
@@ -566,7 +595,7 @@ async function runCommand(message) {
     // The cursor reaches each point before the event does; a script's own screenshot never shows the overlay.
     if (method === 'Input.dispatchMouseEvent') await overlay(lease, { cursor: { x: verdict.send.x, y: verdict.send.y, type: verdict.send.type } });
     if (method === 'Page.captureScreenshot') await overlay(lease, { conceal: true });
-    effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
+    effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : method === 'GitSpace.setInputFilesFromUrls' ? setInputFiles(lease, verdict.send) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
   } finally {
     admitted.resolve();
     if (admissions.get(targetId) === admitted.promise) admissions.delete(targetId);
@@ -597,6 +626,289 @@ async function preview(scope, groupId, targetId) {
     })(), timeout.promise]);
     return shot ? { image: shot.data, reason: null } : { image: null, reason: 'Chrome did not draw this tab in time' };
   } finally { clearTimeout(timer); }
+}
+/** The signed management request for `action` the account sent with this operation, naming these `fields` exactly;
+ * each is used once. */
+function management(action, fields) {
+  const authorization = authorizations.get('management');
+  const command = authorization?.body.command;
+  if (!command || command.type !== 'manage' || command.action !== action || Object.entries(fields).some(([key, value]) => command[key] !== value) || Date.parse(authorization.body.expiresAt) <= Date.now() || Date.parse(authorization.body.dispatch.deadlineAt) <= Date.now() || authorization.used.has(action)) return null;
+  authorization.used.add(action);
+  return authorization;
+}
+/** Signs one upload to the account (`upload.ts`) with this Chrome's pairing key. */
+async function signUpload(method, pathname, bodySha256) {
+  const identity = await stored('identity');
+  if (!identity) throw new Error('Human pairing required');
+  return uploadSignature(identity, method, pathname, bodySha256);
+}
+/** Why the Browser tab cannot capture a tab: it records only one the agent uses now, whose debugger is attached. */
+const CAPTURE_IDLE = 'Capture from the Browser tab records a tab while the agent uses it; to record any tab of the workspace group, use Capture in the GitSpace extension popup';
+/** How long `captureStart` waits for the first frame, whose size it answers with. */
+const CAPTURE_FIRST_FRAME_MS = 2000;
+/**
+ * Captures recording in this Chrome, by capture id (docs/APERTURE-DESIGN.md §11): `video` (WebM with sound from
+ * `chrome.tabCapture`, recorded and uploaded by the offscreen document) when you press Capture, or `frames` (the tab's
+ * screencast, recorded here into `frames.bin` and `frames.json`) from the Browser tab, or from your Capture on a tab
+ * Chrome gives no video of. Each stops at 30 minutes or 1 GiB, and the account hears how it ended.
+ */
+const captures = new Map();
+/** The capture recording a tab, if any. */
+function captureOn(tabId) { for (const capture of captures.values()) if (capture.tabId === tabId) return capture; return undefined; }
+/** One file of a capture, uploaded as it is recorded. */
+function captureUpload(capture, file, mediaType) { return new Upload(GITSPACE_ACCOUNT_URL, signUpload, { kind: 'capture', groupId: capture.groupId, captureId: capture.captureId, file, mediaType }); }
+/** The toolbar and the tab's in-page control show a capture starting or ending. */
+function capturesChanged(tabId) {
+  updateToolbar();
+  for (const channel of channels.values()) if (channel.tabId === tabId) void overlay(channel);
+}
+/** Records a tab's screencast frames through its one screencast (`TabScreencast`), and answers once the first frame
+ * came (or `CAPTURE_FIRST_FRAME_MS` passed) with their size. `announce`: the extension started it, so it tells the
+ * account (`capture` `start`); the Browser tab's `captureStart` named it already. */
+async function startFramesCapture(channel, captureId, announce) {
+  if (captureOn(channel.tabId)) throw new Error('This tab is already being captured');
+  const tab = await chrome.tabs.get(channel.tabId);
+  const startedAt = Date.now();
+  const capture = { captureId, track: 'frames', groupId: channel.grant.groupId, tabId: channel.tabId, targetId: channel.targetId, url: (tab.url || '').slice(0, 8192), title: (tab.title || '').slice(0, 500), startedAt, channel, ending: null, timer: undefined };
+  capture.frames = captureUpload(capture, 'frames.bin', 'application/octet-stream');
+  const first = Promise.withResolvers();
+  // The screencast acknowledges each frame once for every consumer.
+  capture.recorder = new ScreencastRecorder({ startedAt, append: bytes => capture.frames.write(bytes), ack: async () => {}, limit: reason => { void endCapture(capture, reason, true); } });
+  capture.consumer = { maxWidth: CAPTURE_SCREENCAST.maxWidth, maxHeight: CAPTURE_SCREENCAST.maxHeight, quality: CAPTURE_SCREENCAST.quality, frame: frame => { capture.recorder.frame(frame); first.resolve(frame); } };
+  captures.set(captureId, capture);
+  if (announce) send({ capture: { event: 'start', captureId, groupId: capture.groupId, targetId: capture.targetId, track: 'frames', sound: false, page: { url: capture.url, title: capture.title }, startedAt: new Date(startedAt).toISOString() } });
+  try { await channel.screencast.add(capture.consumer); }
+  catch (error) {
+    captures.delete(captureId);
+    if (announce) send({ capture: { event: 'end', captureId, state: 'failed', reason: 'Chrome did not start the screencast of this tab', endedAt: new Date().toISOString(), tracks: {} } });
+    throw error;
+  }
+  capture.timer = setTimeout(() => { void endCapture(capture, 'The capture reached 30 minutes', true); }, CAPTURE_MAX_MS);
+  capturesChanged(capture.tabId);
+  const waited = setTimeout(() => first.resolve(null), CAPTURE_FIRST_FRAME_MS);
+  const frame = await first.promise;
+  clearTimeout(waited);
+  const size = frame ? jpegSize(Uint8Array.from(atob(frame.data), character => character.charCodeAt(0))) : null;
+  return { capture, size: size ?? { width: CAPTURE_SCREENCAST.maxWidth, height: CAPTURE_SCREENCAST.maxHeight } };
+}
+/** The offscreen document that records video, made when a recording starts and closed after the last one. */
+let offscreenCreating = null;
+async function offscreenDocument() {
+  if ((await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length) return;
+  offscreenCreating ??= chrome.offscreen.createDocument({ url: 'offscreen.html', reasons: ['USER_MEDIA'], justification: 'Records the tab you chose to capture, with its sound' }).finally(() => { offscreenCreating = null; });
+  await offscreenCreating;
+}
+/**
+ * Starts your capture of a tab of a workspace group: video with its sound (`chrome.tabCapture`), which Chrome gives
+ * only for a tab you invoked the extension on (opening this popup there). From the tab's in-page control
+ * (`fallback`: its debugger channel), a tab Chrome gives no video of records its screencast frames instead.
+ */
+async function startCapture(tabId, fallback) {
+  if (accountProtocol < MEDIA_PROTOCOL) throw new Error(connected ? 'Your GitSpace account does not save captures yet; update GitSpace' : 'GitSpace is not connected to your account');
+  const tab = await chrome.tabs.get(tabId);
+  const found = (await workspaceGroups()).find(({ group }) => group.id === tab.groupId);
+  if (!found) throw new Error('Capture records a tab of a workspace group');
+  if (captureOn(tabId)) throw new Error('This tab is already being captured');
+  const targetId = (await targets()).find(target => target.tabId === tabId)?.id;
+  if (!targetId) throw new Error('Chrome cannot capture this tab');
+  let streamId;
+  try { streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }); }
+  catch (error) { if (fallback) return startFramesCapture(fallback, crypto.randomUUID(), true); throw error; }
+  const startedAt = Date.now();
+  const capture = { captureId: crypto.randomUUID(), track: 'video', groupId: found.record.groupId, tabId, targetId, url: (tab.url || '').slice(0, 8192), title: (tab.title || '').slice(0, 500), startedAt, channel: null, ending: null, timer: undefined };
+  captures.set(capture.captureId, capture);
+  send({ capture: { event: 'start', captureId: capture.captureId, groupId: capture.groupId, targetId, track: 'video', sound: true, page: { url: capture.url, title: capture.title }, startedAt: new Date(startedAt).toISOString() } });
+  try {
+    await offscreenDocument();
+    const started = await chrome.runtime.sendMessage({ target: 'offscreen', record: { captureId: capture.captureId, groupId: capture.groupId, streamId, account: GITSPACE_ACCOUNT_URL } });
+    if (!started || started.error) throw new Error(started?.error ?? 'The recorder did not answer');
+  } catch (error) {
+    await endCapture(capture, null, true, { error: `Chrome could not record this tab: ${error.message}` });
+    throw error;
+  }
+  capture.timer = setTimeout(() => { void endCapture(capture, 'The capture reached 30 minutes', true); }, CAPTURE_MAX_MS);
+  capturesChanged(tabId);
+  return { capture };
+}
+/**
+ * Ends a capture once: stops recording, finishes its uploads and, with `announce`, tells the account how it ended
+ * (`capture` `end`); the Browser tab's `captureStop` of frames hears it in its answer instead. `recorded`: what the
+ * offscreen document reported for a video that ended on its own. Answers what a frames capture kept (`summary`).
+ */
+function endCapture(capture, reason, announce, recorded) {
+  capture.ending ??= (async () => {
+    clearTimeout(capture.timer);
+    let tracks = {}, summary = null, failure = null;
+    if (capture.track === 'frames') {
+      await capture.channel.screencast.remove(capture.consumer).catch(() => {});
+      try {
+        const kept = await capture.recorder.stop();
+        if (!kept.count) throw new Error('Chrome sent no frames of this tab');
+        await capture.frames.complete();
+        const index = captureUpload(capture, 'frames.json', 'application/json');
+        await index.write(new TextEncoder().encode(JSON.stringify(kept.index)));
+        await index.complete();
+        if (kept.thumbnail) { const thumbnail = captureUpload(capture, 'thumbnail.jpg', 'image/jpeg'); await thumbnail.write(kept.thumbnail).then(() => thumbnail.complete()).catch(() => {}); }
+        summary = { count: kept.count, width: kept.width, height: kept.height, durationMs: kept.durationMs };
+        tracks = { frames: { path: 'frames.bin', index: 'frames.json', count: kept.count, width: kept.width, height: kept.height } };
+      } catch (error) { failure = String(error.message || error); await capture.frames.abort(); }
+    } else {
+      const result = recorded ?? await chrome.runtime.sendMessage({ target: 'offscreen', stop: capture.captureId, reason }).catch(error => ({ error: error.message })) ?? { error: 'The recorder did not answer' };
+      if (result.video) tracks = { video: { path: 'video.webm', ...result.video } }; else failure = result.error ?? 'The recording failed';
+      reason ??= result.reason ?? null;
+    }
+    captures.delete(capture.captureId);
+    capturesChanged(capture.tabId);
+    if (capture.track === 'video' && ![...captures.values()].some(other => other.track === 'video')) await chrome.offscreen.closeDocument().catch(() => {});
+    // A tab the debugger stayed on only for this capture is let go now that no script drives it.
+    if (capture.channel?.heldForCapture && channels.get(capture.targetId) === capture.channel && ![...runs.values()].some(run => run.targets.has(capture.targetId))) await revoke(capture.targetId);
+    if (announce) send({ capture: { event: 'end', captureId: capture.captureId, state: failure ? 'failed' : 'saved', reason: failure ?? reason ?? null, endedAt: new Date().toISOString(), tracks } });
+    return { summary };
+  })();
+  return capture.ending;
+}
+/** A button of a tab's in-page control: Stop (the agent's work on the group), Capture, or Stop capture. */
+function overlayButton(lease, payload) {
+  if (payload === 'stop') return stopGroup(lease.grant.groupId);
+  if (payload === 'capture') return startCapture(lease.tabId, lease);
+  const capture = captureOn(lease.tabId);
+  return payload === 'captureStop' && capture ? endCapture(capture, null, true) : Promise.resolve();
+}
+/**
+ * Downloads an agent tab starts (docs/SIMPLIFICATION.md Batch 16 item 2): the tab's debugger reports each
+ * (`Page.downloadWillBegin`) and `chrome.downloads` reports Chrome's download of the same URL, in either order. The
+ * extension takes Chrome's copy out of your Downloads folder, reads the file through the tab's debugger session and
+ * uploads it to the workspace's drive (`browser/downloads/<date>/<name>`) under the script's or step's attempt; the
+ * account lists it in the run's result.
+ */
+const DOWNLOAD_MATCH_MS = 10_000;
+/** How long a script's release waits for its downloads to be saved. */
+const DOWNLOAD_RELEASE_MS = 60_000;
+const DOWNLOAD_READ_BYTES = 1024 * 1024;
+/** Downloads the tab reported that Chrome has not reported yet, and the other way round. */
+const begunDownloads = [];
+const chromeDownloads = [];
+/** Downloads being saved, by attempt. */
+const savingDownloads = new Map();
+function downloadBegan(lease, params) {
+  if (accountProtocol < MEDIA_PROTOCOL || typeof params.url !== 'string') return;
+  let attemptId = [...runs].find(([, run]) => run.targets.has(lease.targetId) && live(run))?.[0];
+  const step = authorizations.get(lease.grant.groupId);
+  if (!attemptId && step?.body.command.type === 'execute' && step.targetId === lease.targetId && Date.parse(step.body.expiresAt) > Date.now() && Date.parse(step.body.dispatch.deadlineAt) > Date.now()) attemptId = step.body.scope.attemptId;
+  if (!attemptId) return;
+  const now = Date.now();
+  const claim = Promise.withResolvers();
+  const created = chromeDownloads.findIndex(entry => now - entry.at < DOWNLOAD_MATCH_MS && (entry.item.url === params.url || entry.item.finalUrl === params.url));
+  if (created >= 0) claim.resolve(chromeDownloads.splice(created, 1)[0].item);
+  else {
+    const waiting = { url: params.url, claim };
+    begunDownloads.push(waiting);
+    setTimeout(() => { const index = begunDownloads.indexOf(waiting); if (index >= 0) begunDownloads.splice(index, 1); claim.resolve(null); }, DOWNLOAD_MATCH_MS);
+  }
+  const download = { url: params.url, name: typeof params.suggestedFilename === 'string' ? params.suggestedFilename : '', frameId: params.frameId, lease, attemptId, groupId: lease.grant.groupId };
+  let jobs = savingDownloads.get(attemptId);
+  if (!jobs) { jobs = new Set(); savingDownloads.set(attemptId, jobs); }
+  const job = claim.promise.then(item => item ? saveDownload(item, download) : undefined)
+    .catch(error => { console.warn(JSON.stringify({ event: 'gitspace_download_failed', url: download.url.slice(0, 200), error: String(error?.message || error) })); })
+    .finally(() => { jobs.delete(job); if (!jobs.size && savingDownloads.get(attemptId) === jobs) savingDownloads.delete(attemptId); });
+  jobs.add(job);
+}
+chrome.downloads.onCreated.addListener(item => {
+  if (item.byExtensionId === chrome.runtime.id) return;
+  const index = begunDownloads.findIndex(entry => entry.url === item.url || entry.url === item.finalUrl);
+  if (index >= 0) { begunDownloads.splice(index, 1)[0].claim.resolve(item); return; }
+  if (accountProtocol < MEDIA_PROTOCOL) return;
+  const now = Date.now();
+  for (let at = chromeDownloads.length - 1; at >= 0; at--) if (now - chromeDownloads[at].at >= DOWNLOAD_MATCH_MS) chromeDownloads.splice(at, 1);
+  chromeDownloads.push({ item, at: now });
+});
+/** Waits (up to `DOWNLOAD_RELEASE_MS`) until the downloads of an attempt are saved, so the run's result lists them. */
+async function downloadsSaved(attemptId) {
+  const jobs = savingDownloads.get(attemptId);
+  if (!jobs?.size) return;
+  const timeout = Promise.withResolvers();
+  const timer = setTimeout(timeout.resolve, DOWNLOAD_RELEASE_MS);
+  await Promise.race([Promise.allSettled([...jobs]), timeout.promise]);
+  clearTimeout(timer);
+}
+async function saveDownload(item, download) {
+  // Out of your Downloads folder: Chrome's copy stops (or, already finished, is deleted) and leaves the list.
+  await chrome.downloads.cancel(item.id).catch(() => {});
+  const [current] = await chrome.downloads.search({ id: item.id }).catch(() => []);
+  if (current?.state === 'complete') await chrome.downloads.removeFile(item.id).catch(() => {});
+  await chrome.downloads.erase({ id: item.id }).catch(() => {});
+  const source = await openDownload(download, item.mime || 'application/octet-stream');
+  const name = (download.name || (item.filename || '').split(/[\\/]/).pop() || 'download').replace(/[\u0000-\u001f\\/:*?"<>|]/g, '_').trim().slice(0, 200) || 'download';
+  const upload = new Upload(GITSPACE_ACCOUNT_URL, signUpload, { kind: 'download', groupId: download.groupId, attemptId: download.attemptId, name, mediaType: source.mediaType });
+  try {
+    for (let piece = await source.read(); piece; piece = await source.read()) await upload.write(piece);
+    await upload.complete();
+  } catch (error) { await upload.abort(); throw error; }
+  finally { await source.close(); }
+}
+/** A download's file, read in pieces: a `data:` URL as it is, a `blob:` URL in an isolated world of the frame that
+ * made it, anything else loaded again through the tab's debugger with the page's credentials. */
+async function openDownload(download, fallbackType) {
+  const { lease, url } = download;
+  const decode = data => Uint8Array.from(atob(data), character => character.charCodeAt(0));
+  if (url.startsWith('data:')) {
+    const comma = url.indexOf(',');
+    const header = url.slice(5, comma);
+    let bytes = header.endsWith(';base64') ? decode(url.slice(comma + 1)) : new TextEncoder().encode(decodeURIComponent(url.slice(comma + 1)));
+    return { mediaType: header.split(';')[0] || 'text/plain', read: async () => { const piece = bytes; bytes = null; return piece; }, close: async () => {} };
+  }
+  if (url.startsWith('blob:')) {
+    const world = await chrome.debugger.sendCommand(lease.source, 'Page.createIsolatedWorld', { frameId: download.frameId, worldName: 'gitspace-relay' });
+    let offset = 0, total = 0;
+    const piece = async () => {
+      const result = await chrome.debugger.sendCommand(lease.source, 'Runtime.callFunctionOn', { functionDeclaration: downloadBlobReadFunction, arguments: [{ value: url }, { value: offset }, { value: DOWNLOAD_READ_BYTES }], executionContextId: world.executionContextId, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) throw new Error('The page no longer holds this download (it revoked its blob URL)');
+      const bytes = decode(result.result.value.data);
+      total = result.result.value.total; offset += bytes.byteLength;
+      return { bytes, type: result.result.value.type };
+    };
+    const first = await piece();
+    let held = first.bytes;
+    return { mediaType: (first.type || fallbackType).split(';')[0].trim(), read: async () => { if (held) { const bytes = held; held = null; return bytes; } return offset < total ? (await piece()).bytes : null; }, close: async () => {} };
+  }
+  const { resource } = await chrome.debugger.sendCommand(lease.source, 'Network.loadNetworkResource', { frameId: download.frameId, url, options: { disableCache: false, includeCredentials: true } });
+  if (!resource.success || !resource.stream) throw new Error(`Could not load the download again (${resource.netErrorName || `HTTP ${resource.httpStatusCode}`})`);
+  const contentType = Object.entries(resource.headers ?? {}).find(([name]) => name.toLowerCase() === 'content-type')?.[1];
+  let eof = false;
+  return {
+    mediaType: String(contentType || fallbackType).split(';')[0].trim(),
+    read: async () => {
+      if (eof) return null;
+      const chunk = await chrome.debugger.sendCommand(lease.source, 'IO.read', { handle: resource.stream, size: DOWNLOAD_READ_BYTES });
+      eof = chunk.eof;
+      const bytes = chunk.base64Encoded ? decode(chunk.data) : new TextEncoder().encode(chunk.data);
+      return bytes.byteLength || !eof ? bytes : null;
+    },
+    close: () => chrome.debugger.sendCommand(lease.source, 'IO.close', { handle: resource.stream }).catch(() => {}),
+  };
+}
+/** A drive file goes into a page's file input (`GitSpace.setInputFilesFromUrls`, checked by `relayRunCommand`): the
+ * extension fetches each sealed `/files/` link itself, then hands the bytes to an isolated world of the tab in pieces,
+ * which sets the input's files and fires input and change. Neither the link nor the account reaches the page. */
+const INPUT_FILE_PIECE_BYTES = 3 * 1024 * 1024;
+async function setInputFiles(lease, { backendNodeId, files }) {
+  const contents = [];
+  for (const file of files) {
+    const response = await fetch(file.url, { credentials: 'omit', cache: 'no-store' });
+    if (!response.ok) throw new Error(`Could not read ${file.name} from the drive (HTTP ${response.status})`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength !== file.size) throw new Error(`${file.name} is ${bytes.byteLength} bytes in the drive, not ${file.size}`);
+    contents.push(bytes);
+  }
+  const resolved = await chrome.debugger.sendCommand(lease.source, 'DOM.resolveNode', { backendNodeId, executionContextId: await isolatedContext(lease) });
+  const objectId = resolved.object.objectId;
+  try {
+    const refusal = await fixedCall(lease, inputFilesPrepareFunction, [files.length], objectId);
+    if (refusal) throw new Error(refusal);
+    for (const [index, bytes] of contents.entries()) for (let offset = 0; offset === 0 || offset < bytes.byteLength; offset += INPUT_FILE_PIECE_BYTES) await fixedCall(lease, inputFilesChunkFunction, [index, base64Bytes(bytes.subarray(offset, offset + INPUT_FILE_PIECE_BYTES))], objectId);
+    await fixedCall(lease, inputFilesSetFunction, [files.map(file => ({ name: file.name, mediaType: file.mediaType }))], objectId);
+  } finally { await chrome.debugger.sendCommand(lease.source, 'Runtime.releaseObject', { objectId }).catch(() => {}); }
+  return {};
 }
 async function execute(message) {
   if (message.operation === 'authorize') return authorize(message.authorization);
@@ -632,10 +944,10 @@ async function execute(message) {
     const targetId = message.targetId || await createAgentTab(grant, message.url || 'about:blank');
     const channel = await attach(grant, targetId);
     // Chrome does not draw a tab behind yours, and under the script's focus emulation its animation frames then come
-    // about once a second, so each Playwright action waited 1–2 s for its element to hold still. A screencast keeps
-    // the tab painting in the background without showing it; its frames are never acknowledged, so only the first
-    // few reach the extension, and it ends when the debugger leaves the tab.
-    if (!channel.painting) { channel.painting = true; await chrome.debugger.sendCommand(channel.source, 'Page.startScreencast', { format: 'jpeg', quality: 1, maxWidth: 1, maxHeight: 1 }); }
+    // about once a second, so each Playwright action waited 1–2 s for its element to hold still. A 1×1 screencast
+    // keeps the tab painting in the background without showing it; it takes no frames, and it ends when no script
+    // drives the tab or the debugger leaves it.
+    if (!channel.painting) { channel.painting = { maxWidth: 1, maxHeight: 1, quality: 1 }; await channel.screencast.add(channel.painting); }
     run.targets.add(targetId);
     lastUsed.set(grant.groupId, Date.now());
     void overlay(channel);
@@ -660,13 +972,31 @@ async function execute(message) {
     return {targetId,sessionId:channel.sessionId};
   }
   if (message.operation === 'preview') {
-    const authorization = authorizations.get('management');
-    const command = authorization?.body.command;
-    if (!command || command.type !== 'manage' || command.action !== 'preview' || command.groupId !== message.groupId || command.targetId !== message.targetId || Date.parse(authorization.body.expiresAt) <= Date.now() || Date.parse(authorization.body.dispatch.deadlineAt) <= Date.now() || authorization.used.has('preview')) throw new Error('Signed tab preview required');
-    authorization.used.add('preview');
+    const authorization = management('preview', { groupId: message.groupId, targetId: message.targetId });
+    if (!authorization) throw new Error('Signed tab preview required');
     return preview(authorization.body.scope, message.groupId, message.targetId);
   }
-  if (message.operation === 'release') { await endRun(message.attemptId, 'released'); return {}; }
+  if (message.operation === 'captureStart') {
+    const authorization = typeof message.captureId === 'string' ? management('captureStart', { groupId: message.groupId, targetId: message.targetId, captureId: message.captureId }) : null;
+    if (!authorization) throw new Error('Signed capture start required');
+    const channel = channels.get(message.targetId);
+    const scope = authorization.body.scope;
+    if (!channel || channel.grant.groupId !== message.groupId || channel.grant.projectId !== scope.projectId || channel.grant.workspaceId !== scope.workspaceId) throw new Error(CAPTURE_IDLE);
+    await check(message.targetId, channel);
+    const { capture, size } = await startFramesCapture(channel, message.captureId, false);
+    return { captureId: capture.captureId, ...size, url: capture.url, title: capture.title };
+  }
+  if (message.operation === 'captureStop') {
+    if (!management('captureStop', { captureId: message.captureId })) throw new Error('Signed capture stop required');
+    const capture = captures.get(message.captureId);
+    if (!capture) throw new Error('This capture is not recording in this Chrome');
+    // A video's end comes as its own event once its upload completes; frames answer here.
+    if (capture.track === 'video') { void endCapture(capture, null, true); return {}; }
+    const { summary } = await endCapture(capture, null, false);
+    if (!summary) throw new Error('The capture could not be saved');
+    return summary;
+  }
+  if (message.operation === 'release') { await downloadsSaved(message.attemptId); await endRun(message.attemptId, 'released'); return {}; }
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
   // Before any await: the script's commands reach its tab in the order they arrived.
   if (message.attemptId !== undefined) return runCommand(message);
@@ -709,20 +1039,29 @@ async function execute(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.sessionId) return;
   for (const [id, lease] of channels) if (lease.targetId === source.targetId) {
-    // Stop on the tab's overlay, from the overlay's own world only. Neither it nor that world reaches the session.
-    if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) { if (lease.overlay && params.executionContextId === lease.overlay.contextId) void stopGroup(lease.grant.groupId).catch(() => {}); return; }
+    // The tab's one screencast feeds its consumers; no frame reaches a script or the relay.
+    if (method === 'Page.screencastFrame') { lease.screencast.frame(params); return; }
+    if (method === 'Page.screencastVisibilityChanged') return;
+    // The overlay's buttons, from the overlay's own world only. Neither they nor that world reach the session.
+    if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) { if (lease.overlay && params.executionContextId === lease.overlay.contextId) void overlayButton(lease, params.payload).catch(() => {}); return; }
     if (method === 'Runtime.executionContextCreated' && params.context?.name === OVERLAY_WORLD) return;
     if (method === 'DOM.documentUpdated' || (method === 'Page.frameNavigated' && !params.frame.parentId)) { lease.document++; lease.refs.clear(); }
     if (method === 'Page.frameNavigated' && !params.frame.parentId && lease.overlay) lease.overlay.contextId = null;
     // A new document lacks the overlay until it is drawn again.
     if (method === 'Page.loadEventFired' && lease.overlay) void overlay(lease);
+    if (method === 'Page.downloadWillBegin') downloadBegan(lease, params);
     // A script's tab reports every event of its own session, without network credentials.
     if ([...runs.values()].some(run => run.targets.has(lease.targetId) && live(run))) { const forwarded = relayRunEvent(method, params); if (forwarded) forward(id, lease, { targetId: id, sessionId: lease.sessionId, method, params: forwarded }); return; }
     if (!['Page.frameNavigated', 'Page.loadEventFired', 'DOM.documentUpdated'].includes(method)) return;
     void check(id, lease).then(() => send({ targetId: id, sessionId: lease.sessionId, method, params })).catch(() => {});
   }
 });
-chrome.debugger.onDetach.addListener(source => { for (const [id, channel] of channels) if (channel.targetId === source.targetId) { channel.cancelNavigation?.(); channels.delete(id); send({ targetId: id, fenced: true }); } });
+chrome.debugger.onDetach.addListener(source => {
+  for (const [id, channel] of channels) if (channel.targetId === source.targetId) {
+    channel.cancelNavigation?.(); channels.delete(id); send({ targetId: id, fenced: true });
+    for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: Chrome’s debugger left this tab', true);
+  }
+});
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   for (const [id] of channels) void check(id).catch(() => {});
   // The overlay comes back on a page that loaded, whether or not its tab reports Page events.
@@ -757,7 +1096,8 @@ const switched = chrome.storage.local.get(['enabled', 'reenableAt']).then(async 
 }).catch(() => {});
 void switched.then(updateToolbar);
 /** Turns GitSpace on or off in this Chrome; off for `minutes` turns it back on after them. Turning it off ends every
- * script as Stop does, lets every tab's debugger go, and closes the connection to the account until it is on again. */
+ * script as Stop does, stops and saves every capture, lets every tab's debugger go, and closes the connection to the
+ * account until it is on again. */
 function setEnabled(on, minutes) {
   identityOperations = identityOperations.catch(() => {}).then(async () => {
     await switched;
@@ -774,6 +1114,7 @@ function setEnabled(on, minutes) {
     if (reenableAt !== null) await chrome.alarms.create(ENABLE_ALARM, { when: reenableAt });
     updateToolbar();
     await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'stopped')));
+    await Promise.all([...captures.values()].map(capture => endCapture(capture, 'You turned GitSpace off in this Chrome', true)));
     managingIdentity = true; identityGeneration++;
     const previous = socket; socket = undefined; connected = false;
     previous?.close();
@@ -785,16 +1126,18 @@ function setEnabled(on, minutes) {
 /** The toolbar icon, badge and tooltip last set, so they are set again only when what they show changes. */
 let toolbar = '';
 const toolbarIcons = new Map();
-/** Shows on the toolbar whether GitSpace is off, on and idle, running scripts (their count on the badge), or needs
- * you: on but not connected, not paired, or refused as incompatible. */
+/** Shows on the toolbar whether GitSpace is off, recording a capture (REC on the badge), on and idle, running scripts
+ * (their count on the badge), or needs you: on but not connected, not paired, or refused as incompatible. */
 function updateToolbar() {
   const running = runs.size;
+  const recording = captures.size;
   const host = new URL(GITSPACE_ACCOUNT_URL).host;
-  const state = !enabled ? 'off' : incompatible || !paired || !connected ? 'attention' : running ? 'working' : 'idle';
+  const state = !enabled ? 'off' : recording ? 'recording' : incompatible || !paired || !connected ? 'attention' : running ? 'working' : 'idle';
   const title = !enabled ? 'GitSpace is off in this Chrome' + (reenableAt === null ? '' : ' until ' + new Date(reenableAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))
+    : recording ? `GitSpace is recording ${recording === 1 ? 'a tab' : `${recording} tabs`} in this Chrome`
     : incompatible ? 'GitSpace needs an update in this Chrome' : !paired ? 'GitSpace: pair this Chrome in GitSpace, Plugins → Browsers' : !connected ? 'GitSpace is connecting to ' + host
     : running ? `GitSpace is running ${running} ${running === 1 ? 'script' : 'scripts'} in this Chrome` : 'GitSpace is on · ' + host;
-  const badge = state === 'working' ? String(running) : '';
+  const badge = state === 'recording' ? 'REC' : state === 'working' ? String(running) : '';
   const shown = JSON.stringify([state, title, badge]);
   if (shown === toolbar) return;
   toolbar = shown;
@@ -805,7 +1148,7 @@ function updateToolbar() {
       for (const size of [16, 32]) { const context = new OffscreenCanvas(size, size).getContext('2d'); drawToolbarIcon(context, size, state); imageData[size] = context.getImageData(0, 0, size, size); }
       toolbarIcons.set(state, imageData);
     }
-    void Promise.all([chrome.action.setIcon({ imageData: toolbarIcons.get(state) }), chrome.action.setBadgeBackgroundColor({ color: '#1a73e8' }), chrome.action.setBadgeText({ text: badge }), chrome.action.setTitle({ title })]).catch(() => {});
+    void Promise.all([chrome.action.setIcon({ imageData: toolbarIcons.get(state) }), chrome.action.setBadgeBackgroundColor({ color: state === 'recording' ? '#d93025' : '#1a73e8' }), chrome.action.setBadgeText({ text: badge }), chrome.action.setTitle({ title })]).catch(() => {});
   } catch {}
 }
 async function connect() {
@@ -869,7 +1212,12 @@ async function connect() {
           await chrome.storage.local.set({ compatibility: incompatible });
           updateToolbar();
           connection.close();
-        } else { connected = true; updateToolbar(); await chrome.storage.local.remove('compatibility'); void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {}); }
+        } else {
+          connected = true; accountProtocol = account; updateToolbar(); await chrome.storage.local.remove('compatibility');
+          void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {});
+          // The in-page controls show Capture once the account saves captures.
+          for (const channel of channels.values()) void overlay(channel);
+        }
         return;
       }
     } catch { connection.close(); return; }
@@ -886,7 +1234,7 @@ async function connect() {
     clearTimeout(handshakeTimeout);
     if (socket !== connection) return;
     for (const channel of channels.values()) channel.cancelNavigation?.();
-    socket = undefined; connected = false; identityGeneration++; managingIdentity = true;
+    socket = undefined; connected = false; accountProtocol = 0; identityGeneration++; managingIdentity = true;
     updateToolbar();
     identityOperations = identityOperations.catch(() => {}).then(async () => {
       try { await Promise.allSettled([...queues.values()]); await reset(); }
@@ -904,7 +1252,8 @@ async function workspaceGroups() {
   return found;
 }
 /** What the popup shows: whether GitSpace is on here and connected, each workspace group using this Chrome with its
- * scripts, the workspace group of the tab you are looking at, this Chrome's identity, and the latest scripts. */
+ * scripts, the workspace group of the tab you are looking at with Capture (or its recording), the captures recording,
+ * this Chrome's identity, and the latest scripts. */
 async function popupState() {
   const identity = await stored('identity');
   const digest = identity ? await crypto.subtle.digest('SHA-256', Uint8Array.from(atob(identity.publicKey), c => c.charCodeAt(0))) : undefined;
@@ -913,13 +1262,16 @@ async function popupState() {
     running: [...runs.values()].filter(run => run.body.command.grant.body.groupId === record.groupId).length, tabs: (await chrome.tabs.query({ groupId: group.id })).length });
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const tabGroup = active ? groups.find(group => group.chromeGroupId === active.groupId) : undefined;
+  const recording = tabGroup ? captureOn(active.id) : undefined;
   return {
     enabled, reenableAt, account: new URL(GITSPACE_ACCOUNT_URL).host,
     connection: !enabled ? 'off' : incompatible ? 'update' : !identity ? 'unpaired' : connected ? 'connected' : 'connecting',
     fingerprint: digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : null,
     compatibility: (await chrome.storage.local.get('compatibility')).compatibility ?? null,
     groups: groups.map(({ chromeGroupId, ...group }) => group),
-    activeTab: tabGroup ? { tabId: active.id, groupId: tabGroup.groupId, name: tabGroup.name, color: tabGroup.color } : null,
+    activeTab: tabGroup ? { tabId: active.id, groupId: tabGroup.groupId, name: tabGroup.name, color: tabGroup.color,
+      capture: recording ? { recording: recording.captureId, unavailable: null } : { recording: null, unavailable: !connected ? 'Capture needs GitSpace connected to your account' : accountProtocol < MEDIA_PROTOCOL ? 'Your GitSpace account does not save captures yet; update GitSpace' : null } } : null,
+    recordings: [...captures.values()].map(capture => ({ captureId: capture.captureId, title: capture.title, track: capture.track, startedAt: capture.startedAt, saving: capture.ending !== null })),
     log: ((await stored('run-log')) || []).slice(0, 10),
   };
 }
@@ -949,15 +1301,38 @@ function popupRequest(message) {
   if (typeof message.stopGroup === 'string') return stopGroup(message.stopGroup).then(popupState);
   if (typeof message.focusGroup === 'string') return focusGroup(message.focusGroup).then(popupState);
   if (Number.isInteger(message.ungroupTab)) return ungroupTab(message.ungroupTab).then(popupState);
+  // Your click on Capture in this popup is what lets Chrome record the tab.
+  if (Number.isInteger(message.startCapture)) return startCapture(message.startCapture, null).then(popupState);
+  if (typeof message.stopCapture === 'string') { const capture = captures.get(message.stopCapture); return (capture ? endCapture(capture, null, true) : Promise.resolve()).then(popupState); }
 }
-chrome.runtime.onMessage.addListener((message, sender, respond) => { if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
+/** The offscreen document's requests: signing its upload requests, and a recording that ended on its own. Hearing
+ * from it at all keeps this worker running while it records. */
+function offscreenRequest(message, respond) {
+  if (message.uploadSign) {
+    const { captureId, method, pathname, bodySha256 } = message.uploadSign;
+    const signing = captures.get(captureId)?.track === 'video' && typeof pathname === 'string' && pathname.startsWith('/api/browser-relay/uploads') ? signUpload(method, pathname, bodySha256) : Promise.reject(new Error('This capture is not recording'));
+    void signing.then(header => respond({ header }), error => respond({ error: error.message }));
+    return true;
+  }
+  if (typeof message.captureEnded?.captureId === 'string') {
+    const result = message.captureEnded;
+    // A worker that restarted lost the capture, but the account still hears how it ended.
+    const capture = captures.get(result.captureId) ?? { captureId: result.captureId, track: 'video', tabId: null, channel: null, ending: null, timer: undefined };
+    void endCapture(capture, result.reason ?? null, true, result);
+  }
+}
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+if (sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('offscreen.html')) return offscreenRequest(message, respond);
+if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
 const request = popupRequest(message);
 if (request) { void request.then(respond, error => respond({ error: error.message })); return true; }
 if (!message.pair && message.resetIdentity !== true) return;
 identityOperations = identityOperations.catch(() => {}).then(async () => {
+  // Captures are saved under this identity before it changes.
+  await Promise.all([...captures.values()].map(capture => endCapture(capture, 'This Chrome’s GitSpace pairing changed', true)));
   managingIdentity = true;
   identityGeneration++;
-  const previous = socket; socket = undefined; connected = false; pairingCode = undefined;
+  const previous = socket; socket = undefined; connected = false; accountProtocol = 0; pairingCode = undefined;
   previous?.close();
   for (const channel of channels.values()) channel.cancelNavigation?.();
   try {

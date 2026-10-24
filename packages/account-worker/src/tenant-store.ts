@@ -5,7 +5,9 @@ import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
 /**
  * The only code that touches DATA for tenant objects. Every object lives at `sse/users/<account>/<name>`, encrypted at
  * rest by R2 (SSE-C) with its scope's key from the credential vault, and records its scope and plaintext SHA-256 and size
- * at creation. A full read verifies both before releasing its last bytes; a range read trusts R2.
+ * at creation. An object streamed in parts before its digest was known (a drive file uploaded as it arrives) records only
+ * its scope: whoever names it records the digest and size, and reads it with them as `expected`. A full read verifies
+ * the digest and size before releasing its last bytes; a range read trusts R2.
  */
 
 export type Sha256 = `sha256:${string}`;
@@ -13,6 +15,8 @@ export const TENANT_OBJECT_PREFIX = 'sse/';
 const R2_PART_LIMIT = 10_000;
 
 export interface TenantObjectMetadata { scope: string; sha256: Sha256; size: number }
+/** The digest (and size, when known) a referrer recorded for an object that records only its scope. */
+export interface TenantExpected { sha256: Sha256; size?: number }
 export type TenantBody = Uint8Array | { stream: ReadableStream<Uint8Array>; size: number; sha256: Sha256 };
 export interface TenantRange { offset: number; length: number }
 export interface TenantObject extends TenantObjectMetadata { body: ReadableStream<Uint8Array>; range: TenantRange | null }
@@ -25,12 +29,13 @@ export class TenantObjectIntegrityError extends Error {}
 /** Which scope's key a name's object is encrypted under; null for names outside the tenant namespaces. */
 export type TenantNamespace =
   | { kind: 'lfs'; scope: string; projectId: string; oid: string }
-  | { kind: 'drive'; scope: string; workspaceId: string }
+  /** `digest`: named by its SHA-256 (`sha256/<hex>`); `id`: streamed before its digest was known (`upload/<id>`), read only. */
+  | { kind: 'drive'; scope: string; workspaceId: string; named: 'digest' | 'id' }
   | { kind: 'space'; scope: string; projectId: string; spaceId: string };
 
 const storageId = '[A-Za-z0-9._-]{1,128}';
 const lfsName = new RegExp(`^lfs/projects/(${storageId})/objects/([a-f0-9]{64})$`, 'u');
-const driveName = new RegExp(`^accounts/[A-Za-z0-9_-]+/artifacts/space:(${storageId})/sha256/[a-f0-9]{64}$`, 'u');
+const driveName = new RegExp(`^accounts/[A-Za-z0-9_-]+/artifacts/space:(${storageId})/(?:sha256/[a-f0-9]{64}|(upload)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`, 'u');
 const spaceName = new RegExp(`^projects/(${storageId})/spaces/(${storageId})/.+$`, 'u');
 
 export function tenantNamespace(name: string): TenantNamespace | null {
@@ -38,7 +43,7 @@ export function tenantNamespace(name: string): TenantNamespace | null {
   const lfs = lfsName.exec(name);
   if (lfs) return { kind: 'lfs', scope: `lfs:${lfs[1]}`, projectId: lfs[1]!, oid: lfs[2]! };
   const drive = driveName.exec(name);
-  if (drive) return { kind: 'drive', scope: `space:${drive[1]}`, workspaceId: drive[1]! };
+  if (drive) return { kind: 'drive', scope: `space:${drive[1]}`, workspaceId: drive[1]!, named: drive[2] ? 'id' : 'digest' };
   const space = spaceName.exec(name);
   if (space) return { kind: 'space', scope: `space:${space[2]}`, projectId: space[1]!, spaceId: space[2]! };
   return null;
@@ -54,9 +59,14 @@ function declaredMetadata(scope: string, declared: { sha256: Sha256; size: numbe
   return { scope, sha256: declared.sha256, size: String(declared.size) };
 }
 
-function storedMetadata(object: R2Object, scope: string): TenantObjectMetadata {
+/** What an object records, or for one that records only its scope, what its referrer `expected`. */
+function storedMetadata(object: R2Object, scope: string, expected?: TenantExpected): TenantObjectMetadata {
   const { scope: stored, sha256, size } = object.customMetadata ?? {};
   if (stored !== scope) throw new TenantObjectIntegrityError('Tenant object belongs to another scope');
+  if (sha256 === undefined && size === undefined && expected) {
+    if (expected.size !== undefined && object.size !== expected.size) throw new TenantObjectIntegrityError('Tenant object size differs from its recorded size');
+    return { scope, sha256: expected.sha256, size: object.size };
+  }
   if (!sha256 || !/^sha256:[a-f0-9]{64}$/u.test(sha256) || !size || !/^(0|[1-9][0-9]{0,15})$/u.test(size)) throw new TenantObjectIntegrityError('Tenant object metadata is malformed');
   if (object.size !== Number(size)) throw new TenantObjectIntegrityError('Tenant object size differs from its recorded size');
   return { scope, sha256: `sha256:${sha256.slice(7)}`, size: Number(size) };
@@ -129,7 +139,7 @@ export class TenantStore {
     return stored ? { scope, sha256: declared.sha256, size: declared.size } : null;
   }
 
-  async get(name: string, scope: string, options: { range?: TenantRange } = {}): Promise<TenantObject | null> {
+  async get(name: string, scope: string, options: { range?: TenantRange; expected?: TenantExpected } = {}): Promise<TenantObject | null> {
     const range = options.range;
     if (range && (!Number.isSafeInteger(range.offset) || !Number.isSafeInteger(range.length) || range.offset < 0 || range.length < 1)) throw new Error('Tenant object range is invalid');
     const object = await this.bucket.get(this.key(name), { ssecKey: await this.ssecKey(scope), ...(range ? { range } : {}) })
@@ -143,7 +153,7 @@ export class TenantStore {
       });
     if (!object) return null;
     let metadata: TenantObjectMetadata;
-    try { metadata = storedMetadata(object, scope); }
+    try { metadata = storedMetadata(object, scope, options.expected); }
     catch (error) { await object.body.cancel(); throw error; }
     if (range) return { ...metadata, body: object.body, range };
     return { ...metadata, body: object.body.pipeThrough(verifying(metadata)), range: null };
@@ -160,9 +170,9 @@ export class TenantStore {
     return collectBytes(streamBytes(object.body), maxBytes);
   }
 
-  async head(name: string, scope: string): Promise<TenantObjectMetadata | null> {
+  async head(name: string, scope: string, expected?: TenantExpected): Promise<TenantObjectMetadata | null> {
     const object = await this.bucket.head(this.key(name));
-    return object ? storedMetadata(object, scope) : null;
+    return object ? storedMetadata(object, scope, expected) : null;
   }
 
   async delete(names: readonly string[]): Promise<void> {
@@ -237,9 +247,10 @@ export class TenantStore {
     };
   }
 
-  /** Multipart objects record the digest and size declared here; complete checks the size and full reads the digest. */
-  async createMultipart(name: string, scope: string, declared: { sha256: Sha256; size: number }): Promise<string> {
-    const customMetadata = declaredMetadata(scope, declared);
+  /** Multipart objects record the digest and size declared here; complete checks the size and full reads the digest.
+   * With none declared (bytes streamed before their digest is known) the object records only its scope. */
+  async createMultipart(name: string, scope: string, declared: { sha256: Sha256; size: number } | null): Promise<string> {
+    const customMetadata = declared ? declaredMetadata(scope, declared) : { scope };
     return (await this.bucket.createMultipartUpload(this.key(name), { customMetadata, ssecKey: await this.ssecKey(scope) })).uploadId;
   }
 
@@ -255,11 +266,11 @@ export class TenantStore {
     return sendSized(part.stream.pipeThrough(verifying(part)), size, body => upload.uploadPart(partNumber, body, { ssecKey }));
   }
 
-  /** A completed object whose parts do not add up to its declared size is deleted rather than left readable. */
-  async completeMultipart(name: string, scope: string, uploadId: string, parts: R2UploadedPart[]): Promise<TenantObjectMetadata> {
+  /** A completed object whose parts do not add up to its declared (or `expected`) size is deleted rather than left readable. */
+  async completeMultipart(name: string, scope: string, uploadId: string, parts: R2UploadedPart[], expected?: TenantExpected): Promise<TenantObjectMetadata> {
     const completed = await this.bucket.resumeMultipartUpload(this.key(name), uploadId).complete(parts);
     try {
-      return storedMetadata(completed, scope);
+      return storedMetadata(completed, scope, expected);
     } catch (error) {
       await this.bucket.delete(this.key(name));
       throw error;

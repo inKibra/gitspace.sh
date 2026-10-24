@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rm, open, stat } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, open, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { Browser, detectBrowserPlatform, getInstalledBrowsers, install, resolveBuildId } from '@puppeteer/browsers';
 import { ProcessSupervisor, DaemonStartSpecSchema, DaemonSpecSchema, ProcessIdentitySchema, processIdentity, sameProcess } from '@gitspace/supervisor';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserGrantSchema, canonicalJson, type RuntimeBrowserAuthorization, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserGrant, type RuntimeBrowserSignedGrant, type RuntimeBrowserPreparation, type RuntimeBrowserPreview, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
-import type { ExecutorContent } from './tools.js';
+import { MACHINE_TMP, type ExecutorContent } from './tools.js';
 import type { LocalAttachment } from './journal.js';
 import { BrowserEffectUncertain } from './browser-cdp.js';
 import { BrowserConnection, CdpEvent } from './browser-cdp.js';
@@ -15,6 +15,7 @@ import { BrowserOutputStore, boundedText } from './browser-output.js';
 import { performBrowserAction } from './browser-semantic.js';
 import { attachBrowserServiceForward, type BrowserServiceAccess } from './browser-service-forward.js';
 import { BrowserServicePolicy } from './browser-service-policy.js';
+import { CAPTURE_SCREENCAST, ScreencastRecorder } from './browser-screencast.js';
 
 const ManagedRecord = z.object({ owner: z.string(), projectId: z.string(), workspaceId: z.string(), profile: z.string(), spec: DaemonStartSpecSchema, identity: ProcessIdentitySchema.optional() });
 const supervisors = new Map<string, Promise<ProcessSupervisor>>();
@@ -25,6 +26,14 @@ const PageTargets = z.object({ targetInfos: z.array(z.object({ targetId: z.strin
 const LayoutMetrics = z.object({ cssVisualViewport: z.object({ pageX: z.number(), pageY: z.number(), clientWidth: z.number().positive(), clientHeight: z.number().positive() }) });
 /** Previews are at most this wide, small enough to refresh often. */
 const PREVIEW_WIDTH = 480;
+/** Where captures of headless tabs are recorded: inside the machine's /tmp, from where the workspace moves them into
+ * its drive (`drive_transfer`). A capture's folder goes an hour after it stopped. */
+const CAPTURES = join(MACHINE_TMP, 'gitspace-captures');
+const CAPTURE_KEEP_MS = 60 * 60_000;
+const ScreencastFrameEvent = z.object({ method: z.literal('Page.screencastFrame'), sessionId: z.string(), params: z.unknown() });
+/** A stopped capture as the workspace collects it: its frames and the files holding them on this machine. */
+type CaptureResult = { endedAt: string; count: number; width: number; height: number; reason: string | null; files: Record<string, string> };
+type Capture = { projectId: string; workspaceId: string; tab: Tab; directory: string; file: FileHandle; recorder: ScreencastRecorder; unsubscribe(): void; stopping?: Promise<CaptureResult> };
 type Tab = { grant: RuntimeBrowserGrant; scope: string; channel: RuntimeBrowserRelayChannel; targetId: string; sessionId: string; refs: Map<string, number>; document: number; stale: boolean; reason?: string; timer: NodeJS.Timeout; unsubscribe: () => void; closeServices?: () => Promise<void>; servicePolicy?: BrowserServicePolicy; profileKey?: string };
 type Profile = { connection: BrowserConnection; record: ManagedRecord; path: string; tabs: number };
 type Recovery = { id: string; projectId: string; workspaceId: string; state: 'uncertain' | 'fenced' | 'stopped'; reason: string; path: string; record?: ManagedRecord; expiresAt?: string; targetId?: string; groupId?: string };
@@ -47,6 +56,7 @@ export class MachineBrowser {
   private records = new Map<string, Recovery>();
   private outputs = new BrowserOutputStore();
   private used = new Map<string, number>();
+  private captures = new Map<string, Capture>();
   private closed = false;
   private recovery?: Promise<void>;
   constructor(private readonly options: MachineBrowserOptions) {}
@@ -289,6 +299,13 @@ export class MachineBrowser {
     } else if (command.action === 'artifact') result = this.outputs.read(JSON.stringify([dispatch.projectId, dispatch.workspaceId]), command.artifactId ?? '', command.offset, command.limit);
     else if (command.action === 'overview') result = await this.overview(dispatch);
     else if (command.action === 'preview') result = await this.preview(dispatch, command.groupId, command.targetId);
+    else if (command.action === 'captureStart') result = await this.captureStart(dispatch, command.groupId, command.targetId, command.captureId);
+    else if (command.action === 'captureStop') {
+      const capture = this.captures.get(command.captureId ?? '');
+      if (!capture || capture.projectId !== dispatch.projectId || capture.workspaceId !== dispatch.workspaceId) throw new Error('This capture is not recording on this machine');
+      result = await this.captureStop(command.captureId ?? '');
+      this.captures.delete(command.captureId ?? '');
+    }
     else if (command.action === 'revoke') {
       const tab = this.groups.get(command.groupId ?? '');
       if (!tab || tab.grant.projectId !== dispatch.projectId || tab.grant.workspaceId !== dispatch.workspaceId) throw new Error('Browser tab outside workspace');
@@ -347,6 +364,53 @@ export class MachineBrowser {
       return none(tab.stale ? 'This tab has closed' : 'This tab could not be captured');
     }
   }
+  /** Starts recording one of the workspace's headless tabs: its screencast frames go into `frames.bin` in the capture's
+   * folder as they arrive (docs/APERTURE-DESIGN.md §11). */
+  private async captureStart(dispatch: RuntimeToolDispatch, groupId: string | undefined, targetId: string | undefined, captureId: string | undefined): Promise<{ page: { url: string; title: string }; startedAt: string }> {
+    if (!groupId || !targetId || !captureId) throw new Error('A capture names its group, tab and capture');
+    const group = this.groups.get(groupId);
+    if (!group) throw new Error('This tab’s group has ended');
+    if (!this.ownHeadless(group.grant, dispatch)) throw new Error('Browser group outside workspace');
+    const tab = this.tabs.get(targetId);
+    if (!tab || tab.stale || tab.grant.groupId !== groupId) throw new Error('This tab has closed');
+    if (this.captures.has(captureId)) throw new Error('This capture is already recording');
+    const page = TargetInfo.parse(await tab.channel.send('Target.getTargetInfo', { targetId })).targetInfo;
+    const directory = join(CAPTURES, captureId);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const file = await open(join(directory, 'frames.bin'), 'w', 0o600);
+    const startedAt = new Date().toISOString();
+    const recorder = new ScreencastRecorder({
+      startedAt: Date.parse(startedAt),
+      append: async bytes => { await file.write(bytes); },
+      ack: frameSessionId => tab.channel.send('Page.screencastFrameAck', { sessionId: frameSessionId }, tab.sessionId),
+      limit: reason => { void this.captureStop(captureId, reason).catch(() => {}); },
+    });
+    const unsubscribe = tab.channel.subscribe(raw => {
+      const event = ScreencastFrameEvent.safeParse(raw);
+      if (event.success && event.data.sessionId === tab.sessionId) recorder.frame(event.data.params);
+    });
+    this.captures.set(captureId, { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId, tab, directory, file, recorder, unsubscribe });
+    setTimeout(() => { void this.captureStop(captureId, 'The capture reached 30 minutes').catch(() => {}); }, 30 * 60_000).unref();
+    try { await tab.channel.send('Page.startScreencast', CAPTURE_SCREENCAST, tab.sessionId); }
+    catch (error) { await this.captureStop(captureId).catch(() => {}); this.captures.delete(captureId); throw error; }
+    return { page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) }, startedAt };
+  }
+  /** Stops a capture once (by the workspace, or by itself at a limit) and writes `frames.json` and a thumbnail beside
+   * `frames.bin`; the stopped capture waits for the workspace to collect it. */
+  private captureStop(captureId: string, ended?: string): Promise<CaptureResult> {
+    const capture = this.captures.get(captureId);
+    if (!capture) return Promise.reject(new Error('This capture is not recording on this machine'));
+    capture.stopping ??= (async () => {
+      await capture.tab.channel.send('Page.stopScreencast', {}, capture.tab.sessionId).catch(() => {});
+      setTimeout(() => { void rm(capture.directory, { recursive: true, force: true }).catch(() => {}); }, CAPTURE_KEEP_MS).unref();
+      const frames = await capture.recorder.stop().finally(async () => { capture.unsubscribe(); await capture.file.close(); });
+      const bin = join(capture.directory, 'frames.bin'), index = join(capture.directory, 'frames.json'), thumbnail = join(capture.directory, 'thumbnail.jpg');
+      await writeFile(index, JSON.stringify(frames.index), { mode: 0o600 });
+      if (frames.thumbnail) await writeFile(thumbnail, frames.thumbnail, { mode: 0o600 });
+      return { endedAt: new Date().toISOString(), count: frames.count, width: frames.width, height: frames.height, reason: ended ?? null, files: { 'frames.bin': bin, 'frames.json': index, ...(frames.thumbnail ? { 'thumbnail.jpg': thumbnail } : {}) } };
+    })();
+    return capture.stopping;
+  }
   private async perform(dispatch: RuntimeToolDispatch, local: LocalAttachment, args: z.infer<typeof RuntimeBrowserArgumentsSchema>, signed: RuntimeBrowserSignedGrant, signal: AbortSignal): Promise<ExecutorContent> {
     const grant = signed.body;
     if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Browser grant expired');
@@ -403,7 +467,9 @@ export class MachineBrowser {
           if (args.url) { tab.servicePolicy?.beginNavigation(args.url); try { await channel.send('Page.navigate', { url: args.url }, tab.sessionId); } finally { tab.servicePolicy?.endNavigation(); } }
           return [{ type: 'text', text: JSON.stringify({ groupId: grant.groupId, targetId, source: grant.source }) }];
         }
-        targetId = z.object({ targetId: z.string() }).parse(await channel.send('Target.createTarget', { url: 'about:blank', background: true })).targetId;
+        // Each tab gets its own window, where it is the front tab: headless Chrome does not draw a tab behind another,
+        // so a capture of it would get no screencast frames (as on the cloud browser).
+        targetId = z.object({ targetId: z.string() }).parse(await channel.send('Target.createTarget', { url: 'about:blank', background: true, newWindow: true })).targetId;
         profile.tabs++;
       }
       let attached: { sessionId: string };

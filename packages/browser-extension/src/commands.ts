@@ -104,6 +104,8 @@ export type RelayRunTab = {
   sessionId?: string;
   /** Who put the tab in the workspace group: only tabs the agent added may be closed. */
   addedBy: string;
+  /** The account's origin: the only one whose sealed `/files/` links go into file inputs. */
+  account: string;
 };
 /** What the extension does with one script command: send it (with these parameters), answer `{}` without effect, or refuse it. */
 export type RelayRunVerdict = { send: Record<string, unknown> } | { noop: true } | { refused: string };
@@ -138,6 +140,27 @@ const REFUSED_METHODS: Record<string, string> = {
   'Target.createBrowserContext': 'is refused: your Chrome has one context, the workspace group',
   'Page.startScreencast': PAINTING, 'Page.stopScreencast': PAINTING, 'Page.screencastFrameAck': PAINTING,
 };
+
+/** At most this many drive files go into one file input, of at most this many bytes in all. */
+const INPUT_FILES_MAX = 8;
+const INPUT_FILES_MAX_BYTES = 50 * 1024 * 1024;
+
+/** Why `GitSpace.setInputFilesFromUrls` (drive files into a file input, by sealed `/files/` links the extension fetches
+ * itself) is refused, or none. */
+function inputFilesRefusal(params: Record<string, unknown>, account: string): string | null {
+  const { backendNodeId, files } = params;
+  if (typeof backendNodeId !== 'number' || !Number.isSafeInteger(backendNodeId)) return 'GitSpace.setInputFilesFromUrls needs the input’s backendNodeId';
+  if (!Array.isArray(files) || !files.length || files.length > INPUT_FILES_MAX) return `GitSpace.setInputFilesFromUrls takes 1 to ${INPUT_FILES_MAX} files`;
+  let bytes = 0;
+  for (const file of files) {
+    if (typeof file !== 'object' || file === null || !('url' in file) || !('name' in file) || !('mediaType' in file) || !('size' in file) || typeof file.url !== 'string' || typeof file.name !== 'string' || !file.name || file.name.length > 255 || typeof file.mediaType !== 'string' || file.mediaType.length > 255 || typeof file.size !== 'number' || !Number.isSafeInteger(file.size) || file.size < 0) return 'GitSpace.setInputFilesFromUrls files need a url, name, mediaType and size';
+    let url: URL;
+    try { url = new URL(file.url); } catch { return 'GitSpace.setInputFilesFromUrls takes sealed drive links only'; }
+    if (url.origin !== account || !url.pathname.startsWith('/files/')) return 'GitSpace.setInputFilesFromUrls takes sealed drive links only';
+    bytes += file.size;
+  }
+  return bytes > INPUT_FILES_MAX_BYTES ? `GitSpace.setInputFilesFromUrls takes at most ${INPUT_FILES_MAX_BYTES / 1024 / 1024} MiB in all` : null;
+}
 
 /** A destination a script may load: about:blank, or an http(s) page on the grant's origins. */
 function destinationAllowed(grant: { origins: string[] }, value: unknown): boolean {
@@ -181,6 +204,7 @@ export function relayRunCommand(method: string, params: Record<string, unknown>,
   if (method === 'Page.addScriptToEvaluateOnNewDocument') return params.source === '' ? { send: params } : { refused: 'Init scripts would run on sites outside the workspace origins; use page.evaluate after each navigation' };
   // Universal access would let the world reach other origins' frames.
   if (method === 'Page.createIsolatedWorld') return { send: { ...params, grantUniveralAccess: false } };
+  if (method === 'GitSpace.setInputFilesFromUrls') { const refused = inputFilesRefusal(params, tab.account); return refused ? { refused } : { send: params }; }
   if (RUN_METHODS[method] || RUN_DOMAINS[method.split('.')[0] ?? '']) return { send: params };
   return { refused: `${method} is not available to scripts on your Chrome` };
 }
@@ -215,8 +239,6 @@ function scrubbedRecord(value: object): Record<string, unknown> {
  * network extra info (cookies, credentials) is dropped and network headers lose cookies and credentials.
  */
 export function relayRunEvent(method: string, params: Record<string, unknown>): Record<string, unknown> | null {
-  // The extension's own screencast (it keeps a background tab painting); Playwright would acknowledge each frame and
-  // the frames would then stream to the relay.
-  if (method.endsWith('ExtraInfo') || method.startsWith('Page.screencast')) return null;
+  if (method.endsWith('ExtraInfo')) return null;
   return method.startsWith('Network.') ? scrubbedRecord(params) : params;
 }

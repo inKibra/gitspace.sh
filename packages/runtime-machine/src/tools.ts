@@ -46,7 +46,7 @@ export function checkoutPath(root: string, path: string): Promise<string> {
 }
 
 /** The machine's scratch space, open to file tools as it is to bash: agents keep work there that is not the checkout's. */
-const MACHINE_TMP = '/tmp';
+export const MACHINE_TMP = '/tmp';
 
 /** A file tool's path: relative to the checkout, or absolute inside the machine's /tmp. */
 export async function machineFilePath(root: string, path: string): Promise<string> {

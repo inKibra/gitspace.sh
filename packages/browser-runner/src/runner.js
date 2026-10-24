@@ -1,6 +1,7 @@
 // Runs one agent-written Playwright script inside a Worker Loader sandbox (docs/APERTURE-DESIGN.md §6.1). The sandbox
-// has no network of its own: `env.CDP` is its only way out, a WebSocket to the browser through GitSpace's CDP layer.
-// `./script.js` is the agent's script, an async function of `{ page, context, browser, state, view, act }`.
+// has no network of its own: `env.CDP` is its only way out, a WebSocket to the browser through GitSpace's CDP layer,
+// and `env.FILES` its only way to the workspace drive (`capture`, `upload`), scoped to this run by the session.
+// `./script.js` is the agent's script, an async function of `{ page, context, browser, state, view, act, capture, upload }`.
 import { connect } from '@cloudflare/playwright';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { scriptTools } from './tools.ts';
@@ -37,9 +38,10 @@ export default class Runner extends WorkerEntrypoint {
       const [context] = browser.contexts();
       if (!context) throw new Error('The browser session has no default context');
       const page = context.pages().at(-1) ?? await context.newPage();
-      // `view()` shows a page as observe does, with refs that `act()` takes in this run or a later one.
-      const { view, act } = scriptTools(context);
-      const value = await script({ page, context, browser, state, view, act });
+      // `view()` shows a page as observe does, with refs that `act()` takes in this run or a later one; `capture()`
+      // saves a screenshot to the drive and `upload()` sets a file input's files from it.
+      const { view, act, capture, upload } = scriptTools(context, this.env.FILES);
+      const value = await script({ page, context, browser, state, view, act, capture, upload });
       // A script that returns nothing ends with the view of its latest page, which the next run's `page` is.
       if (value === undefined) {
         try { return finish({ ok: true, value: null, view: await view() }); }

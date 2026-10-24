@@ -3,12 +3,13 @@ import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant } from '@gitspace/protocol-runtime';
+import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant, RuntimeBrowserCapture, RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
 import { createAccountBrowserAuthority } from './runtime-browser-account.js';
+import { CAPTURE_FILES, captureFolder, captureName, captureView, captureViews, readCapture, writeCapture, type CaptureDrive, type CaptureFile } from './browser-capture.js';
 import type { SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
@@ -22,6 +23,10 @@ const savedPreparation = z.object({ fingerprint: z.string(), card: RuntimeBrowse
 const machineOverview = z.object({ groupId: z.string().uuid().nullable(), tabs: z.array(z.object({ targetId: z.string(), url: z.string(), title: z.string() })).max(200) });
 /** What the Browser tab shows for a machine whose release cannot answer `overview` or `preview`. */
 const MACHINE_UPDATE_REQUIRED = 'Update GitSpace on this machine to see its browser';
+/** A machine's answers to `captureStart` and `captureStop`: the page, and the recorded files on that machine. */
+const machineCaptureStarted = z.object({ page: z.object({ url: z.string(), title: z.string() }), startedAt: z.iso.datetime() });
+const machineCaptureStopped = z.object({ endedAt: z.iso.datetime(), count: z.number().int().nonnegative(), width: z.number().int().nonnegative(), height: z.number().int().nonnegative(), reason: z.string().nullable(), files: z.record(z.string(), z.string()) });
+const MACHINE_CAPTURE_FILES: CaptureFile[] = ['frames.bin', 'frames.json', 'thumbnail.jpg'];
 type BrowserStorageTransaction = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> };
 type BrowserStorage = BrowserStorageTransaction & { list(options: { prefix: string }): Promise<Map<string, unknown>>; delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
 type BrowserEnvironment = {
@@ -30,7 +35,7 @@ type BrowserEnvironment = {
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
   /** Each workspace's cloud browser lives in its own object (`BrowserSessionDO`), named `<account>:<project>:<workspace>`. */
-  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }>; preview(targetId: string): Promise<RuntimeBrowserPreview> } };
+  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }>; preview(targetId: string): Promise<RuntimeBrowserPreview>; captureStart(input: { projectId: string; workspaceId: string; captureId: string; groupId: string; targetId: string }): Promise<RuntimeBrowserCapture>; captureStop(input: { projectId: string; workspaceId: string; captureId: string }): Promise<RuntimeBrowserCapture> } };
   RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
 type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
@@ -68,7 +73,13 @@ export async function retireWorkspaceBrowsers(storage: { list(options: { prefix:
   for (const key of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).keys()) await storage.delete(key);
   await relay.browserRelayRetireWorkspace(identity.projectId, identity.workspaceId);
 }
-export type RuntimeBrowserAuthorityOptions = { storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ origins: string[]; stepsOnly: string[] }>; groupName(): Promise<string> };
+export type RuntimeBrowserAuthorityOptions = {
+  storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ origins: string[]; stepsOnly: string[] }>; groupName(): Promise<string>;
+  /** The workspace's drive, where captures are kept. */
+  drive(): CaptureDrive;
+  /** Moves a file on an attached machine (`machinePath`, inside its /tmp) to the workspace's drive at `path`. */
+  fromMachine(input: { conversationId: string; machineId: string; machinePath: string; path: string; mediaType: string }): Promise<void>;
+};
 export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOptions): RuntimeBrowserAuthority {
   const { storage, env, identity } = options;
   async function eligible(machineId: string) {
@@ -128,9 +139,12 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const result = await options.runtime().attachments.execute(dispatch, AbortSignal.timeout(60_000));
     if (result.status !== 'completed') {
       const message = result.status === 'failed' ? result.error.message : result.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
-      // LEGACY: releases before machine overviews take `overview` and `preview` for recovery commands (Batch 18) or
-      // refuse the action while checking its authorization (earlier); remove once every machine answers them.
-      if ((command.action === 'overview' || command.action === 'preview') && (message.includes('Browser recovery record outside workspace') || message.includes('Invalid option'))) throw new Error(MACHINE_UPDATE_REQUIRED);
+      // LEGACY: releases before machine overviews take `overview`, `preview` (and before captures `captureStart` and
+      // `captureStop`) for recovery commands (Batch 18) or refuse the action while checking its authorization
+      // (earlier); remove once every machine answers them.
+      const unknown = message.includes('Browser recovery record outside workspace') || message.includes('Invalid option');
+      if ((command.action === 'overview' || command.action === 'preview') && unknown) throw new Error(MACHINE_UPDATE_REQUIRED);
+      if ((command.action === 'captureStart' || command.action === 'captureStop') && unknown) throw new Error('Update GitSpace on this machine to record its browser');
       throw new Error(message);
     }
     const text = result.content.find(part => part.type === 'text');
@@ -295,8 +309,57 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     try { return RuntimeBrowserPreviewSchema.parse(await control(conversationId, placement, { action: 'preview', groupId: grant.groupId, targetId })); }
     catch (error) { return none(error instanceof Error ? error.message : String(error)); }
   }
+  /** Captures (docs/APERTURE-DESIGN.md §11), by you from the Browser tab. A start goes to the browser its group names (a
+   * machine's headless browser, the cloud browser or your Chrome); a stop goes where the capture's record says it is
+   * recording. Either returns the capture with links to its files. */
+  async function capture(conversationId: string, command: RuntimeBrowserManagement): Promise<RuntimeBrowserCaptureView> {
+    const drive = options.drive();
+    if (command.action === 'captureStart') {
+      if (!command.groupId || !command.targetId) throw new Error('A capture names its group and tab');
+      const request = { action: command.action, groupId: command.groupId, targetId: command.targetId, captureId: crypto.randomUUID() };
+      const machine = await storage.get(`runtime.browser.grant:${command.groupId}`);
+      return captureView(drive, machine ? await machineCapture(conversationId, RuntimeBrowserSignedGrantSchema.parse(machine).body, request) : await account.capture(conversationId, request));
+    }
+    if (!command.captureId) throw new Error('A capture stop names its capture');
+    const current = await readCapture(drive, command.captureId);
+    if (!current) throw new Error('Unknown capture');
+    if (current.state !== 'recording') return captureView(drive, current);
+    const groupId = current.target?.groupId;
+    const machine = groupId && current.source === 'machine' ? await storage.get(`runtime.browser.grant:${groupId}`) : undefined;
+    const stopped = !groupId || current.source === 'machine' && !machine
+      ? await writeCapture(drive, { ...current, endedAt: new Date().toISOString(), state: 'failed', reason: 'The browser recording this capture is gone' })
+      : machine ? await machineCapture(conversationId, RuntimeBrowserSignedGrantSchema.parse(machine).body, { action: 'captureStop', groupId, captureId: current.captureId }, current)
+        : await account.capture(conversationId, { action: 'captureStop', groupId, captureId: current.captureId });
+    return captureView(drive, stopped);
+  }
+  /** A capture on a machine's headless browser: the machine records the tab into its /tmp; at the stop each file moves
+   * to the drive (`drive_transfer`) and the capture is saved. */
+  async function machineCapture(conversationId: string, grant: RuntimeBrowserGrant, command: RuntimeBrowserManagement & { groupId: string; captureId: string }, current?: RuntimeBrowserCapture): Promise<RuntimeBrowserCapture> {
+    const drive = options.drive(), placement = (await headlessMachines()).find(item => item.machineId === grant.machineId);
+    if (!current) {
+      if (!placement) throw new Error('This machine is not attached: attach it to record this tab');
+      if (!command.targetId) throw new Error('A capture names its tab');
+      const started = machineCaptureStarted.parse(await control(conversationId, placement, command));
+      return writeCapture(drive, { version: 1, captureId: command.captureId, name: captureName(started.page.title, started.startedAt), by: 'you', source: 'machine', browser: `Headless browser on ${grant.machineId}`.slice(0, 128), target: { groupId: command.groupId, targetId: command.targetId }, page: { url: started.page.url.slice(0, 8192), title: started.page.title.slice(0, 500) }, startedAt: started.startedAt, endedAt: null, state: 'recording', reason: null, tracks: {} });
+    }
+    const failed = (reason: string) => writeCapture(drive, { ...current, endedAt: new Date().toISOString(), state: 'failed', reason: reason.slice(0, 1024) });
+    if (!placement) return failed('The machine recording this capture is not attached');
+    let stopped: z.infer<typeof machineCaptureStopped>;
+    try { stopped = machineCaptureStopped.parse(await control(conversationId, placement, command)); }
+    catch (error) { return failed(error instanceof Error ? error.message : String(error)); }
+    if (!stopped.count || !stopped.width || !stopped.height) return failed(stopped.reason ?? 'The tab showed nothing to record');
+    try {
+      for (const file of MACHINE_CAPTURE_FILES) {
+        const machinePath = stopped.files[file];
+        if (machinePath) await options.fromMachine({ conversationId, machineId: grant.machineId, machinePath, path: `${captureFolder(current.captureId)}${file}`, mediaType: CAPTURE_FILES[file] });
+      }
+    } catch (error) { return failed(`The recording did not reach the drive: ${error instanceof Error ? error.message : String(error)}`); }
+    return writeCapture(drive, { ...current, endedAt: stopped.endedAt, state: 'saved', reason: stopped.reason, tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: stopped.count, width: stopped.width, height: stopped.height } } });
+  }
   async function manage(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement) {
     if (command.action === 'overview') return overview(conversationId);
+    if (command.action === 'captures') return captureViews(options.drive());
+    if (command.action === 'captureStart' || command.action === 'captureStop') return capture(conversationId, command);
     // A group names its browser: a machine's headless group is previewed on that machine, any other by the account.
     if (command.action === 'preview') {
       const stored = command.groupId ? await storage.get(`runtime.browser.grant:${command.groupId}`) : undefined;

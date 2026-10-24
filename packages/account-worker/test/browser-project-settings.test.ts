@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { AccountBrowserRelay, type BrowserWorkspaces } from '../src/browser-relay.js';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
+import { workspaceDrive } from '../src/workspace-drive.js';
 
 type Identity = { key: CryptoKeyPair; publicKey: string };
 type Chrome = { pairingId: string; generation: number; socket: WebSocket; ready: unknown; operations: string[]; revoked: string[]; failRevoke: boolean; reconnect(): Promise<void>; pauseAuthorization(): { reached: Promise<void>; release(): void } };
@@ -56,7 +57,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       listen(socket);
       return browser;
     }
-    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
+    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }, identity => workspaceDrive(env, identity)); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
 async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>, args: RuntimeBrowserArguments = { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }) {
@@ -231,7 +232,7 @@ test('a Chrome group report reaches its workspace with each tab marked usable or
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');
   const tab = (targetId: string, url: string, addedBy: 'agent' | 'page' | 'you', site: string | null) => ({ targetId, url, title: 'Page', addedBy, site });
-  await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId: crypto.randomUUID(), tabs: [] } }));
+  await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId: crypto.randomUUID(), tabs: [], running: 0 } }));
   await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId, tabs: [
     tab('agent-tab', 'https://example.com/pricing', 'agent', null),
     tab('your-tab', 'https://news.example/story', 'you', 'news.example'),
@@ -308,21 +309,16 @@ test('a Chrome has one name, set on its pairing and shown in every project and i
   await expect(relay.rename(a.pairingId, ' ')).rejects.toThrow();
 }));
 
-test('a tab preview goes to a protocol 3 extension under signed authority; a protocol 2 extension is asked to update', () => fixture(async (relay, chrome, root) => {
-  const current = await chrome('Current'), old = await chrome('Old', { protocol: BROWSER_EXTENSION_PROTOCOL - 1 });
-  await relay.setProjectSettings('project', 0, { defaultPairingId: current.pairingId, approvals: [{ pairingId: current.pairingId, note: '' }, { pairingId: old.pairingId, note: '' }] });
-  const previews: unknown[] = [];
-  for (const browser of [current, old]) {
-    const placement = await relay.placement('project', browser.pairingId), opened = await authorization(root, placement);
-    await relay.execute(opened);
-    if (opened.body.command.type !== 'execute') throw new Error('Expected execution');
-    const result = await relay.execute(await authorization(root, placement, 'workspace', 'project', { type: 'manage', action: 'preview', groupId: opened.body.command.grant.body.groupId, targetId: 'tab' }));
-    const text = result.content.find(part => part.type === 'text');
-    previews.push(text?.type === 'text' ? JSON.parse(text.text) : null);
-  }
-  expect(previews).toEqual([{ image: 'jpeg-bytes', reason: null }, { image: null, reason: 'Update the GitSpace extension in Chrome to see previews' }]);
+test('a tab preview goes to the extension under signed authority', () => fixture(async (relay, chrome, root) => {
+  const current = await chrome('Current');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: current.pairingId, approvals: [{ pairingId: current.pairingId, note: '' }] });
+  const placement = await relay.placement('project', current.pairingId), opened = await authorization(root, placement);
+  await relay.execute(opened);
+  if (opened.body.command.type !== 'execute') throw new Error('Expected execution');
+  const result = await relay.execute(await authorization(root, placement, 'workspace', 'project', { type: 'manage', action: 'preview', groupId: opened.body.command.grant.body.groupId, targetId: 'tab' }));
+  const text = result.content.find(part => part.type === 'text');
+  expect(text?.type === 'text' ? JSON.parse(text.text) : null).toEqual({ image: 'jpeg-bytes', reason: null });
   expect(current.operations.slice(-2)).toEqual(['authorize', 'preview']);
-  expect(old.operations).not.toContain('preview');
 }));
 
 test('LEGACY: a name stored on a project approval names its Chrome until the project is next written, and then stays on the pairing', async () => {

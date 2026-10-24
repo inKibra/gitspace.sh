@@ -1,12 +1,12 @@
-import type { EvidenceReference } from '@gitspace/protocol';
-import { ARTIFACT_UPLOAD_MAX_BYTES } from '@gitspace/protocol/rpc-contract';
+import { DRIVE_FILE_MAX_BYTES, Sha256State, type EvidenceReference } from '@gitspace/protocol';
 import { ClientHttpFailure, ClientNetworkFailure, ClientOffline, ClientTimeout, isTaggedError, ServerInternal } from 'result-rpc';
 
 type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
 
 /** Authority calls for one workspace's `uploads/` artifact folder; every method throws the RPC error on failure. */
 export interface ArtifactUploadClient {
-  begin(input: { fileName: string; size: number; mediaType: string | null }): Promise<{ uploadId: string; url: string; chunkBytes: number }>;
+  /** `sha256` is the lowercase hex digest of the whole file; commit refuses bytes that do not match it. */
+  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null }): Promise<{ uploadId: string; url: string; chunkBytes: number }>;
   /** `data` is the chunk's base64 encoding; `sha256` is the lowercase hex digest of its raw bytes. */
   chunk(input: { uploadId: string; offset: number; sha256: string; data: string }, signal: AbortSignal): Promise<{ received: number }>;
   /** Resolves with the registered artifact, which may precede its appearance in the published catalog. */
@@ -49,7 +49,7 @@ export function formatBytes(bytes: number): string {
 /** Rejects files the authority would refuse before any upload state is created. */
 export function uploadRejection(file: Pick<File, 'size'>): string | null {
   if (file.size === 0) return 'Empty files cannot be uploaded.';
-  if (file.size > ARTIFACT_UPLOAD_MAX_BYTES) return `This file is ${formatBytes(file.size)}; uploads are limited to ${formatBytes(ARTIFACT_UPLOAD_MAX_BYTES)}.`;
+  if (file.size > DRIVE_FILE_MAX_BYTES) return `This file is ${formatBytes(file.size)}; uploads are limited to ${formatBytes(DRIVE_FILE_MAX_BYTES)}.`;
   return null;
 }
 
@@ -62,10 +62,15 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
   return promise;
 }
 
+/** Bytes read per step while hashing the whole file before begin; the signal is checked between steps. */
+const HASH_SLICE_BYTES = 4 * 1024 * 1024;
+
 export interface UploadArtifactOptions {
   signal: AbortSignal;
   /** Continue a session whose last failure left server state intact. */
   resume?: ArtifactUploadSession;
+  /** Called as the whole file is hashed before begin, with the bytes hashed so far. */
+  onHashed?(hashed: number): void;
   /** Called after begin and after every acknowledged chunk. */
   onSession(session: ArtifactUploadSession): void;
   /** Backoff before each same-offset retry of a transient chunk failure; its length bounds the retries. */
@@ -73,8 +78,8 @@ export interface UploadArtifactOptions {
 }
 
 /**
- * Streams `file` to the authority one chunk at a time: only the current slice is ever in memory,
- * and chunks are sent strictly in offset order.
+ * Hashes `file` slice by slice (the authority stores it under its digest), then streams it to the authority one
+ * chunk at a time: only the current slice is ever in memory, and chunks are sent strictly in offset order.
  */
 export async function uploadArtifactFile(client: ArtifactUploadClient, file: File, options: UploadArtifactOptions): Promise<ArtifactReference> {
   const rejection = uploadRejection(file);
@@ -83,7 +88,14 @@ export async function uploadArtifactFile(client: ArtifactUploadClient, file: Fil
   let session: ArtifactUploadSession;
   if (options.resume) session = options.resume;
   else {
-    const begun = await client.begin({ fileName: file.name, size: file.size, mediaType: file.type || null });
+    const state = new Sha256State();
+    for (let offset = 0; offset < file.size; offset += HASH_SLICE_BYTES) {
+      signal.throwIfAborted();
+      state.update(new Uint8Array(await file.slice(offset, Math.min(file.size, offset + HASH_SLICE_BYTES)).arrayBuffer()));
+      options.onHashed?.(Math.min(file.size, offset + HASH_SLICE_BYTES));
+    }
+    signal.throwIfAborted();
+    const begun = await client.begin({ fileName: file.name, size: file.size, sha256: state.digest().slice('sha256:'.length), mediaType: file.type || null });
     session = { ...begun, received: 0 };
     options.onSession(session);
     signal.throwIfAborted();

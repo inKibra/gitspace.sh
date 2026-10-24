@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES, rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { DRIVE_FILE_MAX_BYTES } from '@gitspace/protocol';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { ClientNetworkFailure } from 'result-rpc';
 import { describe, expect, it, vi } from 'vitest';
-import { ArtifactUploadRejected, uploadArtifactFile, type ArtifactUploadClient, type ArtifactUploadSession } from './artifact-upload.js';
+import { ArtifactUploadRejected, uploadArtifactFile, uploadRejection, type ArtifactUploadClient, type ArtifactUploadSession } from './artifact-upload.js';
 
 const url = 'drive://workspace/uploads/data.zip';
 const artifact = { kind: 'artifact' as const, url, hash: 'hash', label: 'uploads/data.zip', mediaType: null, generation: 1 };
@@ -50,13 +51,38 @@ describe('uploadArtifactFile', () => {
 
     await expect(uploadArtifactFile(client, file, { signal: new AbortController().signal, onSession: (session) => sessions.push(session) })).resolves.toEqual(artifact);
 
-    expect(client.begin).toHaveBeenCalledWith({ fileName: 'data.zip', size: bytes.length, mediaType: 'application/zip' });
+    expect(client.begin).toHaveBeenCalledWith({ fileName: 'data.zip', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: 'application/zip' });
     expect(offsets).toEqual([0, ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_CHUNK_BYTES * 2]);
     expect(sessions.map((session) => session.received)).toEqual([0, ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_CHUNK_BYTES * 2, bytes.length]);
     expect(stored()).toEqual(bytes);
     expect(client.commit).toHaveBeenCalledExactlyOnceWith('upload-1');
     expect(client.commit.mock.invocationCallOrder[0]).toBeGreaterThan(client.chunk.mock.invocationCallOrder.at(-1)!);
     expect(wholeRead).not.toHaveBeenCalled();
+  });
+
+  it('hashes a file larger than one read in slices and begins with the whole file\'s digest', async () => {
+    const bytes = contents(4 * 1024 * 1024 * 2 + 5);
+    const { client } = authority();
+    const controller = new AbortController();
+    // Stop after begin: this test is about the digest, not the chunks.
+    client.begin.mockImplementationOnce(async () => { controller.abort(); return { uploadId: 'upload-1', url, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES }; });
+    const hashed: number[] = [];
+
+    await expect(uploadArtifactFile(client, new File([bytes], 'big.bin'), { signal: controller.signal, onSession() {}, onHashed: (count) => hashed.push(count) })).rejects.toThrow();
+
+    expect(hashed).toEqual([4 * 1024 * 1024, 8 * 1024 * 1024, bytes.length]);
+    expect(client.begin).toHaveBeenCalledExactlyOnceWith({ fileName: 'big.bin', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: null });
+  });
+
+  it('stops hashing and never begins an upload cancelled while the file is being hashed', async () => {
+    const controller = new AbortController();
+    const { client } = authority();
+    const hashed: number[] = [];
+
+    await expect(uploadArtifactFile(client, new File([contents(4 * 1024 * 1024 + 1)], 'big.bin'), { signal: controller.signal, onSession() {}, onHashed: (count) => { hashed.push(count); controller.abort(); } })).rejects.toThrow();
+
+    expect(hashed).toEqual([4 * 1024 * 1024]);
+    expect(client.begin).not.toHaveBeenCalled();
   });
 
   it('retries a transient chunk failure at the same offset and continues from there', async () => {
@@ -94,15 +120,19 @@ describe('uploadArtifactFile', () => {
     expect(client.commit).toHaveBeenCalledOnce();
   });
 
-  it('rejects files over 16 MiB before beginning an upload', async () => {
+  it('accepts files over the former 16 MiB limit', () => {
+    expect(uploadRejection({ size: 16 * 1024 * 1024 + 1 })).toBeNull();
+  });
+
+  it('rejects files over the drive file limit before beginning an upload', async () => {
     const file = new File([], 'huge.zip');
-    Object.defineProperty(file, 'size', { value: ARTIFACT_UPLOAD_MAX_BYTES + 1 });
+    Object.defineProperty(file, 'size', { value: DRIVE_FILE_MAX_BYTES + 1 });
     const { client } = authority();
 
     const upload = uploadArtifactFile(client, file, { signal: new AbortController().signal, onSession() {} });
 
     await expect(upload).rejects.toBeInstanceOf(ArtifactUploadRejected);
-    await expect(upload).rejects.toThrow('uploads are limited to 16 MiB');
+    await expect(upload).rejects.toThrow('uploads are limited to 1 GiB');
     expect(client.begin).not.toHaveBeenCalled();
   });
 });

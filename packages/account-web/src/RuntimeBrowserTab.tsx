@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RuntimeIdentitySchema, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { approveChrome } from './browser-approvals.js';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
+import { BrowserCaptures, RecordingClock } from './RuntimeBrowserCaptures.js';
 import { browserPluginsUrl, navigateProductUrl } from './routes.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 type Tab = RuntimeBrowserOverview['cloud']['tabs'][number];
 type Chrome = RuntimeBrowserOverview['chromes'][number];
-type Request = (command: RuntimeSessionCommand, signal?: AbortSignal) => Promise<{ browserOverview?: RuntimeBrowserOverview; browserPreview?: RuntimeBrowserPreview; browserStatus?: RuntimeBrowserStatus }>;
+type Request = (command: RuntimeSessionCommand, signal?: AbortSignal) => Promise<{ browserOverview?: RuntimeBrowserOverview; browserPreview?: RuntimeBrowserPreview; browserStatus?: RuntimeBrowserStatus; browserCaptures?: RuntimeBrowserCaptureView[]; browserCapture?: RuntimeBrowserCaptureView }>;
 type Records = { machineId: string | null; records: RuntimeBrowserStatus['records']; error: string | null };
+/** Recording from tab tiles: the captures now recording (matched to tiles by their target) and the commands. */
+type CaptureControls = { recordings: readonly RuntimeBrowserCaptureView[]; start(groupId: string, targetId: string): void; stop(captureId: string): void };
 
-/** How often the overview and each visible tab's preview are read while the tab is shown. */
+/** How often the overview, the captures and each visible tab's preview are read while the tab is shown. */
 export const BROWSER_REFRESH_MS = 10_000;
+/** On your Chrome, Capture here records screencast frames; video with sound needs your click in Chrome itself. */
+const CHROME_CAPTURE_HINT = 'Capture here records the tab without sound. For video with sound, click Capture on the tab in Chrome (the GitSpace toolbar on the page or the extension’s popup).';
 const TAB_ORIGIN: Record<NonNullable<Tab['addedBy']>, string> = { agent: 'Opened by agent', you: 'You added it', page: 'Opened by a page' };
 
 /** Runs `tick` every `ms` while the page is visible, the way the Browser tab and its previews refresh. */
@@ -40,7 +45,11 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
   const [records, setRecords] = useState<readonly Records[]>([]);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [captures, setCaptures] = useState<readonly RuntimeBrowserCaptureView[] | null>(null);
+  const [capturesError, setCapturesError] = useState<string | null>(null);
   const busy = useRef(false);
+  // Bumped by each start and stop, so a list read that began before one does not overwrite what it returned.
+  const captureChanges = useRef(0);
   const request = useCallback<Request>(async (command, signal) => {
     const response = await rpcClient.runtime.session({ ...identity, ...(conversationId ? { conversationId } : {}), command }, { signal });
     if (response.status === 'error') throw response.error;
@@ -65,13 +74,21 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
     }));
     if (!signal?.aborted) setRecords(values);
   }, [machineKey, request]);
+  const readCaptures = useCallback(async (signal?: AbortSignal) => {
+    const changes = captureChanges.current;
+    try {
+      const result = await request({ type: 'browserCaptures' }, signal);
+      if (!result.browserCaptures) throw new Error('The workspace did not return its captures.');
+      if (!signal?.aborted && changes === captureChanges.current) { setCaptures(result.browserCaptures); setCapturesError(null); }
+    } catch (cause) { if (!signal?.aborted) setCapturesError(rpcErrorMessage(cause, 'Read browser captures')); }
+  }, [request]);
   useEffect(() => {
-    setOverview(null); setRecords([]);
+    setOverview(null); setRecords([]); setCaptures(null);
     const controller = new AbortController();
-    void readOverview(controller.signal); void readRecords(controller.signal);
+    void readOverview(controller.signal); void readRecords(controller.signal); void readCaptures(controller.signal);
     return () => controller.abort();
-  }, [readOverview, readRecords]);
-  useVisibleInterval(() => { void readOverview(); }, BROWSER_REFRESH_MS);
+  }, [readOverview, readRecords, readCaptures]);
+  useVisibleInterval(() => { void readOverview(); void readCaptures(); }, BROWSER_REFRESH_MS);
   const act = async (key: string, operation: () => Promise<void>) => {
     if (busy.current) return;
     busy.current = true; setPending(key); setError(null);
@@ -86,12 +103,23 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
   const revoke = (groupId: string, machineId?: string) => {
     if (window.confirm('Revoke access? This ends this workspace’s tab group on that browser and stops its agents using it; the next use starts a new group.')) void act(`revoke:${groupId}`, async () => { await request({ type: 'browserRevoke', ...(machineId === undefined ? {} : { machineId }), groupId }); await readOverview(); });
   };
+  /** Shows the capture a start or stop returned in place of its listed state. */
+  const keepCapture = (view: RuntimeBrowserCaptureView | undefined) => {
+    if (!view) throw new Error('The workspace did not return the capture.');
+    captureChanges.current += 1;
+    setCaptures(previous => [view, ...(previous ?? []).filter(other => other.capture.captureId !== view.capture.captureId)]);
+  };
+  const captureControls: CaptureControls = {
+    recordings: captures?.filter(view => view.capture.state === 'recording' && view.capture.target !== null) ?? [],
+    start: (groupId, targetId) => void act(`capture:${groupId}:${targetId}`, async () => keepCapture((await request({ type: 'browserCaptureStart', groupId, targetId })).browserCapture)),
+    stop: captureId => void act(`stop:${captureId}`, async () => keepCapture((await request({ type: 'browserCaptureStop', captureId })).browserCapture)),
+  };
   const machineLabel = (machineId: string) => machines.find(machine => machine.id === machineId)?.label ?? machineId;
   const recovery = records.filter(row => row.records.length > 0 || row.error !== null);
   const approved = overview?.chromes.filter(chrome => chrome.approved) ?? [];
   const card = `${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`;
   return <section aria-label="Workspace browsers" className="flex flex-col gap-4 p-3">
-    <div className="flex items-center justify-between gap-3"><h3 className="text-body font-medium">Browsers</h3><Button variant="ghost" size="compact" loading={loading} disabled={loading || pending !== null} onClick={() => void Promise.all([readOverview(), readRecords()])}>Refresh</Button></div>
+    <div className="flex items-center justify-between gap-3"><h3 className="text-body font-medium">Browsers</h3><Button variant="ghost" size="compact" loading={loading} disabled={loading || pending !== null} onClick={() => void Promise.all([readOverview(), readRecords(), readCaptures()])}>Refresh</Button></div>
     {overviewError ? <p role="alert" className="text-caption text-destructive">{overviewError}{overview ? ' Showing the last state read.' : ''}</p> : null}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
     {overview === null && !overviewError ? <p role="status" className="text-caption text-muted-foreground">Loading browsers…</p> : null}
@@ -118,16 +146,16 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
           <Badge size="compact" color={chrome.connected ? 'green' : 'gray'}>{chrome.connected ? 'Online' : 'Offline'}</Badge>
         </div>
         {chrome.note ? <p className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{chrome.note}</p> : null}
-        <GroupTabs groupId={chrome.groupId} groupName={chrome.groupName} running={chrome.running} tabs={chrome.tabs} empty="No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them." request={request} pending={pending} onRevoke={revoke} />
+        <GroupTabs groupId={chrome.groupId} groupName={chrome.groupName} running={chrome.running} tabs={chrome.tabs} empty="No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them." request={request} pending={pending} onRevoke={revoke} captures={captureControls} captureHint={chrome.connected ? CHROME_CAPTURE_HINT : null} />
       </section>)}
       <section aria-label="Cloud browser" className={card}>
         <h4 className="text-body font-medium">Cloud browser</h4>
-        <GroupTabs groupId={overview.cloud.groupId} groupName={null} running={overview.cloud.running} tabs={overview.cloud.tabs} empty="Not started. It starts when an agent first browses." request={request} pending={pending} onRevoke={revoke} />
+        <GroupTabs groupId={overview.cloud.groupId} groupName={null} running={overview.cloud.running} tabs={overview.cloud.tabs} empty="Not started. It starts when an agent first browses." request={request} pending={pending} onRevoke={revoke} captures={captureControls} captureHint={null} />
       </section>
       {overview.machines.map(machine => <section key={machine.machineId} aria-label={`Headless browser on ${machineLabel(machine.machineId)}`} className={card}>
         <h4 className="min-w-0 break-words text-body font-medium">Headless browser on {machineLabel(machine.machineId)}</h4>
         {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
-        <GroupTabs groupId={machine.groupId} groupName={null} running={0} tabs={machine.tabs} empty="No tabs open." request={request} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} />
+        <GroupTabs groupId={machine.groupId} groupName={null} running={0} tabs={machine.tabs} empty="No tabs open." request={request} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} captures={captureControls} captureHint={null} />
       </section>)}
       {recovery.length ? <section aria-label="Browser recovery" className={card}>
         <h4 className="text-caption font-semibold">Recovery</h4>
@@ -146,11 +174,13 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
         </div>)}
       </section> : null}
     </> : null}
+    <BrowserCaptures captures={captures} error={capturesError} />
   </section>;
 }
 
-/** `pending` is the Browser tab's action in progress, if any: one action runs at a time. */
-function GroupTabs({ groupId, groupName, running, tabs, empty, request, pending, onRevoke }: { groupId: string | null; groupName: string | null; running: number; tabs: readonly Tab[]; empty: string; request: Request; pending: string | null; onRevoke(groupId: string): void }) {
+/** `pending` is the Browser tab's action in progress, if any: one action runs at a time. `captureHint` explains
+ * recording on this browser beyond the tiles' Capture, if anything. */
+function GroupTabs({ groupId, groupName, running, tabs, empty, request, pending, onRevoke, captures, captureHint }: { groupId: string | null; groupName: string | null; running: number; tabs: readonly Tab[]; empty: string; request: Request; pending: string | null; onRevoke(groupId: string): void; captures: CaptureControls; captureHint: string | null }) {
   if (groupId === null) return <p className="text-caption text-muted-foreground">{empty}</p>;
   return <div className="flex flex-col gap-2">
     <div className="flex flex-wrap items-center gap-2">
@@ -158,14 +188,25 @@ function GroupTabs({ groupId, groupName, running, tabs, empty, request, pending,
       {running > 0 ? <Badge size="compact" color="blue">▶ running {running}</Badge> : null}
       <Button className="ml-auto" variant="ghost" size="compact" disabled={pending !== null} loading={pending === `revoke:${groupId}`} onClick={() => onRevoke(groupId)}>Revoke access</Button>
     </div>
-    {tabs.length ? <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">{tabs.map(tab => <li key={tab.targetId} className="flex min-w-0 flex-col gap-2 rounded-lg bg-surface-3 p-2">
-      <TabPreview groupId={groupId} tab={tab} request={request} />
-      <div className="min-w-0">
-        <p className="truncate text-caption font-medium" title={tab.title}>{tab.title || tab.url}</p>
-        <p className="truncate font-mono text-caption text-muted-foreground" title={tab.url}>{tab.url}</p>
-        {tab.addedBy ? <p className="text-caption text-muted-foreground">{TAB_ORIGIN[tab.addedBy]}{tab.usable ? '' : ' · not on an approved site'}</p> : null}
-      </div>
-    </li>)}</ul> : <p className="text-caption text-muted-foreground">No tabs in the group.</p>}
+    {tabs.length && captureHint ? <p className="text-caption text-muted-foreground">{captureHint}</p> : null}
+    {tabs.length ? <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">{tabs.map(tab => {
+      const label = tab.title || tab.url;
+      const recording = captures.recordings.find(view => view.capture.target?.groupId === groupId && view.capture.target.targetId === tab.targetId);
+      return <li key={tab.targetId} aria-label={`Tab ${label}`} className="flex min-w-0 flex-col gap-2 rounded-lg bg-surface-3 p-2">
+        <TabPreview groupId={groupId} tab={tab} request={request} />
+        <div className="min-w-0">
+          <p className="truncate text-caption font-medium" title={tab.title}>{label}</p>
+          <p className="truncate font-mono text-caption text-muted-foreground" title={tab.url}>{tab.url}</p>
+          {tab.addedBy ? <p className="text-caption text-muted-foreground">{TAB_ORIGIN[tab.addedBy]}{tab.usable ? '' : ' · not on an approved site'}</p> : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {recording ? <>
+            <Badge size="compact" color="red"><span className="tabular-nums"><RecordingClock startedAt={recording.capture.startedAt} /></span></Badge>
+            <Button variant="secondary" size="compact" aria-label={`Stop capturing ${label}`} disabled={pending !== null} loading={pending === `stop:${recording.capture.captureId}`} onClick={() => captures.stop(recording.capture.captureId)}>Stop</Button>
+          </> : <Button variant="ghost" size="compact" aria-label={`Capture ${label}`} disabled={pending !== null} loading={pending === `capture:${groupId}:${tab.targetId}`} onClick={() => captures.start(groupId, tab.targetId)}>Capture</Button>}
+        </div>
+      </li>;
+    })}</ul> : <p className="text-caption text-muted-foreground">No tabs in the group.</p>}
   </div>;
 }
 

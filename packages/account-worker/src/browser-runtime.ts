@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, canonicalBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, canonicalBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeBrowserCapture, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { performBrowserAction, type BrowserSemanticTab } from '@gitspace/runtime-machine/browser-semantic';
 import { BrowserOutputStore } from '@gitspace/runtime-machine/browser-output';
 import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
@@ -11,6 +11,8 @@ export type AccountBrowserTransport = {
   open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ channel: BrowserChannel; targetId: string }>;
   tabs(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<unknown>;
   preview(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ image: string | null; reason: string | null }>;
+  /** `captureStart` / `captureStop` on your Chrome (docs/APERTURE-DESIGN.md §11). */
+  capture(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeBrowserCapture>;
   revoke(groupId: string, pairingId: string): Promise<void>;
 };
 /** How a cloud tab reaches its workspace's hosted services. `urlPattern` narrows interception to hosted names;
@@ -81,14 +83,16 @@ export class AccountBrowserRuntime {
         }
         return json({ groups, records: [] });
       }
-      if ((command.action !== 'revoke' && command.action !== 'preview') || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
+      const recording = command.action === 'captureStart' || command.action === 'captureStop';
+      if ((command.action !== 'revoke' && command.action !== 'preview' && !recording) || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
       const stored = await this.options.storage.get(`browser.account.group:${command.groupId}`);
       const grant = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(command.groupId);
       if (!grant || grant.projectId !== scope.projectId || grant.workspaceId !== scope.workspaceId) throw new Error('Browser group outside workspace');
-      // Previews on your Chrome come from its extension; the cloud browser's from the workspace's browser session.
-      if (command.action === 'preview') {
+      // Previews and captures on your Chrome come from its extension; the cloud browser's from the workspace's browser
+      // session.
+      if (command.action === 'preview' || recording) {
         if (!this.options.relay || canonicalBrowserAuthorization(grant.placement) !== canonicalBrowserAuthorization(scope.placement)) throw new Error('Browser group outside this Chrome');
-        return json(await this.options.relay.preview(authorization, signal));
+        return json(recording ? await this.options.relay.capture(authorization, signal) : await this.options.relay.preview(authorization, signal));
       }
       await this.options.storage.put(`browser.account.revoked:${grant.groupId}`, true);
       for (const tab of [...this.tabs.values()]) if (tab.grant.groupId === grant.groupId) await this.closeTab(tab);

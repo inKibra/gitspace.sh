@@ -8,7 +8,7 @@ import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRe
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
 import { isSubagentTool } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
@@ -95,7 +95,7 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
-  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview>;
+  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[]>;
 };
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
@@ -197,6 +197,15 @@ export function createSessionControls(services: SessionControlServices) {
         if (!services.browser) throw new Error('Browser management unavailable');
         if (command.type === 'browserOverview') return { control: await control(target), browserOverview: RuntimeBrowserOverviewSchema.parse(await services.browser(String(target.id), undefined, { action: 'overview' })) };
         return { control: await control(target), browserPreview: RuntimeBrowserPreviewSchema.parse(await services.browser(String(target.id), undefined, { action: 'preview', groupId: command.groupId, targetId: command.targetId })) };
+      }
+      // Captures (docs/APERTURE-DESIGN.md §11): the workspace's list, and recording a tab's screencast, which you start
+      // and stop from the Browser tab.
+      case 'browserCaptures': case 'browserCaptureStart': case 'browserCaptureStop': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        if (command.type === 'browserCaptures') return { control: await control(target), browserCaptures: RuntimeBrowserCaptureViewSchema.array().parse(await services.browser(String(target.id), undefined, { action: 'captures' })) };
+        const management: RuntimeBrowserManagement = command.type === 'browserCaptureStart' ? { action: 'captureStart', groupId: command.groupId, targetId: command.targetId } : { action: 'captureStop', captureId: command.captureId };
+        return { control: await control(target), browserCapture: RuntimeBrowserCaptureViewSchema.parse(await services.browser(String(target.id), undefined, management)) };
       }
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {

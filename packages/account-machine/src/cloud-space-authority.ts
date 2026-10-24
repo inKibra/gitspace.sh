@@ -279,8 +279,8 @@ export class CloudDataCheckpointBlobStore implements StreamingBlobStore {
     return source === null ? null : collectBytes(source, maxBytes);
   }
 
-  getStream(key: string, expected: { hash: string; size: number }): Promise<AsyncIterable<Uint8Array> | null> {
-    return this.download(key, { ...expected, maxBytes: expected.size });
+  getStream(key: string, expected: { hash?: string; size: number }, workspace?: DataWorkspace): Promise<AsyncIterable<Uint8Array> | null> {
+    return this.download(key, { ...expected, maxBytes: expected.size, ...(workspace === undefined ? {} : { workspace }) });
   }
 
   /**

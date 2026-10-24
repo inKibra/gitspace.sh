@@ -14,6 +14,7 @@ export * from './rpc-contract.js';
 export * from './transcript.js';
 export * from './project-authority.js';
 export * from './artifact-storage.js';
+export * from './sha256-state.js';
 export * from './rpc-crypto.js';
 export * from './skills-contract.js';
 export * from './user-settings.js';

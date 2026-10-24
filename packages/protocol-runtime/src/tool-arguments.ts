@@ -165,7 +165,8 @@ const sha256Hash = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
  * through the workspace object or the model. `blobHash` is the reference the drive manifest records. Paths follow the
  * file tools: relative to the checkout, or absolute inside /tmp. */
 export const RuntimeDriveTransferArgumentsSchema = z.discriminatedUnion('direction', [
-  RuntimeDispatchSelectionSchema.extend({ direction: z.literal('toMachine'), path, scopeId: path, blobHash: sha256Hash, size: z.number().int().nonnegative() }),
+  /** `object`: the manifest entry's object id when the file was streamed before its digest was known. */
+  RuntimeDispatchSelectionSchema.extend({ direction: z.literal('toMachine'), path, scopeId: path, blobHash: sha256Hash, size: z.number().int().nonnegative(), object: z.string().uuid().optional() }),
   RuntimeDispatchSelectionSchema.extend({ direction: z.literal('fromMachine'), path, scopeId: path }),
 ]);
 /** What `fromMachine` stored in the scope: the plaintext digest naming the object, for the cloud to check and name in the

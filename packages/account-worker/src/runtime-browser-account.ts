@@ -3,7 +3,7 @@ import { BROWSER_RUN_LIMIT_MS, RuntimeAccountBrowserPreparationSchema, RuntimeAc
 import type { ToolServices } from '@gitspace/runtime-core';
 import type { RuntimeBrowserAuthorityOptions } from './runtime-browser.js';
 
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserPreviewSchema, type RuntimeBrowserManagement, type RuntimeBrowserPreview } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureSchema, type RuntimeBrowserCapture, type RuntimeBrowserManagement, type RuntimeBrowserPreview } from '@gitspace/protocol-runtime';
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 type Sites = { origins: string[]; stepsOnly: string[] };
 /** First in every script's result on either browser: what a script returns comes from web pages. */
@@ -103,6 +103,22 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
       return reply.image === null ? none(reply.reason ?? 'No preview') : RuntimeBrowserPreviewSchema.parse({ targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: reply.image }, reason: null });
     } catch (error) { return none(error instanceof Error ? error.message : String(error)); }
   }
+  /** Starts or stops a capture of a tab on the cloud browser (its session object records it) or on your Chrome (its
+   * extension records it), by the browser the capture's group is on. */
+  async function capture(conversationId: string, command: RuntimeBrowserManagement & { groupId: string; captureId: string }): Promise<RuntimeBrowserCapture> {
+    const stored = await storage.get(`runtime.browser.account.grant:${command.groupId}`);
+    if (!stored || command.action === 'captureStart' && await storage.get(`runtime.browser.revoked:${command.groupId}`)) throw new Error('This tab’s group has ended');
+    const placement = storedGrantSchema.parse(stored).body.placement;
+    if (placement.kind === 'cloud') {
+      if (!env.BROWSER_SESSION) throw new Error('Browser session unavailable');
+      const session = env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`);
+      if (command.action !== 'captureStart') return session.captureStop({ ...identity, captureId: command.captureId });
+      if (!command.targetId) throw new Error('A capture names its tab');
+      return session.captureStart({ ...identity, captureId: command.captureId, groupId: command.groupId, targetId: command.targetId });
+    }
+    const conversation = await options.runtime().browserConversation(conversationId);
+    return RuntimeBrowserCaptureSchema.parse(await managed(conversationId, conversation.root, placement, command));
+  }
   async function manage(conversationId: string, command: RuntimeBrowserManagement) {
     const placements: RuntimeAccountBrowserPlacement[] = [];
     const conversation = await options.runtime().browserConversation(conversationId);
@@ -130,5 +146,5 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     return RuntimeBrowserStatusSchema.parse({ groups: statuses.flatMap(status => status.groups), records: statuses.flatMap(status => status.records), browsers: settings?.browsers.filter(browser => browser.approved) ?? [] });
   }
-  return { prepare, execute, dispatch, manage };
+  return { prepare, execute, dispatch, manage, capture };
 }

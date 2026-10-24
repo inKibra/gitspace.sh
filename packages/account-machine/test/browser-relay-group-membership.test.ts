@@ -43,6 +43,7 @@ it('a tab dragged into the workspace group is usable on its site; a tab a group 
         onRemoved: { addListener() {} },
       },
       tabGroups: { get: async (id: number) => ({ id }), onRemoved: { addListener() {} } },
+      downloads: { onCreated: { addListener() {} } },
       alarms: { create() {}, onAlarm: { addListener() {} } },
     },
   });

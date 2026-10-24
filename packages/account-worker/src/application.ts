@@ -65,6 +65,7 @@ import {
   type DeviceCapability,
   type VerifiedDevice,
   runtimeSettingValueSchema,
+  dataObjectReadSchema,
   dataObjectWriteSchema,
   dataMultipartPartSchema,
   dataMultipartCompleteSchema,
@@ -2659,6 +2660,8 @@ async function dataScopeDenied(env: Env, signed: SignedControlRequest, namespace
     return dataError(403, 'DATA_SCOPE_DENIED', 'The workspace is unavailable to this machine');
   }
   const { projectId, workspaceId }: { projectId: string; workspaceId: string } = workspace;
+  // A drive file streamed before its digest was known is written by the account alone.
+  if (write && namespace.kind === 'drive' && namespace.named === 'id') return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Drive objects named by an upload id are read only');
   if (namespace.kind === 'space' || namespace.workspaceId === workspaceId) return null;
   if (!write && namespace.workspaceId === projectId) return null;
   if (!write && workspaceId === projectId) {
@@ -2676,10 +2679,14 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
     case 'data.head':
     case 'data.get': {
       if (diagnostics) diagnostics.stage = signed.operation === 'data.head' ? 'r2.head' : 'r2.get';
-      const object = signed.operation === 'data.get' ? await store.get(name, scope) : null;
-      const metadata = signed.operation === 'data.get' ? object : await store.head(name, scope);
+      const read = dataObjectReadSchema.safeParse(signed.payload);
+      if (!read.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'A read names the SHA-256 it expects, if any');
+      // An object that records no digest of its own is read against the one its reader expects.
+      const expected = read.data.hash ? { sha256: read.data.hash } : undefined;
+      const object = signed.operation === 'data.get' ? await store.get(name, scope, expected ? { expected } : {}) : null;
+      const metadata = signed.operation === 'data.get' ? object : await store.head(name, scope, expected);
       if (!metadata) return new Response(null, { status: 404 });
-      if (signed.payload.hash !== undefined && signed.payload.hash !== metadata.sha256) {
+      if (read.data.hash !== undefined && read.data.hash !== metadata.sha256) {
         await object?.body.cancel();
         return dataError(409, 'HASH_MISMATCH', 'Application object hash does not match');
       }

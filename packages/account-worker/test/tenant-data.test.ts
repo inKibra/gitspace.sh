@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createHash } from 'node:crypto';
-import { artifactObjectKey, createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant, TENANT_OBJECT_PART_BYTES, type ControlOperation } from '@gitspace/protocol';
+import { artifactObjectKey, createSignedControlRequest, credentialProtocolBase64, driveUploadObjectKey, signCredentialAuthorityGrant, TENANT_OBJECT_PART_BYTES, type ControlOperation } from '@gitspace/protocol';
 import { RuntimeAttachInputSchema } from '@gitspace/protocol-runtime';
 import { GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 import { AttachmentStore, type AttachmentServices } from '@gitspace/runtime-workspace-do';
@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { gitLfsObjectKey } from '../src/git-lfs-store.js';
 import { tenantObjectKey, tenantStore } from '../src/tenant-store.js';
+import { DriveFiles } from '../src/drive-files.js';
+import { pattern } from './drive-bytes.js';
 import { tenantRootPrivateKey } from './setup.js';
 
 const signingPrivateKey = new Uint8Array(32).fill(61);
@@ -136,4 +138,24 @@ describe('tenant data endpoint', () => {
     await tenantStore(env).put(sibling, 'space:sibling-workspace', base);
     expect((await send('GET', 'data.get', sibling, workspace)).status).toBe(403);
   });
+
+  it('lets an attached machine read a drive file streamed in parts only against its digest, and never write it', async () => {
+    const { userId, send } = await fixture();
+    const workspace = { projectId, workspaceId };
+    // R2's smallest part, so the file is two parts and is named by its upload.
+    const part = 5 * 1024 * 1024;
+    const bytes = pattern(0, part + 5);
+    const file = await new DriveFiles(tenantStore(env), userId).write(`space:${workspaceId}`, new Blob([bytes]).stream(), part);
+    expect(file).toMatchObject({ blobHash: sha256(bytes), size: bytes.byteLength });
+    const name = driveUploadObjectKey(userId, `space:${workspaceId}`, file.object!);
+    // The object records no digest of its own: a read that names none is refused.
+    expect((await send('HEAD', 'data.head', name, workspace)).status).toBe(409);
+    const head = await send('HEAD', 'data.head', name, { ...workspace, hash: sha256(bytes) });
+    expect([head.status, head.headers.get('x-gitspace-sha256'), head.headers.get('x-gitspace-size')]).toEqual([200, sha256(bytes), String(bytes.byteLength)]);
+    const get = await send('GET', 'data.get', name, { ...workspace, hash: sha256(bytes) });
+    expect([get.status, get.headers.get('content-length')]).toEqual([200, String(bytes.byteLength)]);
+    expect(sha256(new Uint8Array(await get.arrayBuffer()))).toBe(sha256(bytes));
+    const other = new Uint8Array([1]);
+    expect((await send('PUT', 'data.put', name, { ...workspace, hash: sha256(other), size: 1 }, other)).status).toBe(400);
+  }, 60_000);
 });

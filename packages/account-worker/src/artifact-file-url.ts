@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { artifactObjectKey } from '@gitspace/protocol';
+import { DriveFiles } from './drive-files.js';
 import { tenantStore, type TenantRange } from './tenant-store.js';
 
 /** How long a minted file URL serves its file. A media element keeps requesting ranges while it plays, so a URL
@@ -12,6 +12,8 @@ const FileGrantSchema = z.object({
   version: z.literal(1),
   scopeId: z.string().min(1),
   hash: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+  /** The manifest entry's `object`: set for a file streamed before its digest was known. */
+  object: z.string().uuid().optional(),
   size: z.number().int().nonnegative().safe(),
   mediaType: z.string().nullable(),
   name: z.string().max(255),
@@ -95,12 +97,13 @@ export async function serveArtifactFile(request: Request, env: Env): Promise<Res
   if (request.method === 'HEAD') return new Response(null, { status, headers });
   let body: ReadableStream<Uint8Array>;
   try {
-    const object = await tenantStore(env).get(artifactObjectKey(env.ACCOUNT_ID, grant.scopeId, grant.hash), grant.scopeId, range ? { range } : {});
-    if (object?.size !== grant.size) {
-      await object?.body.cancel();
+    const file = await new DriveFiles(tenantStore(env), env.ACCOUNT_ID).get(grant.scopeId, { blobHash: grant.hash, size: grant.size, object: grant.object }, range ?? undefined);
+    if (file?.size !== grant.size) {
+      await file?.body.cancel();
       throw new Error('File is unavailable');
     }
-    body = object.body;
+    // A verified whole body has no length of its own; a fixed length keeps the Content-Length set above.
+    body = file.body.pipeThrough(new FixedLengthStream(range ? range.length : grant.size));
   } catch {
     headers.delete('content-length'); headers.delete('content-range');
     return new Response('File is unavailable', { status: 404, headers });

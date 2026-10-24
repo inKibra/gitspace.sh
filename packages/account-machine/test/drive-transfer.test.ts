@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { artifactObjectKey } from '@gitspace/protocol';
+import { artifactObjectKey, DATA_PUT_MAX_BYTES, driveUploadObjectKey } from '@gitspace/protocol';
 import { RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { driveTransferOperation } from '../src/drive-transfer.js';
@@ -62,6 +62,20 @@ test('a drive file stored under an older reference hash still lands, verified by
   expect(new Uint8Array(await readFile(target))).toEqual(zip);
 });
 
+test('a drive file the account streamed before knowing its digest lands, read against the digest its manifest names', async () => {
+  const { run, data, accountId, scratch, scopeId } = await fixture();
+  const object = '0b7c8a52-5d3c-4c1e-9f2a-3f6e1b2c4d5e';
+  const key = driveUploadObjectKey(accountId, scopeId, object);
+  data.objects.set(key, { bytes: zip, workspaceId: null });
+  const target = join(scratch, 'capture.webm');
+  await run({ direction: 'toMachine', path: target, scopeId, blobHash: sha256(zip), size: zip.byteLength, object });
+  expect(new Uint8Array(await readFile(target))).toEqual(zip);
+  expect(data.requests.at(-1)?.payload).toEqual({ key, hash: sha256(zip), projectId: 'project-1', workspaceId: 'workspace-1' });
+  // A manifest digest the object does not match writes nothing.
+  await expect(run({ direction: 'toMachine', path: join(scratch, 'other.webm'), scopeId, blobHash: sha256(zip.toReversed()), size: zip.byteLength, object })).rejects.toThrow();
+  await expect(readFile(join(scratch, 'other.webm'))).rejects.toThrow();
+});
+
 test('a machine file is stored as plaintext named by its SHA-256 in the named drive scope', async () => {
   const { run, data, accountId, scratch, scopeId } = await fixture();
   const source = join(scratch, 'build.zip');
@@ -72,6 +86,22 @@ test('a machine file is stored as plaintext named by its SHA-256 in the named dr
   expect(data.requests.find(request => request.operation === 'data.put')?.payload).toEqual({
     key: artifactObjectKey(accountId, scopeId, sha256(zip)), hash: sha256(zip), size: zip.byteLength, projectId: 'project-1', workspaceId: 'workspace-1',
   });
+});
+
+test('a file larger than one data request moves both ways in parts, byte for byte', async () => {
+  const { run, data, accountId, scratch, scopeId } = await fixture();
+  const large = new Uint8Array(DATA_PUT_MAX_BYTES + 5);
+  for (let index = 0; index < large.byteLength; index += 4096) large[index] = (index / 4096) % 251;
+  const source = join(scratch, 'recording.webm');
+  await writeFile(source, large);
+  const [result] = await run({ direction: 'fromMachine', path: source, scopeId });
+  const blobHash = sha256(large);
+  expect(JSON.parse(result!.type === 'text' ? result!.text : '')).toEqual({ blobHash, size: large.byteLength });
+  expect(Buffer.from(data.objects.get(artifactObjectKey(accountId, scopeId, blobHash))!.bytes).equals(large)).toBe(true);
+  expect(data.requests.filter(request => request.operation === 'data.multipart.part')).toHaveLength(2);
+  const target = join(scratch, 'copy', 'recording.webm');
+  await run({ direction: 'toMachine', path: target, scopeId, blobHash, size: large.byteLength });
+  expect((await readFile(target)).equals(large)).toBe(true);
 });
 
 test('paths outside the checkout and /tmp are refused both ways', async () => {

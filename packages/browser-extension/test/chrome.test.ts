@@ -126,7 +126,7 @@ describe('the in-page overlay on a tab the agent uses', () => {
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     // The overlay draws after the tab is open, without holding up the script.
     await settle();
-    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', name: 'Checkout', color: expect.stringMatching(/^#[0-9a-f]{6}$/), binding: '__gitspaceStop' } }]);
+    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', name: 'Checkout', color: expect.stringMatching(/^#[0-9a-f]{6}$/), binding: '__gitspaceStop', capture: 'none' } }]);
     await chrome.execute(command(attemptId, 'target-1', 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 60, button: 'left', clickCount: 1 }));
     const methods = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? JSON.stringify(Array.isArray(params.arguments) ? params.arguments[0]?.value?.cursor : null) : method);
     expect(methods.slice(-2)).toEqual([JSON.stringify({ x: 40, y: 60, type: 'mousePressed' }), 'Input.dispatchMouseEvent']);

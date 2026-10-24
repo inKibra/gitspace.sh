@@ -33,6 +33,7 @@ for (const transition of ['revoke', 'replacement', 'replacement after native gro
         debugger: { detach: async () => { detached++; }, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
         tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, query: async ({ groupId }: { groupId: number }) => [...tabs].filter(([, group]) => group === groupId).map(([id, groupId]) => ({ id, groupId })), remove: async (ids: number[]) => { for (const id of ids) tabs.delete(id); }, ungroup: async (ids: number[]) => { for (const id of ids) tabs.set(id, -1); }, onUpdated: { addListener() {} } },
         tabGroups: { get: async () => ({ id: 7 }), onRemoved: { addListener() {} } },
+        downloads: { onCreated: { addListener() {} } },
         alarms: { create() {}, onAlarm: { addListener() {} } },
       },
     };
@@ -82,6 +83,7 @@ it('group closure retries failures without closing stale-epoch or sibling groups
       debugger: { detach: async () => {}, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
       tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, query: async ({ groupId }: { groupId: number }) => [...tabs].filter(([, group]) => group === groupId).map(([id, groupId]) => ({ id, groupId })), remove: async (ids: number[]) => { if (failRemoval) throw new Error('Tab closure failed'); for (const id of ids) tabs.delete(id); }, ungroup: async (ids: number[]) => { for (const id of ids) tabs.set(id, -1); }, onUpdated: { addListener() {} } },
       tabGroups: { get: async (id: number) => ({ id }), onRemoved: { addListener() {} } },
+      downloads: { onCreated: { addListener() {} } },
       alarms: { create() {}, onAlarm: { addListener() {} } },
     },
   };

@@ -15,7 +15,7 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('evaluate'), ...tab, expression: z.string().min(1).max(32768) }),
   z.strictObject({ action: z.literal('screenshot'), ...tab }),
   z.strictObject({ action: z.literal('close'), ...tab }),
-  /** A Playwright script, the body of an async function of `{ page, context, browser, state, view, act }` (docs/APERTURE-DESIGN.md §6.1).
+  /** A Playwright script, the body of an async function of `{ page, context, browser, state, view, act, capture, upload }` (docs/APERTURE-DESIGN.md §6.1).
    * On your Chrome `sites` names the granted sites (exact patterns) the script may use; omitted, every granted site
    * that allows scripts. The cloud browser ignores it. */
   z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536), sites: z.array(BrowserOriginPatternSchema).max(32).optional() }),
@@ -48,8 +48,9 @@ export const RuntimeAccountBrowserPreparationSchema = RuntimeAccountBrowserGrant
 export const RuntimeBrowserApprovalCardSchema = z.union([RuntimeBrowserPreparationSchema, RuntimeAccountBrowserPreparationSchema]);
 export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCardSchema>;
 /** `overview`: the workspace's browsers for the Inspector's Browser tab; `preview`: a small image of one tab
- * (`groupId` and `targetId`; the group names the browser). */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional() });
+ * (`groupId` and `targetId`; the group names the browser); `captures`: the workspace's captures, newest first;
+ * `captureStart` (`groupId`, `targetId`): you start recording a tab's screencast frames; `captureStop` (`captureId`). */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
   accountId: id, projectId: id, workspaceId: id,
@@ -97,9 +98,12 @@ export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserP
  * The Chrome extension's protocol (docs/APERTURE-DESIGN.md §12a), independent of release ids. A release accepts
  * extensions at this protocol and the one before; an extension from before protocols were reported counts as 0.
  * Protocol 2 adds scripts (`browser.run`) on your Chrome; protocol 1 extensions keep single steps. Protocol 3 adds tab
- * previews (`manage` `preview`) and running-script counts in group reports.
+ * previews (`manage` `preview`) and running-script counts in group reports. Protocol 4 adds captures (your Capture
+ * click records the tab with `chrome.tabCapture`; `captureStart`/`captureStop` record screencast frames), downloads of
+ * agent tabs saved to the drive, and uploads into pages from sealed `/files/` links, all moving bytes over HTTPS
+ * (`/api/browser-relay/uploads`), never the relay connection.
  */
-export const BROWSER_EXTENSION_PROTOCOL = 3;
+export const BROWSER_EXTENSION_PROTOCOL = 4;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
 export const BROWSER_RUN_LIMIT_MS = 120_000;
 /** Whether a release at protocol `current` refuses an extension at `protocol` as too old. */
@@ -148,8 +152,8 @@ export const RuntimeBrowserTabOriginSchema = z.enum(['agent', 'page', 'you']);
 export const RuntimeBrowserGroupTabSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema, site: z.string().max(253).nullable() });
 /** The extension's report of one workspace group's tabs, sent whenever membership, a URL or a title changes. */
 export const RuntimeBrowserGroupReportSchema = z.strictObject({ groupId: z.string().uuid(), tabs: z.array(RuntimeBrowserGroupTabSchema).max(200),
-  /** Scripts running on the group. LEGACY: protocol 2 extensions do not report it; remove the default when protocol 2 is refused. */
-  running: z.number().int().nonnegative().default(0) });
+  /** Scripts running on the group. */
+  running: z.number().int().nonnegative() });
 export type RuntimeBrowserGroupReport = z.infer<typeof RuntimeBrowserGroupReportSchema>;
 /** The `gitspace.browsers` workspace document (docs/APERTURE-DESIGN.md §4.2): each Chrome group with the tabs the
  * workspace may use (`usable`: on the grant's origins or the site you consented to). */
@@ -181,6 +185,34 @@ export const RuntimeBrowserOverviewSchema = z.strictObject({
   machines: z.array(z.strictObject({ machineId: id, groupId: z.string().uuid().nullable(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200), error: z.string().max(1024).nullable() })).max(16),
 });
 export type RuntimeBrowserOverview = z.infer<typeof RuntimeBrowserOverviewSchema>;
+/** Where browser files live in the workspace's drive (`drive://workspace/<path>`). */
+export const BROWSER_DRIVE_PREFIX = { captures: 'browser/captures/', downloads: 'browser/downloads/' } as const;
+/** A capture (docs/APERTURE-DESIGN.md §11), stored as `browser/captures/<captureId>/capture.json` beside its media.
+ * Part 1 tracks: `image` (a screenshot: one JPEG), `frames` (screencast JPEGs in one container: `frames.bin` holds
+ * the images back to back, `frames.json` is `RuntimeBrowserFramesIndex`), `video` (WebM from `chrome.tabCapture`).
+ * Steps, comments and layout tracks come later (B2/B3). Paths are relative to the capture's folder. */
+export const RuntimeBrowserCaptureSchema = z.strictObject({
+  version: z.literal(1), captureId: z.string().uuid(), name: z.string().trim().min(1).max(200),
+  by: z.enum(['agent', 'you']), source: z.enum(['headless', 'relay', 'machine']), browser: z.string().max(128),
+  page: z.strictObject({ url: z.string().max(8192), title: z.string().max(500) }),
+  /** The tab it records: its workspace group and target; null when not known. */
+  target: z.strictObject({ groupId: z.string().uuid(), targetId: id }).nullable(),
+  startedAt: z.iso.datetime(), endedAt: z.iso.datetime().nullable(),
+  state: z.enum(['recording', 'saved', 'failed']), reason: z.string().max(1024).nullable(),
+  tracks: z.strictObject({
+    image: z.strictObject({ path: z.string().max(256), width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+    frames: z.strictObject({ path: z.string().max(256), index: z.string().max(256), count: z.number().int().nonnegative(), width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+    video: z.strictObject({ path: z.string().max(256), mediaType: z.string().max(128), sound: z.boolean(), durationMs: z.number().int().nonnegative() }).optional(),
+  }),
+});
+export type RuntimeBrowserCapture = z.infer<typeof RuntimeBrowserCaptureSchema>;
+/** `frames.json`: each frame's time since the capture started and its bytes in `frames.bin`. */
+export const RuntimeBrowserFramesIndexSchema = z.strictObject({ version: z.literal(1), frames: z.array(z.strictObject({ t: z.number().int().nonnegative(), offset: z.number().int().nonnegative(), length: z.number().int().positive() })).max(100_000) });
+export type RuntimeBrowserFramesIndex = z.infer<typeof RuntimeBrowserFramesIndexSchema>;
+/** A capture as the Browser tab lists it, with sealed `/files/` links for its media and folder in the drive. */
+export const RuntimeBrowserCaptureViewSchema = z.strictObject({ capture: RuntimeBrowserCaptureSchema, files: z.record(z.string().max(256), z.string().max(4096)) });
+export type RuntimeBrowserCaptureView = z.infer<typeof RuntimeBrowserCaptureViewSchema>;
+
 /** One tab's preview (`manage` `preview`): a small JPEG, or why there is none (on your Chrome, a tab shows one only
  * while the agent is using it, so previews never start Chrome's debugging bar on their own). */
 export const RuntimeBrowserPreviewSchema = z.strictObject({ targetId: id, capturedAt: z.iso.datetime(), image: z.strictObject({ mediaType: z.literal('image/jpeg'), data: z.string().max(600_000) }).nullable(), reason: z.string().max(256).nullable() });

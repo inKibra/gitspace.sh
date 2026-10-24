@@ -1,19 +1,22 @@
 /**
- * The in-page overlay on a tab of your Chrome while an agent uses it (docs/APERTURE-DESIGN.md §6.4): a floating
- * control at the bottom of the tab (the workspace group, what is happening, Stop), a glow in the group colour while a
- * script runs, and the agent's cursor at each point it clicks or moves to.
+ * The in-page overlay on a tab of your Chrome while an agent uses it or a capture records it
+ * (docs/APERTURE-DESIGN.md §6.4, §11): a floating control at the bottom of the tab (the workspace group, what is
+ * happening, Capture or Stop capture with REC while recording, and Stop for the agent), a glow in the group colour
+ * while a script runs, and the agent's cursor at each point it clicks or moves to.
  *
  * A fixed function the extension calls in its own isolated world (`Runtime.callFunctionOn`), never in the page's. The
  * overlay leaves the page and what the agent reads alone: a closed shadow root under an `aria-hidden` host marked
  * `data-gitspace-overlay` (which the screenshot mask hides), styled inline only (no stylesheet a page's CSP could
  * refuse), nothing focusable, and pointer-transparent except the control while your own pointer is over it, so an
- * agent's clicks and hit tests reach the page. Stop calls the binding named in `show`, added to this world only.
+ * agent's clicks and hit tests reach the page. Its buttons call the binding named in `show` (added to this world
+ * only) with `stop`, `capture` or `captureStop`.
  *
- * One argument: `{ show?: { mode: 'run' | 'step', name, color, binding }, cursor?: { x, y, type }, conceal?: boolean,
- * remove?: true }`. `show` installs the overlay where the document lacks it (after a navigation) and refreshes it; an
- * overlay not refreshed for 75 s removes itself, so one whose debugger channel Chrome dropped does not stay. The cursor
- * travels to each point along a curved path, eased, overshooting slightly and settling, in the time Fitts's law gives
- * a hand (260 + 170·log2(1 + d/22) ms); it presses on `mousePressed` and fades after 5 s idle.
+ * One argument: `{ show?: { mode: 'run' | 'step' | 'capture', name, color, binding, capture: 'none' | 'ready' |
+ * 'recording' }, cursor?: { x, y, type }, conceal?: boolean, remove?: true }`. `show` installs the overlay where the
+ * document lacks it (after a navigation) and refreshes it; an overlay not refreshed for 75 s removes itself, so one
+ * whose debugger channel Chrome dropped does not stay. The cursor travels to each point along a curved path, eased,
+ * overshooting slightly and settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms); it presses
+ * on `mousePressed` and fades after 5 s idle.
  */
 export const browserOverlayFunction = `function(command) {
   const key = '__gitspaceOverlay';
@@ -34,6 +37,11 @@ export const browserOverlayFunction = `function(command) {
     const dot = make('span', 'width:8px;height:8px;border-radius:50%;flex:none', pill);
     const name = make('span', 'font-weight:600;overflow:hidden;text-overflow:ellipsis', pill);
     const what = make('span', 'color:#bdc1c6', pill);
+    const rec = make('span', 'display:none;align-items:center;gap:5px;color:#f28b82;font-weight:700', pill);
+    make('span', 'width:8px;height:8px;border-radius:50%;background:#d93025;flex:none', rec);
+    rec.append('REC');
+    const capture = make('button', 'all:unset;' + font + 'cursor:pointer;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.14);color:#fff;font-weight:600', pill);
+    capture.type = 'button'; capture.tabIndex = -1;
     const stop = make('button', 'all:unset;' + font + 'cursor:pointer;padding:4px 12px;border-radius:999px;background:#d93025;color:#fff;font-weight:600', pill);
     stop.type = 'button'; stop.tabIndex = -1; stop.textContent = 'Stop';
     const cursor = make('div', 'position:fixed;left:0;top:0;pointer-events:none;opacity:0;transition:opacity .4s ease;will-change:transform', root);
@@ -47,7 +55,7 @@ export const browserOverlayFunction = `function(command) {
     arrow.appendChild(path); cursor.appendChild(arrow);
     const label = make('span', font + 'position:absolute;left:14px;top:18px;padding:1px 7px;border-radius:999px;color:#fff;font-size:11px;font-weight:600;white-space:nowrap', cursor);
     label.textContent = 'agent';
-    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '' };
+    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', capture: 'none' };
     const place = (x, y) => { state.x = x; state.y = y; cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)'; };
     const pressAt = () => {
       arrow.animate([{ transform: 'scale(1)' }, { transform: 'scale(.8)' }, { transform: 'scale(1)' }], { duration: 240, easing: 'ease-out' });
@@ -91,19 +99,25 @@ export const browserOverlayFunction = `function(command) {
     document.addEventListener('mousemove', hover, { capture: true, passive: true });
     // Nothing on the control reaches the page, and pressing it never moves focus out of the page.
     for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) pill.addEventListener(type, event => { event.stopPropagation(); if (type !== 'click') event.preventDefault(); });
-    stop.addEventListener('click', () => { const call = globalThis[state.binding]; if (typeof call === 'function') { call('stop'); what.textContent = 'Stopping…'; } });
+    const press = command => { const call = globalThis[state.binding]; if (typeof call === 'function') call(command); return typeof call === 'function'; };
+    stop.addEventListener('click', () => { if (press('stop')) what.textContent = 'Stopping…'; });
+    capture.addEventListener('click', () => { if (press(state.capture === 'recording' ? 'captureStop' : 'capture')) capture.textContent = state.capture === 'recording' ? 'Saving…' : 'Starting…'; });
     const expiry = setInterval(() => { if (Date.now() - state.seen > 75000) overlay.dispose(); }, 15000);
     overlay = {
       apply(next) {
         if (next.show) {
-          state.seen = Date.now(); state.binding = next.show.binding;
+          state.seen = Date.now(); state.binding = next.show.binding; state.capture = next.show.capture;
           const color = next.show.color;
           dot.style.background = color; label.style.background = color; path.setAttribute('fill', color);
           pill.style.borderColor = color;
           glow.style.boxShadow = 'inset 0 0 0 2px ' + color + ', inset 0 0 28px 2px ' + color + '66';
           glow.style.opacity = next.show.mode === 'run' ? '1' : '0';
           name.textContent = 'GitSpace · ' + next.show.name;
-          what.textContent = next.show.mode === 'run' ? 'Running a script' : 'Working';
+          what.textContent = next.show.mode === 'run' ? 'Running a script' : next.show.mode === 'step' ? 'Working' : 'Recording';
+          stop.style.display = next.show.mode === 'capture' ? 'none' : '';
+          rec.style.display = next.show.capture === 'recording' ? 'inline-flex' : 'none';
+          capture.style.display = next.show.capture === 'none' ? 'none' : '';
+          capture.textContent = next.show.capture === 'recording' ? 'Stop capture' : 'Capture';
           if (!host.isConnected) document.documentElement.appendChild(host);
         }
         if (next.conceal !== undefined) host.style.visibility = next.conceal ? 'hidden' : 'visible';

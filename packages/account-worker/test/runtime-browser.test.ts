@@ -8,7 +8,7 @@ import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowse
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
-import { BROWSER_EXTENSION_PROTOCOL, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPreview, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, RuntimeBrowserCaptureViewSchema, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPreview, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { UserRelayDO } from '../src/index.js';
 /** The relay object as the browser tools reach it. */
 type BrowserRelayObject = Pick<UserRelayDO, 'browserRelayPlacement' | 'browserRelayProjectSettings' | 'browserRelayExecute'>;
@@ -36,7 +36,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const forgottenPairings = new Set<string>();
   const offlinePairings = new Set<string>();
   const knownPairings = new Map<string, typeof pairing>();
-  const relayRuntime = new AccountBrowserRuntime({ storage, relay: { async tabs() { return []; }, async preview() { return { image: null, reason: 'Preview appears while the agent uses this tab' }; }, async open() { throw new Error('This fixture exercises group discovery, not tab opening'); }, async revoke() {} } });
+  const relayRuntime = new AccountBrowserRuntime({ storage, relay: { async tabs() { return []; }, async preview() { return { image: null, reason: 'Preview appears while the agent uses this tab' }; }, async capture() { throw new Error('This fixture exercises group discovery, not captures'); }, async open() { throw new Error('This fixture exercises group discovery, not tab opening'); }, async revoke() {} } });
   const relay = {
     async browserRelayPlacement(projectId: string, pairingId?: string) { if (projectId !== identity.projectId || !state.projectApproved) throw new Error('Chrome is not approved for this project'); knownPairings.set(pairing.pairingId, { ...pairing }); const selected = knownPairings.get(pairingId ?? pairing.pairingId); if (!selected) throw new Error('Unknown Chrome'); return selected; },
     async browserRelayProjectSettings(projectId: string) { return { projectId, revision: 1, defaultPairingId: pairing.pairingId, browsers: [...[...knownPairings.values()].filter(browser => !forgottenPairings.has(browser.pairingId)).map(({ pairingId, generation }) => ({ pairingId, generation, approved: state.projectApproved, connected: !offlinePairings.has(pairingId), name: 'Work Chrome', note: 'Production account' })), ...state.unapproved] }; },
@@ -66,16 +66,26 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     sessions.push({ name, authorization });
     const text = authorization.body.command.type === 'manage' ? JSON.stringify(RuntimeBrowserStatusSchema.parse({ groups: [], records: [] })) : '{"ok":true,"value":1}';
     return { status: 'completed', requestId: authorization.body.scope.requestId, attemptId: authorization.body.scope.attemptId, content: [{ type: 'text', text }] };
-  } }) };
+  }, async captureStart(): Promise<never> { throw new Error('This fixture records no cloud captures'); }, async captureStop(): Promise<never> { throw new Error('This fixture records no cloud captures'); } }) };
+  /** The workspace's drive, in memory, and the files on the machine its moves read. */
+  const files = new Map<string, Uint8Array>(), machineFiles = new Map<string, Uint8Array>();
+  const moved: Array<{ machineId: string; machinePath: string; path: string; mediaType: string }> = [];
+  const drive = {
+    async write(path: string, _mediaType: string | null, body: Uint8Array | ReadableStream<Uint8Array>) { const bytes = body instanceof Uint8Array ? body : new Uint8Array(await new Response(body).arrayBuffer()); files.set(path, bytes); const blobHash: `sha256:${string}` = `sha256:${path}`; return { path, size: bytes.byteLength, blobHash }; },
+    async list(prefix: string) { return [...files].filter(([path]) => path.startsWith(prefix)).map(([path, bytes]) => ({ path, size: bytes.byteLength, mediaType: null, blobHash: `sha256:${path}` })); },
+    async read(path: string) { return files.get(path) ?? null; },
+    async url(path: string) { return `https://account.test/files/${encodeURIComponent(path)}`; },
+  };
   const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: { getByName: () => relayObject ?? relay }, BROWSER_SESSION, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
   const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
     const machineId = args.on ?? state.defaultMachineId;
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
     if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
-  }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly }), groupName: async () => 'Workspace' });
+  }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly }), groupName: async () => 'Workspace', drive: () => drive,
+  async fromMachine(move) { moved.push(move); await drive.write(move.path, move.mediaType, machineFiles.get(move.machinePath) ?? new Uint8Array()); } });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, forgottenPairings, offlinePairings, storage };
+  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -347,6 +357,49 @@ test('a machine’s headless tab is previewed on that machine; an outdated or de
   expect(await preview()).toMatchObject({ image: null, reason: 'Update GitSpace on this machine to see its browser' });
   f.attachments.splice(0);
   expect(await preview()).toMatchObject({ image: null, reason: 'This machine is not attached: attach it to see this tab' });
+});
+test('you capture a machine’s headless tab: the machine records it, and stopping moves its frames into the drive and saves the capture', async () => {
+  const f = await fixture();
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', on: 'machine' });
+  const card = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  const manage = async (command: RuntimeBrowserManagement) => f.authority.manage(f.input.conversationId, undefined, command);
+  const startedAt = '2026-10-24T09:15:00.000Z', asked: RuntimeBrowserManagement[] = [];
+  f.machineAnswers.set('machine', command => {
+    asked.push(command);
+    if (command.action === 'captureStart') return { page: { url: 'https://example.com/report', title: 'Q3 report' }, startedAt };
+    return { endedAt: '2026-10-24T09:16:00.000Z', count: 2, width: 1280, height: 720, reason: null, files: { 'frames.bin': `/tmp/gitspace-captures/${command.captureId}/frames.bin`, 'frames.json': `/tmp/gitspace-captures/${command.captureId}/frames.json` } };
+  });
+  const started = RuntimeBrowserCaptureViewSchema.parse(await manage({ action: 'captureStart', groupId: card.groupId, targetId: 'machine-tab' }));
+  const { captureId } = started.capture, folder = `browser/captures/${captureId}/`;
+  expect(asked).toEqual([{ action: 'captureStart', groupId: card.groupId, targetId: 'machine-tab', captureId }]);
+  expect(started.capture).toMatchObject({ name: 'Q3 report · 2026-10-24 09:15 UTC', by: 'you', source: 'machine', target: { groupId: card.groupId, targetId: 'machine-tab' }, page: { url: 'https://example.com/report', title: 'Q3 report' }, startedAt, endedAt: null, state: 'recording', tracks: {} });
+  f.machineFiles.set(`/tmp/gitspace-captures/${captureId}/frames.bin`, Uint8Array.from([1, 2, 3]));
+  f.machineFiles.set(`/tmp/gitspace-captures/${captureId}/frames.json`, new TextEncoder().encode('{"version":1,"frames":[]}'));
+  const stopped = RuntimeBrowserCaptureViewSchema.parse(await manage({ action: 'captureStop', captureId }));
+  expect(stopped.capture).toMatchObject({ captureId, state: 'saved', endedAt: '2026-10-24T09:16:00.000Z', tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: 2, width: 1280, height: 720 } } });
+  expect(f.moved.map(({ machinePath, path, mediaType }) => ({ machinePath, path, mediaType }))).toEqual([
+    { machinePath: `/tmp/gitspace-captures/${captureId}/frames.bin`, path: `${folder}frames.bin`, mediaType: 'application/octet-stream' },
+    { machinePath: `/tmp/gitspace-captures/${captureId}/frames.json`, path: `${folder}frames.json`, mediaType: 'application/json' },
+  ]);
+  expect(f.files.get(`${folder}frames.bin`)).toEqual(Uint8Array.from([1, 2, 3]));
+  expect(Object.keys(stopped.files).sort()).toEqual(['frames.bin', 'frames.json']);
+  // Listed with links to its files; stopping it again changes nothing and asks the machine nothing.
+  expect(RuntimeBrowserCaptureViewSchema.array().parse(await manage({ action: 'captures' }))).toEqual([stopped]);
+  expect(RuntimeBrowserCaptureViewSchema.parse(await manage({ action: 'captureStop', captureId }))).toEqual(stopped);
+  expect(asked).toHaveLength(2);
+});
+test('a machine capture stop that cannot reach the machine saves the capture as failed; an outdated machine asks for an update', async () => {
+  const f = await fixture();
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', on: 'machine' });
+  const card = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  const manage = async (command: RuntimeBrowserManagement) => f.authority.manage(f.input.conversationId, undefined, command);
+  f.machineAnswers.set('machine', () => { throw new Error('Invalid option: expected one of "status"|"revoke"|"reconcile"|"discard"|"artifact"|"overview"|"preview"'); });
+  await expect(manage({ action: 'captureStart', groupId: card.groupId, targetId: 'machine-tab' })).rejects.toThrow('Update GitSpace on this machine to record its browser');
+  f.machineAnswers.set('machine', () => ({ page: { url: 'https://example.com/', title: 'Example' }, startedAt: new Date().toISOString() }));
+  const { captureId } = RuntimeBrowserCaptureViewSchema.parse(await manage({ action: 'captureStart', groupId: card.groupId, targetId: 'machine-tab' })).capture;
+  f.attachments.splice(0);
+  expect(RuntimeBrowserCaptureViewSchema.parse(await manage({ action: 'captureStop', captureId })).capture).toMatchObject({ state: 'failed', reason: 'The machine recording this capture is not attached', tracks: {} });
+  expect(f.moved).toEqual([]);
 });
 
 const Frame = z.object({ serverNonce: z.string().optional() });
