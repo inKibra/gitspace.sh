@@ -996,12 +996,20 @@ function isPoint(value) { return typeof value === 'object' && value !== null && 
 /** A share as the account describes it (`RuntimeBrowserShare`), as far as this Chrome uses it. */
 function isShare(value) { return typeof value?.shareId === 'string' && typeof value.targetId === 'string' && typeof value.link === 'string' && typeof value.expiresAt === 'string' && Array.isArray(value.viewers); }
 async function layoutViewport(debuggee) { return (await chrome.debugger.sendCommand(debuggee.source, 'Page.getLayoutMetrics')).cssLayoutViewport; }
-/** This Chrome's live shares changed: told by the account, or made or ended here. */
+/** This Chrome's live shares changed: told by the account, or made or ended here. A share whose tab this Chrome no
+ * longer has (it closed while Chrome or GitSpace was off) is reported closed, which ends it. Of calls that overlap, the
+ * latest wins. */
+let sharesVersion = 0;
 async function setShares(shares) {
+  const version = ++sharesVersion;
   liveShares = shares;
-  for (const shareId of sharePages.keys()) if (!shares.some(share => share.shareId === shareId)) sharePages.delete(shareId);
   const tabIds = new Map((await targets()).map(target => [target.id, target.tabId]));
-  if (liveShares === shares) sharedTabs = new Map(shares.filter(share => tabIds.has(share.targetId)).map(share => [share.targetId, tabIds.get(share.targetId)]));
+  if (version !== sharesVersion) return;
+  const gone = shares.filter(share => !tabIds.has(share.targetId));
+  for (const share of gone) send({ share: { event: 'closed', shareId: share.shareId } });
+  liveShares = gone.length ? shares.filter(share => tabIds.has(share.targetId)) : shares;
+  for (const shareId of sharePages.keys()) if (!liveShares.some(share => share.shareId === shareId)) sharePages.delete(shareId);
+  sharedTabs = new Map(liveShares.map(share => [share.targetId, tabIds.get(share.targetId)]));
 }
 /** A shared tab's page and viewport in CSS pixels: from its debugger session where it has one, else Chrome's size of
  * the tab; null when Chrome gives none. */

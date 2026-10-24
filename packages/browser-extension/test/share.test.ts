@@ -143,6 +143,13 @@ describe('a share of a tab on your Chrome', () => {
     await chrome.closeTab(9);
     expect(chrome.sent.filter(message => message.share).at(-1)).toEqual({ share: { event: 'closed', shareId } });
   });
+
+  it('ends, when the account lists it, if its tab closed while Chrome was off', async () => {
+    const chrome = await sharing();
+    const live = crypto.randomUUID(), lost = crypto.randomUUID();
+    await chrome.fromRelay({ operation: 'shares', shares: [shareOf(live), { ...shareOf(lost), targetId: 'target-from-before-restart' }] });
+    expect(chrome.sent.filter(message => message.share)).toEqual([{ share: { event: 'closed', shareId: lost } }]);
+  });
 });
 
 describe('a share link pasted into a workspace', () => {
