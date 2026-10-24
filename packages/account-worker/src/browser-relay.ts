@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
 import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
-import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
@@ -13,14 +13,19 @@ import { zipSync, strToU8 } from 'fflate';
 export function browserRelayArchive(endpoint: string): Uint8Array {
   return zipSync(Object.fromEntries(Object.entries(extensionFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
 }
-const identity = { pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, extension: RuntimeBrowserExtensionSchema.nullable().optional() };
+/** `name` is the Chrome's one name; pairings stored before names moved to the pairing have none (see `names`). */
+const identity = { pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, extension: RuntimeBrowserExtensionSchema.nullable().optional(), name: RuntimeBrowserNameSchema.optional() };
 const Pairing = z.discriminatedUnion('state', [
   z.object({ ...identity, state: z.literal('awaiting-key'), code: z.string(), expiresAt: z.iso.datetime(), publicKey: z.null() }),
   z.object({ ...identity, state: z.literal('pending-confirmation'), code: z.null(), expiresAt: z.null(), publicKey: z.string() }),
   z.object({ ...identity, state: z.literal('confirmed'), code: z.null(), expiresAt: z.null(), publicKey: z.string() }),
 ]);
 const Registry = z.object({ pairings: z.array(Pairing) });
-const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), approvals: z.array(RuntimeProjectBrowserPreferencesSchema.shape.approvals.element.extend({ generation: z.number().int().nonnegative(), approvalId: z.string().uuid() })) });
+const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), approvals: z.array(RuntimeProjectBrowserPreferencesSchema.shape.approvals.element.extend({ generation: z.number().int().nonnegative(), approvalId: z.string().uuid(),
+  /** LEGACY: approvals stored before names moved to the pairing carry the name; read only as an unnamed pairing's
+   * fallback and dropped on the project's next write. Remove once every stored approval has been rewritten. */
+  name: z.string().optional() })) });
+type StoredPairing = z.infer<typeof Pairing>;
 const Proof = z.object({ pairing: z.literal('client'), pairingId: z.string().uuid(), clientNonce: z.string().regex(/^[a-f0-9]{64}$/), publicKey: z.string().max(128), proof: z.string().max(128), code: z.string().max(256).optional() });
 const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), group: RuntimeBrowserGroupReportSchema.optional() });
 /** Where a workspace's groups are kept for its `gitspace.browsers` document. */
@@ -29,8 +34,12 @@ type Connection = { socket: WebSocket; product: string; sequence: number; pendin
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
  * once the script connects. */
 type ScriptRun = { authorization: RuntimeAccountBrowserAuthorization; grant: RuntimeAccountBrowserSignedGrant; pairingId: string; attemptId: string; deadline: number; connection: Connection; browser?: RelayBrowser; socket?: WebSocket };
-/** The first extension protocol that runs scripts. */
-const SCRIPT_PROTOCOL = 2;
+/** The first extension protocol that shows tab previews. */
+const PREVIEW_PROTOCOL = 3;
+const PreviewReply = z.object({ image: z.string().max(600_000).nullable(), reason: z.string().max(256).nullable() });
+const NO_CHROME = 'No Chrome is paired with this account. Ask the user to pair one in Plugins → Browsers.';
+const UNCONFIRMED = 'A Chrome is paired with this account but its fingerprint is not confirmed yet. Ask the user to confirm it in Plugins → Browsers.';
+const APPROVE_HINT = 'Ask the user to approve one in Plugins → Browsers or in this workspace’s Browser tab.';
 /** Where a script's CDP connection reaches the relay object, from the browser session's sandbox binding only. */
 export const BROWSER_SCRIPT_PATH = '/browser-relay/script/';
 /** Every Chrome extension socket. Its attachment holds the socket's whole pairing state, so the relay hibernates between frames. */
@@ -115,11 +124,23 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   }
   private async registry() { return Registry.parse(await this.ctx.storage.get('browser.relay.pairings') ?? { pairings: [] }); }
   private async projectPreferences(projectId: string) { return ProjectSettings.parse(await this.ctx.storage.get(`browser.relay.project:${projectId}`) ?? { revision: 0, defaultPairingId: null, approvals: [] }); }
+  /** Each pairing's name: its own, else (LEGACY: pairings named before names moved from project approvals to the
+   * pairing; remove with `ProjectSettings`' `name`) the first stored approval's, else `Chrome <id prefix>`. */
+  private async names(pairings: StoredPairing[]) {
+    const legacy = new Map<string, string>();
+    if (pairings.some(pairing => !pairing.name)) for (const stored of (await this.ctx.storage.list({ prefix: 'browser.relay.project:' })).values()) {
+      for (const approval of ProjectSettings.parse(stored).approvals) if (approval.name && !legacy.has(approval.pairingId)) legacy.set(approval.pairingId, approval.name);
+    }
+    return (pairing: StoredPairing) => pairing.name ?? legacy.get(pairing.pairingId) ?? `Chrome ${pairing.pairingId.slice(0, 8)}`;
+  }
+  /** A Chrome as refusals name it, so the agent can pass its `pairingId` or tell the user which Chrome to open. */
+  private describe(pairing: StoredPairing, name: (pairing: StoredPairing) => string) { return `"${name(pairing)}" (${pairing.pairingId}, ${this.connection(pairing.pairingId) ? 'online' : 'offline'})`; }
   async projectSettings(projectId: string) {
     const [preferences, registry] = await Promise.all([this.projectPreferences(projectId), this.registry()]);
-    return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId: preferences.defaultPairingId, browsers: registry.pairings.filter(pairing => pairing.state === 'confirmed').map(pairing => {
+    const confirmed = registry.pairings.filter(pairing => pairing.state === 'confirmed'), name = await this.names(confirmed);
+    return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId: preferences.defaultPairingId, browsers: confirmed.map(pairing => {
       const approval = preferences.approvals.find(item => item.pairingId === pairing.pairingId && item.generation === pairing.generation);
-      return { pairingId: pairing.pairingId, generation: pairing.generation, name: approval?.name ?? `Chrome ${pairing.pairingId.slice(0, 8)}`, note: approval?.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval };
+      return { pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), note: approval?.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval };
     }) });
   }
   async setProjectSettings(projectId: string, expectedRevision: number, value: RuntimeProjectBrowserPreferences) {
@@ -133,11 +154,16 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         const pairing = registry.pairings.find(item => item.pairingId === approval.pairingId && item.state === 'confirmed');
         if (!pairing) return 'Browser fingerprint confirmation required';
         const prior = current.approvals.find(item => item.pairingId === approval.pairingId && item.generation === pairing.generation);
-        approvals.push({ ...approval, generation: pairing.generation, approvalId: prior?.approvalId ?? crypto.randomUUID() });
+        approvals.push({ pairingId: approval.pairingId, note: approval.note, generation: pairing.generation, approvalId: prior?.approvalId ?? crypto.randomUUID() });
       }
       const removed = current.approvals.filter(prior => !approvals.some(next => next.pairingId === prior.pairingId && next.generation === prior.generation));
+      // LEGACY: a name this write drops from an approval moves to its unnamed pairing first; remove with
+      // `ProjectSettings`' `name`.
+      const named = registry.pairings.filter(pairing => !pairing.name && current.approvals.some(item => item.pairingId === pairing.pairingId && item.name));
+      for (const pairing of named) pairing.name = current.approvals.find(item => item.pairingId === pairing.pairingId && item.name)?.name;
       await this.ctx.storage.transaction(async tx => {
         await tx.put(`browser.relay.project:${projectId}`, { revision: current.revision + 1, defaultPairingId: preferences.defaultPairingId, approvals });
+        if (named.length) await tx.put('browser.relay.pairings', registry);
         if (removed.length) for (const stored of (await tx.list({ prefix: 'browser.account.group:' })).values()) {
           const group = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = group.placement;
           if (group.projectId === projectId && placement.kind === 'account-relay' && removed.some(item => item.pairingId === placement.pairingId)) {
@@ -154,8 +180,15 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   }
   private async approved(projectId: string, pairingId: string, generation: number) {
     const approval = (await this.projectPreferences(projectId)).approvals.find(item => item.pairingId === pairingId && item.generation === generation);
-    if (!approval) throw new Error('Chrome is not approved for this project. Ask the user to approve it in project Settings.');
-    return approval;
+    if (approval) return approval;
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId);
+    throw new Error(`${pairing ? this.describe(pairing, await this.names([pairing])) : `Chrome ${pairingId}`} is not approved for this project. ${APPROVE_HINT}`);
+  }
+  /** Why a Chrome the project approved cannot take the call now. */
+  private offline(pairing: StoredPairing, name: (pairing: StoredPairing) => string, others: StoredPairing[]) {
+    const alternatives = others.filter(other => other.pairingId !== pairing.pairingId);
+    const why = pairing.extension?.updateRequired ? 'its GitSpace extension is too old to connect. Ask the user to update the extension in that Chrome' : 'its GitSpace extension is not connected. Ask the user to open that Chrome';
+    return new Error(`"${name(pairing)}" (${pairing.pairingId}) is approved but offline: ${why}${alternatives.length ? `, or pass another approved pairingId: ${alternatives.map(other => this.describe(other, name)).join(', ')}` : ''}.`);
   }
   private async dispatchApproval(authorization: RuntimeAccountBrowserAuthorization) {
     const { scope, command } = authorization.body, placement = scope.placement;
@@ -180,8 +213,21 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     return result;
   }
   async status() {
-    const registry = await this.registry();
-    return RuntimeAccountBrowserRelayStatusSchema.parse({ pairings: await Promise.all(registry.pairings.map(async pairing => ({ pairingId: pairing.pairingId, generation: pairing.generation, state: pairing.state, expiresAt: pairing.expiresAt, pairedKeyFingerprint: pairing.publicKey ? await fingerprint(pairing.publicKey) : null, connected: !!this.connection(pairing.pairingId), extension: pairing.extension ?? null, browser: pairing.state === 'confirmed' ? this.connection(pairing.pairingId)?.product ?? null : null }))) });
+    const registry = await this.registry(), name = await this.names(registry.pairings);
+    return RuntimeAccountBrowserRelayStatusSchema.parse({ pairings: await Promise.all(registry.pairings.map(async pairing => ({ pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), state: pairing.state, expiresAt: pairing.expiresAt, pairedKeyFingerprint: pairing.publicKey ? await fingerprint(pairing.publicKey) : null, connected: !!this.connection(pairing.pairingId), extension: pairing.extension ?? null, browser: pairing.state === 'confirmed' ? this.connection(pairing.pairingId)?.product ?? null : null }))) });
+  }
+  /** Names a paired Chrome; the name shows wherever the Chrome appears, in every project. */
+  async rename(pairingId: string, name: string) {
+    const value = RuntimeBrowserNameSchema.parse(name);
+    const renamed = await this.ctx.blockConcurrencyWhile(async () => {
+      const registry = await this.registry(), pairing = registry.pairings.find(item => item.pairingId === pairingId);
+      if (!pairing) return false;
+      pairing.name = value;
+      await this.ctx.storage.put('browser.relay.pairings', registry);
+      return true;
+    });
+    if (!renamed) throw new Error('Unknown browser pairing');
+    return this.status();
   }
   async confirm(pairingId: string, expectedFingerprint: string) {
     const confirmed = await this.ctx.blockConcurrencyWhile(async () => {
@@ -194,14 +240,21 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (!confirmed) throw new Error('Browser fingerprint mismatch');
     return this.status();
   }
+  /** The Chrome a relay call uses: `pairingId`, else the project default, else the only approved Chrome. Each refusal
+   * says what the agent can do about it (pass a pairingId, or ask the user to pair, approve or open a Chrome). */
   async placement(projectId: string, pairingId?: string) {
-    const preferences = await this.projectPreferences(projectId);
-    const selected = pairingId ?? preferences.defaultPairingId;
-    if (!selected) throw new Error('No approved project default Chrome. Ask the user to choose one in project Settings or select an approved pairingId.');
-    const pairing = (await this.registry()).pairings.find(item => item.pairingId === selected);
-    if (!pairing || pairing.state !== 'confirmed') throw new Error('Browser fingerprint confirmation required');
+    const [preferences, registry] = await Promise.all([this.projectPreferences(projectId), this.registry()]);
+    const confirmed = registry.pairings.filter(item => item.state === 'confirmed');
+    if (!confirmed.length) throw new Error(registry.pairings.some(item => item.state === 'pending-confirmation') ? UNCONFIRMED : NO_CHROME);
+    const name = await this.names(confirmed), list = (pairings: StoredPairing[]) => pairings.map(item => this.describe(item, name)).join(', ');
+    const approved = confirmed.filter(item => preferences.approvals.some(approval => approval.pairingId === item.pairingId && approval.generation === item.generation));
+    if (!approved.length) throw new Error(`No Chrome is approved for this project. Paired: ${list(confirmed)}. ${APPROVE_HINT}`);
+    const selected = pairingId ?? preferences.defaultPairingId ?? (approved.length === 1 ? approved[0]?.pairingId : undefined);
+    if (!selected) throw new Error(`Several Chromes are approved for this project and none is its default: ${list(approved)}. Pass the pairingId of the one to use.`);
+    const pairing = approved.find(item => item.pairingId === selected);
+    if (!pairing) throw new Error(`${pairingId ? `Chrome ${pairingId}` : 'The project default Chrome'} is not approved for this project. Approved: ${list(approved)}. Pass one of their pairingIds, or ask the user to approve that Chrome in Plugins → Browsers or in this workspace’s Browser tab.`);
+    if (!this.connection(pairing.pairingId)) throw this.offline(pairing, name, approved);
     const approval = await this.approved(projectId, pairing.pairingId, pairing.generation);
-    if (!this.connection(pairing.pairingId)) throw new Error('Approved Chrome is unavailable: extension is not connected');
     return { kind: 'account-relay' as const, accountId: this.env.ACCOUNT_ID, pairingId: pairing.pairingId, generation: pairing.generation, approvalId: approval.approvalId };
   }
   async unpair(pairingId: string) {
@@ -363,20 +416,21 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     });
   }
   /** A paired Chrome reported one of its workspace groups. The workspace keeps the tabs, each marked usable when it is
-   * on the grant's origins or on the site you consented to by dragging it in. */
+   * on the grant's origins or on the site you consented to by dragging it in, and the scripts running there. */
   private async groupReported(pairingId: string, report: RuntimeBrowserGroupReport) {
     const stored = await this.ctx.storage.get(`browser.account.group:${report.groupId}`);
     if (!stored || await this.ctx.storage.get(`browser.account.revoked:${report.groupId}`)) return;
     const grant = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = grant.placement;
     if (placement.kind !== 'account-relay' || placement.pairingId !== pairingId) return;
-    const approval = (await this.projectPreferences(grant.projectId)).approvals.find(item => item.pairingId === pairingId);
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId);
+    if (!pairing) return;
     const usable = (url: string, site: string | null) => {
       if (url === 'about:blank') return true;
       try { const { protocol, hostname } = new URL(url); return ['http:', 'https:'].includes(protocol) && [...grant.origins, ...(site ? [site] : [])].some(origin => browserOriginMatches(origin, hostname)); } catch { return false; }
     };
     await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${grant.workspaceId}`).browserGroupReported({ projectId: grant.projectId, workspaceId: grant.workspaceId }, {
-      pairingId, browser: approval?.name ?? `Chrome ${pairingId.slice(0, 8)}`, groupId: grant.groupId, groupName: grant.groupName, origins: grant.origins, expiresAt: grant.expiresAt, reportedAt: new Date().toISOString(),
-      tabs: report.tabs.map(tab => ({ ...tab, usable: usable(tab.url, tab.site) })),
+      pairingId, browser: (await this.names([pairing]))(pairing), groupId: grant.groupId, groupName: grant.groupName, origins: grant.origins, expiresAt: grant.expiresAt, reportedAt: new Date().toISOString(),
+      tabs: report.tabs.map(tab => ({ ...tab, usable: usable(tab.url, tab.site) })), running: report.running,
     });
   }
   /** An archived or deleted workspace's groups lose their authority now; each Chrome closes the agent's tabs and lets
@@ -412,10 +466,11 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (!pairing || pairing.state !== 'confirmed') throw new Error('Browser fingerprint confirmation required');
     const body = await verifyRuntimeAccountBrowserAuthorization(authorization, pairing.trust);
     if (placement.generation !== pairing.generation) throw new Error('Browser pairing changed');
-    const approval = await this.dispatchApproval(authorization);
-    if (!this.connection(placement.pairingId)) throw new Error('Approved Chrome is unavailable: extension is not connected');
+    await this.dispatchApproval(authorization);
+    const name = (await this.names([pairing]))(pairing);
+    if (!this.connection(placement.pairingId)) throw this.offline(pairing, () => name, []);
     const result = await this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(body.expiresAt) - Date.now())));
-    return { ...result, browser: { pairingId: placement.pairingId, name: approval.name } };
+    return { ...result, browser: { pairingId: placement.pairingId, name } };
   }
   private async authorize(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal) {
     signal.throwIfAborted(); const placement = authorization.body.scope.placement;
@@ -427,6 +482,16 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     return { pairingId: placement.pairingId, connection };
   }
   async tabs(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal) { const { pairingId } = await this.authorize(authorization, signal); const command = authorization.body.command; if (command.type === 'manage') throw new Error('Tabs authorization required'); await this.dispatchApproval(authorization); return this.request(pairingId, { operation: 'tabs', groupId: command.type === 'execute' ? command.grant.body.groupId : command.groupId }); }
+  /** One tab's preview (`manage` `preview`). The extension captures only a tab of the group the agent is already
+   * using, so a preview never attaches Chrome's debugger on its own. */
+  async preview(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<z.infer<typeof PreviewReply>> {
+    const { scope, command } = authorization.body, placement = scope.placement;
+    if (command.type !== 'manage' || command.action !== 'preview' || !command.groupId || !command.targetId || placement.kind !== 'account-relay') throw new Error('Preview authorization required');
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === placement.pairingId);
+    if ((pairing?.extension?.protocol ?? 0) < PREVIEW_PROTOCOL) return { image: null, reason: 'Update the GitSpace extension in Chrome to see previews' };
+    const { pairingId } = await this.authorize(authorization, signal);
+    return PreviewReply.parse(await this.request(pairingId, { operation: 'preview', groupId: command.groupId, targetId: command.targetId }));
+  }
   async open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal) {
     const { pairingId, connection } = await this.authorize(authorization, signal);
     const command = authorization.body.command; if (command.type !== 'execute') throw new Error('Browser execution authorization required');
@@ -453,8 +518,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (placement.generation !== pairing.generation) throw new Error('Browser pairing changed');
     await this.dispatchApproval(authorization);
     const connection = this.connection(placement.pairingId);
-    if (!connection) throw new Error('Approved Chrome is unavailable: extension is not connected');
-    if ((pairing.extension?.protocol ?? 0) < SCRIPT_PROTOCOL) throw new Error(`Reload the GitSpace extension in Chrome to run scripts there (it needs protocol ${SCRIPT_PROTOCOL})`);
+    if (!connection) throw this.offline(pairing, await this.names([pairing]), []);
     const claim = `browser.account.claim:${scope.projectId}:${scope.workspaceId}:${scope.attemptId}`;
     if (await this.ctx.storage.get(claim)) throw new Error('Browser authorization already consumed');
     await this.ctx.storage.put(claim, body.expiresAt);

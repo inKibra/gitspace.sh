@@ -47,10 +47,20 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   url.searchParams.delete('gallery');
   if (route !== 'settings') url.searchParams.delete('mode');
   if (route !== 'inference') url.searchParams.delete('profile');
+  if (route !== 'plugins') { url.searchParams.delete('tab'); url.searchParams.delete('pair'); }
   if (isGlobalView(route)) {
     url.searchParams.delete('project');
     url.searchParams.delete('workspace');
   }
+  return url;
+}
+
+/** Plugins → Browsers, where Chromes are paired and approved per project; `pairFor` opens the pairing dialog with
+ * that project chosen. */
+export function browserPluginsUrl(pairFor?: string): URL {
+  const url = setProductRoute(new URL(window.location.href), 'plugins');
+  url.searchParams.set('tab', 'browsers');
+  if (pairFor) url.searchParams.set('pair', pairFor);
   return url;
 }
 

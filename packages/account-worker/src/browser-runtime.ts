@@ -10,6 +10,7 @@ type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: Br
 export type AccountBrowserTransport = {
   open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ channel: BrowserChannel; targetId: string }>;
   tabs(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<unknown>;
+  preview(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ image: string | null; reason: string | null }>;
   revoke(groupId: string, pairingId: string): Promise<void>;
 };
 /** How a cloud tab reaches its workspace's hosted services. `urlPattern` narrows interception to hosted names;
@@ -63,10 +64,15 @@ export class AccountBrowserRuntime {
         }
         return json({ groups, records: [] });
       }
-      if (command.action !== 'revoke' || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
+      if ((command.action !== 'revoke' && command.action !== 'preview') || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
       const stored = await this.options.storage.get(`browser.account.group:${command.groupId}`);
       const grant = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(command.groupId);
       if (!grant || grant.projectId !== scope.projectId || grant.workspaceId !== scope.workspaceId) throw new Error('Browser group outside workspace');
+      // Previews on your Chrome come from its extension; the cloud browser's from the workspace's browser session.
+      if (command.action === 'preview') {
+        if (!this.options.relay || canonicalBrowserAuthorization(grant.placement) !== canonicalBrowserAuthorization(scope.placement)) throw new Error('Browser group outside this Chrome');
+        return json(await this.options.relay.preview(authorization, signal));
+      }
       await this.options.storage.put(`browser.account.revoked:${grant.groupId}`, true);
       for (const tab of [...this.tabs.values()]) if (tab.grant.groupId === grant.groupId) await this.closeTab(tab);
       if (grant.placement.kind === 'account-relay') await this.options.relay?.revoke(grant.groupId, grant.placement.pairingId);

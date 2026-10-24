@@ -4,7 +4,7 @@ import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import { SessionHistoryPageSchema, SessionHistoryPageRequestSchema } from '@gitspace/protocol-agent';
 import { transcriptPageRequestSchema, transcriptContentRequestSchema, transcriptPageSchema, transcriptContentPageSchema } from '@gitspace/blocks';
 import { SessionUsageReportSchema } from './usage.js';
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema } from './browser.js';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema } from './browser.js';
 export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -41,6 +41,8 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
   z.object({ type: z.literal('browserReconcile'), machineId: z.string(), recordId: z.string() }),
   z.object({ type: z.literal('browserDiscard'), machineId: z.string(), recordId: z.string() }),
+  z.object({ type: z.literal('browserOverview') }),
+  z.object({ type: z.literal('browserPreview'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
@@ -61,7 +63,7 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('saveAgentDefinition'), path: z.string(), expectedRevision: z.string().nullable(), content: z.string() }),
 ]);
 export const RuntimeSessionInputSchema = RuntimeIdentitySchema.extend({ conversationId: z.string().optional(), command: RuntimeSessionCommandSchema });
-export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
+export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), browserOverview: RuntimeBrowserOverviewSchema.optional(), browserPreview: RuntimeBrowserPreviewSchema.optional(), setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;
 export type RuntimeSessionResult = z.infer<typeof RuntimeSessionResultSchema>;

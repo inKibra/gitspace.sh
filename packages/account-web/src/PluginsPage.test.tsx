@@ -1,8 +1,13 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { PluginsPage } from './PluginsPage.js';
+import type { BrowserPluginsState } from './BrowserPlugins.js';
 
 const noop = async () => undefined;
+const browsers: BrowserPluginsState = {
+  relay: { pairings: [] }, settings: {}, loading: false, error: null, refresh: noop, pollStatus: async () => ({ pairings: [] }), downloadExtension: noop,
+  pair: async () => { throw new Error('Not paired in this test'); }, confirm: noop, rename: noop, forget: noop, updateProject: noop,
+};
 const composioProps = {
   composioCatalog: { configured: true, toolkits: [] },
   onAuthorizeComposio: async () => 'https://connect.composio.dev/test',
@@ -12,6 +17,7 @@ const composioProps = {
   onDisconnectComposio: noop,
   onDiscover: async () => [],
   onRevokeGrant: noop,
+  browsers,
 } as const;
 
 describe('PluginsPage', () => {

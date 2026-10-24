@@ -46,6 +46,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProjectAssignmentMatrix } from './ProjectAssignmentMatrix.js';
+import { BrowserPlugins, PairChromeDialog, type BrowserPluginsState, type PairChromeRequest } from './BrowserPlugins.js';
 
 export interface PluginsPageProps {
   connections: readonly McpConnectionRpcView[];
@@ -70,6 +71,8 @@ export interface PluginsPageProps {
   onSetGrant(projectId: string, connectionId: string, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<void>;
   onRevokeGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<void>;
   onRefresh(): Promise<void>;
+  /** Plugins → Browsers: your paired Chromes and their project approvals. */
+  browsers: BrowserPluginsState;
 }
 
 type Transport = 'stdio' | 'http' | 'sse';
@@ -132,7 +135,16 @@ export function PluginsPage(props: PluginsPageProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [target, setTarget] = useState<Target>('workspace');
-  const [tab, setTab] = useState(() => props.connections.some((connection) => connection.transport.type !== 'composio') ? 1 : 0);
+  // `?tab=browsers` opens Browsers; `&pair=<project>` also opens the pairing dialog with that project chosen.
+  const [linked] = useState(() => typeof window === 'undefined' ? new URLSearchParams() : new URLSearchParams(window.location.search));
+  const [tab, setTab] = useState(() => linked.get('tab') === 'browsers' ? 2 : props.connections.some((connection) => connection.transport.type !== 'composio') ? 1 : 0);
+  const [pairing, setPairing] = useState<PairChromeRequest | null>(() => linked.has('pair') ? { projectId: linked.get('pair') || null } : null);
+  useEffect(() => {
+    if (!linked.has('pair')) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('pair');
+    window.history.replaceState(window.history.state, '', url);
+  }, [linked]);
   const [machineId, setMachineId] = useState('');
   const [transport, setTransport] = useState<Transport>('http');
   const [command, setCommand] = useState('');
@@ -224,10 +236,12 @@ export function PluginsPage(props: PluginsPageProps) {
       <TabsSubtle selectedIndex={tab} onSelect={setTab} idPrefix="plugins-source" aria-label="Plugin source">
         <TabsSubtleItem index={0} label={`Composio plugins · ${composioConnections.length}`} />
         <TabsSubtleItem index={1} label={`Custom plugins · ${customConnections.length}`} />
+        <TabsSubtleItem index={2} label={`Browsers · ${props.browsers.relay?.pairings.filter((browser) => browser.state === 'confirmed').length ?? 0}`} />
       </TabsSubtle>
       <InputGroup className="w-full sm:ml-auto sm:max-w-xs"><InputField index={0} label="Filter plugins" labelHidden icon={SearchGlyph} placeholder="Search plugins" value={query} onChange={setQuery} /></InputGroup>
-      <Button variant="ghost" leadingIcon={RefreshGlyph} aria-label="Refresh plugins" onClick={() => void settle('refresh', props.onRefresh)} disabled={pending !== null}>Refresh</Button>
+      <Button variant="ghost" leadingIcon={RefreshGlyph} aria-label="Refresh plugins" onClick={() => void settle('refresh', tab === 2 ? props.browsers.refresh : props.onRefresh)} disabled={pending !== null}>Refresh</Button>
       {tab === 1 ? <Button variant="primary" leadingIcon={PlusGlyph} onClick={() => setCreatingCustom(true)}>Add custom plugin</Button> : null}
+      {tab === 2 ? <Button variant="primary" leadingIcon={PlusGlyph} onClick={() => setPairing({ projectId: null })}>Pair a Chrome</Button> : null}
     </div>
 
     <TabsSubtlePanel index={0} selectedIndex={tab} idPrefix="plugins-source" className="flex flex-col gap-8">
@@ -269,12 +283,16 @@ export function PluginsPage(props: PluginsPageProps) {
         </Card>;
       })}</CardGroup> : <EmptyState icon={<PuzzlePiece01 width={22} height={22} strokeWidth={1.5} />} title={customConnections.length ? 'No matching custom plugins' : 'No custom plugins connected'} description={customConnections.length ? 'Change the filter to see your custom plugins.' : 'Connect a local stdio, Streamable HTTP, or SSE MCP server.'} action={customConnections.length ? undefined : <Button variant="primary" leadingIcon={PlusGlyph} onClick={() => setCreatingCustom(true)}>Add custom plugin</Button>} />}
     </TabsSubtlePanel>
-    <section aria-label="Runtime diagnostics" className="mt-8 flex flex-col gap-3 border-t border-border pt-6">
+    <TabsSubtlePanel index={2} selectedIndex={tab} idPrefix="plugins-source">
+      <BrowserPlugins projects={props.projects} browsers={props.browsers} query={query} onPair={setPairing} />
+    </TabsSubtlePanel>
+    {pairing ? <PairChromeDialog request={pairing} projects={props.projects} browsers={props.browsers} onClose={() => setPairing(null)} /> : null}
+    {tab !== 2 ? <section aria-label="Runtime diagnostics" className="mt-8 flex flex-col gap-3 border-t border-border pt-6">
       <h2 className="text-subtitle font-semibold">Runtime diagnostics</h2>
       <p className="text-body text-muted-foreground">Discover granted tools for a project from the cloud. HTTP connections do not need a machine. Stdio servers use the project’s authorized machine placement; discovery may start those servers.</p>
       <div className="flex flex-wrap gap-3"><Select value={diagnosticProjectId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticProjectId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic project" placeholder="Choose project" />{selectOptions(props.projects.map((project) => ({ value: project.id, label: project.name })))}</Select><Button variant="secondary" disabled={pending !== null || !diagnosticProjectId} loading={pending === 'discover'} onClick={() => void settle('discover', async () => { setDiscoveredTools(null); setDiscoveredTools(await props.onDiscover(diagnosticProjectId)); })}>Discover runtime tools</Button></div>
       {discoveredTools ? <><p role="status" className="text-caption tabular-nums text-muted-foreground">{discoveredTools.length} discovered tools · project space {props.projects.find((project) => project.id === diagnosticProjectId)?.name}</p>{discoveredTools.map((tool) => <p key={tool.ompToolName} className="text-caption"><code>{tool.ompToolName}</code> · {tool.description ?? tool.name}</p>)}</> : <p className="text-caption text-muted-foreground">Not checked. Connections and assignments remain editable without a machine.</p>}
-    </section>
+    </section> : null}
 
     {error ? <p role="alert" className="mt-4 text-body text-destructive">{error}</p> : null}
 

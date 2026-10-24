@@ -29,7 +29,6 @@ vi.mock('../SynchronizationProvider.js', () => ({
   useAccountMachines: () => ({ state: 'success', value: fleet.machines, refetch: async () => {} }),
   useEnvironmentSynchronization: () => ({ value: undefined }),
 }));
-vi.mock('../RuntimeBrowser.js', () => ({ RuntimeBrowserGroups: () => null }));
 
 const stamp = '2026-10-14T09:00:00.000Z';
 const commit = 'a'.repeat(40);

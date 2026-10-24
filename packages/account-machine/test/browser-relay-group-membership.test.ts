@@ -33,7 +33,7 @@ it('a tab dragged into the workspace group is usable on its site; a tab a group 
     grant: { groupId: 'group', groupName: 'Workspace', projectId: 'project', workspaceId: 'workspace', origins: ['approved.example'], expiresAt: new Date(Date.now() + 60_000).toISOString() },
     chrome: {
       runtime: { onMessage: { addListener() {} } },
-      storage: { local: { remove: async () => {} }, session: { get: async () => ({ browserEpoch: 'epoch' }) } },
+      storage: { local: { remove: async () => {}, get: async () => ({}) }, session: { get: async () => ({ browserEpoch: 'epoch' }) } },
       debugger: { getTargets: async () => [...tabs.values()].map(tab => ({ id: `target-${tab.id}`, tabId: tab.id, type: 'page', title: 'Page', url: tab.url })), onEvent: { addListener() {} }, onDetach: { addListener() {} } },
       tabs: {
         get: async (id: number) => tabs.get(id),
@@ -69,7 +69,7 @@ it('a tab dragged into the workspace group is usable on its site; a tab a group 
     { targetId: 'target-1', url: 'https://approved.example/', title: 'Page', addedBy: 'agent', site: null },
     { targetId: 'target-2', url: 'https://news.example/story', title: 'Page', addedBy: 'you', site: 'news.example' },
     { targetId: 'target-3', url: 'https://elsewhere.example/', title: 'Page', addedBy: 'page', site: null },
-  ] } });
+  ], running: 0 } });
 
   // Dragging it out ends the consent: dragged back in later, it consents again to what it shows then.
   tabs.set(2, { id: 2, groupId: -1, url: 'https://news.example/story' });

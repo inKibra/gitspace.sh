@@ -11,7 +11,6 @@ import { useRetainedQueryValue, useRetainedRead } from '../useRetainedRead.js';
 import { useWorkspaceRunMachine } from '../useWorkspaceRunMachine.js';
 import { workspaceMachines, workspaceStatus } from '../workspace-status.js';
 import { runtimeLfsHeldBack, useLfsTransition } from '../LfsTransition.js';
-import { RuntimeBrowserGroups } from '../RuntimeBrowser.js';
 import type { RuntimeInspectorContext } from '../RuntimeWorkspace.js';
 import { EnvironmentView } from './EnvironmentView.js';
 import { LifecycleLogDialog } from './LifecycleLogDialog.js';
@@ -142,10 +141,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
     <EnvironmentView
       model={model}
       busy={busy}
-      machinesFooter={<>
-        {heldBack.length ? <p role="alert" className="text-caption text-warning">Uncommitted Git LFS changes are held back on their machine. Commit them before detaching.</p> : null}
-        {snapshot ? <RuntimeBrowserGroups key={`${snapshot.projectId}:${snapshot.workspaceId}`} snapshot={snapshot} machines={directory ?? []} /> : null}
-      </>}
+      machinesFooter={heldBack.length ? <p role="alert" className="text-caption text-warning">Uncommitted Git LFS changes are held back on their machine. Commit them before detaching.</p> : null}
       onProfileChange={profile => mutate(async () => { const result = await rpcClient.environment.setProfile({ spaceId, profile }); if (result.status === 'error') throw result.error; })}
       onConfigure={onAskAgent ? () => mutate(() => onAskAgent(CONFIGURE_ENVIRONMENT_PROMPT)) : undefined}
       onAttach={id => mutate(async () => { const result = await rpcClient.runtime.attachment.cache.request({ ...identity, machineId: RuntimeMachineIdSchema.parse(id) }); if (result.status === 'error') throw result.error; })}

@@ -50,7 +50,7 @@ test('confirmed Chromes execute independently and rejecting candidates or forget
     await expect(relay.confirm(pairing.pairingId, '0'.repeat(64))).rejects.toThrow('fingerprint');
     await relay.confirm(pairing.pairingId, identity.pairedKeyFingerprint);
     const settings = await relay.projectSettings('project');
-    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, name, note }) => ({ pairingId, name, note })), { pairingId: pairing.pairingId, name, note: '' }] });
+    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, note }) => ({ pairingId, note })), { pairingId: pairing.pairingId, note: '' }] });
     const placement = await relay.placement('project', pairing.pairingId);
     const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: name, source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt }, workspace.key.privateKey, authority);
     const operations: string[] = [];

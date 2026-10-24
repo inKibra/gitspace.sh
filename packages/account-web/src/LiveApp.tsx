@@ -1,7 +1,6 @@
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
-import type { RuntimeAccountBrowserRelayStatus } from '@gitspace/protocol-runtime';
-import { accountBrowserStatus, downloadAccountBrowserExtension, unpairAccountBrowser } from './browser-relay-client.js';
 import { runtimeLfsHeldBack, useLfsTransition, type ConfirmLfsTransition } from './LfsTransition.js';
+import { useBrowserPlugins } from './BrowserPlugins.js';
 import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspace/protocol/inference';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
@@ -50,6 +49,7 @@ import type { GitHubAppManifestForm, GitHubAppOwner } from '@gitspace/protocol/g
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
 import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
 import { RuntimeServices } from './RuntimeServices.js';
+import { RuntimeBrowserTab } from './RuntimeBrowserTab.js';
 import { RuntimeSubagentHistory } from './RuntimeSubagentHistory.js';
 import { CloudCreationProgress } from './CloudCreationProgress.js';
 import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
@@ -231,6 +231,7 @@ export function LiveInspector({
     scope={scope}
     workspaces={workspaces}
     environment={openAgentSetup => <LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} onAskAgent={onAskAgent} onOpenAgent={() => selectInspection(projectId, spaceId !== projectId ? spaceId : null)} onOpenAgentSetup={openAgentSetup} runtimeContext={runtimeContext} />}
+    browser={openEnvironment => <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><RuntimeBrowserTab key={`${runtimeContext.snapshot.projectId}:${runtimeContext.snapshot.workspaceId}`} snapshot={runtimeContext.snapshot} conversationId={runtimeContext.conversationId} machines={(serviceMachineValues ?? []).map(machine => ({ id: machine.id, label: machine.label }))} onOpenEnvironment={openEnvironment} /></ScrollArea>}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackValue ?? null}
@@ -645,13 +646,6 @@ function GitSpaceProduct() {
   const startGitHubApp = useResultMutation(rpcClient.github.app.start);
   const startGitHubInstall = useResultMutation(rpcClient.github.install.start);
   const rotateGitHubKey = useResultMutation(rpcClient.github.app.rotateKey);
-  const [browserRelayValue, setBrowserRelayValue] = useState<RuntimeAccountBrowserRelayStatus | null>(null);
-  const [browserRelayError, setBrowserRelayError] = useState<string | null>(null);
-  const refreshBrowserRelay = async () => {
-    try { const value = await accountBrowserStatus(); setBrowserRelayValue(value); setBrowserRelayError(null); return value; }
-    catch (error) { setBrowserRelayError(rpcErrorMessage(error, 'Account browser')); throw error; }
-  };
-  useEffect(() => { let active = true; void accountBrowserStatus().then(value => { if (active) setBrowserRelayValue(value); }, error => { if (active) setBrowserRelayError(rpcErrorMessage(error, 'Account browser')); }); return () => { active = false; }; }, []);
   const saveComposioSetup = async (apiKey: string): Promise<void> => {
     const result = await putComposioSetup.mutateAsync({ apiKey });
     if (result.status === 'error') throw result.error;
@@ -661,11 +655,6 @@ function GitSpaceProduct() {
     const result = await deleteComposioSetup.mutateAsync({});
     if (result.status === 'error') throw result.error;
     await composioSetupQuery.refetch();
-  };
-  const runBrowserRelay = async (operation: 'setup' | 'start' | 'test'): Promise<void> => {
-    if (operation === 'setup') await downloadAccountBrowserExtension();
-    const value = await refreshBrowserRelay();
-    if (operation === 'test' && !value.pairings.some(browser => browser.state === 'confirmed' && browser.connected)) throw new Error('Connect and confirm a Chrome, then approve it in project settings');
   };
   const revokeDeviceAndRefresh = async (deviceId: string): Promise<void> => {
     const result = await revokeDevice.mutateAsync({ deviceId });
@@ -1033,7 +1022,6 @@ function GitSpaceProduct() {
     ['Cloud images', cloudImagesQuery], ['Cloud image default', imageDefaultQuery],
   ] as const;
   const page = (mode: 'settings' | 'onboarding') => <>
-    {browserRelayError ? <p role="alert" className="px-8 py-1 text-caption text-destructive">{browserRelayError}<Button variant="ghost" size="compact" onClick={() => void refreshBrowserRelay().catch(() => {})}>Retry browser status</Button></p> : null}
     {reads.map(([label, query]) => query.state === 'failure' ? <p key={label} role="alert" className="px-8 py-1 text-caption text-destructive">{label}: {rpcErrorMessage(query.error, label)}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry</Button></p> : null)}
     <SettingsPage
     mode={mode}
@@ -1089,11 +1077,6 @@ function GitSpaceProduct() {
     composioSetup={composioSetupValue ?? null}
     onPutComposioSetup={saveComposioSetup}
     onDeleteComposioSetup={removeComposioSetup}
-    browserRelay={browserRelayValue ?? null}
-    onSetupBrowserRelay={() => runBrowserRelay('setup')}
-    onStartBrowserRelay={() => runBrowserRelay('start')}
-    onUnpairBrowserRelay={async pairingId => { setBrowserRelayValue(await unpairAccountBrowser(pairingId)); }}
-    onTestBrowserRelay={() => runBrowserRelay('test')}
     projects={(productProjectsValue ?? []).map((project) => ({ id: project.id, name: project.name }))}
     onBack={() => navigateProduct(optionalQueryParameter('project') ? 'agent' : 'projects', 'replace')}
     onComplete={completeOnboarding}
@@ -1346,9 +1329,11 @@ function AccountPlugins({ projects }: { projects: readonly ConfigurationProject[
     await Promise.all([connections.refetch(), catalog.refetch()]);
     setRefreshToken((current) => current + 1);
   };
+  const browsers = useBrowserPlugins(projects);
   const errors = [connections.state === 'failure' ? rpcErrorMessage(connections.error, 'mcp.connections.list') : null, catalog.state === 'failure' ? rpcErrorMessage(catalog.error, 'mcp.composio.catalog') : null, grantError, machines.state === 'failure' ? `Machine directory: ${rpcErrorMessage(machines.error, 'machine.list')}` : null].filter(Boolean).join(' · ');
   return <PluginsPage
     projects={projects}
+    browsers={browsers}
     connections={connectionRead.value ?? []}
     grants={grants.filter((grant) => projects.some((project) => project.id === grant.projectId))}
     machines={(machineValues ?? []).map((machine) => ({ id: machine.id, label: machine.label, state: machine.desiredState === 'online' && machine.rpcEndpoint ? machine.state : 'offline' }))}

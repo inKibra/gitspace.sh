@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { afterEach, expect, test, vi } from 'vitest';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { launchCloudBrowser, type BrowserChannel } from '../src/browser-cdp.js';
-import { CloudServiceCookies } from '../src/browser-session.js';
+import { CloudServiceCookies, browserPages, browserPreview } from '../src/browser-session.js';
 import { CdpBrowserShim } from '../src/browser-shim.js';
 import { hostedServiceUrlPattern, isHostedServiceHostname, isWorkspaceServiceHostname } from '../src/service-access.js';
 import { RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
@@ -128,4 +128,25 @@ test('an expired cloud tab and its browser close before the next operation', asy
     expect(methods.slice(-2)).toEqual(['Target.closeTarget', 'Browser.close']);
     expect(await released.promise).toBe(1000);
   } finally { pair[1].close(); }
+});
+
+test('a cloud tab preview is a small JPEG of the visible page, taken on a session of its own that it lets go', async () => {
+  const sent: { method: string; params: Record<string, unknown>; sessionId?: string }[] = [];
+  const upstream: BrowserChannel = {
+    async send(method, params = {}, sessionId) {
+      sent.push({ method, params, ...(sessionId ? { sessionId } : {}) });
+      if (method === 'Target.getTargets') return { targetInfos: [{ targetId: 'page', type: 'page', url: 'https://example.com/', title: 'Example', attached: true }, { targetId: 'worker', type: 'service_worker', url: 'https://example.com/sw.js', title: '', attached: false }] };
+      if (method === 'Target.attachToTarget') return { sessionId: 'preview-session' };
+      if (method === 'Page.getLayoutMetrics') return { cssVisualViewport: { pageX: 0, pageY: 300, clientWidth: 1280, clientHeight: 720 } };
+      if (method === 'Page.captureScreenshot') return { data: 'jpeg-bytes' };
+      return {};
+    },
+    subscribe() { return () => {}; },
+    async close() {},
+  };
+  const shim = await CdpBrowserShim.open(upstream);
+  expect(await browserPages(shim)).toEqual([{ targetId: 'page', url: 'https://example.com/', title: 'Example' }]);
+  expect(await browserPreview(shim, 'page')).toMatchObject({ targetId: 'page', image: { mediaType: 'image/jpeg', data: 'jpeg-bytes' }, reason: null });
+  expect(sent.find(command => command.method === 'Page.captureScreenshot')).toEqual({ method: 'Page.captureScreenshot', params: { format: 'jpeg', quality: 50, clip: { x: 0, y: 300, width: 1280, height: 720, scale: 0.375 } }, sessionId: 'preview-session' });
+  expect(sent.at(-1)).toEqual({ method: 'Target.detachFromTarget', params: { sessionId: 'preview-session' } });
 });

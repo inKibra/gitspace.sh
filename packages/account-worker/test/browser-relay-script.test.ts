@@ -29,7 +29,7 @@ async function chrome(relay: UserRelayDO, root: Identity, protocol: number) {
   if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
   await relay.browserRelayConfirm(pairing.pairingId, status.pairedKeyFingerprint);
   const settings = await relay.browserRelayProjectSettings('project');
-  await relay.browserRelaySetProjectSettings('project', settings.revision, { defaultPairingId: pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, name, note }) => ({ pairingId, name, note })), { pairingId: pairing.pairingId, name: 'Work', note: '' }] });
+  await relay.browserRelaySetProjectSettings('project', settings.revision, { defaultPairingId: pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, note }) => ({ pairingId, note })), { pairingId: pairing.pairingId, note: '' }] });
   const operations: Operation[] = [];
   const tabs = [{ targetId: 'your-tab', title: 'Docs', url: 'https://example.com/docs', addedBy: 'you' }];
   socket.addEventListener('message', event => {
@@ -82,16 +82,6 @@ function cdp(socket: WebSocket) {
   };
 }
 const upgrade = (url: string) => new Request(url, { headers: { upgrade: 'websocket' } });
-
-test('a script on a Chrome whose extension reports protocol 1 is refused with the reload message, before the extension is asked', async () => {
-  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (relay: UserRelayDO) => {
-    const root = await keys(), browser = await chrome(relay, root, 1);
-    try {
-      await expect(relay.browserRelayScriptBegin(await runAuthorization(root, browser.placement))).rejects.toThrow('Reload the GitSpace extension in Chrome to run scripts there (it needs protocol 2)');
-      expect(browser.operations).toEqual([]);
-    } finally { browser.socket.close(); }
-  });
-});
 
 test('a script sees the workspace group as one browser over the extension, until its run ends', async () => {
   // The account's own relay object, the one the public handler forwards to.

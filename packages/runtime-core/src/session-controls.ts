@@ -8,7 +8,7 @@ import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRe
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview } from '@gitspace/protocol-runtime';
 import { isSubagentTool } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
@@ -95,7 +95,7 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
-  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage>;
+  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview>;
 };
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
@@ -191,6 +191,12 @@ export function createSessionControls(services: SessionControlServices) {
         const { type: _type, machineId, ...fields } = command;
         const result = await services.browser(String(target.id), machineId, { action, ...fields });
         return { control: await control(target), ...(command.type === 'browserArtifact' ? { browserArtifact: RuntimeBrowserArtifactPageSchema.parse(result) } : { browserStatus: RuntimeBrowserStatusSchema.parse(result) }) };
+      }
+      case 'browserOverview': case 'browserPreview': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        if (command.type === 'browserOverview') return { control: await control(target), browserOverview: RuntimeBrowserOverviewSchema.parse(await services.browser(String(target.id), undefined, { action: 'overview' })) };
+        return { control: await control(target), browserPreview: RuntimeBrowserPreviewSchema.parse(await services.browser(String(target.id), undefined, { action: 'preview', groupId: command.groupId, targetId: command.targetId })) };
       }
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {

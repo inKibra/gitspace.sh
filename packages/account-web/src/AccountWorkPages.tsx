@@ -8,10 +8,9 @@ import { CreateProjectDialog, CreateWorkspaceDialog, EmptyState, PageCanvas, Pag
 import { WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
 import type { Directory } from './useAccountDirectory.js';
 import { glyph } from './glyph.js';
-import { navigateProductUrl, setProductRoute } from './routes.js';
+import { browserPluginsUrl, navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
-import { ProjectBrowserSettings } from './ProjectBrowserSettings.js';
 import { StorageIncidents } from './StorageIncidents.js';
 
 export interface AccountWorkPagesProps {
@@ -314,7 +313,7 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
       {!visible.length ? <EmptyState title="No projects" description={filter === 'archived' ? 'Nothing is archived.' : 'Create a project or import a repository to start.'} /> : null}
     </div>
     <Dialog open={settingsProject !== null} onOpenChange={(open) => { if (!open) setSettingsProjectId(null); }}><DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto">
-      <DialogHeader><DialogTitle>{settingsProject?.name} settings</DialogTitle><DialogDescription>Project settings and your personal Chrome permissions for its workspaces.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>{settingsProject?.name} settings</DialogTitle><DialogDescription>Settings shared by every workspace in this project.</DialogDescription></DialogHeader>
       {settingsProject ? <ProjectBaseBranchSettings key={settingsProject.id} project={settingsProject} onSetBaseBranch={onSetProjectBaseBranch} /> : null}
       {settingsProject && inference ? <section className="flex flex-col gap-3">
         <div className="flex flex-col gap-1">
@@ -324,7 +323,7 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
         <ProjectInferenceSelector key={settingsProject.id} projectId={settingsProject.id} projectName={settingsProject.name} />
         <p className="text-caption text-muted-foreground">Manage models, agents, and credentials under Navigate → Inference.</p>
       </section> : null}
-      {settingsProject ? <ProjectBrowserSettings key={`chrome:${settingsProject.id}`} projectId={settingsProject.id} /> : null}
+      <p className="text-caption text-muted-foreground">Choose which of your Chromes agents here may use in <a className="text-foreground underline" href={browserPluginsUrl().href} onClick={event => { event.preventDefault(); setSettingsProjectId(null); navigateProductUrl(browserPluginsUrl()); }}>Plugins → Browsers</a>.</p>
       <DialogFooter><Button variant="secondary" onClick={() => setSettingsProjectId(null)}>Done</Button></DialogFooter>
     </DialogContent></Dialog>
     {error && !projectDialog && workspaceDialog === null ? <p role="alert" className="pt-4 text-caption text-destructive">{error}</p> : null}

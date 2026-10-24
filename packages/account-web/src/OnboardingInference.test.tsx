@@ -34,7 +34,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
     gitIdentity={null} onChange={() => undefined} onSave={noop} onSetRuntimeSetting={noop} onUpdateMachine={noop} onSetMachineAgentAttach={noop} onCreateSandbox={noop}
     cloudImages={[]} cloudImageDefault={null} cloudImageError={null} onChangeCloudImage={noop} onRecoverCloudImage={noop} onSetCloudImageDefault={noop}
     onControlMachine={noop} onDestroyMachine={noop} devices={[]} onRevokeDevice={noop} onSignOut={noop} onCreateApiClient={async () => 'gsk_test'}
-    composioSetup={null} onPutComposioSetup={noop} onDeleteComposioSetup={noop} browserRelay={null} onSetupBrowserRelay={noop} onStartBrowserRelay={noop} onUnpairBrowserRelay={noop} onTestBrowserRelay={noop}
+    composioSetup={null} onPutComposioSetup={noop} onDeleteComposioSetup={noop}
     canManageMcp={false} canEnableMcp={false} onMcpStatus={unused} onMcpEnable={unused} onMcpRotate={unused} onMcpDisable={unused}
     canConnectBrowser={false} onCreateBrowserInvitation={unused} onBrowserInvitationStatus={unused} onCancelBrowserInvitation={unused} onBrowserConnected={noop}
     projects={[]} onBack={() => undefined} onComplete={noop} runtimeSync={{ status: 'synced', message: null }} deployment={null} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} error={null}

@@ -73,6 +73,7 @@ import {
   File02,
   FileCode02,
   GitBranch01,
+  Globe01,
   Image01,
   LinkExternal01,
   MessageSquare01,
@@ -101,7 +102,7 @@ import { syncRepositoryTreePaths } from './repository-tree-paths.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
 
-export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'issues' | 'usage' | 'guide' | 'journal';
+export type InspectorPermanentView = 'overview' | 'environment' | 'browser' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'issues' | 'usage' | 'guide' | 'journal';
 export type InspectorDocumentKind = 'file' | 'diff' | 'artifact' | 'resource' | 'goal' | 'workflow' | 'rubric';
 export interface InspectorOpenDocument {
   id: string;
@@ -152,6 +153,8 @@ export interface InspectorProps {
   stackStatus?: OverviewViewProps['stackStatus'];
   /** The Environment tab; `openAgentSetup` switches to the Agent setup tab. */
   environment?: (openAgentSetup: () => void) => ReactNode;
+  /** The Browser tab: this workspace's browsers; `openEnvironment` switches to the Environment tab, where sites are approved. */
+  browser?: (openEnvironment: () => void) => ReactNode;
   repositoryEntries: readonly RepositoryTreeEntry[];
   lfsHeldBack?: readonly GitLfsHeldBack[];
   repositoryMode: RepositoryMode;
@@ -221,11 +224,12 @@ interface GuideViewState {
 const guideViewCache = new Map<string, GuideViewState>();
 const RuntimeAvailability = createContext(true);
 const openWorkspaceFirst = 'Open this workspace on a machine first';
-const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, agents: true, subagents: true, files: true, services: true, usage: true };
+const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, browser: true, agents: true, subagents: true, files: true, services: true, usage: true };
 
 const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'environment', label: 'Environment' },
+  { id: 'browser', label: 'Browser' },
   { id: 'goal', label: 'Goal' },
   { id: 'agents', label: 'Agent setup' },
   { id: 'subagents', label: 'Subagents' },
@@ -1207,6 +1211,7 @@ export function Inspector(props: InspectorProps) {
     switch (id) {
       case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
       case 'environment': return props.environment?.(() => selectSurface('agents')) ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
+      case 'browser': return props.browser?.(() => selectSurface('environment')) ?? <Padded><EmptyState icon={ic(Globe01, 22)} title="Browsers unavailable" description="This view has no workspace browsers to show." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'agents': return null;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} onStop={props.onStopSubagent} renderTranscript={props.renderSubagentTranscript} />;

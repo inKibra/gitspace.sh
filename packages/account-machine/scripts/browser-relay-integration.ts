@@ -47,7 +47,7 @@ try {
   await pollUntilReady(async () => (await status()).pairings.some(browser => browser.pairingId === pairing.pairingId && browser.connected), { timeoutMs: 15_000, message: 'extension did not connect directly to account worker' });
   const fingerprint = (await status()).pairings.find(browser => browser.pairingId === pairing.pairingId)?.pairedKeyFingerprint; assert.match(fingerprint ?? '', /^[a-f0-9]{64}$/);
   await request('/confirm', { pairingId: pairing.pairingId, fingerprint });
-  await request('/project-update', { projectId: 'project', expectedRevision: 0, preferences: { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, name: 'Primary Chrome', note: 'Local smoke fixture' }] } });
+  await request('/project-update', { projectId: 'project', expectedRevision: 0, preferences: { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, note: 'Local smoke fixture' }] } });
   const placement = RuntimeAccountBrowserPlacementSchema.parse(await (await request('/placement', { projectId: 'project' })).json());
   assert.equal(placement.kind, 'account-relay');
   const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Account relay fixture', source: 'relay', stepsOnly: [], origins: ['127.0.0.1'], expiresAt }, workspaceKeys.privateKey, authority);
@@ -80,7 +80,7 @@ try {
   assert(secondIdentity?.state === 'pending-confirmation');
   assert.notEqual(secondIdentity.pairedKeyFingerprint, fingerprint);
   await request('/confirm', { pairingId: secondPairing.pairingId, fingerprint: secondIdentity.pairedKeyFingerprint });
-  await request('/project-update', { projectId: 'project', expectedRevision: 1, preferences: { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, name: 'Primary Chrome', note: 'Local smoke fixture' }, { pairingId: secondPairing.pairingId, name: 'Second Chrome', note: 'Independent profile' }] } });
+  await request('/project-update', { projectId: 'project', expectedRevision: 1, preferences: { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, note: 'Local smoke fixture' }, { pairingId: secondPairing.pairingId, note: 'Independent profile' }] } });
   assert.deepEqual(RuntimeAccountBrowserPlacementSchema.parse(await (await request('/placement', { projectId: 'project' })).json()), placement);
   const secondPlacement = RuntimeAccountBrowserPlacementSchema.parse(await (await request('/placement', { projectId: 'project', pairingId: secondPairing.pairingId })).json());
   assert(secondPlacement.kind === 'account-relay');
@@ -98,7 +98,7 @@ try {
   assert.equal(revokedOpened.status, 'completed');
   const revokedPage = context.pages().find(page => page.url().endsWith('/revoked'));
   assert(revokedPage, 'The primary Chrome must have a real tab before revocation');
-  await request('/project-update', { projectId: 'project', expectedRevision: 2, preferences: { defaultPairingId: secondPairing.pairingId, approvals: [{ pairingId: secondPairing.pairingId, name: 'Second Chrome', note: 'Independent profile' }] } });
+  await request('/project-update', { projectId: 'project', expectedRevision: 2, preferences: { defaultPairingId: secondPairing.pairingId, approvals: [{ pairingId: secondPairing.pairingId, note: 'Independent profile' }] } });
   await pollUntilReady(async () => revokedPage.isClosed(), { timeoutMs: 10_000, message: 'Project revocation did not physically close the primary Chrome tab' });
   assert(secondContext.pages().some(page => page.url().endsWith('/second')), 'Project revocation must preserve the sibling Chrome tab');
   assert.equal((await execute({ action: 'tabs', source: 'relay' })).status, 403);

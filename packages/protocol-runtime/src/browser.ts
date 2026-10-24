@@ -21,6 +21,12 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536), sites: z.array(BrowserOriginPatternSchema).max(32).optional() }),
 ]);
 export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSchema>;
+/** `chromes` touches no browser: it lists the project's Chromes (names, pairing ids, online, approved, default) for the
+ * agent to choose from. */
+export const RuntimeBrowserChromesArgumentsSchema = z.strictObject({ action: z.literal('chromes') });
+/** The browser tool as agents call it: every browser action, plus `chromes`. */
+export const RuntimeBrowserToolArgumentsSchema = z.discriminatedUnion('action', [...RuntimeBrowserArgumentsSchema.options, RuntimeBrowserChromesArgumentsSchema]);
+export type RuntimeBrowserToolArguments = z.infer<typeof RuntimeBrowserToolArgumentsSchema>;
 const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
 export const RuntimeBrowserGrantSchema = z.strictObject({ ...executionScope, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
 export type RuntimeBrowserGrant = z.infer<typeof RuntimeBrowserGrantSchema>;
@@ -41,7 +47,9 @@ export const RuntimeAccountBrowserGroupRowSchema = RuntimeAccountBrowserGrantSch
 export const RuntimeAccountBrowserPreparationSchema = RuntimeAccountBrowserGrantSchema.extend({ id, action: RuntimeBrowserPreparationSchema.shape.action });
 export const RuntimeBrowserApprovalCardSchema = z.union([RuntimeBrowserPreparationSchema, RuntimeAccountBrowserPreparationSchema]);
 export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCardSchema>;
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional() });
+/** `overview`: the workspace's browsers for the Inspector's Browser tab; `preview`: a small image of one tab
+ * (`groupId` and `targetId`; the group names the browser). */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
   accountId: id, projectId: id, workspaceId: id,
@@ -88,9 +96,10 @@ export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserP
 /**
  * The Chrome extension's protocol (docs/APERTURE-DESIGN.md §12a), independent of release ids. A release accepts
  * extensions at this protocol and the one before; an extension from before protocols were reported counts as 0.
- * Protocol 2 adds scripts (`browser.run`) on your Chrome; protocol 1 extensions keep single steps.
+ * Protocol 2 adds scripts (`browser.run`) on your Chrome; protocol 1 extensions keep single steps. Protocol 3 adds tab
+ * previews (`manage` `preview`) and running-script counts in group reports.
  */
-export const BROWSER_EXTENSION_PROTOCOL = 2;
+export const BROWSER_EXTENSION_PROTOCOL = 3;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
 export const BROWSER_RUN_LIMIT_MS = 120_000;
 /** Whether a release at protocol `current` refuses an extension at `protocol` as too old. */
@@ -99,7 +108,9 @@ export function browserExtensionUpdateRequired(protocol: number, current = BROWS
 }
 /** What a paired extension last reported, and whether this release refused it as too old. */
 export const RuntimeBrowserExtensionSchema = z.strictObject({ version: z.string().max(40).nullable(), protocol: z.number().int().nonnegative(), updateRequired: z.boolean() });
-const browserPairingStatus = { connected: z.boolean(), browser: z.string().nullable(), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), extension: RuntimeBrowserExtensionSchema.nullable() };
+/** A paired Chrome's name, one per Chrome, shown everywhere it appears (Plugins, the Browser tab, the agent's list). */
+export const RuntimeBrowserNameSchema = z.string().trim().min(1).max(128);
+const browserPairingStatus = { connected: z.boolean(), browser: z.string().nullable(), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), name: RuntimeBrowserNameSchema, extension: RuntimeBrowserExtensionSchema.nullable() };
 export const RuntimeAccountBrowserIdentitySchema = z.discriminatedUnion('state', [
   z.strictObject({ ...browserPairingStatus, state: z.literal('awaiting-key'), pairedKeyFingerprint: z.null(), expiresAt: z.iso.datetime() }),
   z.strictObject({ ...browserPairingStatus, state: z.literal('pending-confirmation'), pairedKeyFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.null() }),
@@ -107,13 +118,14 @@ export const RuntimeAccountBrowserIdentitySchema = z.discriminatedUnion('state',
 ]);
 export const RuntimeAccountBrowserRelayStatusSchema = z.strictObject({ pairings: z.array(RuntimeAccountBrowserIdentitySchema) });
 export type RuntimeAccountBrowserRelayStatus = z.infer<typeof RuntimeAccountBrowserRelayStatusSchema>;
-const projectBrowserApproval = z.strictObject({ pairingId: z.string().uuid(), name: z.string().trim().min(1).max(128), note: z.string().max(2048) });
+/** A project's approval of one Chrome, with its note for this project's agents. The name belongs to the pairing. */
+const projectBrowserApproval = z.strictObject({ pairingId: z.string().uuid(), note: z.string().max(2048) });
 export const RuntimeProjectBrowserPreferencesSchema = z.strictObject({ defaultPairingId: z.string().uuid().nullable(), approvals: z.array(projectBrowserApproval).max(32) }).superRefine((value, ctx) => {
   if (new Set(value.approvals.map(item => item.pairingId)).size !== value.approvals.length) ctx.addIssue({ code: 'custom', message: 'Browser approvals must be unique', path: ['approvals'] });
   if (value.defaultPairingId && !value.approvals.some(item => item.pairingId === value.defaultPairingId)) ctx.addIssue({ code: 'custom', message: 'Default Chrome must be approved for this project', path: ['defaultPairingId'] });
 });
 export type RuntimeProjectBrowserPreferences = z.infer<typeof RuntimeProjectBrowserPreferencesSchema>;
-export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean() })).max(32) });
+export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean() })).max(32) });
 export type RuntimeProjectBrowserSettings = z.infer<typeof RuntimeProjectBrowserSettingsSchema>;
 export const RuntimeBrowserArtifactSchema = z.strictObject({ id, url: z.string().max(8192), mediaType: z.string().max(128), bytes: z.number().int().nonnegative(), expiresAt: z.iso.datetime() });
 export const RuntimeBrowserArtifactPageSchema = z.strictObject({ artifact: RuntimeBrowserArtifactSchema, offset: z.number().int().nonnegative(), data: z.string().max(90000), nextOffset: z.number().int().nonnegative().nullable() });
@@ -135,7 +147,9 @@ export const RuntimeBrowserTabOriginSchema = z.enum(['agent', 'page', 'you']);
  * at that moment: dragging it in consents to that site for that tab. */
 export const RuntimeBrowserGroupTabSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema, site: z.string().max(253).nullable() });
 /** The extension's report of one workspace group's tabs, sent whenever membership, a URL or a title changes. */
-export const RuntimeBrowserGroupReportSchema = z.strictObject({ groupId: z.string().uuid(), tabs: z.array(RuntimeBrowserGroupTabSchema).max(200) });
+export const RuntimeBrowserGroupReportSchema = z.strictObject({ groupId: z.string().uuid(), tabs: z.array(RuntimeBrowserGroupTabSchema).max(200),
+  /** Scripts running on the group. LEGACY: protocol 2 extensions do not report it; remove the default when protocol 2 is refused. */
+  running: z.number().int().nonnegative().default(0) });
 export type RuntimeBrowserGroupReport = z.infer<typeof RuntimeBrowserGroupReportSchema>;
 /** The `gitspace.browsers` workspace document (docs/APERTURE-DESIGN.md §4.2): each Chrome group with the tabs the
  * workspace may use (`usable`: on the grant's origins or the site you consented to). */
@@ -144,10 +158,30 @@ export const RuntimeBrowsersDocumentSchema = z.strictObject({
     pairingId: z.string().uuid(), browser: z.string().max(128), groupId: z.string().uuid(), groupName: id,
     origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime(), reportedAt: z.iso.datetime(),
     tabs: z.array(RuntimeBrowserGroupTabSchema.extend({ usable: z.boolean() })).max(200),
+    /** LEGACY: rows stored before running counts have none; remove the default once they have been rewritten. */
+    running: z.number().int().nonnegative().default(0),
   })).max(32),
 });
 export type RuntimeBrowsersDocument = z.infer<typeof RuntimeBrowsersDocumentSchema>;
 export type RuntimeBrowsersDocumentGroup = RuntimeBrowsersDocument['chrome'][number];
+/** A tab as the Inspector's Browser tab shows it. `addedBy` is null on the cloud browser, where only agents open tabs. */
+export const RuntimeBrowserTabViewSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema.nullable(), usable: z.boolean() });
+/** The workspace's browsers for the Inspector's Browser tab (`manage` `overview`): the approved sites, the cloud
+ * browser, and every Chrome confirmed on the account with whether this project approved it. `groupId` is the
+ * workspace's group on that browser, null until one exists. */
+export const RuntimeBrowserOverviewSchema = z.strictObject({
+  sites: z.strictObject({ origins: z.array(BrowserOriginPatternSchema), stepsOnly: z.array(BrowserOriginPatternSchema) }),
+  cloud: z.strictObject({ groupId: z.string().uuid().nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200) }),
+  chromes: z.array(z.strictObject({
+    pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema, note: z.string().max(2048), connected: z.boolean(), approved: z.boolean(), isDefault: z.boolean(),
+    groupId: z.string().uuid().nullable(), groupName: id.nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200),
+  })).max(32),
+});
+export type RuntimeBrowserOverview = z.infer<typeof RuntimeBrowserOverviewSchema>;
+/** One tab's preview (`manage` `preview`): a small JPEG, or why there is none (on your Chrome, a tab shows one only
+ * while the agent is using it, so previews never start Chrome's debugging bar on their own). */
+export const RuntimeBrowserPreviewSchema = z.strictObject({ targetId: id, capturedAt: z.iso.datetime(), image: z.strictObject({ mediaType: z.literal('image/jpeg'), data: z.string().max(600_000) }).nullable(), reason: z.string().max(256).nullable() });
+export type RuntimeBrowserPreview = z.infer<typeof RuntimeBrowserPreviewSchema>;
 
 /** Domain-separated canonical JSON: signatures never accept a key supplied by the command. */
 export function canonicalBrowserAuthorization(value: unknown): string {

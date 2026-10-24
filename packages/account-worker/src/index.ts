@@ -47,7 +47,7 @@ import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostna
 import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
-import { RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
 export {
@@ -425,6 +425,7 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelaySetProjectSettings(projectId: string, expectedRevision: number, preferences: RuntimeProjectBrowserPreferences) { return this.browserRelay.setProjectSettings(projectId, expectedRevision, preferences); }
   browserRelayUnpair(pairingId: string) { return this.browserRelay.unpair(pairingId); }
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
+  browserRelayRename(pairingId: string, name: string) { return this.browserRelay.rename(pairingId, name); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
   /** An archived or deleted workspace's Chrome groups end, and its cloud browser's service sessions with them. */
   async browserRelayRetireWorkspace(projectId: string, workspaceId: string) {
@@ -1050,14 +1051,14 @@ export default {
       return new Response(null, { status: 303, headers: { location: approval.href, 'cache-control': 'no-store', 'set-cookie': `${SERVICE_STATE_COOKIE}=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300` } });
     }
     if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).fetch(request);
-    if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
+    if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|rename|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');
       if (declared !== null && (!/^\d+$/u.test(declared) || !Number.isSafeInteger(Number(declared)))) return jsonError(400, 'REQUEST_LENGTH_INVALID', 'Invalid request content length');
       if (declared !== null && Number(declared) > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
-      const mutatesPairing = /^\/api\/browser-relay\/(pair|unpair|confirm|project-update)$/u.test(url.pathname);
+      const mutatesPairing = /^\/api\/browser-relay\/(pair|unpair|confirm|rename|project-update)$/u.test(url.pathname);
       const requiresWrite = mutatesPairing || url.pathname === '/api/services/approve';
       const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
         header: request.headers.get('x-gitspace-device'), method: 'POST', target: `${url.pathname}${url.search}`, body,
@@ -1092,6 +1093,12 @@ export default {
         } catch (error) {
           return jsonError(409, 'PROJECT_BROWSER_UPDATE_REJECTED', error instanceof Error ? error.message : 'Project Chrome update rejected');
         }
+      }
+      if (url.pathname.endsWith('/rename')) {
+        const rename = z.object({ pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema }).safeParse(raw);
+        if (!rename.success) return jsonError(400, 'PAIRING_REQUEST_INVALID', 'A paired browser and its name are required');
+        try { return Response.json({ status: 'ok', value: await relay.browserRelayRename(rename.data.pairingId, rename.data.name) }); }
+        catch (error) { return jsonError(404, 'PAIRING_NOT_FOUND', error instanceof Error ? error.message : 'Unknown browser pairing'); }
       }
       const parsed = z.object({ pairingId: z.string().uuid(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).safeParse(raw);
       if (!parsed.success || (url.pathname.endsWith('/confirm') && !parsed.data.fingerprint)) return jsonError(400, 'PAIRING_REQUEST_INVALID', 'A paired browser identity is required');

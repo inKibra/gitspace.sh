@@ -4,6 +4,8 @@ import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } fr
 import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, siteOf, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
+import { drawToolbarIcon } from './icon.ts';
+import { browserOverlayFunction } from './overlay.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 const allowed = relayCommandAllowed;
@@ -56,6 +58,8 @@ async function authorize(authorization) {
       const scriptSha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
       runs.set(body.scope.attemptId, { body, targets: new Set(), sites, named: command.args.sites !== undefined, scriptSha256, startedAt: new Date().toISOString(), commands: 0, refused: 0 });
       await markRunning(grant.groupId);
+      scheduleReport(grant.groupId);
+      updateToolbar();
       return {};
     }
   }
@@ -82,7 +86,9 @@ function send(value) {
 }
 async function targets() { return (await chrome.debugger.getTargets()).filter(target => target.type === 'page'); }
 async function targetInfo(id) { const target = (await targets()).find(target => target.id === id); if (!target || !Number.isInteger(target.tabId)) throw new Error('Unknown exact tab target'); return target; }
-const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'];
+/** Chrome's tab group colours, as it draws them in the tab strip (for the popup and the in-page overlay). */
+const GROUP_HEX = { blue: '#1a73e8', red: '#d93025', yellow: '#f9ab00', green: '#188038', pink: '#d01884', purple: '#a142f4', cyan: '#007b83', orange: '#fa903e', grey: '#5f6368' };
+const GROUP_COLORS = Object.keys(GROUP_HEX);
 /** A workspace keeps one colour wherever its group is recreated. */
 function groupColor(workspaceId) { let hash = 0; for (const character of workspaceId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0; return GROUP_COLORS[hash % GROUP_COLORS.length]; }
 /** The grant as it applies to one tab: a tab you dragged in is also usable on the site it showed then. */
@@ -202,7 +208,8 @@ function leave(tabId) {
 /** Reports coalesce: a page load fires several tab updates. */
 const reportTimers = new Map();
 function scheduleReport(groupId) { clearTimeout(reportTimers.get(groupId)); reportTimers.set(groupId, setTimeout(() => { reportTimers.delete(groupId); void report(groupId).catch(() => {}); }, 300)); }
-/** Tells the account which tabs are in a workspace group now; a group that is gone reports none. */
+/** Tells the account which tabs are in a workspace group now, and how many scripts run on it; a group that is gone
+ * reports none. */
 async function report(groupId) {
   const found = (await groupRecords()).find(({ record }) => record.groupId === groupId);
   const tabs = found ? await chrome.tabs.query({ groupId: found.record.chromeGroupId }) : [];
@@ -210,7 +217,7 @@ async function report(groupId) {
   send({ group: { groupId, tabs: tabs.filter(tab => targetIds.has(tab.id)).slice(0, 200).map(tab => {
     const entry = found.record.members?.[tab.id];
     return { targetId: targetIds.get(tab.id), url: (tab.url || '').slice(0, 8192), title: (tab.title || '').slice(0, 500), addedBy: entry?.by ?? 'you', site: entry?.by === 'you' ? entry.site ?? null : null };
-  }) } });
+  }), running: [...runs.values()].filter(run => run.body.command.grant.body.groupId === groupId).length } });
 }
 /** When the agent last used each group. A group idle this long collapses once. */
 const lastUsed = new Map();
@@ -225,18 +232,19 @@ async function collapseIdle() {
     await chrome.tabGroups.update(found.record.chromeGroupId, { collapsed: true });
   }
 }
+/** Lets a tab's debugger channel go: its overlay leaves the page first, since the page keeps it after the debugger. */
 async function revoke(id) {
   const channel = channels.get(id); channels.delete(id);
   if (!channel) return releases.get(id);
   channel.cancelNavigation?.();
-  const release = chrome.debugger.detach(channel.source).catch(() => {});
+  const release = (async () => { if (channel.overlay) await overlayStep(channel, () => overlayCall(channel, { remove: true })); await chrome.debugger.detach(channel.source); })().catch(() => {});
   releases.set(id, release);
   try { await release; } finally { if (releases.get(id) === release) releases.delete(id); }
 }
 async function fence(id) { send({ targetId: id, fenced: true }); await revoke(id); }
 async function check(id, expected = channels.get(id)) {
   if (!expected || channels.get(id) !== expected) throw new Error('Unknown or revoked target channel');
-  try { ({ scope: expected.scope, urls: expected.urls, dragged: expected.dragged, addedBy: expected.addedBy } = await member(expected.grant, expected.targetId)); }
+  try { ({ scope: expected.scope, urls: expected.urls, dragged: expected.dragged, addedBy: expected.addedBy, tabId: expected.tabId } = await member(expected.grant, expected.targetId)); }
   catch (error) { if (channels.get(id) === expected) await fence(id); throw error; }
   if (channels.get(id) !== expected) throw new Error('Unknown or revoked target channel');
   return expected;
@@ -259,8 +267,19 @@ async function endRun(attemptId, reason) {
   ended.set(attemptId, reason);
   if (ended.size > 100) ended.delete(ended.keys().next().value);
   for (const targetId of run.targets) if (channels.has(targetId) && ![...runs.values()].some(other => other.targets.has(targetId))) await (reason === 'released' ? revoke(targetId) : fence(targetId));
+  // A tab a single step still uses keeps its overlay, without the script's glow.
+  for (const targetId of run.targets) { const channel = channels.get(targetId); if (channel) void overlay(channel); }
+  updateToolbar();
+  scheduleReport(run.body.command.grant.body.groupId);
   await logRun(runLogEntry(run, reason, new Date().toISOString())).catch(() => {});
   await markRunning(run.body.command.grant.body.groupId);
+}
+/** Stops a workspace group in this Chrome now, from the popup or its tabs' Stop: its scripts end as a release does
+ * (their sessions hear that their tabs are gone and see their commands refused), and so does its current single step. */
+async function stopGroup(groupId) {
+  authorizations.delete(groupId);
+  await Promise.all([...runs].filter(([, run]) => run.body.command.grant.body.groupId === groupId).map(([attemptId]) => endRun(attemptId, 'stopped')));
+  for (const channel of channels.values()) if (channel.grant.groupId === groupId) void overlay(channel);
 }
 /** Adds a script that ended to the local run log (`run-log`), newest first. */
 async function logRun(entry) {
@@ -284,6 +303,53 @@ function markRunning(groupId) {
       const title = groupTitle(current, [...runs.values()].some(run => run.body.command.grant.body.groupId === groupId));
       if (title !== current) await chrome.tabGroups.update(group.id, { title });
     } catch {}
+  });
+}
+/** The isolated world of the in-page overlay (`overlay.ts`), and the binding its Stop calls there. */
+const OVERLAY_WORLD = 'gitspace-overlay';
+const OVERLAY_BINDING = '__gitspaceStop';
+/** The longest one overlay step may take: a page held by a dialog never answers, and the agent never waits on it. */
+const OVERLAY_STEP_MS = 1000;
+/** What a tab's overlay shows: a script running on it, a single step using it now, or nothing. */
+function overlayMode(channel) {
+  if ([...runs.values()].some(run => run.targets.has(channel.targetId) && live(run))) return 'run';
+  const step = authorizations.get(channel.grant.groupId);
+  return step?.body.command.type === 'execute' && step.targetId === channel.targetId && Date.parse(step.body.expiresAt) > Date.now() && Date.parse(step.body.dispatch.deadlineAt) > Date.now() ? 'step' : null;
+}
+/** Overlay steps of one tab run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing else. */
+function overlayStep(channel, operation) {
+  const step = (channel.overlayQueue ?? Promise.resolve()).then(() => {
+    const timeout = Promise.withResolvers();
+    const timer = setTimeout(timeout.resolve, OVERLAY_STEP_MS);
+    return Promise.race([operation(), timeout.promise]).finally(() => clearTimeout(timer));
+  }).catch(() => {});
+  channel.overlayQueue = step;
+  return step;
+}
+/** Calls the overlay function in the tab's overlay world, which a navigation replaces; the world's Stop binding is
+ * added to that world alone, so no page script can call it. */
+async function overlayCall(channel, command) {
+  const call = async () => {
+    if (!channel.overlay.contextId) {
+      const tree = await chrome.debugger.sendCommand(channel.source, 'Page.getFrameTree');
+      const world = await chrome.debugger.sendCommand(channel.source, 'Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: OVERLAY_WORLD });
+      await chrome.debugger.sendCommand(channel.source, 'Runtime.addBinding', { name: OVERLAY_BINDING, executionContextId: world.executionContextId });
+      channel.overlay.contextId = world.executionContextId;
+    }
+    return chrome.debugger.sendCommand(channel.source, 'Runtime.callFunctionOn', { functionDeclaration: browserOverlayFunction, arguments: [{ value: command }], executionContextId: channel.overlay.contextId, returnByValue: true });
+  };
+  // A context that a navigation destroyed: the next call makes the new document's world.
+  try { return await call(); } catch { channel.overlay.contextId = null; return call(); }
+}
+/** Brings a tab's overlay up to date (`extra`: the agent's pointer, or hiding it for a script's screenshot): shown
+ * while the agent uses the tab, removed after. */
+function overlay(channel, extra = {}) {
+  return overlayStep(channel, async () => {
+    if (channels.get(channel.targetId) !== channel) return;
+    const mode = overlayMode(channel);
+    if (!mode) { if (channel.overlay) { try { await overlayCall(channel, { remove: true }); } finally { delete channel.overlay; } } return; }
+    channel.overlay ??= { contextId: null };
+    await overlayCall(channel, { show: { mode, name: channel.grant.groupName, color: GROUP_HEX[groupColor(channel.grant.workspaceId)], binding: OVERLAY_BINDING }, ...extra });
   });
 }
 /** A tab as one script sees it: the script's sites, and the site you dragged the tab in on when the script named none. */
@@ -497,14 +563,40 @@ async function runCommand(message) {
     lastUsed.set(lease.grant.groupId, Date.now());
     if ('noop' in verdict) return {};
     if (method === 'Target.closeTarget' || method === 'Page.close') { await closeTab(lease); return method === 'Page.close' ? {} : { success: true }; }
+    // The cursor reaches each point before the event does; a script's own screenshot never shows the overlay.
+    if (method === 'Input.dispatchMouseEvent') await overlay(lease, { cursor: { x: verdict.send.x, y: verdict.send.y, type: verdict.send.type } });
+    if (method === 'Page.captureScreenshot') await overlay(lease, { conceal: true });
     effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
   } finally {
     admitted.resolve();
     if (admissions.get(targetId) === admitted.promise) admissions.delete(targetId);
   }
-  const result = await effect;
+  let result;
+  try { result = await effect; } finally { if (method === 'Page.captureScreenshot') void overlay(lease, { conceal: false }); }
   await check(targetId, lease);
   return result;
+}
+/** Why a tab shows no preview: the debugger is never attached for one, so previews never start Chrome's debugging bar. */
+const PREVIEW_IDLE = 'Preview appears while the agent uses this tab';
+/** Previews are small: at most this wide, in CSS pixels. A tab Chrome does not draw in time (one behind yours) shows
+ * none rather than holding up the commands after it. */
+const PREVIEW_WIDTH = 480;
+const PREVIEW_TIMEOUT_MS = 5000;
+/** A small image of a tab for GitSpace's Browser tab (`manage` `preview`), only of a tab of the group the agent is
+ * using now, which already has a debugger channel. */
+async function preview(scope, groupId, targetId) {
+  const channel = channels.get(targetId);
+  if (!channel || channel.grant.groupId !== groupId || channel.grant.projectId !== scope.projectId || channel.grant.workspaceId !== scope.workspaceId) return { image: null, reason: PREVIEW_IDLE };
+  try { await check(targetId, channel); } catch { return { image: null, reason: PREVIEW_IDLE }; }
+  const timeout = Promise.withResolvers();
+  const timer = setTimeout(() => timeout.resolve(null), PREVIEW_TIMEOUT_MS);
+  try {
+    const shot = await Promise.race([(async () => {
+      const { cssVisualViewport: viewport } = await chrome.debugger.sendCommand(channel.source, 'Page.getLayoutMetrics');
+      return chrome.debugger.sendCommand(channel.source, 'Page.captureScreenshot', { format: 'jpeg', quality: 50, captureBeyondViewport: false, clip: { x: 0, y: 0, width: viewport.clientWidth, height: viewport.clientHeight, scale: Math.min(1, PREVIEW_WIDTH / viewport.clientWidth) } });
+    })(), timeout.promise]);
+    return shot ? { image: shot.data, reason: null } : { image: null, reason: 'Chrome did not draw this tab in time' };
+  } finally { clearTimeout(timer); }
 }
 async function execute(message) {
   if (message.operation === 'authorize') return authorize(message.authorization);
@@ -546,6 +638,7 @@ async function execute(message) {
     if (!channel.painting) { channel.painting = true; await chrome.debugger.sendCommand(channel.source, 'Page.startScreencast', { format: 'jpeg', quality: 1, maxWidth: 1, maxHeight: 1 }); }
     run.targets.add(targetId);
     lastUsed.set(grant.groupId, Date.now());
+    void overlay(channel);
     return { targetId, sessionId: channel.sessionId };
   }
   if (message.operation === 'open') {
@@ -562,7 +655,16 @@ async function execute(message) {
     const channel = await attach(grant, targetId);
     authorization.targetId = targetId;
     lastUsed.set(grant.groupId, Date.now());
+    // The step's tab shows the overlay; one an earlier step used stops showing it.
+    for (const other of channels.values()) if (other.grant.groupId === grant.groupId) void overlay(other);
     return {targetId,sessionId:channel.sessionId};
+  }
+  if (message.operation === 'preview') {
+    const authorization = authorizations.get('management');
+    const command = authorization?.body.command;
+    if (!command || command.type !== 'manage' || command.action !== 'preview' || command.groupId !== message.groupId || command.targetId !== message.targetId || Date.parse(authorization.body.expiresAt) <= Date.now() || Date.parse(authorization.body.dispatch.deadlineAt) <= Date.now() || authorization.used.has('preview')) throw new Error('Signed tab preview required');
+    authorization.used.add('preview');
+    return preview(authorization.body.scope, message.groupId, message.targetId);
   }
   if (message.operation === 'release') { await endRun(message.attemptId, 'released'); return {}; }
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
@@ -596,7 +698,10 @@ async function execute(message) {
   else if (method === 'Page.navigate') return navigate(lease, params);
   else {
     if (method === 'Accessibility.getFullAXTree') { const document = lease.document; result = await chrome.debugger.sendCommand(lease.source, method, { depth: 32 }); if (document !== lease.document) throw new Error('Document changed during observation'); result.gitspaceDocument = document; for (const node of result.nodes || []) if (Number.isSafeInteger(node.backendDOMNodeId)) lease.refs.add(node.backendDOMNodeId); }
-    else result = await chrome.debugger.sendCommand(lease.source, method, params);
+    else {
+      if (method === 'Input.dispatchMouseEvent') await overlay(lease, { cursor: { x: params.x, y: params.y, type: params.type } });
+      result = await chrome.debugger.sendCommand(lease.source, method, params);
+    }
   }
   await check(message.targetId, lease);
   return result;
@@ -604,7 +709,13 @@ async function execute(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.sessionId) return;
   for (const [id, lease] of channels) if (lease.targetId === source.targetId) {
+    // Stop on the tab's overlay, from the overlay's own world only. Neither it nor that world reaches the session.
+    if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) { if (lease.overlay && params.executionContextId === lease.overlay.contextId) void stopGroup(lease.grant.groupId).catch(() => {}); return; }
+    if (method === 'Runtime.executionContextCreated' && params.context?.name === OVERLAY_WORLD) return;
     if (method === 'DOM.documentUpdated' || (method === 'Page.frameNavigated' && !params.frame.parentId)) { lease.document++; lease.refs.clear(); }
+    if (method === 'Page.frameNavigated' && !params.frame.parentId && lease.overlay) lease.overlay.contextId = null;
+    // A new document lacks the overlay until it is drawn again.
+    if (method === 'Page.loadEventFired' && lease.overlay) void overlay(lease);
     // A script's tab reports every event of its own session, without network credentials.
     if ([...runs.values()].some(run => run.targets.has(lease.targetId) && live(run))) { const forwarded = relayRunEvent(method, params); if (forwarded) forward(id, lease, { targetId: id, sessionId: lease.sessionId, method, params: forwarded }); return; }
     if (!['Page.frameNavigated', 'Page.loadEventFired', 'DOM.documentUpdated'].includes(method)) return;
@@ -614,6 +725,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener(source => { for (const [id, channel] of channels) if (channel.targetId === source.targetId) { channel.cancelNavigation?.(); channels.delete(id); send({ targetId: id, fenced: true }); } });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   for (const [id] of channels) void check(id).catch(() => {});
+  // The overlay comes back on a page that loaded, whether or not its tab reports Page events.
+  if (change.status === 'complete') for (const channel of channels.values()) if (channel.tabId === tabId && channel.overlay) void overlay(channel);
   if ('groupId' in change) void join(tab, true).catch(() => {});
   else if ((change.url || change.title || change.status === 'complete') && tab.groupId >= 0) void groupRecords().then(records => { const found = records.find(({ record }) => record.chromeGroupId === tab.groupId); if (found) scheduleReport(found.record.groupId); }).catch(() => {});
 });
@@ -625,19 +738,92 @@ chrome.tabGroups.onRemoved.addListener(group => { void serially(async () => {
   for (const { key, record } of await groupRecords()) if (record.chromeGroupId === group.id) { await persist(key, null); scheduleReport(record.groupId); }
 }).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } }).catch(() => { socket?.close(); }); });
 async function reset() { authorizations.clear(); await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'disconnected'))); await Promise.all([...channels.keys()].map(revoke)); }
+/** Whether GitSpace is on in this Chrome (`enabled` in `chrome.storage.local`; on unless you turned it off), and when
+ * it turns itself back on after "Off for 1 hour" (`reenableAt`, by the `relay-enable` alarm). Off, this Chrome keeps no
+ * connection to the account and no debugger on any tab. */
+let enabled = true;
+let reenableAt = null;
+const ENABLE_ALARM = 'relay-enable';
+/** Whether the account accepted this connection, and whether this Chrome has an identity to connect with. */
+let connected = false;
+let paired = true;
+const switched = chrome.storage.local.get(['enabled', 'reenableAt']).then(async saved => {
+  if (saved.enabled !== false) return;
+  if (Number.isFinite(saved.reenableAt) && saved.reenableAt <= Date.now()) { await chrome.storage.local.remove(['enabled', 'reenableAt']); return; }
+  enabled = false;
+  reenableAt = Number.isFinite(saved.reenableAt) ? saved.reenableAt : null;
+  // Chrome may drop alarms when it restarts.
+  if (reenableAt !== null) await chrome.alarms.create(ENABLE_ALARM, { when: reenableAt });
+}).catch(() => {});
+void switched.then(updateToolbar);
+/** Turns GitSpace on or off in this Chrome; off for `minutes` turns it back on after them. Turning it off ends every
+ * script as Stop does, lets every tab's debugger go, and closes the connection to the account until it is on again. */
+function setEnabled(on, minutes) {
+  identityOperations = identityOperations.catch(() => {}).then(async () => {
+    await switched;
+    await chrome.alarms.clear(ENABLE_ALARM);
+    if (on) {
+      enabled = true; reenableAt = null;
+      await chrome.storage.local.remove(['enabled', 'reenableAt']);
+      updateToolbar();
+      await connect();
+      return;
+    }
+    enabled = false; reenableAt = minutes ? Date.now() + minutes * 60_000 : null;
+    await chrome.storage.local.set({ enabled: false, reenableAt });
+    if (reenableAt !== null) await chrome.alarms.create(ENABLE_ALARM, { when: reenableAt });
+    updateToolbar();
+    await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'stopped')));
+    managingIdentity = true; identityGeneration++;
+    const previous = socket; socket = undefined; connected = false;
+    previous?.close();
+    for (const channel of channels.values()) channel.cancelNavigation?.();
+    try { await Promise.allSettled([...queues.values()]); await reset(); } finally { managingIdentity = false; updateToolbar(); }
+  });
+  return identityOperations;
+}
+/** The toolbar icon, badge and tooltip last set, so they are set again only when what they show changes. */
+let toolbar = '';
+const toolbarIcons = new Map();
+/** Shows on the toolbar whether GitSpace is off, on and idle, running scripts (their count on the badge), or needs
+ * you: on but not connected, not paired, or refused as incompatible. */
+function updateToolbar() {
+  const running = runs.size;
+  const host = new URL(GITSPACE_ACCOUNT_URL).host;
+  const state = !enabled ? 'off' : incompatible || !paired || !connected ? 'attention' : running ? 'working' : 'idle';
+  const title = !enabled ? 'GitSpace is off in this Chrome' + (reenableAt === null ? '' : ' until ' + new Date(reenableAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))
+    : incompatible ? 'GitSpace needs an update in this Chrome' : !paired ? 'GitSpace: pair this Chrome in GitSpace, Plugins → Browsers' : !connected ? 'GitSpace is connecting to ' + host
+    : running ? `GitSpace is running ${running} ${running === 1 ? 'script' : 'scripts'} in this Chrome` : 'GitSpace is on · ' + host;
+  const badge = state === 'working' ? String(running) : '';
+  const shown = JSON.stringify([state, title, badge]);
+  if (shown === toolbar) return;
+  toolbar = shown;
+  // Only the toolbar: a failure here never fails the script or connection that changed it.
+  try {
+    if (!toolbarIcons.has(state)) {
+      const imageData = {};
+      for (const size of [16, 32]) { const context = new OffscreenCanvas(size, size).getContext('2d'); drawToolbarIcon(context, size, state); imageData[size] = context.getImageData(0, 0, size, size); }
+      toolbarIcons.set(state, imageData);
+    }
+    void Promise.all([chrome.action.setIcon({ imageData: toolbarIcons.get(state) }), chrome.action.setBadgeBackgroundColor({ color: '#1a73e8' }), chrome.action.setBadgeText({ text: badge }), chrome.action.setTitle({ title })]).catch(() => {});
+  } catch {}
+}
 async function connect() {
-  if (managingIdentity) return;
+  await switched;
+  if (managingIdentity || !enabled) return;
   const generation = identityGeneration;
   if (socket && socket.readyState <= WebSocket.OPEN) return;
   await chrome.storage.local.remove('pairingCode');
-  const identity = await stored('identity'); if (!identity || managingIdentity || generation !== identityGeneration || (socket && socket.readyState <= WebSocket.OPEN)) return;
+  const identity = await stored('identity');
+  paired = Boolean(identity); updateToolbar();
+  if (!identity || managingIdentity || !enabled || generation !== identityGeneration || (socket && socket.readyState <= WebSocket.OPEN)) return;
   const protocols = [];
   if (!pairingCode) {
     const issuedAt = Date.now(), nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
     const signature = encode64(await crypto.subtle.sign('Ed25519', identity.privateKey, new TextEncoder().encode('gitspace-browser-relay-v2:admission:' + identity.pairingId + ':' + identity.generation + ':' + issuedAt + ':' + nonce)));
     protocols.push('gitspace-admission.' + btoa(JSON.stringify({ pairingId: identity.pairingId, generation: identity.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''));
   }
-  if (managingIdentity || generation !== identityGeneration || (socket && socket.readyState <= WebSocket.OPEN)) return;
+  if (managingIdentity || !enabled || generation !== identityGeneration || (socket && socket.readyState <= WebSocket.OPEN)) return;
   const connection = new WebSocket(endpoint, protocols);
   socket = connection;
   const clientNonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -670,18 +856,20 @@ async function connect() {
       }
       if (message.pairing) throw new Error('Repeated pairing handshake');
       if (message.updateRequired) {
-        incompatible = 'Update required: this extension speaks protocol ' + EXTENSION_PROTOCOL + '; your GitSpace account needs ' + message.updateRequired.minimum + ' or later. Download the extension again from GitSpace Settings and reload it.';
+        incompatible = 'Update required: this extension speaks protocol ' + EXTENSION_PROTOCOL + '; your GitSpace account needs ' + message.updateRequired.minimum + ' or later. Download the extension again from GitSpace (Plugins → Browsers) and reload it.';
         await chrome.storage.local.set({ compatibility: incompatible });
+        updateToolbar();
         return;
       }
       if (message.ready === true) {
         // A release accepts its protocol and the one before; so does the extension. Older relays report none (0).
         const account = typeof message.protocol === 'number' ? message.protocol : 0;
         if (account < EXTENSION_PROTOCOL - 1) {
-          incompatible = 'This GitSpace account runs an older release (protocol ' + account + ') than this extension supports (' + EXTENSION_PROTOCOL + '). Download the extension that this account offers in Settings.';
+          incompatible = 'This GitSpace account runs an older release (protocol ' + account + ') than this extension supports (' + EXTENSION_PROTOCOL + '). Download the extension that this account offers in Plugins → Browsers.';
           await chrome.storage.local.set({ compatibility: incompatible });
+          updateToolbar();
           connection.close();
-        } else { await chrome.storage.local.remove('compatibility'); void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {}); }
+        } else { connected = true; updateToolbar(); await chrome.storage.local.remove('compatibility'); void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {}); }
         return;
       }
     } catch { connection.close(); return; }
@@ -698,7 +886,8 @@ async function connect() {
     clearTimeout(handshakeTimeout);
     if (socket !== connection) return;
     for (const channel of channels.values()) channel.cancelNavigation?.();
-    socket = undefined; identityGeneration++; managingIdentity = true;
+    socket = undefined; connected = false; identityGeneration++; managingIdentity = true;
+    updateToolbar();
     identityOperations = identityOperations.catch(() => {}).then(async () => {
       try { await Promise.allSettled([...queues.values()]); await reset(); }
       // An incompatible extension stays disconnected until it is reloaded or re-paired, instead of retrying every second.
@@ -707,23 +896,68 @@ async function connect() {
   };
   connection.onerror = () => connection.close();
 }
-/** The popup's scripts view: how many scripts run, the latest of the run log, and Stop scripts, which ends every
- * script now as a release does; their sessions hear that their tabs are gone and see their commands refused. */
-async function scripts(stop) {
-  if (stop) await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'stopped')));
-  return { running: [...runs.values()].filter(live).length, log: ((await stored('run-log')) || []).slice(0, 10) };
+/** The workspace groups this extension records in this browser session, with their Chrome groups. */
+async function workspaceGroups() {
+  const { browserEpoch } = await chrome.storage.session.get('browserEpoch');
+  const found = [];
+  for (const { record } of await groupRecords()) if (record.browserEpoch === browserEpoch) { try { found.push({ record, group: await chrome.tabGroups.get(record.chromeGroupId) }); } catch {} }
+  return found;
 }
-chrome.runtime.onMessage.addListener((message, sender, respond) => { if ((!message.pair && message.resetIdentity !== true && message.identityStatus !== true && message.stopRuns !== true && message.runStatus !== true) || sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
-if (message.stopRuns === true || message.runStatus === true) { void scripts(message.stopRuns === true).then(respond, error => respond({ error: error.message })); return true; }
-identityOperations = identityOperations.catch(() => {}).then(async () => {
-  if (message.identityStatus === true) {
-    const identity = await stored('identity');
-    const digest = identity ? await crypto.subtle.digest('SHA-256', Uint8Array.from(atob(identity.publicKey), c => c.charCodeAt(0))) : undefined;
-    respond({ fingerprint: digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : null, compatibility: (await chrome.storage.local.get('compatibility')).compatibility ?? null }); return;
+/** What the popup shows: whether GitSpace is on here and connected, each workspace group using this Chrome with its
+ * scripts, the workspace group of the tab you are looking at, this Chrome's identity, and the latest scripts. */
+async function popupState() {
+  const identity = await stored('identity');
+  const digest = identity ? await crypto.subtle.digest('SHA-256', Uint8Array.from(atob(identity.publicKey), c => c.charCodeAt(0))) : undefined;
+  const groups = [];
+  for (const { record, group } of await workspaceGroups()) groups.push({ groupId: record.groupId, chromeGroupId: group.id, name: groupTitle(group.title ?? '', false), color: GROUP_HEX[group.color] ?? GROUP_HEX.grey,
+    running: [...runs.values()].filter(run => run.body.command.grant.body.groupId === record.groupId).length, tabs: (await chrome.tabs.query({ groupId: group.id })).length });
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tabGroup = active ? groups.find(group => group.chromeGroupId === active.groupId) : undefined;
+  return {
+    enabled, reenableAt, account: new URL(GITSPACE_ACCOUNT_URL).host,
+    connection: !enabled ? 'off' : incompatible ? 'update' : !identity ? 'unpaired' : connected ? 'connected' : 'connecting',
+    fingerprint: digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : null,
+    compatibility: (await chrome.storage.local.get('compatibility')).compatibility ?? null,
+    groups: groups.map(({ chromeGroupId, ...group }) => group),
+    activeTab: tabGroup ? { tabId: active.id, groupId: tabGroup.groupId, name: tabGroup.name, color: tabGroup.color } : null,
+    log: ((await stored('run-log')) || []).slice(0, 10),
+  };
+}
+/** Show in the popup: the first tab of a workspace group, in front. */
+async function focusGroup(groupId) {
+  const found = (await workspaceGroups()).find(({ record }) => record.groupId === groupId);
+  const [first] = found ? (await chrome.tabs.query({ groupId: found.group.id })).sort((a, b) => a.index - b.index) : [];
+  if (!first) throw new Error('This workspace group has no tabs in this Chrome');
+  if (found.group.collapsed) await chrome.tabGroups.update(found.group.id, { collapsed: false });
+  await chrome.tabs.update(first.id, { active: true });
+  await chrome.windows.update(first.windowId, { focused: true });
+}
+/** Remove from group in the popup: the tab leaves its workspace group and stays open; the agent no longer sees it. */
+async function ungroupTab(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!(await workspaceGroups()).some(({ group }) => group.id === tab.groupId)) throw new Error('This tab is not in a workspace group');
+  await chrome.tabs.ungroup(tabId);
+}
+/** The popup's requests besides pairing; each answers with what the popup shows next. */
+function popupRequest(message) {
+  if (message.popupState === true) return popupState();
+  if (typeof message.setEnabled?.enabled === 'boolean') {
+    const { enabled: on, minutes } = message.setEnabled;
+    if (minutes !== undefined && (on || !Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60)) return Promise.reject(new Error('Invalid time off'));
+    return setEnabled(on, minutes).then(popupState);
   }
+  if (typeof message.stopGroup === 'string') return stopGroup(message.stopGroup).then(popupState);
+  if (typeof message.focusGroup === 'string') return focusGroup(message.focusGroup).then(popupState);
+  if (Number.isInteger(message.ungroupTab)) return ungroupTab(message.ungroupTab).then(popupState);
+}
+chrome.runtime.onMessage.addListener((message, sender, respond) => { if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
+const request = popupRequest(message);
+if (request) { void request.then(respond, error => respond({ error: error.message })); return true; }
+if (!message.pair && message.resetIdentity !== true) return;
+identityOperations = identityOperations.catch(() => {}).then(async () => {
   managingIdentity = true;
   identityGeneration++;
-  const previous = socket; socket = undefined; pairingCode = undefined;
+  const previous = socket; socket = undefined; connected = false; pairingCode = undefined;
   previous?.close();
   for (const channel of channels.values()) channel.cancelNavigation?.();
   try {
@@ -734,7 +968,7 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
       const db = await database; const deleted = Promise.withResolvers(); const tx = db.transaction('state', 'readwrite');
       // Keep replay and attachment-generation records: resetting transport identity does not renew old grants.
       tx.objectStore('state').delete('identity'); tx.oncomplete = deleted.resolve; tx.onerror = () => deleted.reject(tx.error); tx.onabort = () => deleted.reject(tx.error);
-      await deleted.promise; respond({ ok: true }); return;
+      await deleted.promise; paired = false; updateToolbar(); respond({ ok: true }); return;
     }
   const { code, trust, pairingId, generation } = message.pair;
   if (typeof code !== 'string' || typeof pairingId !== 'string' || !pairingId || !Number.isSafeInteger(generation) || !trust || trust.algorithm !== 'Ed25519' || !trust.accountId || typeof trust.publicKey !== 'string') throw new Error('Invalid human pairing');
@@ -747,7 +981,14 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
   } finally { managingIdentity = false; await connect(); }
 }).catch(error => respond({ error: error.message })); return true; });
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => { for (const [id] of channels) void check(id).catch(() => {}); for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId, 'deadline').catch(() => {}); void collapseIdle().catch(() => {}); void connect(); });
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === ENABLE_ALARM) { void setEnabled(true).catch(() => {}); return; }
+  for (const [id] of channels) void check(id).catch(() => {});
+  for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId, 'deadline').catch(() => {});
+  // Keeps each overlay from expiring, and takes down that of a single step that has ended.
+  for (const channel of channels.values()) void overlay(channel);
+  void collapseIdle().catch(() => {}); void connect();
+});
 // A group marked while scripts ran before this worker started has none running now.
 void groupRecords().then(records => { for (const { record } of records) void markRunning(record.groupId); }).catch(() => {});
 connect();

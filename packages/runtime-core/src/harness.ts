@@ -10,7 +10,7 @@ import { createBackgroundAgentTask, createSubagentReplyExtension } from './backg
 import { admitRuntimeCodemodeTool, createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { ruleGenerationRegistry } from './rule-generations.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
-import { RuntimeBrowserArgumentsSchema, RuntimeChildAgentsArgumentsSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserChromesArgumentsSchema, RuntimeChildAgentsArgumentsSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 import { z } from 'zod';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -172,14 +172,14 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   } })] });
   const [firstBrowserAction, ...otherBrowserActions] = RuntimeBrowserArgumentsSchema.options;
   const headlessSource = { source: z.literal('headless').default('headless') };
-  const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource))]);
+  const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource)), RuntimeBrowserChromesArgumentsSchema]);
   const childExtension = defineExtension({ name: 'gitspace.child-tools', tools: tools.filter(tool => tool.name === 'agents' || tool.name === BROWSER_TOOL_NAME).map(tool => {
     const schema = tool.name === 'agents' ? RuntimeChildAgentsArgumentsSchema : headlessBrowser;
     return {
       ...tool,
       description: tool.name === 'agents'
         ? 'Message parent or a named sibling, inspect agents, or wait for the next event. Subagents cannot spawn or stop agents.'
-        : 'Use the headless browser. Subagents cannot access the user relay browser.',
+        : 'Use the headless browser; {action:"chromes"} lists the project’s Chromes. Subagents cannot access the user relay browser.',
       parameters: runtimeToolParameters(schema),
       prepareArguments: (input: unknown) => schema.parse(input),
     };

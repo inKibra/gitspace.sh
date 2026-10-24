@@ -1,7 +1,7 @@
 /// <reference path="./global-props.d.ts" />
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
-import { BROWSER_RUN_LIMIT_MS, type RuntimeAccountBrowserAuthorization, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { BROWSER_RUN_LIMIT_MS, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserPreview, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { launchCloudBrowser, type BrowserChannel } from './browser-cdp.js';
 import { AccountBrowserRuntime } from './browser-runtime.js';
 import { BROWSER_SCRIPT_PATH } from './browser-relay.js';
@@ -16,6 +16,29 @@ const IDLE_CLOSE_MS = 5 * 60_000;
 /** A service session lasts 15 minutes from each mint; a request that finds it older than this mints again. */
 const SERVICE_RENEW_MS = 10 * 60_000;
 const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), view: z.string().optional(), viewError: z.string().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
+const Targets = z.object({ targetInfos: z.array(z.object({ targetId: z.string(), type: z.string(), url: z.string(), title: z.string() })) });
+const LayoutMetrics = z.object({ cssVisualViewport: z.object({ pageX: z.number(), pageY: z.number(), clientWidth: z.number().positive(), clientHeight: z.number().positive() }) });
+/** Previews are at most this wide, small enough to refresh often. */
+const PREVIEW_WIDTH = 480;
+
+/** The pages open in a browser, as the Inspector's Browser tab lists them. */
+export async function browserPages(shim: CdpBrowserShim): Promise<{ targetId: string; url: string; title: string }[]> {
+  const client = shim.client(() => {});
+  try { return Targets.parse(await client.send('Target.getTargets')).targetInfos.filter(target => target.type === 'page').map(({ targetId, url, title }) => ({ targetId, url: url.slice(0, 8192), title: title.slice(0, 500) })); }
+  finally { await client.close(); }
+}
+
+/** A small JPEG of a page's visible area, through a client of its own that lets the page go afterwards. */
+export async function browserPreview(shim: CdpBrowserShim, targetId: string): Promise<RuntimeBrowserPreview> {
+  const client = shim.client(() => {});
+  try {
+    const { sessionId } = z.object({ sessionId: z.string() }).parse(await client.send('Target.attachToTarget', { targetId, flatten: true }));
+    const viewport = LayoutMetrics.parse(await client.send('Page.getLayoutMetrics', {}, sessionId)).cssVisualViewport;
+    const clip = { x: viewport.pageX, y: viewport.pageY, width: viewport.clientWidth, height: viewport.clientHeight, scale: Math.min(1, PREVIEW_WIDTH / viewport.clientWidth) };
+    const { data } = z.object({ data: z.string() }).parse(await client.send('Page.captureScreenshot', { format: 'jpeg', quality: 50, clip }, sessionId));
+    return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data }, reason: null };
+  } finally { await client.close(); }
+}
 
 /** A client of the shared browser as the agent tools use it: the browser channel shape over a shim client. */
 function shimChannel(shim: CdpBrowserShim, label: string): BrowserChannel {
@@ -111,6 +134,18 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   async alarm(): Promise<void> {
     if (this.scripts.size) { await this.used(); return; }
     this.release();
+  }
+
+  /** The cloud browser's pages and running scripts, for the Inspector's Browser tab. With no browser open there is
+   * nothing to show, and none is opened to show it. */
+  async overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }> {
+    return { tabs: this.browser ? await browserPages(await this.browser) : [], running: this.scripts.size };
+  }
+
+  /** One cloud tab's preview; none while no browser is open. */
+  async preview(targetId: string): Promise<RuntimeBrowserPreview> {
+    if (!this.browser) return { targetId, capturedAt: new Date().toISOString(), image: null, reason: 'The cloud browser is not running' };
+    return browserPreview(await this.browser, targetId);
   }
 
   /** The workspace's browser tools, and its scripts for `run`. */

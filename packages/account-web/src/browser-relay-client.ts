@@ -8,6 +8,7 @@ async function request(...[action, body]:
   | [action: 'pair' | 'status' | 'extension.zip']
   | [action: 'unpair', body: { pairingId: string }]
   | [action: 'confirm', body: { pairingId: string; fingerprint: string }]
+  | [action: 'rename', body: { pairingId: string; name: string }]
   | [action: 'project-status', body: { projectId: string }]
   | [action: 'project-update', body: { projectId: string; expectedRevision: number; preferences: RuntimeProjectBrowserPreferences }]
 ) {
@@ -31,6 +32,11 @@ export async function unpairAccountBrowser(pairingId: string) {
 }
 export async function confirmAccountBrowser(pairingId: string, fingerprint: string) {
   const result = z.object({ status: z.literal('ok'), value: RuntimeAccountBrowserRelayStatusSchema }).parse(await (await request('confirm', { pairingId, fingerprint })).json());
+  return result.value;
+}
+/** Names a paired Chrome; the name is the pairing's, shown in every project. */
+export async function renameAccountBrowser(pairingId: string, name: string) {
+  const result = z.object({ status: z.literal('ok'), value: RuntimeAccountBrowserRelayStatusSchema }).parse(await (await request('rename', { pairingId, name })).json());
   return result.value;
 }
 export async function projectBrowserSettings(projectId: string) {

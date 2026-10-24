@@ -2,8 +2,8 @@ import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/
 import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
-import { RuntimeBrowserArgumentsSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import type { RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
@@ -19,14 +19,14 @@ export interface RuntimeBrowserAuthority {
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 const savedPreparation = z.object({ fingerprint: z.string(), card: RuntimeBrowserApprovalCardSchema });
 type BrowserStorageTransaction = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> };
-type BrowserStorage = BrowserStorageTransaction & { delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
+type BrowserStorage = BrowserStorageTransaction & { list(options: { prefix: string }): Promise<Map<string, unknown>>; delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
 type BrowserEnvironment = {
   ACCOUNT_ID: Env['ACCOUNT_ID'];
   RELAY_NAME: Env['RELAY_NAME'];
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
   /** Each workspace's cloud browser lives in its own object (`BrowserSessionDO`), named `<account>:<project>:<workspace>`. */
-  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
+  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }>; preview(targetId: string): Promise<RuntimeBrowserPreview> } };
   RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
 type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
@@ -114,7 +114,10 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const sites = { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() };
     if (args.source === 'relay') {
       const url = args.action === 'navigate' || args.action === 'open' ? args.url : undefined;
-      if (!sites.origins.length || url && !sites.origins.some(pattern => browserOriginMatches(pattern, new URL(url).hostname))) throw new Error('Browser origin is not approved. Propose adding the required hostname to browser.origins in .gitspace/bundle.json, commit the environment definition, and ask the user to approve that origin in Environment. Yolo never approves environment changes.');
+      // Before any site is approved the workspace still gets its group: an empty agent tab, and tabs to list it, so the
+      // user can drag tabs in.
+      if (!sites.origins.length && !(args.action === 'open' && !args.url || args.action === 'tabs')) throw new Error('No site is approved for this workspace yet, so on the user’s Chrome only open without url (an empty tab in the workspace group) and tabs work. Propose the site in browser.origins in .gitspace/bundle.json, commit the environment definition, and ask the user to approve it in Environment. Yolo never approves environment changes.');
+      if (url && !sites.origins.some(pattern => browserOriginMatches(pattern, new URL(url).hostname))) throw new Error('Browser origin is not approved. Propose adding the required hostname to browser.origins in .gitspace/bundle.json, commit the environment definition, and ask the user to approve that origin in Environment. Yolo never approves environment changes.');
       // A script's sites are checked before anything is signed; your Chrome checks them again.
       for (const site of args.action === 'run' ? args.sites ?? [] : []) {
         if (!sites.origins.includes(site)) throw new Error(`${site} is not an approved site of this workspace. Name sites exactly as approved: ${sites.origins.join(', ')}.`);
@@ -164,7 +167,21 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if (saved.fingerprint !== fingerprint) throw new Error('Browser attempt identity reused');
     return saved.card;
   }
+  /** `chromes`: the project's Chromes as the agent may choose among them. It touches no browser and signs nothing. */
+  async function chromes(input: Input): Promise<RuntimeToolResult> {
+    const conversation = await options.runtime().browserConversation(input.conversationId);
+    const reply = (text: string): RuntimeToolResult => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text }] });
+    if (!conversation.root) return reply('The user’s Chrome (source:"relay") is main-agent-only; subagents use the headless browser.');
+    if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
+    const settings = await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId);
+    if (!settings.browsers.length) return reply('No Chrome is paired with this account. Ask the user to pair one in Plugins → Browsers.');
+    const approved = settings.browsers.filter(browser => browser.approved);
+    const rows = settings.browsers.map(browser => `- "${browser.name}" pairingId=${browser.pairingId}: ${browser.connected ? 'online' : 'offline'}, ${browser.approved ? 'approved' : 'not approved'}${browser.pairingId === settings.defaultPairingId ? ', default' : ''}${browser.note ? `. Note: ${browser.note}` : ''}`);
+    const rule = settings.defaultPairingId ? 'source:"relay" uses the default Chrome unless you pass an approved pairingId.' : approved.length === 1 ? 'source:"relay" uses the one approved Chrome unless you pass another approved pairingId.' : approved.length ? 'No Chrome is the default: pass the pairingId of an approved Chrome with source:"relay".' : 'None is approved for this project: ask the user to approve one in Plugins → Browsers or in this workspace’s Browser tab.';
+    return reply(`Chromes paired with this account:\n${rows.join('\n')}\n${rule} Only an approved, online Chrome takes calls; an offline one is never replaced by another.`);
+  }
   async function execute(input: Input): Promise<RuntimeToolResult> {
+    if (RuntimeBrowserToolArgumentsSchema.parse(input.args).action === 'chromes') return chromes(input);
     const { args, sites } = await context(input), origins = sites.origins;
     if (accountPlacement(args)) return account.execute(input, args, sites);
     const saved = savedPreparation.parse(await storage.get(`runtime.browser.prepare:${input.attemptId}`));
@@ -194,7 +211,36 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if (await storage.get(`runtime.browser.revoked:${body.groupId}`)) throw new Error('Browser group grant expired or revoked');
     return options.runtime().attachments.execute(dispatch, input.signal ?? AbortSignal.timeout(Math.max(1, Date.parse(dispatch.deadlineAt) - Date.now())));
   }
+  /** The workspace's live group on a browser (`cloud` or a pairing id): none until first use or after a revocation. */
+  async function liveGroup(browser: string) {
+    const groupId = z.string().uuid().optional().parse(await storage.get(`runtime.browser.account.group:${browser}`));
+    return groupId && !await storage.get(`runtime.browser.revoked:${groupId}`) ? groupId : null;
+  }
+  /** The Inspector's Browser tab: approved sites, the cloud browser's tabs, and every Chrome confirmed on the account
+   * with this workspace's group there. Only the main conversation sees the user's Chromes. Nothing here opens a browser. */
+  async function overview(conversationId: string): Promise<RuntimeBrowserOverview> {
+    const conversation = await options.runtime().browserConversation(conversationId);
+    const approved = await options.approvedSites();
+    const cloudGroup = await liveGroup('cloud');
+    const cloud = cloudGroup && env.BROWSER_SESSION ? await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).overview() : { tabs: [], running: 0 };
+    const chromes: RuntimeBrowserOverview['chromes'] = [];
+    if (conversation.root && env.RELAY) {
+      const settings = await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId);
+      const document = await workspaceBrowsersDocument(storage);
+      for (const browser of settings.browsers) {
+        // The newest report of the workspace's group on this Chrome, or the group before the Chrome has reported it.
+        const row = document.chrome.find(group => group.pairingId === browser.pairingId);
+        const groupId = row?.groupId ?? await liveGroup(browser.pairingId);
+        const grant = !row && groupId ? await storage.get(`runtime.browser.account.grant:${groupId}`) : undefined;
+        chromes.push({ pairingId: browser.pairingId, name: browser.name, note: browser.note, connected: browser.connected, approved: browser.approved, isDefault: browser.pairingId === settings.defaultPairingId,
+          groupId, groupName: row?.groupName ?? (grant ? RuntimeAccountBrowserSignedGrantSchema.parse(grant).body.groupName : null), running: row?.running ?? 0,
+          tabs: row?.tabs.map(tab => ({ targetId: tab.targetId, url: tab.url, title: tab.title, addedBy: tab.addedBy, usable: tab.usable })) ?? [] });
+      }
+    }
+    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, chromes });
+  }
   async function manage(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement) {
+    if (command.action === 'overview') return overview(conversationId);
     if (!machineId) return account.manage(conversationId, command);
     const placements = machineId ? [await eligible(machineId)] : await Promise.all([...new Set(options.runtime().attachments.list().filter(item => item.state === 'ready' && item.capabilities.some(cap => cap.startsWith('browser.'))).map(item => item.machineId))].map(id => eligible(id)));
     if (command.action !== 'status' && placements.length !== 1) throw new Error('Browser management requires an exact machine');

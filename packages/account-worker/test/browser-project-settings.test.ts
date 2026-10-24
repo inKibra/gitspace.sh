@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { z } from 'zod';
-import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody } from '@gitspace/protocol-runtime';
 import { AccountBrowserRelay, type BrowserWorkspaces } from '../src/browser-relay.js';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
@@ -51,7 +51,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
         if (message.operation === 'authorize' && paused) { paused.reached(); await paused.resume; }
         if (message.operation === 'revoke' && browser.failRevoke) { active.send(JSON.stringify({ id: message.id, error: { message: 'Chrome temporarily failed closure' } })); return; }
         if (message.operation === 'revoke' && message.groupId) revoked.push(message.groupId);
-        active.send(JSON.stringify({ id: message.id, result: message.operation === 'tabs' ? [{ title: name }] : {} }));
+        active.send(JSON.stringify({ id: message.id, result: message.operation === 'tabs' ? [{ title: name }] : message.operation === 'preview' ? { image: 'jpeg-bytes', reason: null } : {} }));
       }); }
       listen(socket);
       return browser;
@@ -59,13 +59,13 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
     try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
-async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project') {
+async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>) {
   const workspace = await keys(), expiresAt = new Date(Date.now() + 60_000).toISOString(), issuedAt = new Date().toISOString();
   const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId, workspaceId, publicKey: workspace.publicKey, issuedAt, expiresAt }, root.key.privateKey);
   const placement = { kind: 'account-relay' as const, accountId: env.ACCOUNT_ID, pairingId: pairing.pairingId, generation: pairing.generation, ...(pairing.approvalId ? { approvalId: pairing.approvalId } : {}) };
   const grant = await signRuntimeAccountBrowserGrant({ projectId, workspaceId, placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt }, workspace.key.privateKey, authority);
   const attemptId = crypto.randomUUID();
-  return signRuntimeAccountBrowserAuthorization({ scope: { projectId, workspaceId, placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority);
+  return signRuntimeAccountBrowserAuthorization({ scope: { projectId, workspaceId, placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: manage ? 'browser_control' : 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: manage ?? { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority);
 }
 
 test('confirmed Chrome rejects signed unapproved project dispatch before any extension operation', () => fixture(async (relay, chrome, root) => {
@@ -75,8 +75,9 @@ test('confirmed Chrome rejects signed unapproved project dispatch before any ext
 }));
 test('independent project defaults permit two approved Chromes in one workspace', () => fixture(async (relay, chrome, root) => {
   const a = await chrome('A'), b = await chrome('B');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, name: 'Work', note: 'Production' }, { pairingId: b.pairingId, name: 'Test', note: 'Sandbox' }] });
-  await relay.setProjectSettings('other-project', 0, { defaultPairingId: b.pairingId, approvals: [{ pairingId: b.pairingId, name: 'Other project', note: '' }] });
+  await relay.rename(a.pairingId, 'Work');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, note: 'Production' }, { pairingId: b.pairingId, note: 'Sandbox' }] });
+  await relay.setProjectSettings('other-project', 0, { defaultPairingId: b.pairingId, approvals: [{ pairingId: b.pairingId, note: '' }] });
   expect((await relay.placement('other-project')).pairingId).toBe(b.pairingId);
   expect((await relay.placement('project')).pairingId).toBe(a.pairingId);
   expect((await relay.execute(await authorization(root, await relay.placement('project', a.pairingId)))).browser).toEqual({ pairingId: a.pairingId, name: 'Work' });
@@ -85,39 +86,42 @@ test('independent project defaults permit two approved Chromes in one workspace'
 }));
 test('project revocation rejects saved grants across workspaces while preserving sibling Chrome', () => fixture(async (relay, chrome, root) => {
   const a = await chrome('A'), b = await chrome('B');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, name: 'A', note: '' }, { pairingId: b.pairingId, name: 'B', note: '' }] });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, note: '' }, { pairingId: b.pairingId, note: '' }] });
   const placement = await relay.placement('project', a.pairingId);
   const first = await authorization(root, placement, 'first'), second = await authorization(root, placement, 'second');
-  await relay.setProjectSettings('project', 1, { defaultPairingId: b.pairingId, approvals: [{ pairingId: b.pairingId, name: 'B', note: '' }] });
+  await relay.setProjectSettings('project', 1, { defaultPairingId: b.pairingId, approvals: [{ pairingId: b.pairingId, note: '' }] });
   await expect(relay.execute(first)).rejects.toThrow(/approv/i); await expect(relay.execute(second)).rejects.toThrow(/approv/i);
   expect(JSON.stringify(await relay.execute(await authorization(root, await relay.placement('project', b.pairingId))))).toContain('B'); expect(a.operations).toEqual([]);
 }));
 test('offline approved Chrome remains discoverable and refuses dispatch without fallback', () => fixture(async (relay, chrome, root) => {
   const a = await chrome('A'), b = await chrome('B');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, name: 'Work', note: 'Local Chrome' }, { pairingId: b.pairingId, name: 'Other', note: '' }] });
+  await relay.rename(a.pairingId, 'Work');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, note: 'Local Chrome' }, { pairingId: b.pairingId, note: '' }] });
   const pending = await authorization(root, await relay.placement('project', a.pairingId));
   const closed = new Promise<void>(resolve => a.socket.addEventListener('close', () => resolve(), { once: true })); a.socket.close(); await closed;
   expect((await relay.projectSettings('project')).browsers).toContainEqual({ pairingId: a.pairingId, generation: a.generation, name: 'Work', note: 'Local Chrome', connected: false, approved: true });
-  await expect(relay.placement('project')).rejects.toThrow(/connected|unavailable/i); await expect(relay.execute(pending)).rejects.toThrow(/connected|unavailable/i); expect(b.operations).toEqual([]);
+  const other = `"Chrome ${b.pairingId.slice(0, 8)}" (${b.pairingId}, online)`;
+  await expect(relay.placement('project')).rejects.toThrow(`"Work" (${a.pairingId}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome, or pass another approved pairingId: ${other}.`);
+  await expect(relay.execute(pending)).rejects.toThrow(`"Work" (${a.pairingId}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome.`); expect(b.operations).toEqual([]);
 }));
 test('project settings reject stale concurrent update and unconfirmed identities', () => fixture(async (relay, chrome) => {
-  const browser = await chrome('A'); const preferences = { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'A', note: '' }] };
+  const browser = await chrome('A'); const preferences = { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] };
   const results = await Promise.allSettled([relay.setProjectSettings('project', 0, preferences), relay.setProjectSettings('project', 0, { defaultPairingId: null, approvals: [] })]);
   expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1); expect(results.filter(result => result.status === 'rejected')).toHaveLength(1);
   expect((await relay.projectSettings('other-project')).browsers.every(browser => !browser.approved)).toBe(true);
-  await expect(relay.setProjectSettings('other-project', 0, { defaultPairingId: null, approvals: [{ pairingId: crypto.randomUUID(), name: 'Unknown', note: '' }] })).rejects.toThrow(/confirm/i);
+  await expect(relay.setProjectSettings('other-project', 0, { defaultPairingId: null, approvals: [{ pairingId: crypto.randomUUID(), note: '' }] })).rejects.toThrow(/confirm/i);
 }));
 test('personal project approvals cannot authorize another relay owner', () => fixture(async (relay, chrome) => {
   const browser = await chrome('Owner A');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'Personal', note: 'Only mine' }] });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: 'Only mine' }] });
   await fixture(async other => {
     expect((await other.projectSettings('project')).browsers).toEqual([]);
-    await expect(other.placement('project', browser.pairingId)).rejects.toThrow(/confirm|approv/i);
+    await expect(other.placement('project', browser.pairingId)).rejects.toThrow('No Chrome is paired with this account');
   });
 }));
 test('project revocation during extension authorization prevents the subsequent tab read', () => fixture(async (relay, chrome, root) => {
   const browser = await chrome('Private');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'Private', note: '' }] });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] });
   const paused = browser.pauseAuthorization(), pending = relay.execute(await authorization(root, await relay.placement('project', browser.pairingId)));
   await paused.reached;
   await relay.setProjectSettings('project', 1, { defaultPairingId: null, approvals: [] });
@@ -126,7 +130,7 @@ test('project revocation during extension authorization prevents the subsequent 
 }));
 test('reapproving Chrome creates fresh authority while preserving sibling authority and rejecting old grants', () => fixture(async (relay, chrome, root) => {
   const a = await chrome('A'), b = await chrome('B');
-  const approvalA = { pairingId: a.pairingId, name: 'A', note: '' }, approvalB = { pairingId: b.pairingId, name: 'B', note: '' };
+  const approvalA = { pairingId: a.pairingId, note: '' }, approvalB = { pairingId: b.pairingId, note: '' };
   await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [approvalA, approvalB] });
   const before = await relay.placement('project', a.pairingId), sibling = await relay.placement('project', b.pairingId);
   const old = await authorization(root, before); await relay.execute(old);
@@ -141,7 +145,7 @@ test('reapproving Chrome creates fresh authority while preserving sibling author
 
 test('project removal closes only affected Chrome groups and retries failed closure after reconnect', () => fixture(async (relay, chrome, root) => {
   const a = await chrome('A'), b = await chrome('B');
-  const approvalA = { pairingId: a.pairingId, name: 'A', note: '' }, approvalB = { pairingId: b.pairingId, name: 'B', note: '' };
+  const approvalA = { pairingId: a.pairingId, note: '' }, approvalB = { pairingId: b.pairingId, note: '' };
   await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [approvalA, approvalB] });
   await relay.setProjectSettings('other', 0, { defaultPairingId: a.pairingId, approvals: [approvalA] });
   const first = await authorization(root, await relay.placement('project', a.pairingId));
@@ -165,7 +169,7 @@ test('project removal closes only affected Chrome groups and retries failed clos
 
 test('connected project removal acknowledges extension group closure', () => fixture(async (relay, chrome, root) => {
   const browser = await chrome('A');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'A', note: '' }] });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] });
   const value = await authorization(root, await relay.placement('project'));
   await relay.execute(value);
   await relay.setProjectSettings('project', 1, { defaultPairingId: null, approvals: [] });
@@ -175,7 +179,7 @@ test('connected project removal acknowledges extension group closure', () => fix
 
 test('offline project removal survives relay restart and closes groups on hello', () => fixture(async (relay, chrome, root, restart) => {
   const browser = await chrome('Offline');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'Offline', note: '' }] });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] });
   const value = await authorization(root, await relay.placement('project'));
   await relay.execute(value);
   const closed = new Promise<void>(resolve => browser.socket.addEventListener('close', () => resolve(), { once: true })); browser.socket.close(); await closed;
@@ -203,7 +207,7 @@ test('the relay records the extension version and protocol each browser reports,
 
 test('retiring a workspace closes its Chrome groups and leaves other workspaces their own', () => fixture(async (relay, chrome, root) => {
   const browser = await chrome('A');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'A', note: '' }] });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] });
   const archived = await authorization(root, await relay.placement('project'));
   const kept = await authorization(root, await relay.placement('project'), 'kept');
   for (const value of [archived, kept]) await relay.execute(value);
@@ -214,9 +218,10 @@ test('retiring a workspace closes its Chrome groups and leaves other workspaces 
   expect(JSON.stringify(await relay.execute(await authorization(root, kept.body.scope.placement, 'kept')))).toContain('A');
 }));
 
-test('a Chrome group report reaches its workspace with each tab marked usable or not', () => fixture(async (relay, chrome, root, restart, sockets) => {
+test('a Chrome group report reaches its workspace with each tab marked usable or not, and its running scripts', () => fixture(async (relay, chrome, root, restart, sockets) => {
   const browser = await chrome('A');
-  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, name: 'Work Chrome', note: '' }] });
+  await relay.rename(browser.pairingId, 'Work Chrome');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] });
   const value = await authorization(root, await relay.placement('project'));
   await relay.execute(value);
   if (value.body.command.type !== 'execute') throw new Error('Expected execution');
@@ -231,10 +236,74 @@ test('a Chrome group report reaches its workspace with each tab marked usable or
     tab('agent-tab', 'https://example.com/pricing', 'agent', null),
     tab('your-tab', 'https://news.example/story', 'you', 'news.example'),
     tab('popup', 'https://elsewhere.example/', 'page', null),
-  ] } }));
+  ], running: 2 } }));
   await expect.poll(() => reports.length).toBe(1);
   expect(reports[0]).toMatchObject({ name: `${env.ACCOUNT_ID}:workspace`, identity: { projectId: 'project', workspaceId: 'workspace' }, group: {
-    groupId, pairingId: browser.pairingId, browser: 'Work Chrome', origins: ['example.com'],
+    groupId, pairingId: browser.pairingId, browser: 'Work Chrome', origins: ['example.com'], running: 2,
     tabs: [{ targetId: 'agent-tab', usable: true }, { targetId: 'your-tab', usable: true }, { targetId: 'popup', usable: false }],
   } });
 }));
+
+test('a relay call that cannot run says why and what to do, naming the Chromes it could use', () => fixture(async (relay, chrome) => {
+  const unhelpful = /browser_control|project Settings/;
+  await expect(relay.placement('project')).rejects.toThrow(/^No Chrome is paired with this account\. Ask the user to pair one in Plugins → Browsers\.$/);
+  const a = await chrome('A'), b = await chrome('B');
+  await relay.rename(a.pairingId, 'Work'); await relay.rename(b.pairingId, 'Home');
+  const work = `"Work" (${a.pairingId}, online)`, home = `"Home" (${b.pairingId}, online)`;
+  await expect(relay.placement('project')).rejects.toThrow(`No Chrome is approved for this project. Paired: ${work}, ${home}. Ask the user to approve one in Plugins → Browsers or in this workspace’s Browser tab.`);
+  await relay.setProjectSettings('project', 0, { defaultPairingId: null, approvals: [{ pairingId: a.pairingId, note: '' }] });
+  await expect(relay.placement('project', b.pairingId)).rejects.toThrow(`Chrome ${b.pairingId} is not approved for this project. Approved: ${work}. Pass one of their pairingIds, or ask the user to approve that Chrome in Plugins → Browsers or in this workspace’s Browser tab.`);
+  await relay.setProjectSettings('project', 1, { defaultPairingId: null, approvals: [{ pairingId: a.pairingId, note: '' }, { pairingId: b.pairingId, note: '' }] });
+  await expect(relay.placement('project')).rejects.toThrow(`Several Chromes are approved for this project and none is its default: ${work}, ${home}. Pass the pairingId of the one to use.`);
+  const refusals: string[] = [];
+  for (const pairingId of [undefined, crypto.randomUUID()]) refusals.push(await relay.placement('project', pairingId).then(() => '', (error: unknown) => String(error)));
+  refusals.push(await relay.placement('other').then(() => '', (error: unknown) => String(error)));
+  expect(refusals.every(message => message && !unhelpful.test(message))).toBe(true);
+}));
+
+test('the only Chrome a project approved is used without a default', () => fixture(async (relay, chrome) => {
+  const a = await chrome('A');
+  await chrome('B');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: null, approvals: [{ pairingId: a.pairingId, note: '' }] });
+  expect((await relay.placement('project')).pairingId).toBe(a.pairingId);
+}));
+
+test('a Chrome has one name, set on its pairing and shown in every project and in the account status', () => fixture(async (relay, chrome) => {
+  const a = await chrome('A');
+  expect((await relay.projectSettings('project')).browsers.map(browser => browser.name)).toEqual([`Chrome ${a.pairingId.slice(0, 8)}`]);
+  await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId, note: 'Work account' }] });
+  expect((await relay.rename(a.pairingId, '  Laptop  ')).pairings.find(pairing => pairing.pairingId === a.pairingId)?.name).toBe('Laptop');
+  expect((await relay.projectSettings('project')).browsers).toContainEqual(expect.objectContaining({ pairingId: a.pairingId, name: 'Laptop', note: 'Work account', approved: true }));
+  expect((await relay.projectSettings('other')).browsers).toContainEqual(expect.objectContaining({ pairingId: a.pairingId, name: 'Laptop', approved: false }));
+  await expect(relay.rename(crypto.randomUUID(), 'Nobody')).rejects.toThrow(/unknown/i);
+  await expect(relay.rename(a.pairingId, ' ')).rejects.toThrow();
+}));
+
+test('a tab preview goes to a protocol 3 extension under signed authority; a protocol 2 extension is asked to update', () => fixture(async (relay, chrome, root) => {
+  const current = await chrome('Current'), old = await chrome('Old', { protocol: BROWSER_EXTENSION_PROTOCOL - 1 });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: current.pairingId, approvals: [{ pairingId: current.pairingId, note: '' }, { pairingId: old.pairingId, note: '' }] });
+  const previews: unknown[] = [];
+  for (const browser of [current, old]) {
+    const placement = await relay.placement('project', browser.pairingId), opened = await authorization(root, placement);
+    await relay.execute(opened);
+    if (opened.body.command.type !== 'execute') throw new Error('Expected execution');
+    const result = await relay.execute(await authorization(root, placement, 'workspace', 'project', { type: 'manage', action: 'preview', groupId: opened.body.command.grant.body.groupId, targetId: 'tab' }));
+    const text = result.content.find(part => part.type === 'text');
+    previews.push(text?.type === 'text' ? JSON.parse(text.text) : null);
+  }
+  expect(previews).toEqual([{ image: 'jpeg-bytes', reason: null }, { image: null, reason: 'Update the GitSpace extension in Chrome to see previews' }]);
+  expect(current.operations.slice(-2)).toEqual(['authorize', 'preview']);
+  expect(old.operations).not.toContain('preview');
+}));
+
+test('LEGACY: a name stored on a project approval names its Chrome until the project is next written, and then stays on the pairing', async () => {
+  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (relay, state) => {
+    const pairingId = crypto.randomUUID(), root = await keys();
+    await state.storage.put('browser.relay.pairings', { pairings: [{ pairingId, generation: 1, state: 'confirmed', code: null, expiresAt: null, publicKey: root.publicKey, trust: { algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey } }] });
+    await state.storage.put('browser.relay.project:project', { revision: 1, defaultPairingId: pairingId, approvals: [{ pairingId, name: 'Work Chrome', note: 'Production', generation: 1, approvalId: crypto.randomUUID() }] });
+    expect((await relay.browserRelayProjectSettings('other')).browsers.map(browser => browser.name)).toEqual(['Work Chrome']);
+    await relay.browserRelaySetProjectSettings('project', 1, { defaultPairingId: pairingId, approvals: [{ pairingId, note: 'Production' }] });
+    expect(JSON.stringify(await state.storage.get('browser.relay.project:project'))).not.toContain('Work Chrome');
+    expect((await relay.browserRelayStatus()).pairings.map(pairing => pairing.name)).toEqual(['Work Chrome']);
+  });
+});

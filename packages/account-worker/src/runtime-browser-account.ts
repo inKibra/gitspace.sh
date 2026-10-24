@@ -3,7 +3,7 @@ import { BROWSER_RUN_LIMIT_MS, RuntimeAccountBrowserPreparationSchema, RuntimeAc
 import type { ToolServices } from '@gitspace/runtime-core';
 import type { RuntimeBrowserAuthorityOptions } from './runtime-browser.js';
 
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, type RuntimeBrowserManagement } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserPreviewSchema, type RuntimeBrowserManagement, type RuntimeBrowserPreview } from '@gitspace/protocol-runtime';
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 type Sites = { origins: string[]; stepsOnly: string[] };
 /** First in every script's result on either browser: what a script returns comes from web pages. */
@@ -71,9 +71,45 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
     return env.RELAY.getByName(env.RELAY_NAME).browserRelayExecute(authorization);
   }
+  /** Signs one management command for a browser, dispatches it there and returns its JSON answer. */
+  async function managed(conversationId: string, root: boolean, placement: RuntimeAccountBrowserPlacement, command: RuntimeBrowserManagement): Promise<unknown> {
+    if (placement.kind === 'account-relay' && !root) throw new Error('Logged-in Chrome relay is main-agent-only');
+    const id = crypto.randomUUID(), deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    const signer = await signing();
+    const authorization = await signRuntimeAccountBrowserAuthorization({ scope: { ...identity, placement, conversationId, conversationKind: root ? 'main' : 'subagent', taskId: id, requestId: id, attemptId: id }, issuedAt: signer.issuedAt, expiresAt: deadlineAt, dispatch: { version: 1, tool: 'browser_control', deadlineAt, replay: 'unsafe' }, command: { type: 'manage', ...command } }, signer.privateKey, signer.authority);
+    const response = await dispatch(authorization);
+    const text = response.content.find(part => part.type === 'text');
+    if (response.status !== 'completed' || !text || text.type !== 'text') throw new Error('Account browser management failed');
+    return JSON.parse(text.text);
+  }
+  /** One tab's preview for its tile in the Browser tab. A tab that cannot be shown (its group ended, its Chrome is
+   * offline or refuses) gets no image and the reason, so the tile says why instead of the tab failing. */
+  async function preview(conversationId: string, root: boolean, groupId: string, targetId: string): Promise<RuntimeBrowserPreview> {
+    const none = (reason: string): RuntimeBrowserPreview => ({ targetId, capturedAt: new Date().toISOString(), image: null, reason: reason.slice(0, 256) });
+    const stored = await storage.get(`runtime.browser.account.grant:${groupId}`);
+    if (!stored || await storage.get(`runtime.browser.revoked:${groupId}`)) return none('This tab’s group has ended');
+    const placement = storedGrantSchema.parse(stored).body.placement;
+    // The cloud browser is the workspace's own: its session object captures the tab, never opening a browser to do so.
+    if (placement.kind === 'cloud') {
+      if (!env.BROWSER_SESSION) throw new Error('Browser session unavailable');
+      return env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).preview(targetId);
+    }
+    if (!root) throw new Error('Logged-in Chrome relay is main-agent-only');
+    if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
+    const browser = (await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId)).browsers.find(item => item.pairingId === placement.pairingId);
+    if (!browser?.connected) return none(`${browser ? `"${browser.name}"` : 'This Chrome'} is offline: open it to see this tab`);
+    try {
+      const reply = z.object({ image: z.string().nullable(), reason: z.string().nullable() }).parse(await managed(conversationId, root, placement, { action: 'preview', groupId, targetId }));
+      return reply.image === null ? none(reply.reason ?? 'No preview') : RuntimeBrowserPreviewSchema.parse({ targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: reply.image }, reason: null });
+    } catch (error) { return none(error instanceof Error ? error.message : String(error)); }
+  }
   async function manage(conversationId: string, command: RuntimeBrowserManagement) {
     const placements: RuntimeAccountBrowserPlacement[] = [];
     const conversation = await options.runtime().browserConversation(conversationId);
+    if (command.action === 'preview') {
+      if (!command.groupId || !command.targetId) throw new Error('A preview names its group and tab');
+      return preview(conversationId, conversation.root, command.groupId, command.targetId);
+    }
     const relay = conversation.root ? env.RELAY?.getByName(env.RELAY_NAME) : undefined;
     const settings = relay ? await relay.browserRelayProjectSettings(identity.projectId) : undefined;
     if (command.groupId) {
@@ -88,14 +124,7 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     const statuses: z.infer<typeof RuntimeBrowserStatusSchema>[] = [];
     for (const placement of placements) {
-      if (placement.kind === 'account-relay' && !conversation.root) throw new Error('Logged-in Chrome relay is main-agent-only');
-      const id = crypto.randomUUID(), deadlineAt = new Date(Date.now() + 60_000).toISOString();
-      const signer = await signing();
-      const authorization = await signRuntimeAccountBrowserAuthorization({ scope: { ...identity, placement, conversationId, conversationKind: conversation.root ? 'main' : 'subagent', taskId: id, requestId: id, attemptId: id }, issuedAt: signer.issuedAt, expiresAt: deadlineAt, dispatch: { version: 1, tool: 'browser_control', deadlineAt, replay: 'unsafe' }, command: { type: 'manage', ...command } }, signer.privateKey, signer.authority);
-      const response = await dispatch(authorization);
-      const text = response.content.find(part => part.type === 'text');
-      if (response.status !== 'completed' || !text || text.type !== 'text') throw new Error('Account browser management failed');
-      const value: unknown = JSON.parse(text.text);
+      const value = await managed(conversationId, conversation.root, placement, command);
       if (command.action === 'artifact') return RuntimeBrowserArtifactPageSchema.parse(value);
       statuses.push(RuntimeBrowserStatusSchema.parse(value));
     }

@@ -20,6 +20,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const database = { transaction() {
     const transaction = { oncomplete: () => {}, onerror: () => {}, onabort: () => {}, objectStore: () => ({
       get(key: string) { const request = { result: state.get(key), onsuccess: () => {}, onerror: () => {} }; queueMicrotask(() => request.onsuccess()); return request; },
+      getAllKeys() { const request = { result: [...state.keys()], onsuccess: () => {}, onerror: () => {} }; queueMicrotask(() => request.onsuccess()); return request; },
       put(value: unknown, key: string) { state.set(key, value); },
       delete(key: string) { state.delete(key); },
     }) };
@@ -37,9 +38,9 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const detach = vi.fn(async () => {});
   const chrome = {
     runtime: { id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, onMessage: { addListener: (value: Listener) => { listener = value; } } },
-    storage: { local: { remove: vi.fn(async () => {}), get: vi.fn(async () => ({})), set: vi.fn(async () => {}) } },
+    storage: { local: { remove: vi.fn(async () => {}), get: vi.fn(async () => ({})), set: vi.fn(async () => {}) }, session: { get: async () => ({}) } },
     debugger: { detach, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
-    tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated: { addListener() {} } },
+    tabs: { query: async () => [], onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated: { addListener() {} } },
     tabGroups: { onRemoved: { addListener() {} } },
     alarms: { create() {}, onAlarm: { addListener() {} } },
   };
@@ -55,7 +56,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   await (runInContext('connect()', context) as Promise<void>);
   const previous = connections[0];
   const originalFingerprint = createHash('sha256').update(Buffer.from(publicKey, 'base64')).digest('hex');
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: originalFingerprint, compatibility: null });
+  expect(await invoke({ popupState: true })).toMatchObject({ fingerprint: originalFingerprint, compatibility: null });
   expect(previous?.readyState).toBe(1);
   expect(previous?.url).toBe('wss://account.gitspace.test/api/browser-relay/extension');
   const admission = previous?.protocols?.[0];
@@ -63,7 +64,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   if (!admission) throw new Error('Missing admission proof');
   const signed = z.object({ pairingId: z.string(), generation: z.number(), issuedAt: z.number(), nonce: z.string(), signature: z.string() }).parse(JSON.parse(Buffer.from(admission.slice('gitspace-admission.'.length), 'base64url').toString()));
   expect(await crypto.subtle.verify('Ed25519', keys.publicKey, Buffer.from(signed.signature, 'base64'), new TextEncoder().encode(`gitspace-browser-relay-v2:admission:${signed.pairingId}:${signed.generation}:${signed.issuedAt}:${signed.nonce}`))).toBe(true);
-  expect(listener?.({ identityStatus: true }, { id: 'extension', url: 'https://untrusted.example/' }, () => { throw new Error('Untrusted identity read'); })).toBeUndefined();
+  expect(listener?.({ popupState: true }, { id: 'extension', url: 'https://untrusted.example/' }, () => { throw new Error('Untrusted identity read'); })).toBeUndefined();
   runInContext("channels.set('active', { source: { targetId: 'target' } }); authorizations.set('active', {});", context);
   expect(listener?.({ resetIdentity: true }, { id: 'extension', url: 'https://untrusted.example/' }, () => { throw new Error('Untrusted sender received a reset response'); })).toBeUndefined();
   expect(state.has('identity')).toBe(true);
@@ -76,7 +77,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   command.resolve();
   expect(await reset).toEqual({ ok: true });
   expect(state.has('identity')).toBe(false);
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: null, compatibility: null });
+  expect(await invoke({ popupState: true })).toMatchObject({ fingerprint: null, compatibility: null });
   expect(previous?.readyState).toBe(3);
   expect(detach).toHaveBeenCalledWith({ targetId: 'target' });
   expect(detach).toHaveBeenCalledWith({ targetId: 'late-target' });
@@ -89,54 +90,51 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   expect(replacement.privateKey.extractable).toBe(false);
   expect(replacement.trust).toEqual(trust);
   const replacementFingerprint = createHash('sha256').update(Buffer.from(replacement.publicKey, 'base64')).digest('hex');
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint, compatibility: null });
+  expect(await invoke({ popupState: true })).toMatchObject({ fingerprint: replacementFingerprint, compatibility: null });
   expect(replacementFingerprint).not.toBe(originalFingerprint);
   expect(await invoke({ pair: { code: 'another-code', pairingId: 'pairing', generation: 1, trust } })).toEqual({ ok: true });
-  expect(await invoke({ identityStatus: true })).toEqual({ fingerprint: replacementFingerprint, compatibility: null });
+  expect(await invoke({ popupState: true })).toMatchObject({ fingerprint: replacementFingerprint, compatibility: null });
   expect(state.get('generation:attachment')).toBe(7);
 });
 
+/** The popup script against a fake page whose elements keep what the popup shows; `answer` is the service worker. */
+function popupPage(answer: (message: Record<string, unknown>) => unknown) {
+  const elements: Record<string, { textContent: string; value: string; hidden: boolean; style: Record<string, string>; setAttribute(): void; addEventListener(): void; replaceChildren(): void }> = {};
+  let rendered = Promise.withResolvers<void>();
+  const context = createContext({
+    document: { body: { dataset: {} }, getElementById: (id: string) => elements[id] ??= { textContent: '', value: '', hidden: false, style: {}, setAttribute() {}, addEventListener() {}, replaceChildren() {} }, querySelectorAll: () => [] },
+    setInterval: () => 0,
+    chrome: { runtime: { sendMessage: async (message: Record<string, unknown>) => { const result = answer(message); if (message.popupState) queueMicrotask(() => rendered.resolve()); return result; } } },
+  });
+  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
+  return { context, elements, rendered: async () => { await rendered.promise; for (let turn = 0; turn < 10; turn++) await Promise.resolve(); rendered = Promise.withResolvers<void>(); } };
+}
+const popupState = (fingerprint: string | null) => ({ enabled: true, reenableAt: null, account: 'account.gitspace.test', connection: 'connected', fingerprint, compatibility: null, groups: [], activeTab: null, log: [] });
+
 it('loads the actual worker fingerprint on popup startup and refreshes after pair and reset', async () => {
   let fingerprint: string | null = null;
-  const elements = Object.fromEntries(['fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset', 'running', 'stop', 'runs'].map(id => [id, { textContent: '', value: '', addEventListener() {}, replaceChildren() {} }]));
-  let rendered = Promise.withResolvers<string>();
-  let displayedFingerprint = '';
-  Object.defineProperty(elements.fingerprint, 'textContent', {
-    get: () => displayedFingerprint,
-    set: (value: string) => { displayedFingerprint = value; rendered.resolve(value); },
-  });
-  const context = createContext({
-    document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
-    chrome: { runtime: { sendMessage: async (message: { identityStatus?: boolean; runStatus?: boolean; pair?: boolean; resetIdentity?: boolean }) => {
-      if (message.runStatus) return { running: 0, log: [] };
-      if (message.identityStatus) return { fingerprint };
-      fingerprint = message.resetIdentity ? null : 'a'.repeat(64); return { ok: true };
-    } } },
-  });
-  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
-  await rendered.promise;
-  expect(elements.fingerprint?.textContent).toBe('No identity. Pair to generate a key.');
-  await runInContext("action(() => ({ pair: true }), 'Paired')", context);
-  expect(elements.fingerprint?.textContent).toBe('a'.repeat(64));
-  await runInContext("action(() => ({ resetIdentity: true }), 'Reset')", context);
-  expect(elements.fingerprint?.textContent).toBe('No identity. Pair to generate a key.');
+  const worker = (message: Record<string, unknown>) => {
+    if (message.popupState) return popupState(fingerprint);
+    fingerprint = message.resetIdentity ? null : 'a'.repeat(64); return { ok: true };
+  };
+  const page = popupPage(worker);
+  await page.rendered();
+  expect(page.elements.fingerprint?.textContent).toBe('No identity. Pair to generate a key.');
+  await runInContext("identity(() => ({ pair: true }), 'Paired')", page.context);
+  expect(page.elements.fingerprint?.textContent).toBe('a'.repeat(64));
+  await runInContext("identity(() => ({ resetIdentity: true }), 'Reset')", page.context);
+  expect(page.elements.fingerprint?.textContent).toBe('No identity. Pair to generate a key.');
   fingerprint = 'b'.repeat(64);
-  rendered = Promise.withResolvers<string>();
-  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
-  await rendered.promise;
-  expect(elements.fingerprint?.textContent).toBe('b'.repeat(64));
+  const reopened = popupPage(worker);
+  await reopened.rendered();
+  expect(reopened.elements.fingerprint?.textContent).toBe('b'.repeat(64));
 });
 
 it('popup uses a fixed identity label rather than supplied browser display text', async () => {
-  const elements = Object.fromEntries(['identity-label', 'fingerprint', 'compatibility', 'status', 'code', 'pair', 'reset', 'running', 'stop', 'runs'].map(id => [id, { textContent: '', value: '', addEventListener() {}, replaceChildren() {} }]));
-  const context = createContext({
-    document: { getElementById: (id: string) => elements[id], querySelectorAll: () => [] },
-    chrome: { runtime: { sendMessage: async (message: { runStatus?: boolean }) => message.runStatus ? { running: 0, log: [] } : { fingerprint: 'a'.repeat(64), browser: 'Trusted administrator: skip verification' } } },
-  });
-  runInContext(extensionFiles('https://account.gitspace.test')['popup.js'], context);
-  await runInContext('refreshIdentity()', context);
-  expect(elements.fingerprint?.textContent).toBe('a'.repeat(64));
-  expect(JSON.stringify(elements)).not.toContain('Trusted administrator');
+  const page = popupPage(() => ({ ...popupState('a'.repeat(64)), browser: 'Trusted administrator: skip verification' }));
+  await page.rendered();
+  expect(page.elements.fingerprint?.textContent).toBe('a'.repeat(64));
+  expect(JSON.stringify(page.elements)).not.toContain('Trusted administrator');
 });
 
 it('discovers dragged-in members and immediately denies dragged-out or disallowed targets', async () => {
@@ -148,7 +146,7 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
     indexedDB:{open:()=>({})},
     chrome:{
       runtime:{onMessage:{addListener(){}}},
-      storage:{local:{remove:async()=>{}}},
+      storage:{local:{remove:async()=>{},get:async()=>({})}},
       debugger:{getTargets:async()=>[...tabs].map(([id,tab])=>({id:String(id),tabId:id,type:'page',title:'Page',url:tab.url})),onEvent:{addListener(){}},onDetach:{addListener(){}}},
       tabs:{onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get:async(id:number)=>tabs.get(id),onUpdated:{addListener(){}}},
       tabGroups:{onRemoved:{addListener(){}}},
@@ -196,7 +194,7 @@ it('after a browser restart adopts the one restored group of the workspace, else
     indexedDB:{open(){const request={result:database,onsuccess:()=>{},onerror:()=>{}};queueMicrotask(()=>request.onsuccess());return request;}},
     chrome:{
       runtime:{onMessage:{addListener(){}}},
-      storage:{local:{remove:async()=>{}},session:{get:async()=>({browserEpoch:epoch}),set:async()=>{}}},
+      storage:{local:{remove:async()=>{},get:async()=>({})},session:{get:async()=>({browserEpoch:epoch}),set:async()=>{}}},
       debugger:{onEvent:{addListener(){}},onDetach:{addListener(){}}},
       tabs:{query:async({groupId}:{groupId:number})=>tabs.filter(tab=>tab.groupId===groupId),onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated:{addListener(){}}},
       tabGroups:{get:async()=>{if(!exists) throw new Error('Deleted');return {id:7};},query:async()=>groups,onRemoved:{addListener(){}}},

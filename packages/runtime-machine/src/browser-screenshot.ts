@@ -1,4 +1,6 @@
-/** Fixed isolated-world functions shared with the generated extension. No caller-supplied code. */
+/** Fixed isolated-world functions shared with the generated extension. No caller-supplied code. The mask also hides
+ * the GitSpace in-page overlay (`[data-gitspace-overlay]`: the agent cursor and the Stop control on your Chrome), which
+ * is never part of what the agent sees. */
 export const browserScreenshotPrepareFunction = `function(boxes) {
   const key = '__gitspaceBrowserMask';
   if (globalThis[key]) throw new Error('Screenshot mask already active');
@@ -16,7 +18,7 @@ export const browserScreenshotPrepareFunction = `function(boxes) {
   const scan = (parent) => {
     const style = document.createElement('style');
     const custom = [...parent.querySelectorAll('*')].filter(el=>el.localName.includes('-')).map(el=>el.localName);
-    style.textContent = ['input','textarea','select','[contenteditable]','iframe','canvas','video',...custom].join(',') + '{visibility:hidden!important}';
+    style.textContent = ['input','textarea','select','[contenteditable]','iframe','canvas','video','[data-gitspace-overlay]',...custom].join(',') + '{visibility:hidden!important}';
     (parent === document ? document.documentElement : parent).appendChild(style); styles.push(style);
     for (const el of parent.querySelectorAll('*')) {
       if (el.matches('input,textarea,select,[contenteditable],iframe,canvas,video')) cover(el.getBoundingClientRect(), '[masked]');
