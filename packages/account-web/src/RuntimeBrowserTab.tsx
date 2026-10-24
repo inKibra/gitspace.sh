@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RuntimeIdentitySchema, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
+import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
+import { RuntimeIdentitySchema, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { approveChrome } from './browser-approvals.js';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { BrowserCaptures, RecordingClock } from './RuntimeBrowserCaptures.js';
+import { BrowserPageComments, BrowserShares, ShareTab, type BrowserShareOptions } from './RuntimeBrowserShares.js';
+import { useLiveChanges } from './live-notices.js';
 import { browserPluginsUrl, navigateProductUrl } from './routes.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 type Tab = RuntimeBrowserOverview['cloud']['tabs'][number];
 type Chrome = RuntimeBrowserOverview['chromes'][number];
-type Request = (command: RuntimeSessionCommand, signal?: AbortSignal) => Promise<{ browserOverview?: RuntimeBrowserOverview; browserPreview?: RuntimeBrowserPreview; browserStatus?: RuntimeBrowserStatus; browserCaptures?: RuntimeBrowserCaptureView[]; browserCapture?: RuntimeBrowserCaptureView }>;
+type Request = (command: RuntimeSessionCommand, signal?: AbortSignal) => Promise<RuntimeSessionResult>;
 type Records = { machineId: string | null; records: RuntimeBrowserStatus['records']; error: string | null };
 /** Recording from tab tiles: the captures now recording (matched to tiles by their target) and the commands. */
 type CaptureControls = { recordings: readonly RuntimeBrowserCaptureView[]; start(groupId: string, targetId: string): void; stop(captureId: string): void };
+/** Sharing a tab of a Chrome group from its tile; `onCreated` receives the share made. */
+type ShareCreate = (groupId: string, targetId: string, options: BrowserShareOptions, onCreated: (share: RuntimeBrowserShare) => void) => void;
 
 /** How often the overview, the captures and each visible tab's preview are read while the tab is shown. */
 export const BROWSER_REFRESH_MS = 10_000;
@@ -47,9 +52,15 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
   const [error, setError] = useState<string | null>(null);
   const [captures, setCaptures] = useState<readonly RuntimeBrowserCaptureView[] | null>(null);
   const [capturesError, setCapturesError] = useState<string | null>(null);
+  const [shares, setShares] = useState<readonly RuntimeBrowserShare[] | null>(null);
+  const [sharesError, setSharesError] = useState<string | null>(null);
+  const [comments, setComments] = useState<readonly RuntimeBrowserPageCommentView[] | null>(null);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
   const busy = useRef(false);
   // Bumped by each start and stop, so a list read that began before one does not overwrite what it returned.
   const captureChanges = useRef(0);
+  // The same for each share made or stopped.
+  const shareChanges = useRef(0);
   const request = useCallback<Request>(async (command, signal) => {
     const response = await rpcClient.runtime.session({ ...identity, ...(conversationId ? { conversationId } : {}), command }, { signal });
     if (response.status === 'error') throw response.error;
@@ -82,13 +93,31 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
       if (!signal?.aborted && changes === captureChanges.current) { setCaptures(result.browserCaptures); setCapturesError(null); }
     } catch (cause) { if (!signal?.aborted) setCapturesError(rpcErrorMessage(cause, 'Read browser captures')); }
   }, [request]);
+  const readShares = useCallback(async (signal?: AbortSignal) => {
+    const changes = shareChanges.current;
+    try {
+      const result = await request({ type: 'browserShares' }, signal);
+      if (!result.browserShares) throw new Error('The workspace did not return its shares.');
+      if (!signal?.aborted && changes === shareChanges.current) { setShares(result.browserShares); setSharesError(null); }
+    } catch (cause) { if (!signal?.aborted) setSharesError(rpcErrorMessage(cause, 'Read browser shares')); }
+  }, [request]);
+  const readComments = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const result = await request({ type: 'browserPageComments' }, signal);
+      if (!result.browserPageComments) throw new Error('The workspace did not return its page comments.');
+      if (!signal?.aborted) { setComments(result.browserPageComments); setCommentsError(null); }
+    } catch (cause) { if (!signal?.aborted) setCommentsError(rpcErrorMessage(cause, 'Read page comments')); }
+  }, [request]);
   useEffect(() => {
-    setOverview(null); setRecords([]); setCaptures(null);
+    setOverview(null); setRecords([]); setCaptures(null); setShares(null); setComments(null);
     const controller = new AbortController();
-    void readOverview(controller.signal); void readRecords(controller.signal); void readCaptures(controller.signal);
+    void readOverview(controller.signal); void readRecords(controller.signal); void readCaptures(controller.signal); void readShares(controller.signal); void readComments(controller.signal);
     return () => controller.abort();
-  }, [readOverview, readRecords, readCaptures]);
-  useVisibleInterval(() => { void readOverview(); void readCaptures(); }, BROWSER_REFRESH_MS);
+  }, [readOverview, readRecords, readCaptures, readShares, readComments]);
+  useVisibleInterval(() => { void readOverview(); void readCaptures(); void readShares(); }, BROWSER_REFRESH_MS);
+  // A comment made on a share of this workspace's tabs is announced; the list is read again.
+  const commentNotices = useLiveChanges(workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId));
+  useEffect(() => { if (commentNotices !== null) void readComments(); }, [commentNotices, readComments]);
   const act = async (key: string, operation: () => Promise<void>) => {
     if (busy.current) return;
     busy.current = true; setPending(key); setError(null);
@@ -109,6 +138,15 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
     captureChanges.current += 1;
     setCaptures(previous => [view, ...(previous ?? []).filter(other => other.capture.captureId !== view.capture.captureId)]);
   };
+  /** Shows the share a create or stop returned in place of its listed state. */
+  const keepShare = (share: RuntimeBrowserShare | undefined): RuntimeBrowserShare => {
+    if (!share) throw new Error('The workspace did not return the share.');
+    shareChanges.current += 1;
+    setShares(previous => previous?.some(other => other.shareId === share.shareId) ? previous.map(other => other.shareId === share.shareId ? share : other) : [share, ...(previous ?? [])]);
+    return share;
+  };
+  const shareTab: ShareCreate = (groupId, targetId, options, onCreated) => void act(`share:${groupId}:${targetId}`, async () => onCreated(keepShare((await request({ type: 'browserShareCreate', groupId, targetId, ...options })).browserShare)));
+  const stopShare = (shareId: string) => void act(`unshare:${shareId}`, async () => { keepShare((await request({ type: 'browserShareRevoke', shareId })).browserShare); });
   const captureControls: CaptureControls = {
     recordings: captures?.filter(view => view.capture.state === 'recording' && view.capture.target !== null) ?? [],
     start: (groupId, targetId) => void act(`capture:${groupId}:${targetId}`, async () => keepCapture((await request({ type: 'browserCaptureStart', groupId, targetId })).browserCapture)),
@@ -119,7 +157,7 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
   const approved = overview?.chromes.filter(chrome => chrome.approved) ?? [];
   const card = `${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`;
   return <section aria-label="Workspace browsers" className="flex flex-col gap-4 p-3">
-    <div className="flex items-center justify-between gap-3"><h3 className="text-body font-medium">Browsers</h3><Button variant="ghost" size="compact" loading={loading} disabled={loading || pending !== null} onClick={() => void Promise.all([readOverview(), readRecords(), readCaptures()])}>Refresh</Button></div>
+    <div className="flex items-center justify-between gap-3"><h3 className="text-body font-medium">Browsers</h3><Button variant="ghost" size="compact" loading={loading} disabled={loading || pending !== null} onClick={() => void Promise.all([readOverview(), readRecords(), readCaptures(), readShares(), readComments()])}>Refresh</Button></div>
     {overviewError ? <p role="alert" className="text-caption text-destructive">{overviewError}{overview ? ' Showing the last state read.' : ''}</p> : null}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
     {overview === null && !overviewError ? <p role="status" className="text-caption text-muted-foreground">Loading browsers…</p> : null}
@@ -146,16 +184,16 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
           <Badge size="compact" color={chrome.connected ? 'green' : 'gray'}>{chrome.connected ? 'Online' : 'Offline'}</Badge>
         </div>
         {chrome.note ? <p className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{chrome.note}</p> : null}
-        <GroupTabs groupId={chrome.groupId} groupName={chrome.groupName} running={chrome.running} tabs={chrome.tabs} empty="No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them." request={request} pending={pending} onRevoke={revoke} captures={captureControls} captureHint={chrome.connected ? CHROME_CAPTURE_HINT : null} />
+        <GroupTabs groupId={chrome.groupId} groupName={chrome.groupName} running={chrome.running} tabs={chrome.tabs} empty="No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them." request={request} pending={pending} onRevoke={revoke} captures={captureControls} captureHint={chrome.connected ? CHROME_CAPTURE_HINT : null} onShare={shareTab} />
       </section>)}
       <section aria-label="Cloud browser" className={card}>
         <h4 className="text-body font-medium">Cloud browser</h4>
-        <GroupTabs groupId={overview.cloud.groupId} groupName={null} running={overview.cloud.running} tabs={overview.cloud.tabs} empty="Not started. It starts when an agent first browses." request={request} pending={pending} onRevoke={revoke} captures={captureControls} captureHint={null} />
+        <GroupTabs groupId={overview.cloud.groupId} groupName={null} running={overview.cloud.running} tabs={overview.cloud.tabs} empty="Not started. It starts when an agent first browses." request={request} pending={pending} onRevoke={revoke} captures={captureControls} captureHint={null} onShare={null} />
       </section>
       {overview.machines.map(machine => <section key={machine.machineId} aria-label={`Headless browser on ${machineLabel(machine.machineId)}`} className={card}>
         <h4 className="min-w-0 break-words text-body font-medium">Headless browser on {machineLabel(machine.machineId)}</h4>
         {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
-        <GroupTabs groupId={machine.groupId} groupName={null} running={0} tabs={machine.tabs} empty="No tabs open." request={request} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} captures={captureControls} captureHint={null} />
+        <GroupTabs groupId={machine.groupId} groupName={null} running={0} tabs={machine.tabs} empty="No tabs open." request={request} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} captures={captureControls} captureHint={null} onShare={null} />
       </section>)}
       {recovery.length ? <section aria-label="Browser recovery" className={card}>
         <h4 className="text-caption font-semibold">Recovery</h4>
@@ -174,13 +212,16 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
         </div>)}
       </section> : null}
     </> : null}
+    <BrowserShares shares={shares} error={sharesError} pending={pending} onStop={stopShare} />
+    <BrowserPageComments comments={comments} error={commentsError} />
     <BrowserCaptures captures={captures} error={capturesError} />
   </section>;
 }
 
 /** `pending` is the Browser tab's action in progress, if any: one action runs at a time. `captureHint` explains
- * recording on this browser beyond the tiles' Capture, if anything. */
-function GroupTabs({ groupId, groupName, running, tabs, empty, request, pending, onRevoke, captures, captureHint }: { groupId: string | null; groupName: string | null; running: number; tabs: readonly Tab[]; empty: string; request: Request; pending: string | null; onRevoke(groupId: string): void; captures: CaptureControls; captureHint: string | null }) {
+ * recording on this browser beyond the tiles' Capture, if anything. `onShare` is set for a Chrome's group: its tiles
+ * get Share. */
+function GroupTabs({ groupId, groupName, running, tabs, empty, request, pending, onRevoke, captures, captureHint, onShare }: { groupId: string | null; groupName: string | null; running: number; tabs: readonly Tab[]; empty: string; request: Request; pending: string | null; onRevoke(groupId: string): void; captures: CaptureControls; captureHint: string | null; onShare: ShareCreate | null }) {
   if (groupId === null) return <p className="text-caption text-muted-foreground">{empty}</p>;
   return <div className="flex flex-col gap-2">
     <div className="flex flex-wrap items-center gap-2">
@@ -204,6 +245,7 @@ function GroupTabs({ groupId, groupName, running, tabs, empty, request, pending,
             <Badge size="compact" color="red"><span className="tabular-nums"><RecordingClock startedAt={recording.capture.startedAt} /></span></Badge>
             <Button variant="secondary" size="compact" aria-label={`Stop capturing ${label}`} disabled={pending !== null} loading={pending === `stop:${recording.capture.captureId}`} onClick={() => captures.stop(recording.capture.captureId)}>Stop</Button>
           </> : <Button variant="ghost" size="compact" aria-label={`Capture ${label}`} disabled={pending !== null} loading={pending === `capture:${groupId}:${tab.targetId}`} onClick={() => captures.start(groupId, tab.targetId)}>Capture</Button>}
+          {onShare ? <ShareTab label={label} pending={pending === `share:${groupId}:${tab.targetId}`} busy={pending !== null} onCreate={(options, onCreated) => onShare(groupId, tab.targetId, options, onCreated)} /> : null}
         </div>
       </li>;
     })}</ul> : <p className="text-caption text-muted-foreground">No tabs in the group.</p>}

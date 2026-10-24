@@ -8,8 +8,9 @@ import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 import { drawToolbarIcon } from './icon.ts';
 import { browserOverlayFunction } from './overlay.ts';
 import { base64Bytes, downloadBlobReadFunction, inputFilesChunkFunction, inputFilesPrepareFunction, inputFilesSetFunction } from './page-files.ts';
+import { SHARE_EXPIRIES_MINUTES, shareRequest, shareTargetFunction } from './share.ts';
 import { TabScreencast } from './screencast.ts';
-import { Upload, uploadSignature } from './upload.ts';
+import { relaySignature, Upload } from './upload.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 const ACCOUNT_ORIGIN = new URL(GITSPACE_ACCOUNT_URL).origin;
@@ -73,9 +74,11 @@ async function authorize(authorization) {
 }
 const EXTENSION_PROTOCOL = BROWSER_EXTENSION_PROTOCOL;
 /** The protocol the connected account speaks (0 while not connected). Captures, downloads saved to the drive and
- * uploads into pages need an account at protocol 5; with one at 4, downloads stay Chrome's and Capture says why not. */
+ * uploads into pages need an account at protocol 5; while not connected, downloads stay Chrome's and Capture says
+ * why not. Share links need an account at protocol 6. */
 let accountProtocol = 0;
 const MEDIA_PROTOCOL = 5;
+const SHARE_PROTOCOL = 6;
 /** Set when the account refuses this extension, or this extension refuses the account, as incompatible. */
 let incompatible = false;
 let socket;
@@ -241,16 +244,48 @@ async function collapseIdle() {
     await chrome.tabGroups.update(found.record.chromeGroupId, { collapsed: true });
   }
 }
-/** Lets a tab's debugger channel go: its overlay leaves the page first, since the page keeps it after the debugger.
- * A capture recording the tab's screencast ends with what it recorded. */
+/**
+ * Each tab's one debugger session (Chrome attaches an extension once per tab), by target id, with the tab's one
+ * screencast and in-page overlay. The agent's channel of a group tab uses it, and so does each share watched on the
+ * tab. A shared tab in no workspace group has a session but never a channel, so no agent command, script or event
+ * reaches it: every agent path goes through `channels` and `check`.
+ */
+const debuggees = new Map();
+/** The debugger session of a tab (`targetInfo`), attached on first use. */
+function debuggeeOf(target) {
+  let debuggee = debuggees.get(target.id);
+  if (!debuggee) {
+    const source = { targetId: target.id };
+    const created = { targetId: target.id, tabId: target.tabId, source, screencast: new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)), overlay: undefined, overlayQueue: undefined, pointed: false, world: null, viewport: '' };
+    created.attached = (async () => { await releases.get(target.id); await chrome.debugger.attach(source, '1.3'); return created; })();
+    void created.attached.catch(() => { if (debuggees.get(target.id) === created) debuggees.delete(target.id); });
+    debuggees.set(target.id, created);
+    debuggee = created;
+  }
+  return debuggee.attached;
+}
+/** Lets the debugger leave a tab: its overlay leaves the page first, since the page keeps it after the debugger. */
+async function detachTab(targetId, source) {
+  const debuggee = debuggees.get(targetId);
+  debuggees.delete(targetId);
+  const release = (async () => { if (debuggee?.overlay) await overlayStep(debuggee, () => overlayCall(debuggee, { remove: true })); await chrome.debugger.detach(source); })().catch(() => {});
+  releases.set(targetId, release);
+  try { await release; } finally { if (releases.get(targetId) === release) releases.delete(targetId); }
+}
+/** Lets a tab's debugger channel go, and the debugger with it unless a share still watches the tab, which keeps it
+ * without the script's painting. A capture recording the tab's screencast ends with what it recorded. */
 async function revoke(id) {
   const channel = channels.get(id); channels.delete(id);
   if (!channel) return releases.get(id);
   channel.cancelNavigation?.();
   for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: GitSpace no longer uses this tab', true);
-  const release = (async () => { if (channel.overlay) await overlayStep(channel, () => overlayCall(channel, { remove: true })); await chrome.debugger.detach(channel.source); })().catch(() => {});
-  releases.set(id, release);
-  try { await release; } finally { if (releases.get(id) === release) releases.delete(id); }
+  const debuggee = debuggees.get(id);
+  if (debuggee && watchesOn(debuggee).length) {
+    if (channel.painting) void channel.screencast.remove(channel.painting).catch(() => {});
+    void overlay(debuggee);
+    return;
+  }
+  await detachTab(id, channel.source);
 }
 async function fence(id) { send({ targetId: id, fenced: true }); await revoke(id); }
 async function check(id, expected = channels.get(id)) {
@@ -291,7 +326,7 @@ async function endRun(attemptId, reason) {
     await (reason === 'released' ? revoke(targetId) : fence(targetId));
   }
   // A tab a single step still uses keeps its overlay, without the script's glow.
-  for (const targetId of run.targets) { const channel = channels.get(targetId); if (channel) void overlay(channel); }
+  for (const targetId of run.targets) if (channels.has(targetId)) void overlay(targetId);
   updateToolbar();
   scheduleReport(run.body.command.grant.body.groupId);
   await logRun(runLogEntry(run, reason, new Date().toISOString())).catch(() => {});
@@ -302,7 +337,7 @@ async function endRun(attemptId, reason) {
 async function stopGroup(groupId) {
   authorizations.delete(groupId);
   await Promise.all([...runs].filter(([, run]) => run.body.command.grant.body.groupId === groupId).map(([attemptId]) => endRun(attemptId, 'stopped')));
-  for (const channel of channels.values()) if (channel.grant.groupId === groupId) void overlay(channel);
+  for (const channel of channels.values()) if (channel.grant.groupId === groupId) void overlay(channel.targetId);
 }
 /** Adds a script that ended to the local run log (`run-log`), newest first. */
 async function logRun(entry) {
@@ -342,41 +377,49 @@ function overlayMode(channel) {
   return captureOn(channel.tabId) ? 'capture' : null;
 }
 /** Overlay steps of one tab run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing else. */
-function overlayStep(channel, operation) {
-  const step = (channel.overlayQueue ?? Promise.resolve()).then(() => {
+function overlayStep(debuggee, operation) {
+  const step = (debuggee.overlayQueue ?? Promise.resolve()).then(() => {
     const timeout = Promise.withResolvers();
     const timer = setTimeout(timeout.resolve, OVERLAY_STEP_MS);
     return Promise.race([operation(), timeout.promise]).finally(() => clearTimeout(timer));
   }).catch(() => {});
-  channel.overlayQueue = step;
+  debuggee.overlayQueue = step;
   return step;
 }
 /** Calls the overlay function in the tab's overlay world, which a navigation replaces; the world's Stop binding is
  * added to that world alone, so no page script can call it. */
-async function overlayCall(channel, command) {
+async function overlayCall(debuggee, command) {
   const call = async () => {
-    if (!channel.overlay.contextId) {
-      const tree = await chrome.debugger.sendCommand(channel.source, 'Page.getFrameTree');
-      const world = await chrome.debugger.sendCommand(channel.source, 'Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: OVERLAY_WORLD });
-      await chrome.debugger.sendCommand(channel.source, 'Runtime.addBinding', { name: OVERLAY_BINDING, executionContextId: world.executionContextId });
-      channel.overlay.contextId = world.executionContextId;
+    if (!debuggee.overlay.contextId) {
+      const tree = await chrome.debugger.sendCommand(debuggee.source, 'Page.getFrameTree');
+      const world = await chrome.debugger.sendCommand(debuggee.source, 'Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: OVERLAY_WORLD });
+      await chrome.debugger.sendCommand(debuggee.source, 'Runtime.addBinding', { name: OVERLAY_BINDING, executionContextId: world.executionContextId });
+      debuggee.overlay.contextId = world.executionContextId;
     }
-    return chrome.debugger.sendCommand(channel.source, 'Runtime.callFunctionOn', { functionDeclaration: browserOverlayFunction, arguments: [{ value: command }], executionContextId: channel.overlay.contextId, returnByValue: true });
+    return chrome.debugger.sendCommand(debuggee.source, 'Runtime.callFunctionOn', { functionDeclaration: browserOverlayFunction, arguments: [{ value: command }], executionContextId: debuggee.overlay.contextId, returnByValue: true });
   };
   // A context that a navigation destroyed: the next call makes the new document's world.
-  try { return await call(); } catch { channel.overlay.contextId = null; return call(); }
+  try { return await call(); } catch { debuggee.overlay.contextId = null; return call(); }
 }
-/** Brings a tab's overlay up to date (`extra`: the agent's pointer, or hiding it for a script's screenshot): shown
- * while the agent uses the tab or a capture records it, removed after. Its Capture button shows only when the account
- * saves captures. */
-function overlay(channel, extra = {}) {
-  return overlayStep(channel, async () => {
-    if (channels.get(channel.targetId) !== channel) return;
-    const mode = overlayMode(channel);
-    if (!mode) { if (channel.overlay) { try { await overlayCall(channel, { remove: true }); } finally { delete channel.overlay; } } return; }
-    channel.overlay ??= { contextId: null };
-    const capture = captureOn(channel.tabId) ? 'recording' : accountProtocol >= MEDIA_PROTOCOL ? 'ready' : 'none';
-    await overlayCall(channel, { show: { mode, name: channel.grant.groupName, color: GROUP_HEX[groupColor(channel.grant.workspaceId)], binding: OVERLAY_BINDING, capture }, ...extra });
+/** Brings the overlay of a tab with a debugger session up to date (`extra`: the agent's pointer, or hiding it for a
+ * screenshot): the control while the agent uses the tab or a capture records it, and the pointers of the people
+ * watching its shares; removed when neither. Its Capture button shows only when the account saves captures. */
+function overlay(targetId, extra = {}) {
+  const debuggee = debuggees.get(targetId);
+  if (!debuggee) return Promise.resolve();
+  return overlayStep(debuggee, async () => {
+    if (debuggees.get(targetId) !== debuggee) return;
+    const channel = channels.get(targetId);
+    const mode = channel ? overlayMode(channel) : null;
+    const pointers = watchesOn(debuggee).flatMap(watch => watch.pointers);
+    if (!mode && !pointers.length) { if (debuggee.overlay) { try { await overlayCall(debuggee, { remove: true }); } finally { delete debuggee.overlay; debuggee.pointed = false; } } return; }
+    debuggee.overlay ??= { contextId: null };
+    const capture = channel && captureOn(channel.tabId) ? 'recording' : accountProtocol >= MEDIA_PROTOCOL ? 'ready' : 'none';
+    const show = mode ? { mode, name: channel.grant.groupName, color: GROUP_HEX[groupColor(channel.grant.workspaceId)], binding: OVERLAY_BINDING, capture } : null;
+    // Pointers go along while any are drawn, and once more, empty, to take the last ones away.
+    const command = { show, ...(pointers.length || debuggee.pointed ? { pointers } : {}), ...extra };
+    debuggee.pointed = pointers.length > 0;
+    await overlayCall(debuggee, command);
   });
 }
 /** A tab as one script sees it: the script's sites, and the site you dragged the tab in on when the script named none. */
@@ -552,17 +595,18 @@ async function createAgentTab(grant, url) {
   finally { agentTabs.delete(tab.id); }
   return targetId;
 }
-/** The debugger channel of a tab in the group, attached on first use, with the tab's one screencast. With an account
- * that saves downloads, Page events are on from the start, so a download the agent starts is seen. */
+/** The debugger channel of a tab in the group, on the tab's debugger session (attached on first use) with its one
+ * screencast. With an account that saves downloads, Page events are on from the start, so a download the agent
+ * starts is seen. */
 async function attach(grant, targetId) {
-  await member(grant, targetId);
+  const target = await member(grant, targetId);
   await releases.get(targetId);
   let channel = channels.get(targetId);
   if (channel && channel.grant.groupId !== grant.groupId) { try { await check(targetId, channel); } catch {} await releases.get(targetId); channel = channels.get(targetId); }
   if (channel && channel.grant.groupId !== grant.groupId) throw new Error('Target already bound to another workspace');
   if (!channel) {
-    const source = {targetId}; await chrome.debugger.attach(source,'1.3');
-    channel = {grant,targetId,source,sessionId:crypto.randomUUID(),refs:new Set(),document:0,screencast:new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)),painting:null}; channels.set(targetId,channel);
+    const { source, screencast } = await debuggeeOf(target);
+    channel = {grant,targetId,source,sessionId:crypto.randomUUID(),refs:new Set(),document:0,screencast,painting:null}; channels.set(targetId,channel);
     if (accountProtocol >= MEDIA_PROTOCOL) await chrome.debugger.sendCommand(source, 'Page.enable');
   } else channel.grant = grant;
   await check(targetId, channel);
@@ -593,15 +637,15 @@ async function runCommand(message) {
     if ('noop' in verdict) return {};
     if (method === 'Target.closeTarget' || method === 'Page.close') { await closeTab(lease); return method === 'Page.close' ? {} : { success: true }; }
     // The cursor reaches each point before the event does; a script's own screenshot never shows the overlay.
-    if (method === 'Input.dispatchMouseEvent') await overlay(lease, { cursor: { x: verdict.send.x, y: verdict.send.y, type: verdict.send.type } });
-    if (method === 'Page.captureScreenshot') await overlay(lease, { conceal: true });
+    if (method === 'Input.dispatchMouseEvent') await overlay(targetId, { cursor: { x: verdict.send.x, y: verdict.send.y, type: verdict.send.type } });
+    if (method === 'Page.captureScreenshot') await overlay(targetId, { conceal: true });
     effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : method === 'GitSpace.setInputFilesFromUrls' ? setInputFiles(lease, verdict.send) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
   } finally {
     admitted.resolve();
     if (admissions.get(targetId) === admitted.promise) admissions.delete(targetId);
   }
   let result;
-  try { result = await effect; } finally { if (method === 'Page.captureScreenshot') void overlay(lease, { conceal: false }); }
+  try { result = await effect; } finally { if (method === 'Page.captureScreenshot') void overlay(targetId, { conceal: false }); }
   await check(targetId, lease);
   return result;
 }
@@ -640,7 +684,7 @@ function management(action, fields) {
 async function signUpload(method, pathname, bodySha256) {
   const identity = await stored('identity');
   if (!identity) throw new Error('Human pairing required');
-  return uploadSignature(identity, method, pathname, bodySha256);
+  return relaySignature(identity, 'upload', method, pathname, bodySha256);
 }
 /** Why the Browser tab cannot capture a tab: it records only one the agent uses now, whose debugger is attached. */
 const CAPTURE_IDLE = 'Capture from the Browser tab records a tab while the agent uses it; to record any tab of the workspace group, use Capture in the GitSpace extension popup';
@@ -660,7 +704,7 @@ function captureUpload(capture, file, mediaType) { return new Upload(GITSPACE_AC
 /** The toolbar and the tab's in-page control show a capture starting or ending. */
 function capturesChanged(tabId) {
   updateToolbar();
-  for (const channel of channels.values()) if (channel.tabId === tabId) void overlay(channel);
+  for (const channel of channels.values()) if (channel.tabId === tabId) void overlay(channel.targetId);
 }
 /** Records a tab's screencast frames through its one screencast (`TabScreencast`), and answers once the first frame
  * came (or `CAPTURE_FIRST_FRAME_MS` passed) with their size. `announce`: the extension started it, so it tells the
@@ -910,6 +954,282 @@ async function setInputFiles(lease, { backendNodeId, files }) {
   } finally { await chrome.debugger.sendCommand(lease.source, 'Runtime.releaseObject', { objectId }).catch(() => {}); }
   return {};
 }
+/**
+ * Share links (docs/APERTURE-DESIGN.md §8, `share.ts`): `liveShares` are this Chrome's live shares as the account last
+ * told them (`shares`) or the popup made them; `watching` the shares people watch now, by share id, each a consumer
+ * of its tab's screencast (`watch.consumer`) whose frames go to the relay (`shareFrame`), with its viewers' pointers.
+ * Watching attaches the debugger to the tab if need be, also to a tab in no workspace group: the share is your consent
+ * to that, for frames, pointers and what is under a point only.
+ */
+let liveShares = [];
+/** The tab of each live share's target, so a share whose tab closed (and whose target is gone with it) ends. */
+let sharedTabs = new Map();
+/** The page each share was last reported on (`share` `page`), so only changes go out. */
+const sharePages = new Map();
+const watching = new Map();
+/** A watched share's frames go out at most this often (4 a second), the newest when they come faster, and none while
+ * the relay connection holds more than `SHARE_BACKLOG_BYTES` unsent. */
+const SHARE_FRAME_MS = 250;
+const SHARE_BACKLOG_BYTES = 512 * 1024;
+const SHARE_FRAME_QUALITY = 60;
+/** Share frames and comment crops are at most this large on a side; a frame at most `SHARE_FRAME_CHARACTERS` of
+ * base64, a crop (JPEG at `SHARE_CROP_QUALITY`) at most `SHARE_CROP_BYTES`. */
+const SHARE_FRAME_SIDE = 1280;
+const SHARE_FRAME_CHARACTERS = 1_500_000;
+const SHARE_CROP_QUALITY = 70;
+const SHARE_CROP_BYTES = 400 * 1024;
+/** The isolated world where the extension reads what is under a point of a shared tab. */
+const SHARE_WORLD = 'gitspace-share';
+/** Viewers of one share whose pointers are drawn, at most. */
+const SHARE_POINTERS = 20;
+const SHARE_OFFLINE = 'Sharing needs GitSpace connected to your account';
+const SHARE_UPDATE = 'Your GitSpace account does not share tabs yet; update GitSpace';
+const SHARE_WEB_ONLY = 'Only a web page (http or https) can be shared';
+const SHARE_UNWATCHED = 'No one watches this share in this Chrome';
+/** Relay messages about shares that carry no id and get no answer. */
+const SHARE_NOTICES = { shares: true, sharePointers: true, shareEnded: true };
+/** Relay operations on one share, which run one at a time per share. */
+const SHARE_OPERATIONS = { shareWatch: true, shareUnwatch: true, shareHit: true, shareAnchor: true };
+function watchesOn(debuggee) { return [...watching.values()].filter(watch => watch.debuggee === debuggee); }
+/** A point on a tab's viewport, as fractions of it. */
+function isPoint(value) { return typeof value === 'object' && value !== null && [value.x, value.y].every(part => typeof part === 'number' && part >= 0 && part <= 1); }
+/** A share as the account describes it (`RuntimeBrowserShare`), as far as this Chrome uses it. */
+function isShare(value) { return typeof value?.shareId === 'string' && typeof value.targetId === 'string' && typeof value.link === 'string' && typeof value.expiresAt === 'string' && Array.isArray(value.viewers); }
+async function layoutViewport(debuggee) { return (await chrome.debugger.sendCommand(debuggee.source, 'Page.getLayoutMetrics')).cssLayoutViewport; }
+/** This Chrome's live shares changed: told by the account, or made or ended here. */
+async function setShares(shares) {
+  liveShares = shares;
+  for (const shareId of sharePages.keys()) if (!shares.some(share => share.shareId === shareId)) sharePages.delete(shareId);
+  const tabIds = new Map((await targets()).map(target => [target.id, target.tabId]));
+  if (liveShares === shares) sharedTabs = new Map(shares.filter(share => tabIds.has(share.targetId)).map(share => [share.targetId, tabIds.get(share.targetId)]));
+}
+/** A shared tab's page and viewport in CSS pixels: from its debugger session where it has one, else Chrome's size of
+ * the tab; null when Chrome gives none. */
+async function sharedPage(targetId) {
+  const debuggee = debuggees.get(targetId);
+  const tab = await chrome.tabs.get(debuggee?.tabId ?? (await targetInfo(targetId)).tabId);
+  const viewport = debuggee ? await layoutViewport(await debuggee.attached) : { clientWidth: tab.width, clientHeight: tab.height };
+  const width = Math.round(viewport.clientWidth), height = Math.round(viewport.clientHeight);
+  return width > 0 && height > 0 ? { url: (tab.url || '').slice(0, 8192), title: (tab.title || '').slice(0, 500), width, height } : null;
+}
+/** Tells the account that a shared tab's page, title or viewport changed (`share` `page`), once per change and share. */
+async function reportPages(targetId) {
+  const shares = liveShares.filter(share => share.targetId === targetId);
+  if (!shares.length) return;
+  const page = await sharedPage(targetId);
+  if (!page) return;
+  const reported = JSON.stringify(page);
+  for (const share of shares) if (sharePages.get(share.shareId) !== reported) { sharePages.set(share.shareId, reported); send({ share: { event: 'page', shareId: share.shareId, ...page } }); }
+}
+/** A shared tab closed: its shares end (`share` `closed`). */
+function sharedTabClosed(tabId) {
+  const ended = new Set([...liveShares.filter(share => sharedTabs.get(share.targetId) === tabId).map(share => share.shareId), ...[...watching.values()].filter(watch => watch.debuggee.tabId === tabId).map(watch => watch.shareId)]);
+  for (const shareId of ended) { send({ share: { event: 'closed', shareId } }); const watch = watching.get(shareId); if (watch) void endWatch(watch); }
+  if (ended.size) void setShares(liveShares.filter(share => !ended.has(share.shareId))).catch(() => {});
+}
+/** `shareTab`: the page of a tab about to be shared, and the workspace group holding it (null for none). */
+async function shareTab(targetId) {
+  const tab = await chrome.tabs.get((await targetInfo(targetId)).tabId);
+  if (!siteOf(tab.url)) throw new Error(SHARE_WEB_ONLY);
+  const found = (await workspaceGroups()).find(({ group }) => group.id === tab.groupId);
+  return { url: tab.url.slice(0, 8192), title: (tab.title || '').slice(0, 500), groupId: found?.record.groupId ?? null };
+}
+/** `shareWatch`: someone watches a share: its tab's screencast streams at the size the largest viewer needs, asked
+ * again with a new size when that changes. Answers the tab's page and viewport. */
+async function watchShare({ shareId, targetId, maxWidth, maxHeight }) {
+  if (typeof shareId !== 'string' || typeof targetId !== 'string' || !Number.isSafeInteger(maxWidth) || !Number.isSafeInteger(maxHeight) || maxWidth < 1 || maxHeight < 1) throw new Error('Invalid share watch');
+  let watch = watching.get(shareId);
+  if (watch && watch.debuggee.targetId !== targetId) throw new Error('This share is of another tab');
+  if (!watch) {
+    watch = { shareId, debuggee: await debuggeeOf(await targetInfo(targetId)), consumer: { quality: SHARE_FRAME_QUALITY, maxWidth: 1, maxHeight: 1, frame: frame => shareFrame(shareId, frame) }, pending: null, timer: undefined, pointers: [] };
+    watching.set(shareId, watch);
+  }
+  watch.consumer.maxWidth = Math.min(maxWidth, SHARE_FRAME_SIDE);
+  watch.consumer.maxHeight = Math.min(maxHeight, SHARE_FRAME_SIDE);
+  try {
+    await watch.debuggee.screencast.add(watch.consumer);
+    const page = await sharedPage(targetId);
+    if (!page) throw new Error('Chrome gives no size for this tab');
+    sharePages.set(shareId, JSON.stringify(page));
+    return page;
+  } catch (error) { await endWatch(watch); throw error; }
+}
+/** One screencast frame of a watched share's tab: sent now unless one went out within `SHARE_FRAME_MS`, else kept as
+ * the newest. A frame of another device size means the viewport changed, which the account hears as a page change. */
+function shareFrame(shareId, frame) {
+  const watch = watching.get(shareId);
+  if (!watch) return;
+  watch.pending = frame;
+  if (watch.timer === undefined) sendShareFrame(watch);
+  const viewport = `${frame.metadata?.deviceWidth}x${frame.metadata?.deviceHeight}`;
+  if (watch.debuggee.viewport !== viewport) { watch.debuggee.viewport = viewport; void reportPages(watch.debuggee.targetId).catch(() => {}); }
+}
+/** Sends a watched share's newest frame with its image size (from its JPEG header, near the start of its data), then
+ * waits `SHARE_FRAME_MS` before the next. While the relay connection is backed up, the newest frame waits. */
+function sendShareFrame(watch) {
+  watch.timer = undefined;
+  if (watching.get(watch.shareId) !== watch || !watch.pending) return;
+  if (!(socket?.bufferedAmount > SHARE_BACKLOG_BYTES)) {
+    const { data } = watch.pending;
+    watch.pending = null;
+    const size = data.length <= SHARE_FRAME_CHARACTERS ? jpegSize(Uint8Array.from(atob(data.slice(0, 4096)), character => character.charCodeAt(0))) : null;
+    if (size) send({ shareFrame: { shareId: watch.shareId, data, width: size.width, height: size.height } });
+  }
+  watch.timer = setTimeout(() => sendShareFrame(watch), SHARE_FRAME_MS);
+}
+/** Stops watching a share: its frames and pointers stop, and the debugger leaves its tab unless the agent or another
+ * share still uses it. */
+async function endWatch(watch) {
+  if (watching.get(watch.shareId) !== watch) return;
+  watching.delete(watch.shareId);
+  clearTimeout(watch.timer);
+  const { debuggee } = watch;
+  await debuggee.screencast.remove(watch.consumer).catch(() => {});
+  if (debuggees.get(debuggee.targetId) !== debuggee) return;
+  if (channels.has(debuggee.targetId) || watchesOn(debuggee).length) await overlay(debuggee.targetId);
+  else await detachTab(debuggee.targetId, debuggee.source);
+}
+/** The relay's share notices: this Chrome's live shares, the pointers of a watched share's viewers, a share ended. */
+async function shareNotice(message) {
+  if (message.operation === 'shares') { if (Array.isArray(message.shares)) await setShares(message.shares.filter(share => isShare(share) && share.endedAt === null)); return; }
+  const watch = watching.get(message.shareId);
+  if (message.operation === 'sharePointers') {
+    if (!watch || !Array.isArray(message.pointers)) return;
+    watch.pointers = message.pointers.filter(pointer => typeof pointer?.viewerId === 'string' && typeof pointer.name === 'string' && /^#[0-9a-f]{6}$/i.test(pointer.color) && isPoint(pointer.at)).slice(0, SHARE_POINTERS)
+      .map(pointer => ({ id: `${watch.shareId}:${pointer.viewerId}`, name: pointer.name.slice(0, 60), color: pointer.color, x: pointer.at.x, y: pointer.at.y }));
+    await overlay(watch.debuggee.targetId);
+    return;
+  }
+  if (watch) await endWatch(watch);
+  await setShares(liveShares.filter(share => share.shareId !== message.shareId));
+}
+/** Runs `operation` with the tab's share world (`SHARE_WORLD`), made again once a navigation replaced it. */
+async function inShareWorld(debuggee, operation) {
+  const make = async () => {
+    const tree = await chrome.debugger.sendCommand(debuggee.source, 'Page.getFrameTree');
+    debuggee.world = (await chrome.debugger.sendCommand(debuggee.source, 'Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: SHARE_WORLD })).executionContextId;
+  };
+  if (!debuggee.world) await make();
+  try { return await operation(debuggee.world); } catch { await make(); return operation(debuggee.world); }
+}
+/** What is under a point of a shared tab (`DOM.getNodeForLocation` at the point's CSS pixels on the layout viewport):
+ * the element's box, accessible role and name, a little of its visible text and selectors that find it
+ * (`shareTargetFunction`); null where Chrome finds nothing there, or only the overlay. */
+async function shareTarget(debuggee, viewport, at) {
+  const tab = (method, params) => chrome.debugger.sendCommand(debuggee.source, method, params);
+  const width = viewport.clientWidth, height = viewport.clientHeight;
+  try {
+    const { backendNodeId } = await tab('DOM.getNodeForLocation', { x: Math.min(Math.floor(at.x * width), Math.ceil(width) - 1), y: Math.min(Math.floor(at.y * height), Math.ceil(height) - 1), includeUserAgentShadowDOM: false, ignorePointerEventsNone: true });
+    const read = await inShareWorld(debuggee, async executionContextId => {
+      const { object } = await tab('DOM.resolveNode', { backendNodeId, executionContextId });
+      try { const result = await tab('Runtime.callFunctionOn', { functionDeclaration: shareTargetFunction, objectId: object.objectId, returnByValue: true }); return result.exceptionDetails ? null : result.result?.value ?? null; }
+      finally { await tab('Runtime.releaseObject', { objectId: object.objectId }).catch(() => {}); }
+    });
+    if (!read) return null;
+    const quad = (await tab('DOM.getBoxModel', { backendNodeId })).model.border;
+    const xs = [quad[0], quad[2], quad[4], quad[6]].map(x => Math.min(1, Math.max(0, x / width))), ys = [quad[1], quad[3], quad[5], quad[7]].map(y => Math.min(1, Math.max(0, y / height)));
+    const box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+    const node = (await tab('Accessibility.getPartialAXTree', { backendNodeId, fetchRelatives: false }).catch(() => null))?.nodes?.find(entry => entry.backendDOMNodeId === backendNodeId);
+    return { box, role: String(node?.role?.value ?? '').slice(0, 64), name: String(node?.name?.value ?? '').slice(0, 500), text: read.text, selectors: read.selectors };
+  } catch { return null; }
+}
+/** `shareHit`: what is under a viewer's point of a watched share, for comment mode. */
+async function shareHit({ shareId, at }) {
+  const watch = watching.get(shareId);
+  if (!watch) throw new Error(SHARE_UNWATCHED);
+  if (!isPoint(at)) throw new Error('Invalid share point');
+  return { target: await shareTarget(watch.debuggee, await layoutViewport(watch.debuggee), at) };
+}
+/** `shareAnchor`: where a viewer's comment points on a watched share: the page, the element at its point, the area
+ * (that element's box, or the dragged one), the viewport and scroll, and a JPEG crop of the area. */
+async function shareAnchor({ shareId, at, region }) {
+  const watch = watching.get(shareId);
+  if (!watch) throw new Error(SHARE_UNWATCHED);
+  const box = isPoint(region) && [region.width, region.height].every(part => typeof part === 'number' && part >= 0 && part <= 1);
+  if ((at !== undefined && !isPoint(at)) || (region !== undefined && !box) || (at === undefined && region === undefined)) throw new Error('A comment needs a point or an area of the tab');
+  const { debuggee } = watch;
+  const viewport = await layoutViewport(debuggee);
+  const target = at ? await shareTarget(debuggee, viewport, at) : null;
+  const area = region ?? target?.box ?? { x: at.x, y: at.y, width: 0, height: 0 };
+  const tab = await chrome.tabs.get(debuggee.tabId);
+  return {
+    page: { url: (tab.url || '').slice(0, 8192), title: (tab.title || '').slice(0, 500) }, target, region: area,
+    viewport: { width: Math.max(1, Math.round(viewport.clientWidth)), height: Math.max(1, Math.round(viewport.clientHeight)) },
+    scroll: { x: viewport.pageX, y: viewport.pageY }, crop: await shareCrop(debuggee, viewport, area),
+  };
+}
+/** A JPEG of an area of a shared tab without the overlay, made smaller until it fits `SHARE_CROP_BYTES`; null for an
+ * empty area or one Chrome does not draw. */
+async function shareCrop(debuggee, viewport, area) {
+  const width = area.width * viewport.clientWidth, height = area.height * viewport.clientHeight;
+  if (width < 1 || height < 1) return null;
+  const clip = { x: viewport.pageX + area.x * viewport.clientWidth, y: viewport.pageY + area.y * viewport.clientHeight, width, height };
+  const fit = Math.min(1, SHARE_FRAME_SIDE / width, SHARE_FRAME_SIDE / height);
+  await overlay(debuggee.targetId, { conceal: true });
+  try {
+    for (const factor of [1, 0.5, 0.25]) {
+      const { data } = await chrome.debugger.sendCommand(debuggee.source, 'Page.captureScreenshot', { format: 'jpeg', quality: SHARE_CROP_QUALITY, captureBeyondViewport: false, clip: { ...clip, scale: fit * factor } });
+      if (data.length * 3 / 4 <= SHARE_CROP_BYTES) return data;
+    }
+    return null;
+  } catch { return null; }
+  finally { void overlay(debuggee.targetId, { conceal: false }); }
+}
+/** `adoptTab`: a tab whose share link you pasted into a workspace's composer joins that workspace's group as if you
+ * dragged it in: yours, consenting to the site it shows. Where this Chrome has no Chrome group of that workspace group
+ * yet, it is made from the group's latest signed grant here. */
+async function adoptTab(groupId, targetId) {
+  const tab = await chrome.tabs.get((await targetInfo(targetId)).tabId);
+  const site = siteOf(tab.url);
+  if (!site) throw new Error(SHARE_WEB_ONLY);
+  const groups = await workspaceGroups();
+  const holding = groups.find(({ group }) => group.id === tab.groupId);
+  if (holding && holding.record.groupId !== groupId) throw new Error("This tab is in another workspace's group; drag it out first");
+  const found = groups.find(({ record }) => record.groupId === groupId);
+  if (found) {
+    if (tab.groupId !== found.group.id) await chrome.tabs.group({ tabIds: [tab.id], groupId: found.group.id });
+    await updateRecord(found.key, current => current?.chromeGroupId === found.group.id ? { ...current, members: { ...current.members, [tab.id]: { by: 'you', site } } } : current);
+  } else {
+    const authorization = authorizations.get(groupId);
+    const grant = authorization?.body.command.type === 'execute' ? authorization.body.command.grant.body : null;
+    if (!grant || Date.parse(grant.expiresAt) <= Date.now()) throw new Error('This workspace has no group in this Chrome yet');
+    const { key, record, browserEpoch } = await groupRecord(grant);
+    const chromeGroupId = await chrome.tabs.group({ tabIds: [tab.id], ...(record ? { groupId: record.chromeGroupId } : {}) });
+    await chrome.tabGroups.update(chromeGroupId, { title: groupTitle(grant.groupName, [...runs.values()].some(run => run.body.command.grant.body.groupId === groupId)), color: groupColor(grant.workspaceId), collapsed: false });
+    await updateRecord(key, current => ({ groupId, chromeGroupId, browserEpoch, members: { ...(current?.chromeGroupId === chromeGroupId ? current.members : {}), [tab.id]: { by: 'you', site } } }));
+  }
+  scheduleReport(groupId);
+  return { url: tab.url.slice(0, 8192), title: (tab.title || '').slice(0, 500) };
+}
+/** One signed share request answered with a share (`create`, `revoke`). */
+async function signedShare(request) {
+  const identity = await stored('identity');
+  if (!identity) throw new Error('Human pairing required');
+  const value = await shareRequest(GITSPACE_ACCOUNT_URL, identity, request);
+  if (!isShare(value?.share)) throw new Error('The account answered the share with an unexpected reply');
+  return value.share;
+}
+/** Copy link in the popup: a share of a web page in this Chrome, for `expiresInMinutes`, with comments only for a tab
+ * in a workspace group (they land in that workspace). */
+async function createShare({ tabId, comment, expiresInMinutes }) {
+  if (!Number.isInteger(tabId) || typeof comment !== 'boolean' || !SHARE_EXPIRIES_MINUTES.includes(expiresInMinutes)) throw new Error('Invalid share');
+  if (!connected) throw new Error(SHARE_OFFLINE);
+  if (accountProtocol < SHARE_PROTOCOL) throw new Error(SHARE_UPDATE);
+  const tab = await chrome.tabs.get(tabId);
+  if (!siteOf(tab.url)) throw new Error(SHARE_WEB_ONLY);
+  if (comment && !(await workspaceGroups()).some(({ group }) => group.id === tab.groupId)) throw new Error('Comments need the tab in a workspace group');
+  const targetId = (await targets()).find(target => target.tabId === tabId)?.id;
+  if (!targetId) throw new Error('Chrome cannot share this tab');
+  const share = await signedShare({ op: 'create', targetId, comment, expiresInMinutes });
+  await setShares([...liveShares.filter(other => other.shareId !== share.shareId), share]);
+}
+/** Stop sharing in the popup: the share ends for everyone watching. */
+async function revokeShare(shareId) {
+  await signedShare({ op: 'revoke', shareId });
+  const watch = watching.get(shareId);
+  if (watch) await endWatch(watch);
+  await setShares(liveShares.filter(share => share.shareId !== shareId));
+}
 async function execute(message) {
   if (message.operation === 'authorize') return authorize(message.authorization);
   if (message.operation === 'prepare') {
@@ -950,7 +1270,7 @@ async function execute(message) {
     if (!channel.painting) { channel.painting = { maxWidth: 1, maxHeight: 1, quality: 1 }; await channel.screencast.add(channel.painting); }
     run.targets.add(targetId);
     lastUsed.set(grant.groupId, Date.now());
-    void overlay(channel);
+    void overlay(targetId);
     return { targetId, sessionId: channel.sessionId };
   }
   if (message.operation === 'open') {
@@ -968,7 +1288,7 @@ async function execute(message) {
     authorization.targetId = targetId;
     lastUsed.set(grant.groupId, Date.now());
     // The step's tab shows the overlay; one an earlier step used stops showing it.
-    for (const other of channels.values()) if (other.grant.groupId === grant.groupId) void overlay(other);
+    for (const other of channels.values()) if (other.grant.groupId === grant.groupId) void overlay(other.targetId);
     return {targetId,sessionId:channel.sessionId};
   }
   if (message.operation === 'preview') {
@@ -997,6 +1317,12 @@ async function execute(message) {
     return summary;
   }
   if (message.operation === 'release') { await downloadsSaved(message.attemptId); await endRun(message.attemptId, 'released'); return {}; }
+  if (message.operation === 'shareTab') return shareTab(message.targetId);
+  if (message.operation === 'shareWatch') return watchShare(message);
+  if (message.operation === 'shareUnwatch') { const watch = watching.get(message.shareId); if (watch) await endWatch(watch); return {}; }
+  if (message.operation === 'shareHit') return shareHit(message);
+  if (message.operation === 'shareAnchor') return shareAnchor(message);
+  if (message.operation === 'adoptTab') return adoptTab(message.groupId, message.targetId);
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
   // Before any await: the script's commands reach its tab in the order they arrived.
   if (message.attemptId !== undefined) return runCommand(message);
@@ -1029,7 +1355,7 @@ async function execute(message) {
   else {
     if (method === 'Accessibility.getFullAXTree') { const document = lease.document; result = await chrome.debugger.sendCommand(lease.source, method, { depth: 32 }); if (document !== lease.document) throw new Error('Document changed during observation'); result.gitspaceDocument = document; for (const node of result.nodes || []) if (Number.isSafeInteger(node.backendDOMNodeId)) lease.refs.add(node.backendDOMNodeId); }
     else {
-      if (method === 'Input.dispatchMouseEvent') await overlay(lease, { cursor: { x: params.x, y: params.y, type: params.type } });
+      if (method === 'Input.dispatchMouseEvent') await overlay(lease.targetId, { cursor: { x: params.x, y: params.y, type: params.type } });
       result = await chrome.debugger.sendCommand(lease.source, method, params);
     }
   }
@@ -1038,25 +1364,36 @@ async function execute(message) {
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.sessionId) return;
-  for (const [id, lease] of channels) if (lease.targetId === source.targetId) {
-    // The tab's one screencast feeds its consumers; no frame reaches a script or the relay.
-    if (method === 'Page.screencastFrame') { lease.screencast.frame(params); return; }
-    if (method === 'Page.screencastVisibilityChanged') return;
-    // The overlay's buttons, from the overlay's own world only. Neither they nor that world reach the session.
-    if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) { if (lease.overlay && params.executionContextId === lease.overlay.contextId) void overlayButton(lease, params.payload).catch(() => {}); return; }
-    if (method === 'Runtime.executionContextCreated' && params.context?.name === OVERLAY_WORLD) return;
-    if (method === 'DOM.documentUpdated' || (method === 'Page.frameNavigated' && !params.frame.parentId)) { lease.document++; lease.refs.clear(); }
-    if (method === 'Page.frameNavigated' && !params.frame.parentId && lease.overlay) lease.overlay.contextId = null;
-    // A new document lacks the overlay until it is drawn again.
-    if (method === 'Page.loadEventFired' && lease.overlay) void overlay(lease);
-    if (method === 'Page.downloadWillBegin') downloadBegan(lease, params);
-    // A script's tab reports every event of its own session, without network credentials.
-    if ([...runs.values()].some(run => run.targets.has(lease.targetId) && live(run))) { const forwarded = relayRunEvent(method, params); if (forwarded) forward(id, lease, { targetId: id, sessionId: lease.sessionId, method, params: forwarded }); return; }
-    if (!['Page.frameNavigated', 'Page.loadEventFired', 'DOM.documentUpdated'].includes(method)) return;
-    void check(id, lease).then(() => send({ targetId: id, sessionId: lease.sessionId, method, params })).catch(() => {});
-  }
+  const debuggee = debuggees.get(source.targetId);
+  if (!debuggee) return;
+  // The tab's one screencast feeds its consumers; no frame reaches a script or the relay as an event.
+  if (method === 'Page.screencastFrame') { debuggee.screencast.frame(params); return; }
+  if (method === 'Page.screencastVisibilityChanged') return;
+  // The extension's own worlds never reach a session.
+  if (method === 'Runtime.executionContextCreated' && (params.context?.name === OVERLAY_WORLD || params.context?.name === SHARE_WORLD)) return;
+  if (method === 'Page.frameNavigated' && !params.frame.parentId) { if (debuggee.overlay) debuggee.overlay.contextId = null; debuggee.world = null; }
+  // A new document lacks the overlay until it is drawn again.
+  if (method === 'Page.loadEventFired' && debuggee.overlay) void overlay(debuggee.targetId);
+  // Everything else is the agent's, on a tab it has a channel to; a tab only shares watch tells no one.
+  const lease = channels.get(source.targetId);
+  if (!lease) return;
+  const id = lease.targetId;
+  // The overlay's buttons, from the overlay's own world only. Neither they nor that world reach the session.
+  if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) { if (debuggee.overlay && params.executionContextId === debuggee.overlay.contextId) void overlayButton(lease, params.payload).catch(() => {}); return; }
+  if (method === 'DOM.documentUpdated' || (method === 'Page.frameNavigated' && !params.frame.parentId)) { lease.document++; lease.refs.clear(); }
+  if (method === 'Page.downloadWillBegin') downloadBegan(lease, params);
+  // A script's tab reports every event of its own session, without network credentials.
+  if ([...runs.values()].some(run => run.targets.has(lease.targetId) && live(run))) { const forwarded = relayRunEvent(method, params); if (forwarded) forward(id, lease, { targetId: id, sessionId: lease.sessionId, method, params: forwarded }); return; }
+  if (!['Page.frameNavigated', 'Page.loadEventFired', 'DOM.documentUpdated'].includes(method)) return;
+  void check(id, lease).then(() => send({ targetId: id, sessionId: lease.sessionId, method, params })).catch(() => {});
 });
 chrome.debugger.onDetach.addListener(source => {
+  // Shares watched there stop streaming until the account asks to watch them again.
+  const debuggee = debuggees.get(source.targetId);
+  if (debuggee) {
+    debuggees.delete(source.targetId);
+    for (const watch of watchesOn(debuggee)) { watching.delete(watch.shareId); clearTimeout(watch.timer); }
+  }
   for (const [id, channel] of channels) if (channel.targetId === source.targetId) {
     channel.cancelNavigation?.(); channels.delete(id); send({ targetId: id, fenced: true });
     for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: Chrome’s debugger left this tab', true);
@@ -1065,18 +1402,27 @@ chrome.debugger.onDetach.addListener(source => {
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   for (const [id] of channels) void check(id).catch(() => {});
   // The overlay comes back on a page that loaded, whether or not its tab reports Page events.
-  if (change.status === 'complete') for (const channel of channels.values()) if (channel.tabId === tabId && channel.overlay) void overlay(channel);
+  if (change.status === 'complete') for (const debuggee of debuggees.values()) if (debuggee.tabId === tabId && debuggee.overlay) void overlay(debuggee.targetId);
+  if (change.url || change.title) for (const [targetId, sharedTabId] of sharedTabs) if (sharedTabId === tabId) void reportPages(targetId).catch(() => {});
   if ('groupId' in change) void join(tab, true).catch(() => {});
   else if ((change.url || change.title || change.status === 'complete') && tab.groupId >= 0) void groupRecords().then(records => { const found = records.find(({ record }) => record.chromeGroupId === tab.groupId); if (found) scheduleReport(found.record.groupId); }).catch(() => {});
 });
 chrome.tabs.onCreated.addListener(tab => { void serially(async () => {
   if (Number.isInteger(tab.openerTabId) && (await groupRecords()).some(({ record }) => record.members?.[tab.openerTabId])) pageTabs.add(tab.id);
 }).then(() => { if (tab.groupId >= 0) return join(tab, false); }).catch(() => {}); });
-chrome.tabs.onRemoved.addListener(tabId => { void leave(tabId).catch(() => {}); });
+chrome.tabs.onRemoved.addListener(tabId => { void leave(tabId).catch(() => {}); sharedTabClosed(tabId); });
 chrome.tabGroups.onRemoved.addListener(group => { void serially(async () => {
   for (const { key, record } of await groupRecords()) if (record.chromeGroupId === group.id) { await persist(key, null); scheduleReport(record.groupId); }
 }).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } }).catch(() => { socket?.close(); }); });
-async function reset() { authorizations.clear(); await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'disconnected'))); await Promise.all([...channels.keys()].map(revoke)); }
+/** After the connection ends: no step or script holds a tab, no share is watched, and the account tells the shares
+ * again once connected. */
+async function reset() {
+  authorizations.clear();
+  await Promise.all([...runs.keys()].map(attemptId => endRun(attemptId, 'disconnected')));
+  await Promise.all([...watching.values()].map(endWatch));
+  await Promise.all([...channels.keys()].map(revoke));
+  liveShares = []; sharedTabs = new Map(); sharePages.clear();
+}
 /** Whether GitSpace is on in this Chrome (`enabled` in `chrome.storage.local`; on unless you turned it off), and when
  * it turns itself back on after "Off for 1 hour" (`reenableAt`, by the `relay-enable` alarm). Off, this Chrome keeps no
  * connection to the account and no debugger on any tab. */
@@ -1216,18 +1562,21 @@ async function connect() {
           connected = true; accountProtocol = account; updateToolbar(); await chrome.storage.local.remove('compatibility');
           void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {});
           // The in-page controls show Capture once the account saves captures.
-          for (const channel of channels.values()) void overlay(channel);
+          for (const targetId of debuggees.keys()) void overlay(targetId);
         }
         return;
       }
     } catch { connection.close(); return; }
     if (message.operation === 'revoke') for (const channel of channels.values()) if (channel.grant.groupId === message.groupId) channel.cancelNavigation?.();
-    const key = 'commands';
+    if (SHARE_NOTICES[message.operation]) { void shareNotice(message).catch(() => {}); return; }
+    const key = SHARE_OPERATIONS[message.operation] ? 'share:' + message.shareId : 'commands';
     const start = () => { if (socket !== connection || connection.readyState !== WebSocket.OPEN) throw new Error('Disconnected command'); return execute(message); };
-    // A script's commands do not wait for one another (it may await one while sending the next); everything else runs one at a time.
-    const scripted = message.operation === 'command' && message.attemptId !== undefined;
-    const operation = scripted ? Promise.resolve().then(start) : (queues.get(key) || Promise.resolve()).catch(() => {}).then(start);
-    if (!scripted) queues.set(key, operation);
+    // A script's commands do not wait for one another (it may await one while sending the next), nor does `shareTab`
+    // (asked while this Chrome's own share request waits on it); the operations on one share run one at a time, apart
+    // from everything else, which runs one at a time.
+    const concurrent = (message.operation === 'command' && message.attemptId !== undefined) || message.operation === 'shareTab';
+    const operation = concurrent ? Promise.resolve().then(start) : (queues.get(key) || Promise.resolve()).catch(() => {}).then(start);
+    if (!concurrent) queues.set(key, operation);
     void operation.then(result => { if (socket === connection) send({ id: message.id, result }); }, error => { if (socket === connection) send({ id: message.id, error: { message: String(error.message || error).slice(0, 500) } }); }).finally(() => { if (queues.get(key) === operation) queues.delete(key); });
   };
   connection.onclose = () => {
@@ -1248,12 +1597,12 @@ async function connect() {
 async function workspaceGroups() {
   const { browserEpoch } = await chrome.storage.session.get('browserEpoch');
   const found = [];
-  for (const { record } of await groupRecords()) if (record.browserEpoch === browserEpoch) { try { found.push({ record, group: await chrome.tabGroups.get(record.chromeGroupId) }); } catch {} }
+  for (const { key, record } of await groupRecords()) if (record.browserEpoch === browserEpoch) { try { found.push({ key, record, group: await chrome.tabGroups.get(record.chromeGroupId) }); } catch {} }
   return found;
 }
 /** What the popup shows: whether GitSpace is on here and connected, each workspace group using this Chrome with its
- * scripts, the workspace group of the tab you are looking at with Capture (or its recording), the captures recording,
- * this Chrome's identity, and the latest scripts. */
+ * scripts, the workspace group of the tab you are looking at with Capture (or its recording), sharing that tab (when
+ * it shows a web page) with its live shares, the captures recording, this Chrome's identity, and the latest scripts. */
 async function popupState() {
   const identity = await stored('identity');
   const digest = identity ? await crypto.subtle.digest('SHA-256', Uint8Array.from(atob(identity.publicKey), c => c.charCodeAt(0))) : undefined;
@@ -1263,6 +1612,7 @@ async function popupState() {
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const tabGroup = active ? groups.find(group => group.chromeGroupId === active.groupId) : undefined;
   const recording = tabGroup ? captureOn(active.id) : undefined;
+  const shared = active && siteOf(active.url) ? (await targets()).find(target => target.tabId === active.id) : undefined;
   return {
     enabled, reenableAt, account: new URL(GITSPACE_ACCOUNT_URL).host,
     connection: !enabled ? 'off' : incompatible ? 'update' : !identity ? 'unpaired' : connected ? 'connected' : 'connecting',
@@ -1271,6 +1621,8 @@ async function popupState() {
     groups: groups.map(({ chromeGroupId, ...group }) => group),
     activeTab: tabGroup ? { tabId: active.id, groupId: tabGroup.groupId, name: tabGroup.name, color: tabGroup.color,
       capture: recording ? { recording: recording.captureId, unavailable: null } : { recording: null, unavailable: !connected ? 'Capture needs GitSpace connected to your account' : accountProtocol < MEDIA_PROTOCOL ? 'Your GitSpace account does not save captures yet; update GitSpace' : null } } : null,
+    shareTab: shared ? { tabId: active.id, grouped: Boolean(tabGroup), unavailable: !connected ? SHARE_OFFLINE : accountProtocol < SHARE_PROTOCOL ? SHARE_UPDATE : null } : null,
+    shares: shared ? liveShares.filter(share => share.targetId === shared.id) : [],
     recordings: [...captures.values()].map(capture => ({ captureId: capture.captureId, title: capture.title, track: capture.track, startedAt: capture.startedAt, saving: capture.ending !== null })),
     log: ((await stored('run-log')) || []).slice(0, 10),
   };
@@ -1304,6 +1656,8 @@ function popupRequest(message) {
   // Your click on Capture in this popup is what lets Chrome record the tab.
   if (Number.isInteger(message.startCapture)) return startCapture(message.startCapture, null).then(popupState);
   if (typeof message.stopCapture === 'string') { const capture = captures.get(message.stopCapture); return (capture ? endCapture(capture, null, true) : Promise.resolve()).then(popupState); }
+  if (typeof message.shareCreate === 'object' && message.shareCreate !== null) return createShare(message.shareCreate).then(popupState);
+  if (typeof message.shareRevoke?.shareId === 'string') return revokeShare(message.shareRevoke.shareId).then(popupState);
 }
 /** The offscreen document's requests: signing the begin request of its uploads, and a recording that ended on its own. Hearing
  * from it at all keeps this worker running while it records. */
@@ -1361,7 +1715,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
   for (const [id] of channels) void check(id).catch(() => {});
   for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId, 'deadline').catch(() => {});
   // Keeps each overlay from expiring, and takes down that of a single step that has ended.
-  for (const channel of channels.values()) void overlay(channel);
+  for (const targetId of debuggees.keys()) void overlay(targetId);
   void collapseIdle().catch(() => {}); void connect();
 });
 // A group marked while scripts ran before this worker started has none running now.

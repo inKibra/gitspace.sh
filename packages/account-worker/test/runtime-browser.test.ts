@@ -1,27 +1,31 @@
 import { env } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { createModels } from '@earendil-works/pi-ai';
-import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowsersDocument } from '../src/runtime-browser.js';
+import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowsersDocument, workspacePageComments, type RuntimeBrowserAuthorityOptions } from '../src/runtime-browser.js';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
-import { BROWSER_EXTENSION_PROTOCOL, RuntimeBrowserCaptureViewSchema, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPreview, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, RuntimeAccountBrowserGroupRowSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserConnectedTabSchema, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPageCommentViewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserShareSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPageComment, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { UserProjectIndexDO } from '../src/project-authority.js';
 import type { UserRelayDO } from '../src/index.js';
 /** The relay object as the browser tools reach it. */
 type BrowserRelayObject = Pick<UserRelayDO, 'browserRelayPlacement' | 'browserRelayProjectSettings' | 'browserRelayExecute'>;
 const harnesses: Harness[] = [];
 afterEach(async () => { vi.useRealTimers(); await Promise.all(harnesses.splice(0).map(harness => harness.close(BACKGROUND_CONTEXT))); });
-async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRelayRuntime = false, relayObject?: BrowserRelayObject) {
+/** `workspace`: the workspace's own storage, when a test writes through its object; otherwise an in-memory one. */
+async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRelayRuntime = false, relayObject?: BrowserRelayObject, workspace?: RuntimeBrowserAuthorityOptions['storage']) {
   const data = new Map<string, unknown>();
   let transaction = Promise.resolve();
-  const storage = { async get(key: string) { return data.get(key); }, async list({ prefix }: { prefix: string }) { return new Map([...data].filter(([key]) => key.startsWith(prefix))); }, async put(key: string, value: unknown) { data.set(key, value); }, async delete(key: string) { return data.delete(key); }, async transaction<T>(fn: (value: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> }) => Promise<T>): Promise<T> {
-    const result = transaction.then(() => fn(storage));
+  const memory = { async get(key: string) { return data.get(key); }, async list({ prefix, reverse = false, limit = Infinity }: { prefix: string; reverse?: boolean; limit?: number }) { const keys = [...data.keys()].filter(key => key.startsWith(prefix)).sort(); if (reverse) keys.reverse(); return new Map(keys.slice(0, limit).map(key => [key, data.get(key)])); }, async put(key: string, value: unknown) { data.set(key, value); }, async delete(key: string) { return data.delete(key); }, async transaction<T>(fn: (value: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> }) => Promise<T>): Promise<T> {
+    const result = transaction.then(() => fn(memory));
     transaction = result.then(() => {}, () => {});
     return result;
   } };
+  const storage: RuntimeBrowserAuthorityOptions['storage'] = workspace ?? memory;
   const identity = { projectId: 'project', workspaceId: 'workspace' };
   const attachment = RuntimeAttachmentSchema.parse({ ...identity, machineId: 'machine', attachmentId: 'attachment', generation: 1, state: 'ready', role: 'cache', checkout: { kind: 'shared', branch: 'main' }, updatedAt: new Date().toISOString(), online: true, capabilities: ['browser', 'browser_control', 'browser.relay', 'browser.headless'] });
   const attachments = [attachment];
@@ -36,7 +40,36 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const forgottenPairings = new Set<string>();
   const offlinePairings = new Set<string>();
   const knownPairings = new Map<string, typeof pairing>();
-  const relayRuntime = new AccountBrowserRuntime({ storage, relay: { async tabs() { return []; }, async preview() { return { image: null, reason: 'Preview appears while the agent uses this tab' }; }, async capture() { throw new Error('This fixture exercises group discovery, not captures'); }, async open() { throw new Error('This fixture exercises group discovery, not tab opening'); }, async revoke() {} } });
+  /** The relay's shares as this fixture keeps them, each with the secret of its link, and every share call it got. */
+  const shares = new Map<string, { share: RuntimeBrowserShare; secret: string }>();
+  const shareCalls: unknown[] = [];
+  const relayRuntime = new AccountBrowserRuntime({ storage, relay: { async tabs() { return []; }, async preview() { return { image: null, reason: 'Preview appears while the agent uses this tab' }; }, async capture() { throw new Error('This fixture exercises group discovery, not captures'); }, async open() { throw new Error('This fixture exercises group discovery, not tab opening'); }, async revoke() {},
+    async shares(projectId, workspaceId) { shareCalls.push({ action: 'shares', projectId, workspaceId }); return [...shares.values()].flatMap(({ share }) => share.workspace?.projectId === projectId && share.workspace.workspaceId === workspaceId ? [share] : []); },
+    async shareCreate(input) {
+      shareCalls.push({ action: 'shareCreate', ...input });
+      const shareId = crypto.randomUUID(), secret = crypto.randomUUID() + crypto.randomUUID(), createdAt = new Date();
+      const share = RuntimeBrowserShareSchema.parse({ shareId, link: `https://account.test/s/${shareId}#${secret}`, pairingId: pairing.pairingId, browser: 'Work Chrome', targetId: input.targetId, workspace: { projectId: input.projectId, workspaceId: input.workspaceId, groupId: input.groupId }, page: { url: 'https://example.com/', title: 'Example' }, comment: input.comment, createdAt: createdAt.toISOString(), expiresAt: new Date(createdAt.getTime() + input.expiresInMinutes * 60_000).toISOString(), endedAt: null, endReason: null, viewers: [], audit: [] });
+      shares.set(shareId, { share, secret });
+      return share;
+    },
+    async shareRevoke(projectId, workspaceId, shareId) {
+      shareCalls.push({ action: 'shareRevoke', projectId, workspaceId, shareId });
+      const record = shares.get(shareId);
+      if (!record || record.share.workspace?.projectId !== projectId || record.share.workspace.workspaceId !== workspaceId) throw new Error('Unknown share');
+      record.share = { ...record.share, endedAt: new Date().toISOString(), endReason: 'revoked' };
+      return record.share;
+    },
+    async shareConnect({ projectId, workspaceId, shareId, secret, groupId }) {
+      shareCalls.push({ action: 'shareConnect', groupId: groupId ?? null });
+      const record = shares.get(shareId);
+      if (!record || record.secret !== secret) throw new Error('Unknown share');
+      // The workspace's live group on the share's Chrome, as the relay recorded it when the group was last used.
+      const stored = groupId ? await storage.get(`browser.account.group:${groupId}`) : undefined;
+      const group = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : undefined;
+      if (!group || group.projectId !== projectId || group.workspaceId !== workspaceId || group.placement.kind !== 'account-relay' || group.placement.pairingId !== record.share.pairingId || Date.parse(group.expiresAt) <= Date.now()) return { needsGroup: { pairingId: record.share.pairingId } };
+      record.share = { ...record.share, workspace: { projectId, workspaceId, groupId: group.groupId } };
+      return { connected: { pairingId: record.share.pairingId, browser: record.share.browser, groupId: group.groupId, targetId: record.share.targetId, url: record.share.page.url, title: record.share.page.title } };
+    } } });
   const relay = {
     async browserRelayPlacement(projectId: string, pairingId?: string) { if (projectId !== identity.projectId || !state.projectApproved) throw new Error('Chrome is not approved for this project'); knownPairings.set(pairing.pairingId, { ...pairing }); const selected = knownPairings.get(pairingId ?? pairing.pairingId); if (!selected) throw new Error('Unknown Chrome'); return selected; },
     async browserRelayProjectSettings(projectId: string) { return { projectId, revision: 1, defaultPairingId: pairing.pairingId, browsers: [...[...knownPairings.values()].filter(browser => !forgottenPairings.has(browser.pairingId)).map(({ pairingId, generation }) => ({ pairingId, generation, approved: state.projectApproved, connected: !offlinePairings.has(pairingId), name: 'Work Chrome', note: 'Production account' })), ...state.unapproved] }; },
@@ -85,7 +118,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly }), groupName: async () => 'Workspace', drive: () => drive,
   async fromMachine(move) { moved.push(move); await drive.write(move.path, move.mediaType, machineFiles.get(move.machinePath) ?? new Uint8Array()); } });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved };
+  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -445,3 +478,94 @@ test('a Chrome tab that cannot be previewed gets a tile reason, not an error: Ch
   await f.authority.manage(f.input.conversationId, undefined, { action: 'revoke', groupId: group.groupId });
   expect(await preview()).toMatchObject({ image: null, reason: 'This tab’s group has ended' });
 });
+
+test('you share a tab of the workspace’s group on your Chrome, list its shares while that Chrome is offline, and end one', async () => {
+  const f = await fixture('physical', true);
+  const manage = async (command: RuntimeBrowserManagement) => f.authority.manage(f.input.conversationId, undefined, command);
+  // With no Chrome paired there are no shares, and no relay is asked.
+  expect(await manage({ action: 'shares' })).toEqual([]);
+  expect(f.dispatches).toEqual([]);
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
+  const group = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  const made = RuntimeBrowserShareSchema.parse(await manage({ action: 'shareCreate', groupId: group.groupId, targetId: 'your-tab', comment: true, expiresInMinutes: 60 }));
+  expect(f.shareCalls).toEqual([{ action: 'shareCreate', projectId: 'project', workspaceId: 'workspace', groupId: group.groupId, targetId: 'your-tab', comment: true, expiresInMinutes: 60 }]);
+  expect(made).toMatchObject({ targetId: 'your-tab', comment: true, workspace: { projectId: 'project', workspaceId: 'workspace', groupId: group.groupId }, endedAt: null });
+  await expect(manage({ action: 'shareCreate', groupId: group.groupId, targetId: 'your-tab', comment: false, expiresInMinutes: 30 })).rejects.toThrow('A share lasts 15 minutes, 1 hour, 8 hours or 24 hours');
+  f.offlinePairings.add(f.pairing.pairingId);
+  expect(await manage({ action: 'shares' })).toEqual([made]);
+  expect(RuntimeBrowserShareSchema.parse(await manage({ action: 'shareRevoke', shareId: made.shareId }))).toMatchObject({ shareId: made.shareId, endedAt: expect.any(String), endReason: 'revoked' });
+  // A group that ended shares no tab, and the relay is not asked.
+  await manage({ action: 'revoke', groupId: group.groupId });
+  await expect(manage({ action: 'shareCreate', groupId: group.groupId, targetId: 'your-tab', comment: false, expiresInMinutes: 15 })).rejects.toThrow('This tab’s group has ended');
+  expect(f.shareCalls.map(call => z.object({ action: z.string() }).parse(call).action)).toEqual(['shareCreate', 'shares', 'shareRevoke']);
+});
+
+test('a share link you paste connects its tab to the workspace’s group on its Chrome, made or renewed first as the agent’s tabs there does', async () => {
+  const f = await fixture('physical', true);
+  f.knownPairings.set(f.pairing.pairingId, { ...f.pairing });
+  const manage = async (command: RuntimeBrowserManagement) => f.authority.manage(f.input.conversationId, undefined, command);
+  const paste = (title: string) => {
+    const shareId = crypto.randomUUID(), secret = crypto.randomUUID() + crypto.randomUUID(), createdAt = new Date();
+    f.shares.set(shareId, { secret, share: RuntimeBrowserShareSchema.parse({ shareId, link: `https://account.test/s/${shareId}#${secret}`, pairingId: f.pairing.pairingId, browser: 'Work Chrome', targetId: `tab-${title}`, workspace: null, page: { url: 'https://docs.example/', title }, comment: false, createdAt: createdAt.toISOString(), expiresAt: new Date(createdAt.getTime() + 3_600_000).toISOString(), endedAt: null, endReason: null, viewers: [], audit: [] }) });
+    return { shareId, secret };
+  };
+  /** What the workspace asked of the relay, in order: management actions, and the steps it signed. */
+  const asked = () => f.dispatches.map(dispatch => {
+    const command = 'body' in dispatch ? dispatch.body.command : null;
+    return command?.type === 'manage' ? `${command.action}${command.groupId ? ' in group' : ''}` : command?.type === 'execute' ? command.args.action : 'machine';
+  });
+  const spec = paste('Spec');
+  await expect(manage({ action: 'shareConnect', shareId: spec.shareId, secret: 'not the secret of that link' })).rejects.toThrow('Unknown share');
+  expect(asked()).toEqual(['shareConnect']);
+  const connected = RuntimeBrowserConnectedTabSchema.parse(await manage({ action: 'shareConnect', ...spec }));
+  expect(asked()).toEqual(['shareConnect', 'shareConnect', 'tabs', 'shareConnect in group']);
+  expect(connected).toEqual({ pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId: expect.any(String), targetId: 'tab-Spec', url: 'https://docs.example/', title: 'Spec' });
+  // It is the workspace's group on that Chrome: the agent's next tabs there uses it.
+  const agentTabs = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay', pairingId: f.pairing.pairingId }), requestId: 'agent-tabs', attemptId: 'agent-tabs' };
+  expect((await f.authority.prepare(agentTabs)).groupId).toBe(connected.groupId);
+  // Another link on that Chrome renews the same group instead of making one.
+  expect(RuntimeBrowserConnectedTabSchema.parse(await manage({ action: 'shareConnect', ...paste('Notes') }))).toMatchObject({ groupId: connected.groupId, targetId: 'tab-Notes' });
+});
+
+test('comments people make on a share reach the agent and its subagents newest first with drive crops, and the Browser tab with crop links; the workspace keeps the newest 2000', async () => {
+  const projectId = `page-comments-${crypto.randomUUID()}`, identity = { projectId, workspaceId: projectId };
+  const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await project.setProjectLifecycle((await project.bootstrap({ id: projectId, name: 'Comments', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' })).revision, 'active');
+  const notices = vi.spyOn(UserProjectIndexDO.prototype, 'liveNotices');
+  const shareId = crypto.randomUUID(), id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const button = { box: { x: 0.5, y: 0.25, width: 0.1, height: 0.05 }, role: 'button', name: 'Buy', text: 'Buy now', selectors: ['#buy', 'main button.primary'] };
+  const comment = (n: number): RuntimeBrowserPageComment => ({ version: 1, commentId: id(n), shareId, by: { name: n % 2 ? 'Dana' : 'Lee', guest: n % 2 === 1 }, text: `Comment ${n}`, page: { url: 'https://example.com/pricing', title: 'Pricing' }, target: n === 2000 ? button : null, region: button.box, viewport: { width: 1280, height: 720 }, scroll: { x: 0, y: 120 }, crop: n === 1998 ? null : `browser/comments/${id(n)}.jpg`, createdAt: new Date(Date.parse('2026-10-24T09:00:00.000Z') + n * 1000).toISOString() });
+  /** A comment as the agent reads it. */
+  const read = (n: number, target: object | null, crop: string | null) => ({ commentId: id(n), by: comment(n).by, text: `Comment ${n}`, page: { url: 'https://example.com/pricing', title: 'Pricing' }, target, region: button.box, crop, createdAt: comment(n).createdAt, shareId });
+  try {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`), async (space, state) => {
+      // The newest arrives first: the workspace orders comments by when they were made, not when they arrived.
+      for (const n of [2000, ...Array.from({ length: 2000 }, (_, index) => index)]) await space.pageCommentAdded(identity, comment(n));
+      const f = await fixture('physical', false, undefined, state.storage);
+      for (const n of [2000, 1999]) await f.drive.write(`browser/comments/${id(n)}.jpg`, 'image/jpeg', Uint8Array.from([n % 256]));
+      const comments = async (attemptId: string) => {
+        const [part] = (await f.authority.execute({ ...f.input, args: RuntimeBrowserToolArgumentsSchema.parse({ action: 'comments', limit: 3 }), requestId: attemptId, attemptId })).content;
+        return part?.type === 'text' ? JSON.parse(part.text) : null;
+      };
+      const newest = [
+        read(2000, { role: 'button', name: 'Buy', text: 'Buy now', selectors: ['#buy', 'main button.primary'] }, `drive://workspace/browser/comments/${id(2000)}.jpg`),
+        read(1999, null, `drive://workspace/browser/comments/${id(1999)}.jpg`),
+        read(1998, null, null),
+      ];
+      expect(await comments('main')).toEqual(newest);
+      // The Browser tab links each crop still in the drive.
+      const views = RuntimeBrowserPageCommentViewSchema.array().parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'pageComments' }));
+      expect(views.slice(0, 4).map(view => [view.comment.text, view.cropUrl])).toEqual([
+        ['Comment 2000', `https://account.test/files/${encodeURIComponent(`browser/comments/${id(2000)}.jpg`)}`],
+        ['Comment 1999', `https://account.test/files/${encodeURIComponent(`browser/comments/${id(1999)}.jpg`)}`],
+        ['Comment 1998', null], ['Comment 1997', null],
+      ]);
+      f.state.root = false;
+      expect(await comments('subagent')).toEqual(newest);
+      expect(f.dispatches).toEqual([]); expect(f.sessions).toEqual([]);
+      const kept = await workspacePageComments(state.storage, 2001);
+      expect([kept.length, kept.at(-1)?.text]).toEqual([2000, 'Comment 1']);
+    });
+    await vi.waitFor(() => expect(notices.mock.calls.some(([batch]) => batch.some(notice => notice.workspace === projectId && notice.resource === 'page-comments'))).toBe(true));
+  } finally { vi.restoreAllMocks(); }
+}, 60_000);

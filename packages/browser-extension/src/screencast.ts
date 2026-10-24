@@ -3,7 +3,7 @@
  * and Chrome runs one `Page.startScreencast` per session, so every consumer shares it. It runs at the largest size
  * and quality any consumer asks for, starts again at a new size when consumers come or go, and stops when none
  * remain. Consumers: the 1×1 screencast that keeps a background tab painting (it takes no frames), a capture
- * recording frames, and anything else that wants a live image of the tab.
+ * recording frames, the shares people watch, and anything else that wants a live image of the tab.
  *
  * Frames are acknowledged only while a consumer takes them, so the painting screencast alone sends a few frames and
  * then waits, as it always has. Script events never see them: the extension handles `Page.screencastFrame` before
@@ -26,7 +26,8 @@ export class TabScreencast {
   private changes: Promise<void> = Promise.resolve();
   constructor(private readonly send: ScreencastSend) {}
 
-  /** Adds a consumer; resolves once the screencast runs at a size that covers it. */
+  /** Adds a consumer, or takes the new size of one added before; resolves once the screencast runs at a size that
+   * covers it. */
   add(consumer: ScreencastConsumer): Promise<void> { this.consumers.add(consumer); return this.update(); }
   /** Removes a consumer; resolves once the screencast runs at the size those left need, or stopped. */
   remove(consumer: ScreencastConsumer): Promise<void> { this.consumers.delete(consumer); return this.update(); }

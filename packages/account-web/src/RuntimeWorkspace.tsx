@@ -196,6 +196,11 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
+      sessionCommand={async command => {
+        const response = await rpcClient.runtime.session({ ...identity, ...(conversationId ? { conversationId } : {}), command });
+        if (response.status === 'error') throw response.error;
+        return response.value;
+      }}
       resolveResourceFile={resolveResourceFile}
       terminals={{
         spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,

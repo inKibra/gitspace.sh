@@ -119,6 +119,29 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const conversation = await options.runtime().browserConversation(conversationId);
     return RuntimeBrowserCaptureSchema.parse(await managed(conversationId, conversation.root, placement, command));
   }
+  /** Share links on your Chromes (docs/APERTURE-DESIGN.md §8), kept by the relay. A new share is signed for its
+   * group's Chrome. Listing, ending and connecting shares name no Chrome of their own, so one of the account's confirmed
+   * Chromes carries them (an approved, online one when there is one); the relay checks the share's own Chrome where it
+   * matters. With no Chrome paired there are no shares. */
+  async function share(conversationId: string, command: RuntimeBrowserManagement): Promise<unknown> {
+    if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
+    const conversation = await options.runtime().browserConversation(conversationId);
+    if (command.action === 'shareCreate') {
+      if (!command.groupId) throw new Error('A share names its group and tab');
+      const stored = await storage.get(`runtime.browser.account.grant:${command.groupId}`);
+      if (!stored || await storage.get(`runtime.browser.revoked:${command.groupId}`)) throw new Error('This tab’s group has ended');
+      const placement = storedGrantSchema.parse(stored).body.placement;
+      if (placement.kind !== 'account-relay') throw new Error('Only tabs on your Chrome can be shared');
+      return managed(conversationId, conversation.root, placement, command);
+    }
+    const { browsers } = await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId);
+    const carrier = browsers.find(browser => browser.approved && browser.connected) ?? browsers[0];
+    if (!carrier) {
+      if (command.action === 'shares') return [];
+      throw new Error('No Chrome is paired with this account, so it has no shares');
+    }
+    return managed(conversationId, conversation.root, { kind: 'account-relay', accountId: env.ACCOUNT_ID, pairingId: carrier.pairingId, generation: carrier.generation }, command);
+  }
   async function manage(conversationId: string, command: RuntimeBrowserManagement) {
     const placements: RuntimeAccountBrowserPlacement[] = [];
     const conversation = await options.runtime().browserConversation(conversationId);
@@ -146,5 +169,5 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     return RuntimeBrowserStatusSchema.parse({ groups: statuses.flatMap(status => status.groups), records: statuses.flatMap(status => status.records), browsers: settings?.browsers.filter(browser => browser.approved) ?? [] });
   }
-  return { prepare, execute, dispatch, manage, capture };
+  return { prepare, execute, dispatch, manage, capture, share };
 }

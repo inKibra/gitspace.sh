@@ -47,7 +47,8 @@ import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostna
 import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
-import { BROWSER_UPLOAD_PATH, serveBrowserUpload, type BrowserUploadStep } from './browser-upload.js';
+import { BROWSER_UPLOAD_PATH, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
+import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './browser-share.js';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
@@ -320,7 +321,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
     return view.serviceDeviceAuthority(deviceId, Date.now());
   });
-  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity));
+  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity), browserShareAccount(this.env));
   async serviceApprove(input: { hostname: string; deviceId: string; state: string; returnTo: string }) {
     const ticket = await this.serviceSessions.approve(input);
     await this.scheduleMachineCheck();
@@ -440,6 +441,10 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayScriptEnd(token: string) { return this.browserRelay.scriptEnd(token); }
   /** One step of a file upload from a Chrome extension (`serveBrowserUpload`). */
   browserRelayUpload(step: BrowserUploadStep) { return this.browserRelay.upload(step); }
+  /** Share links (`browser-share.ts`): a request your Chrome signed, a link's greeting, and a viewer joining. */
+  browserRelayShare(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.shareRequest(request, body); }
+  browserSharePreview(shareId: string, secret: string) { return this.browserRelay.sharePreview(shareId, secret); }
+  browserShareJoin(shareId: string, secret: string) { return this.browserRelay.shareJoin(shareId, secret); }
 
   private presenceLine: Promise<void> = Promise.resolve();
   /** When machine presence is next reconciled against the live sockets. */
@@ -539,8 +544,11 @@ export class UserRelayDO extends BudgetedDurableObject {
     // A Chrome extension's socket. It arrives here through the stub's `fetch`, never as an RPC argument: an incoming
     // request carries its abort signal, which RPC cannot pass.
     if (url.pathname === '/api/browser-relay/extension') return this.browserRelay.fetch(request);
+    // A share viewer's socket; it says hello with the token its join sealed.
+    if (/^\/api\/shares\/[^/]+\/live$/u.test(url.pathname)) return this.browserRelay.shareFetch(request);
     // A script's CDP connection to a Chrome, from the browser session's sandbox binding. The public handler forwards
-    // only `/ws`, `/tunnel/` and the extension's socket here, so this path is internal; its token admits a live run alone.
+    // only `/ws`, `/tunnel/`, the extension's socket and share viewers' sockets here, so this path is internal; its
+    // token admits a live run alone.
     if (url.pathname.startsWith(BROWSER_SCRIPT_PATH)) return this.browserRelay.scriptFetch(request);
     return jsonError(404, 'NOT_FOUND', 'Relay route not found');
   }
@@ -896,6 +904,7 @@ export class UserRelayDO extends BudgetedDurableObject {
       this.presenceCheckAt = null;
       await this.sweepPresence();
     }
+    await this.browserRelay.alarm().catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_alarm_failed', error: error instanceof Error ? error.message : String(error) })));
     await this.scheduleMachineCheck();
   }
 
@@ -1060,6 +1069,8 @@ export default {
     // chunks and the relay WebSocket; your Chrome begins its uploads signed by its pairing key.
     if (url.pathname.startsWith(`${UPLOAD_LINK_PATH}/`)) return serveUploadLink(request, env, { relay: env.RELAY.getByName(env.RELAY_NAME), drive: identity => workspaceDrive(env, identity) });
     if (url.pathname === BROWSER_UPLOAD_PATH) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), link: target => mintUploadLink(env, { kind: 'browser', ...target }) });
+    // Share links: public, before device authority (a join signed by one of the account's devices is checked there).
+    if (url.pathname === BROWSER_SHARE_PATH || url.pathname.startsWith('/api/shares/')) return serveBrowserShare(request, env);
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|rename|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');

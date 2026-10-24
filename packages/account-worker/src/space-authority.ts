@@ -1,12 +1,12 @@
 import { SpaceAuthorityRecordSchema, WorkspaceDomainError, type SpaceAuthorityRecord, type SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { LiveChanges } from './live-changes.js';
-import type { LiveNotice } from '@gitspace/protocol/live-notice';
+import { workspaceLiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { RuntimeBrowsersDocumentSchema, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
-import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
+import { RuntimeBrowserPageCommentSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserPageComment, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
+import { BROWSER_GROUP_ROWS, PAGE_COMMENT_ROWS, PAGE_COMMENTS_KEPT, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -44,6 +44,8 @@ type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 /** How long a machine stays offline before its workspaces' conversations are told. */
 const OFFLINE_NOTICE_MS = 60_000;
 const OfflineMachinesSchema = z.record(z.string(), z.object({ since: z.number(), told: z.boolean() }));
+/** How many page comment rows (`PAGE_COMMENT_ROWS`) the workspace holds. */
+const PAGE_COMMENT_COUNT = 'runtime.page-comment-count';
 
 /** Whether a base checkout at `commit` already holds the project's `tip` (true) or fast-forwards to it (false). One with
  * commits the tip lacks is never moved there: those commits would leave its branch. */
@@ -540,6 +542,24 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     if (current.lifecycle !== 'active' || await this.ctx.storage.get(`runtime.browser.revoked:${group.groupId}`)) return;
     await this.ctx.storage.put(`${BROWSER_GROUP_ROWS}${group.groupId}`, RuntimeBrowsersDocumentSchema.shape.chrome.element.parse(group));
     (await this.runtime?.catch(() => undefined))?.publish();
+  }
+
+  /** A comment someone watching one of this workspace's shares made on its tab (docs/APERTURE-DESIGN.md §8), kept as a
+   * row for the agent's `comments` and the Browser tab; past `PAGE_COMMENTS_KEPT` the oldest go. Tabs showing the
+   * Browser tab hear of it (`page-comments`). An archived workspace takes none. */
+  async pageCommentAdded(raw: unknown, comment: RuntimeBrowserPageComment): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    authorizeWorkspaceRuntime(await this.metadata(identity), identity, true);
+    const row = RuntimeBrowserPageCommentSchema.parse(comment);
+    const key = `${PAGE_COMMENT_ROWS}${new Date(row.createdAt).toISOString()}:${row.commentId}`;
+    await this.ctx.storage.transaction(async tx => {
+      const kept = z.number().int().nonnegative().parse(await tx.get(PAGE_COMMENT_COUNT) ?? 0) + (await tx.get(key) === undefined ? 1 : 0);
+      await tx.put(key, row);
+      const oldest = kept > PAGE_COMMENTS_KEPT ? [...(await tx.list({ prefix: PAGE_COMMENT_ROWS, limit: kept - PAGE_COMMENTS_KEPT })).keys()] : [];
+      if (oldest.length) await tx.delete(oldest);
+      await tx.put(PAGE_COMMENT_COUNT, kept - oldest.length);
+    });
+    this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId), version: Date.now() }]);
   }
 
   /** Permanent deletion of this workspace's runtime, attachments and placement. The tombstone is written before and

@@ -37,6 +37,11 @@ details[open] summary{margin-bottom:8px}
 code{display:block;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;padding:6px 8px;border-radius:8px;background:var(--bg);margin:4px 0 8px}
 form{display:flex;gap:6px;margin:8px 0}form label{flex:1}
 input{width:100%;font:inherit;font-size:12px;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+input[type=checkbox]{width:auto;margin:0}
+select{font:inherit;font-size:12px;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 6px}
+#share-new .row{justify-content:space-between}#share-new label{display:flex;align-items:center;gap:6px}
+.share{padding:4px 0}.share+.share{border-top:1px solid var(--line)}.share .muted{margin:2px 0}.share>button{margin-top:6px}
+.viewers{font-size:12px}.guest{margin-left:4px;padding:0 5px;border-radius:999px;border:1px solid var(--line);color:var(--muted);font-size:10px}
 #runs li{font-size:11px;color:var(--muted);padding:3px 0;border-top:1px solid var(--line)}
 .rec{display:inline-flex;align-items:center;gap:5px;color:var(--red);font-weight:700;font-size:12px}.rec::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--red)}
 #tab-capture{margin-top:4px}#tab-capture .muted{flex:1}
@@ -50,6 +55,10 @@ input{width:100%;font:inherit;font-size:12px;color:inherit;background:var(--bg);
 <section class="card"><h2>Using this Chrome</h2><ul id="groups"></ul><p id="no-groups" class="muted">No workspace is using this Chrome.</p></section>
 <section id="this-tab" class="card" hidden><h2>This tab</h2><div class="row"><span id="tab-dot" class="dot"></span><span id="tab-group" class="grow name"></span><button id="ungroup" type="button">Remove from group</button></div>
 <div id="tab-capture" class="row"><span id="capture-state" class="muted"></span><button id="capture" type="button">Capture</button></div></section>
+<section id="share" class="card" hidden><h2>Share this tab</h2>
+<div id="share-new"><div class="row"><label><input id="share-comment" type="checkbox">Comments</label><select id="share-expiry" aria-label="The link ends after"><option value="15">15 minutes</option><option value="60" selected>1 hour</option><option value="480">8 hours</option><option value="1440">24 hours</option></select><button id="share-copy" type="button">Copy link</button></div>
+<p id="share-comment-hint" class="muted">Comments need the tab in a workspace group</p><p id="share-unavailable" class="muted" hidden></p></div>
+<ul id="shares"></ul></section>
 <section id="recordings-card" class="card" hidden><h2>Recording</h2><ul id="recordings"></ul></section>
 <div class="actions"><button id="snooze" type="button">Off for 1 hour</button></div>
 <details id="identity" class="card"><summary>Identity &amp; pairing</summary>
@@ -70,6 +79,6 @@ export function extensionFiles(accountUrl: string): Record<string, string> {
     'popup.html': POPUP_HTML,
     'offscreen.js': OFFSCREEN_SOURCE,
     'offscreen.html': '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace recorder</title></head><body><script src="offscreen.js"></script></body></html>',
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.5.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen'], host_permissions: [`${new URL(accountUrl).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.6.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen'], host_permissions: [`${new URL(accountUrl).origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
   };
 }

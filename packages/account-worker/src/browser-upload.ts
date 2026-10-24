@@ -28,10 +28,18 @@ const NONCES = 'browser.relay.upload-nonces';
 const UPLOAD = 'browser.relay.upload:';
 export const BROWSER_DOWNLOAD = 'browser.relay.download:';
 
-/** The text a pairing key signs for one upload request. */
-export function browserUploadSignedText(input: { pairingId: string; generation: number; method: string; pathname: string; bodySha256: string; issuedAt: number; nonce: string }): string {
-  return `gitspace-browser-relay-v2:upload:${input.pairingId}:${input.generation}:${input.method}:${input.pathname}:${input.bodySha256}:${input.issuedAt}:${input.nonce}`;
+/** What a pairing-key signature on a request to the account is for: `upload` begins an upload, `share` makes, ends or
+ * lists share links (`browser-share.ts`). The label is part of the signed text, so one never passes as the other. */
+export type BrowserSignedLabel = 'upload' | 'share';
+/** The text a pairing key signs for one request. */
+export function browserSignedText(label: BrowserSignedLabel, input: { pairingId: string; generation: number; method: string; pathname: string; bodySha256: string; issuedAt: number; nonce: string }): string {
+  return `gitspace-browser-relay-v2:${label}:${input.pairingId}:${input.generation}:${input.method}:${input.pathname}:${input.bodySha256}:${input.issuedAt}:${input.nonce}`;
 }
+/** Error codes and wording per label: `UPLOAD_SIGNATURE_INVALID`, `SHARE_SIGNATURE_INVALID`… */
+const SIGNED: Record<BrowserSignedLabel, { code: string; noun: string; Noun: string }> = {
+  upload: { code: 'UPLOAD', noun: 'upload', Noun: 'Upload' },
+  share: { code: 'SHARE', noun: 'share request', Noun: 'Share request' },
+};
 const Signature = z.object({ pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), issuedAt: z.number().int(), nonce: z.string().regex(/^[a-f0-9]{64}$/u), signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/u).max(128) });
 const Begin = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('download'), groupId: z.string().uuid(), attemptId: z.string().min(1).max(256), name: z.string().min(1).max(512), mediaType: z.string().min(1).max(128) }),
@@ -47,17 +55,18 @@ export type BrowserUpload = z.infer<typeof Upload>;
 /** A finished download, kept for the run that started it (workspace-relative drive path). */
 export const BrowserDownloadSchema = z.object({ path: z.string(), size: z.number().int().nonnegative(), mediaType: z.string(), expiresAt: z.number().int() });
 
-/** The signed request that begins an upload, as the route saw it. */
-export type BrowserUploadRequest = { method: string; pathname: string; header: string | null; bodySha256: string };
+/** A request signed with a pairing key, as the route saw it. */
+export type BrowserSignedRequest = { method: string; pathname: string; header: string | null; bodySha256: string };
 /** `begin` is signed; the rest come through the upload's link, which names the pairing that began it. */
 export type BrowserUploadStep =
-  | { op: 'begin'; request: BrowserUploadRequest; body: unknown }
+  | { op: 'begin'; request: BrowserSignedRequest; body: unknown }
   | { op: 'part'; pairingId: string; uploadId: string; index: number }
   | { op: 'stored'; uploadId: string; index: number; size: number; drive: z.infer<typeof DriveUploadSchema> }
   | { op: 'complete'; pairingId: string; uploadId: string; body: unknown }
   | { op: 'abort'; pairingId: string; uploadId: string };
-type Failure = { ok: false; status: number; code: string; message: string };
-export type BrowserUploadReply = { ok: true; value: Record<string, unknown> } | Failure;
+/** A refused request to the account's browser routes: its HTTP status, code and message. */
+export type BrowserRequestFailure = { ok: false; status: number; code: string; message: string };
+export type BrowserUploadReply = { ok: true; value: Record<string, unknown> } | BrowserRequestFailure;
 /** What `part` tells the link's route: store the part in that workspace's drive, continuing `drive`. */
 export const BrowserUploadPartSchema = z.object({ projectId: z.string(), workspaceId: z.string(), drive: DriveUploadSchema });
 /** What `begin` tells the route, which answers with the upload's link instead of its ids. */
@@ -78,8 +87,54 @@ export type BrowserUploadAuthority = {
   captured(captureId: string, file: keyof typeof CAPTURE_FILES, size: number): Promise<void>;
 };
 
-const fail = (status: number, code: string, message: string): Failure => ({ ok: false, status, code, message });
+const fail = (status: number, code: string, message: string): BrowserRequestFailure => ({ ok: false, status, code, message });
 const SESSION_GONE = fail(404, 'UPLOAD_UNKNOWN', 'Unknown upload');
+
+/** The confirmed pairing whose key signed this request for `label` (`pairing` gives its key), once per nonce: the nonces
+ * of every label are kept together in `storage` while their signatures could still be accepted. */
+export async function browserRequestSigner(storage: Pick<DurableObjectStorage, 'get' | 'put'>, pairing: (pairingId: string) => Promise<{ generation: number; publicKey: string } | undefined>, label: BrowserSignedLabel, request: BrowserSignedRequest): Promise<{ ok: true; pairingId: string } | BrowserRequestFailure> {
+  const { code, noun, Noun } = SIGNED[label];
+  if (!request.header || request.header.length > 1024) return fail(401, `${code}_SIGNATURE_REQUIRED`, `A signed ${noun} is required`);
+  let claim: z.infer<typeof Signature>;
+  try { claim = Signature.parse(JSON.parse(atob(request.header.replaceAll('-', '+').replaceAll('_', '/')))); }
+  catch { return fail(401, `${code}_SIGNATURE_INVALID`, `Invalid ${noun} signature`); }
+  const now = Date.now();
+  if (Math.abs(now - claim.issuedAt) > SIGNATURE_WINDOW_MS) return fail(401, `${code}_SIGNATURE_EXPIRED`, `${Noun} signature expired; check this computer’s clock`);
+  const signer = await pairing(claim.pairingId);
+  if (!signer || signer.generation !== claim.generation) return fail(401, 'BROWSER_PAIRING_UNCONFIRMED', 'This Chrome is not paired and confirmed with this account');
+  try {
+    const key = await crypto.subtle.importKey('raw', browserUnbase64(signer.publicKey), 'Ed25519', false, ['verify']);
+    if (!await crypto.subtle.verify('Ed25519', key, browserUnbase64(claim.signature), new TextEncoder().encode(browserSignedText(label, { ...claim, method: request.method, pathname: request.pathname, bodySha256: request.bodySha256 })))) return fail(401, `${code}_SIGNATURE_INVALID`, `Invalid ${noun} signature`);
+  } catch { return fail(401, `${code}_SIGNATURE_INVALID`, `Invalid ${noun} signature`); }
+  const nonces = z.record(z.string(), z.number()).parse(await storage.get(NONCES) ?? {});
+  const key = `${claim.pairingId}:${claim.nonce}`;
+  if (nonces[key] !== undefined) return fail(401, `${code}_NONCE_REUSED`, `${Noun} signature already used`);
+  const kept = Object.fromEntries(Object.entries(nonces).filter(([, until]) => until > now));
+  await storage.put(NONCES, { ...kept, [key]: claim.issuedAt + 2 * SIGNATURE_WINDOW_MS });
+  return { ok: true, pairingId: claim.pairingId };
+}
+
+/** A signed request's JSON body as a route reads it: a POST of at most 16 KiB with its Content-Length, and the body's
+ * SHA-256 the signature covers. */
+export async function readBrowserSignedRequest(request: Request, label: BrowserSignedLabel): Promise<{ ok: true; request: BrowserSignedRequest; body: unknown } | BrowserRequestFailure> {
+  const { code, noun, Noun } = SIGNED[label];
+  if (request.method !== 'POST') return fail(405, 'METHOD_NOT_ALLOWED', `Send a ${noun} with POST`);
+  const declared = Number(request.headers.get('content-length'));
+  if (!request.headers.has('content-length') || !Number.isSafeInteger(declared) || declared > JSON_BODY_BYTES) return fail(413, `${code}_INVALID`, `Send a ${noun} with at most ${JSON_BODY_BYTES} bytes of JSON and its Content-Length`);
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength !== declared) return fail(400, `${code}_INVALID`, 'The request does not match its Content-Length');
+  const bodySha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  let body: unknown;
+  try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { return fail(400, `${code}_INVALID`, `${Noun} must be JSON`); }
+  return { ok: true, request: { method: request.method, pathname: new URL(request.url).pathname, header: request.headers.get(BROWSER_UPLOAD_HEADER), bodySha256 }, body };
+}
+
+/** The answer of the account's browser routes (your Chrome's signed requests, share links): `{status:'ok', value}` or
+ * `{status:'error', error:{code, message}}`. */
+export function browserRouteReply(reply: { ok: true; value: unknown } | BrowserRequestFailure): Response {
+  const body = reply.ok ? { status: 'ok', value: reply.value } : { status: 'error', error: { code: reply.code, message: reply.message } };
+  return Response.json(body, { status: reply.ok ? 200 : reply.status, headers: { 'cache-control': 'no-store' } });
+}
 
 /**
  * Where a download lands in the workspace's drive (`drive://workspace/<path>`): `browser/downloads/<YYYY-MM-DD>/<name>`
@@ -105,7 +160,7 @@ export class BrowserUploads {
   async step(step: BrowserUploadStep): Promise<BrowserUploadReply> {
     if (step.op === 'stored') return this.stored(step);
     if (step.op === 'begin') {
-      const signer = await this.signer(step.request);
+      const signer = await browserRequestSigner(this.storage, pairingId => this.authority.pairing(pairingId), 'upload', step.request);
       return signer.ok ? this.begin(signer.pairingId, step.body) : signer;
     }
     const upload = await this.session(step.pairingId, step.uploadId);
@@ -119,29 +174,7 @@ export class BrowserUploads {
     return { ok: true, value: { projectId: row.projectId, workspaceId: row.workspaceId, drive: row.drive } };
   }
 
-  /** The confirmed pairing whose key signed this request, once per nonce. */
-  private async signer(request: BrowserUploadRequest): Promise<{ ok: true; pairingId: string } | Failure> {
-    if (!request.header || request.header.length > 1024) return fail(401, 'UPLOAD_SIGNATURE_REQUIRED', 'A signed upload is required');
-    let claim: z.infer<typeof Signature>;
-    try { claim = Signature.parse(JSON.parse(atob(request.header.replaceAll('-', '+').replaceAll('_', '/')))); }
-    catch { return fail(401, 'UPLOAD_SIGNATURE_INVALID', 'Invalid upload signature'); }
-    const now = Date.now();
-    if (Math.abs(now - claim.issuedAt) > SIGNATURE_WINDOW_MS) return fail(401, 'UPLOAD_SIGNATURE_EXPIRED', 'Upload signature expired; check this computer’s clock');
-    const pairing = await this.authority.pairing(claim.pairingId);
-    if (!pairing || pairing.generation !== claim.generation) return fail(401, 'BROWSER_PAIRING_UNCONFIRMED', 'This Chrome is not paired and confirmed with this account');
-    try {
-      const key = await crypto.subtle.importKey('raw', browserUnbase64(pairing.publicKey), 'Ed25519', false, ['verify']);
-      if (!await crypto.subtle.verify('Ed25519', key, browserUnbase64(claim.signature), new TextEncoder().encode(browserUploadSignedText({ ...claim, method: request.method, pathname: request.pathname, bodySha256: request.bodySha256 })))) return fail(401, 'UPLOAD_SIGNATURE_INVALID', 'Invalid upload signature');
-    } catch { return fail(401, 'UPLOAD_SIGNATURE_INVALID', 'Invalid upload signature'); }
-    const nonces = z.record(z.string(), z.number()).parse(await this.storage.get(NONCES) ?? {});
-    const key = `${claim.pairingId}:${claim.nonce}`;
-    if (nonces[key] !== undefined) return fail(401, 'UPLOAD_NONCE_REUSED', 'Upload signature already used');
-    const kept = Object.fromEntries(Object.entries(nonces).filter(([, until]) => until > now));
-    await this.storage.put(NONCES, { ...kept, [key]: claim.issuedAt + 2 * SIGNATURE_WINDOW_MS });
-    return { ok: true, pairingId: claim.pairingId };
-  }
-
-  private async session(pairingId: string, uploadId: string): Promise<{ ok: true; value: BrowserUpload } | Failure> {
+  private async session(pairingId: string, uploadId: string): Promise<{ ok: true; value: BrowserUpload } | BrowserRequestFailure> {
     const stored = await this.storage.get(`${UPLOAD}${uploadId}`);
     if (!stored) return SESSION_GONE;
     const row = Upload.parse(stored);
@@ -208,19 +241,11 @@ export class BrowserUploads {
 /** `POST BROWSER_UPLOAD_PATH`, signed with the pairing key: begins an upload and answers with its link (`upload-link.ts`),
  * the drive path it will have and when its session lapses if no part arrives. */
 export async function serveBrowserUpload(request: Request, dependencies: { relay: { browserRelayUpload(step: BrowserUploadStep): Promise<BrowserUploadReply> }; link(target: { pairingId: string; uploadId: string }): Promise<string> }): Promise<Response> {
-  const reply = (status: number, body: { status: 'ok'; value: unknown } | { status: 'error'; error: { code: string; message: string } }) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
-  const url = new URL(request.url);
-  if (url.pathname !== BROWSER_UPLOAD_PATH) return reply(404, { status: 'error', error: { code: 'UPLOAD_ROUTE_UNKNOWN', message: 'Unknown upload request' } });
-  if (request.method !== 'POST') return reply(405, { status: 'error', error: { code: 'METHOD_NOT_ALLOWED', message: 'Begin an upload with POST' } });
-  const declared = Number(request.headers.get('content-length'));
-  if (!request.headers.has('content-length') || !Number.isSafeInteger(declared) || declared > JSON_BODY_BYTES) return reply(413, { status: 'error', error: { code: 'UPLOAD_INVALID', message: `Begin an upload with at most ${JSON_BODY_BYTES} bytes of JSON and its Content-Length` } });
-  const body = new Uint8Array(await request.arrayBuffer());
-  if (body.byteLength !== declared) return reply(400, { status: 'error', error: { code: 'UPLOAD_INVALID', message: 'The request does not match its Content-Length' } });
-  const bodySha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', body))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-  let json: unknown;
-  try { json = JSON.parse(new TextDecoder().decode(body)); } catch { return reply(400, { status: 'error', error: { code: 'UPLOAD_INVALID', message: 'Upload request must be JSON' } }); }
-  const begun = await dependencies.relay.browserRelayUpload({ op: 'begin', request: { method: request.method, pathname: url.pathname, header: request.headers.get(BROWSER_UPLOAD_HEADER), bodySha256 }, body: json });
-  if (!begun.ok) return reply(begun.status, { status: 'error', error: { code: begun.code, message: begun.message } });
+  if (new URL(request.url).pathname !== BROWSER_UPLOAD_PATH) return browserRouteReply(fail(404, 'UPLOAD_ROUTE_UNKNOWN', 'Unknown upload request'));
+  const read = await readBrowserSignedRequest(request, 'upload');
+  if (!read.ok) return browserRouteReply(read);
+  const begun = await dependencies.relay.browserRelayUpload({ op: 'begin', request: read.request, body: read.body });
+  if (!begun.ok) return browserRouteReply(begun);
   const { uploadId, pairingId, path, expiresAt } = BrowserUploadBegunSchema.parse(begun.value);
-  return reply(200, { status: 'ok', value: { link: await dependencies.link({ pairingId, uploadId }), path, expiresAt } });
+  return browserRouteReply({ ok: true, value: { link: await dependencies.link({ pairingId, uploadId }), path, expiresAt } });
 }

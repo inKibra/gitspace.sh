@@ -2,9 +2,11 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { RuntimeSnapshotSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
+import { RuntimeSnapshotSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
+import { liveNotices } from './live-notices.js';
 import { FRAMES_AHEAD } from './RuntimeBrowserCaptures.js';
 import { BROWSER_REFRESH_MS, RuntimeBrowserTab } from './RuntimeBrowserTab.js';
 
@@ -20,6 +22,8 @@ const started = '2026-10-24T12:00:00.000Z';
 let overview: RuntimeBrowserOverview;
 let previews: Record<string, RuntimeBrowserPreview>;
 let captures: RuntimeBrowserCaptureView[];
+let shares: RuntimeBrowserShare[];
+let comments: RuntimeBrowserPageCommentView[];
 let container: HTMLDivElement;
 let root: Root;
 const commands = (type: RuntimeSessionCommand['type']) => rpc.session.mock.calls.filter(([input]) => input.command.type === type);
@@ -36,6 +40,14 @@ function labelled(label: string): HTMLElement {
 async function render(machines: readonly { id: string; label: string }[] = []) { await act(async () => root.render(<RuntimeBrowserTab snapshot={snapshot} machines={machines} onOpenEnvironment={() => {}} />)); }
 /** Lets fetches, their bodies and the renders they cause finish. */
 async function settle() { for (let round = 0; round < 5; round += 1) await act(async () => { await vi.advanceTimersByTimeAsync(0); }); }
+function share(id: number, fields: Partial<RuntimeBrowserShare> = {}): RuntimeBrowserShare {
+  const shareId = `00000000-0000-4000-8000-0000000000e${id}`;
+  return { shareId, link: `https://account.test/s/${shareId}#Zq3x_Kd8-Pw0aB7cD9eF1gH2iJ4kL5mN6oP8rS0tU2v${id}`, pairingId: work, browser: 'Work Chrome', targetId: 'tab-a', workspace: { projectId: 'project', workspaceId: 'workspace', groupId: group }, page: { url: 'https://app.example.com/login', title: 'Login' }, comment: false, createdAt: started, expiresAt: '2026-10-24T13:00:00.000Z', endedAt: null, endReason: null, viewers: [], audit: [], ...fields };
+}
+function comment(id: number, text: string, guest: boolean, cropUrl: string | null): RuntimeBrowserPageCommentView {
+  return { cropUrl, comment: { version: 1, commentId: `00000000-0000-4000-8000-0000000000f${id}`, shareId: null, by: { name: guest ? 'Ana' : 'Brad', guest }, text, page: { url: 'https://app.example.com/login', title: 'Login' }, target: { box: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, role: 'button', name: 'Sign in', text: 'Sign in', selectors: ['#sign-in'] }, region: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, viewport: { width: 1280, height: 720 }, scroll: { x: 0, y: 0 }, crop: null, createdAt: started } };
+}
+const chromeWithTab = (): RuntimeBrowserOverview['chromes'] => [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', running: 0, tabs: [{ targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'you', usable: true }] }];
 function capture(id: number, fields: Partial<RuntimeBrowserCapture>, files: Record<string, string> = {}): RuntimeBrowserCaptureView {
   return { capture: { version: 1, captureId: `00000000-0000-4000-8000-0000000000c${id}`, name: `Capture ${id}`, by: 'agent', source: 'headless', browser: 'Cloud browser', page: { url: 'https://app.example.com', title: 'App' }, target: null, startedAt: started, endedAt: started, state: 'saved', reason: null, tracks: {}, ...fields }, files };
 }
@@ -47,6 +59,8 @@ beforeEach(() => {
   overview = { sites: { origins: ['https://app.example.com', 'https://bank.example.com'], stepsOnly: ['https://bank.example.com'] }, cloud: { groupId: null, running: 0, tabs: [] }, machines: [], chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }] };
   previews = {};
   captures = [];
+  shares = [];
+  comments = [];
   rpc.session.mockImplementation(async ({ command }: { command: RuntimeSessionCommand }) => {
     if (command.type === 'browserOverview') return { status: 'ok', value: { control: {}, browserOverview: overview } };
     if (command.type === 'browserPreview') return { status: 'ok', value: { control: {}, browserPreview: previews[command.targetId] } };
@@ -63,6 +77,18 @@ beforeEach(() => {
       const saved: RuntimeBrowserCaptureView = { ...stopped, capture: { ...stopped.capture, state: 'saved', endedAt: new Date().toISOString(), tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: 40, width: 1280, height: 720 } } } };
       captures = captures.map(view => view.capture.captureId === command.captureId ? saved : view);
       return { status: 'ok', value: { control: {}, browserCapture: saved } };
+    }
+    if (command.type === 'browserShares') return { status: 'ok', value: { control: {}, browserShares: shares } };
+    if (command.type === 'browserPageComments') return { status: 'ok', value: { control: {}, browserPageComments: comments } };
+    if (command.type === 'browserShareCreate') {
+      const made = share(9, { targetId: command.targetId, comment: command.comment, expiresAt: new Date(Date.parse(started) + command.expiresInMinutes * 60_000).toISOString() });
+      shares = [made, ...shares];
+      return { status: 'ok', value: { control: {}, browserShare: made } };
+    }
+    if (command.type === 'browserShareRevoke') {
+      const ended = { ...shares.find(other => other.shareId === command.shareId)!, endedAt: new Date().toISOString(), endReason: 'revoked' as const };
+      shares = shares.map(other => other.shareId === command.shareId ? ended : other);
+      return { status: 'ok', value: { control: {}, browserShare: ended } };
     }
     throw new Error(`Unexpected ${command.type}`);
   });
@@ -302,4 +328,79 @@ it('captures a tab from its tile, shows REC with the time recorded on every reco
   expect(labelled('Capture App').textContent).toBe('Capture');
   expect(labelled('Recording of App').textContent).toMatch(/· 1:05(?!:)/u);
   expect(labelled('Tab Docs').textContent).toContain('REC 1:35');
+});
+
+it('shares a Chrome tab from its tile with comments and the expiry you chose, then shows its link to copy', async () => {
+  vi.useFakeTimers();
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+  overview = { ...overview, chromes: chromeWithTab(), cloud: { groupId: group, running: 0, tabs: [{ targetId: 'tab-c', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true }] } };
+  await render();
+  expect(container.querySelector('[aria-label="Share App"]')).toBeNull();
+  await act(async () => labelled('Share Login').click());
+  const popover = labelled('Share link for Login');
+  await act(async () => popover.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  const expiry = popover.querySelector<HTMLSelectElement>('select[aria-label="Expires after"]')!;
+  expect(expiry.value).toBe('60');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(expiry, '480');
+    expiry.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await act(async () => button('Create link').click());
+  await settle();
+  expect(commands('browserShareCreate').map(([input]) => input.command)).toEqual([{ type: 'browserShareCreate', groupId: group, targetId: 'tab-a', comment: true, expiresInMinutes: 480 }]);
+  const link = shares[0]!.link;
+  expect(labelled('Share link for Login').querySelector<HTMLInputElement>('input[aria-label="Link for Login"]')?.value).toBe(link);
+  expect(labelled('Share link for Login').textContent).toContain('View, point and comment');
+  await act(async () => labelled('Share link for Login').querySelector<HTMLButtonElement>('button[aria-label="Copy link for Login"]')!.click());
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(link);
+  expect(labelled('Shares').textContent).toContain('Login');
+});
+
+it('lists live and ended shares with who is watching and the time left, and stops sharing one', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(started));
+  shares = [
+    share(1, { expiresAt: '2026-10-24T13:15:00.000Z', comment: true, viewers: [{ viewerId: '00000000-0000-4000-8000-000000000101', name: 'Ana', guest: true, joinedAt: started }, { viewerId: '00000000-0000-4000-8000-000000000102', name: 'Brad', guest: false, joinedAt: started }], audit: [{ at: started, event: 'joined', by: 'Ana', guest: true, detail: null }, { at: started, event: 'created', by: 'you', guest: false, detail: null }] }),
+    share(2, { page: { url: 'https://app.example.com/old', title: 'Old page' }, endedAt: started, endReason: 'expired' }),
+  ];
+  await render();
+  await settle();
+  const live = labelled('Share of Login');
+  expect(live.textContent).toContain('Watching: Ana (guest), Brad');
+  expect(live.textContent).toContain('1 h 15 min left');
+  expect(live.textContent).toContain('View, point and comment');
+  expect(live.querySelector('details')?.hasAttribute('open')).toBe(false);
+  expect(live.querySelector('details')?.textContent).toContain('Ana (guest) joined');
+  const ended = labelled('Share of Old page');
+  expect(ended.textContent).toContain('Expired');
+  expect(ended.querySelector('button')).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(30 * 60_000); });
+  expect(labelled('Share of Login').textContent).toContain('45 min left');
+
+  await act(async () => labelled('Stop sharing Login').click());
+  await settle();
+  expect(commands('browserShareRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserShareRevoke', shareId: shares[0]!.shareId }]);
+  expect(labelled('Share of Login').textContent).toContain('Stopped');
+  expect(container.querySelector('[aria-label="Stop sharing Login"]')).toBeNull();
+});
+
+it('shows page comments with where they point, who made them and on which page, and reads them again when one is announced', async () => {
+  vi.useFakeTimers();
+  comments = [comment(1, 'The button does nothing', true, '/files/crop-1')];
+  await render();
+  await settle();
+  const first = labelled('Comment by Ana');
+  expect(first.querySelector('img')?.getAttribute('src')).toBe('/files/crop-1');
+  expect(first.textContent).toContain('guest');
+  expect(first.textContent).toContain('The button does nothing');
+  expect(first.textContent).toContain('On button “Sign in”');
+  expect(first.querySelector('a')?.getAttribute('href')).toBe('https://app.example.com/login');
+
+  comments = [comment(2, 'Make it blue', false, null), ...comments];
+  await act(async () => { liveNotices.receive({ ...workspaceLiveKey('workspace', 'page-comments', 'project'), version: 1 }); });
+  await settle();
+  const second = labelled('Comment by Brad');
+  expect(second.textContent).toContain('Make it blue');
+  expect(second.textContent).not.toContain('guest');
+  expect(second.querySelector('img')).toBeNull();
 });

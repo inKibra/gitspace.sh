@@ -1,12 +1,15 @@
 import { expect } from 'bun:test';
 import { createContext, runInContext } from 'node:vm';
-import { browserBase64, RuntimeAccountBrowserSignedGrantSchema, signRuntimeAccountBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeBrowserAuthorityCertificate, type RuntimeAccountBrowserAuthorizationBody } from '@gitspace/protocol-runtime';
+import { Window } from 'happy-dom';
+import { BROWSER_EXTENSION_PROTOCOL, browserBase64, RuntimeAccountBrowserSignedGrantSchema, signRuntimeAccountBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeBrowserAuthorityCertificate, type RuntimeAccountBrowserAuthorizationBody, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { extensionFiles } from '../src/index.js';
 import { browserOverlayFunction } from '../src/overlay.js';
 
-type Tab = { id: number; groupId: number; url: string; index: number; windowId: number; title?: string };
+type Tab = { id: number; groupId: number; url: string; index: number; windowId: number; title?: string; width?: number; height?: number };
+type Group = { id: number; title: string; color: string; collapsed: boolean };
 type Reply = Record<string, unknown> & { error?: string };
 type DebuggerEvent = (source: { targetId: string }, method: string, params: object) => void;
+type TabUpdated = (tabId: number, change: Record<string, unknown>, tab: Tab) => void;
 type Sender = { id: string; url: string };
 type Listener = (message: Record<string, unknown>, sender: Sender, respond: (value: unknown) => void) => boolean | undefined;
 /** One DevTools command the extension sent to a tab. */
@@ -19,6 +22,8 @@ export type AccountRequest = { method: string; pathname: string; header: string 
 export type DownloadItem = { id: number; url: string; finalUrl: string; mime: string; filename: string; state: string; byExtensionId?: string };
 /** The offscreen document's fake media: the recorder the extension made, and the stream it recorded. */
 export type Recorder = { mimeType: string; slice: number; state: string; emit(bytes: Uint8Array<ArrayBuffer>): void };
+/** The screencast commands the extension sent to a tab, in order: each start's parameters, and `stop`. */
+export const screencasts = (commands: DebuggerCommand[], targetId: string) => commands.filter(entry => entry.targetId === targetId && ['Page.startScreencast', 'Page.stopScreencast'].includes(entry.method)).map(({ method, params }) => method === 'Page.startScreencast' ? params : 'stop');
 
 const projectId = 'project';
 const workspaceId = 'workspace';
@@ -78,7 +83,11 @@ export async function installed(options: { local?: Record<string, unknown>; live
     queueMicrotask(() => tx.oncomplete()); return tx;
   } };
   const tabs = new Map<number, Tab>([1, 2, 3].map(id => [id, { id, groupId: 7, url: ['https://app.example/', 'https://a.docs.example/', 'https://bank.example/'][id - 1] ?? '', index: id, windowId: 1, title: 'Page' }]));
-  const group = { id: 7, title: 'Checkout', color: 'blue', collapsed: false };
+  const group: Group = { id: 7, title: 'Checkout', color: 'blue', collapsed: false };
+  /** Chrome's tab groups by id; groups Chrome makes for `chrome.tabs.group` are numbered above 100. */
+  const groups = new Map<number, Group>([[group.id, group]]);
+  /** The tab in front, which the popup is about. */
+  let activeTabId = 1;
   const local = new Map<string, unknown>(Object.entries(options.local ?? {}));
   const alarms = new Map<string, { when?: number; periodInMinutes?: number }>();
   const titles: string[] = [];
@@ -96,6 +105,9 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const timers: Timer[] = [];
   let debuggerEvent: DebuggerEvent = () => {};
   let alarmListener: (alarm: { name: string }) => void = () => {};
+  const tabUpdated: TabUpdated[] = [];
+  const tabRemoved: Array<(tabId: number) => void> = [];
+  const debuggerDetached: Array<(source: { targetId: string }) => void> = [];
   /** Tests waiting for something the extension sends: checked again whenever a request reaches the account or a
    * message reaches the relay. */
   const waiters: Array<{ check: () => boolean; resolve: () => void }> = [];
@@ -103,10 +115,12 @@ export async function installed(options: { local?: Record<string, unknown>; live
   /** Answers a debugger command instead of `ANSWERS` when it returns something. */
   let answer: (command: DebuggerCommand) => unknown = () => undefined;
   /** The relay connections the extension opened, in order. */
-  const sockets: Array<{ readyState: number; sent: string[]; onmessage?: (event: { data: string }) => void; onclose?: () => void; close(): void }> = [];
+  const sockets: Array<{ readyState: number; bufferedAmount: number; sent: string[]; onmessage?: (event: { data: string }) => void; onclose?: () => void; close(): void }> = [];
   class WebSocket {
     static OPEN = 1;
     readyState = 0;
+    /** Bytes sent but not yet on the network; a test sets it to back the connection up. */
+    bufferedAmount = 0;
     sent: string[] = [];
     onmessage?: (event: { data: string }) => void;
     onclose?: () => void;
@@ -129,12 +143,28 @@ export async function installed(options: { local?: Record<string, unknown>; live
   }
   const record = () => { toolbar.push({ ...current }); };
 
-  // The account: uploads in parts, and sealed drive files.
+  // The account: uploads in parts, sealed drive files, and this Chrome's shares.
   const requests: AccountRequest[] = [];
   const uploads = new Map<string, { begin: Record<string, unknown>; parts: Uint8Array<ArrayBuffer>[]; completed: boolean; aborted: boolean }>();
   const files = new Map<string, Uint8Array<ArrayBuffer>>();
+  const shares = new Map<string, RuntimeBrowserShare>();
   const held: Array<{ matches: (request: AccountRequest) => boolean; release: Promise<void> }> = [];
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
+  /** A share request (`POST /api/browser-relay/shares`): a share made (the account answers its link), or ended. */
+  const shareRequest = (request: AccountRequest) => {
+    const body = JSON.parse(new TextDecoder().decode(request.body));
+    if (body.op === 'create') {
+      const shareId = crypto.randomUUID();
+      const tab = [...tabs.values()].find(entry => `target-${entry.id}` === body.targetId);
+      const share: RuntimeBrowserShare = { shareId, link: `https://account.gitspace.test/s/${shareId}#${'k'.repeat(43)}`, pairingId, browser: 'Chrome', targetId: body.targetId, workspace: null, page: { url: tab?.url ?? '', title: tab?.title ?? '' }, comment: body.comment, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + body.expiresInMinutes * 60_000).toISOString(), endedAt: null, endReason: null, viewers: [], audit: [] };
+      shares.set(shareId, share);
+      return json({ status: 'ok', value: { share } });
+    }
+    const share = shares.get(body.shareId);
+    if (body.op !== 'revoke' || !share) return new Response(JSON.stringify({ status: 'error', error: { code: 'SHARE_UNKNOWN', message: 'Unknown share' } }), { status: 404 });
+    Object.assign(share, { endedAt: new Date().toISOString(), endReason: 'revoked' });
+    return json({ status: 'ok', value: { share } });
+  };
   const fetch = async (input: URL | string, init: { method?: string; headers?: Record<string, string>; body?: Uint8Array<ArrayBuffer>; credentials?: string } = {}) => {
     const url = new URL(String(input));
     if (url.origin !== 'https://account.gitspace.test') throw new Error(`Unexpected fetch of ${url.href}`);
@@ -146,6 +176,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
     requests.push(request);
     notify();
     for (const hold of held) if (hold.matches(request)) await hold.release;
+    if (request.method === 'POST' && url.pathname === '/api/browser-relay/shares') return shareRequest(request);
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/uploads') {
       const begin = JSON.parse(new TextDecoder().decode(request.body));
       const id = `upload-${uploads.size + 1}`;
@@ -226,7 +257,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
 
   const chrome = {
     runtime: {
-      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.5.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
+      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.6.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
       getContexts: async () => offscreenOpen ? [{ contextType: 'OFFSCREEN_DOCUMENT' }] : [],
       sendMessage: (message: Record<string, unknown>) => deliver(offscreenListeners, message, workerSender),
     },
@@ -243,16 +274,27 @@ export async function installed(options: { local?: Record<string, unknown>; live
       attach: async (source: { targetId: string }) => { attached.push(source.targetId); },
       detach: async (source: { targetId: string }) => { detached.push(source.targetId); },
       sendCommand: async (source: { targetId: string }, method: string, params: Record<string, unknown> = {}) => { const command = { targetId: source.targetId, method, params }; commands.push(command); return answer(command) ?? ANSWERS[method] ?? {}; },
-      onEvent: { addListener: (listener: DebuggerEvent) => { debuggerEvent = listener; } }, onDetach: { addListener() {} },
+      onEvent: { addListener: (listener: DebuggerEvent) => { debuggerEvent = listener; } }, onDetach: { addListener: (listener: (source: { targetId: string }) => void) => { debuggerDetached.push(listener); } },
     },
     tabs: {
       get: async (id: number) => tabs.get(id),
-      query: async (query: { groupId?: number; active?: boolean }) => query.active ? [...tabs.values()].slice(0, 1) : [...tabs.values()].filter(tab => tab.groupId === query.groupId),
+      query: async (query: { groupId?: number; active?: boolean }) => [...tabs.values()].filter(tab => query.active ? tab.id === activeTabId && (query.groupId === undefined || tab.groupId === query.groupId) : tab.groupId === query.groupId),
       update: async (tabId: number) => { focused.push({ tabId, windowId: tabs.get(tabId)?.windowId ?? -1 }); },
       ungroup: async (tabId: number) => { ungrouped.push(tabId); },
-      onUpdated: { addListener() {} }, onCreated: { addListener() {} }, onRemoved: { addListener() {} },
+      // Like Chrome: a new group when none is named, and each tab that moved reports its group.
+      group: async ({ tabIds, groupId }: { tabIds: number[]; groupId?: number }) => {
+        const id = groupId ?? 100 + groups.size;
+        if (!groups.has(id)) groups.set(id, { id, title: '', color: 'grey', collapsed: false });
+        for (const tab of tabIds.flatMap(tabId => tabs.get(tabId) ?? [])) { tab.groupId = id; for (const listener of tabUpdated) listener(tab.id, { groupId: id }, tab); }
+        return id;
+      },
+      onUpdated: { addListener: (listener: TabUpdated) => { tabUpdated.push(listener); } }, onCreated: { addListener() {} }, onRemoved: { addListener: (listener: (tabId: number) => void) => { tabRemoved.push(listener); } },
     },
-    tabGroups: { get: async () => ({ ...group }), update: async (_id: number, change: { title?: string }) => { if (change.title !== undefined) { group.title = change.title; titles.push(change.title); } }, onRemoved: { addListener() {} } },
+    tabGroups: {
+      get: async (id: number) => { const found = groups.get(id); if (!found) throw new Error(`No group with id: ${id}.`); return { ...found }; },
+      update: async (id: number, change: Partial<Group>) => { const found = groups.get(id); if (!found) throw new Error(`No group with id: ${id}.`); Object.assign(found, change); if (change.title !== undefined) titles.push(change.title); },
+      onRemoved: { addListener() {} },
+    },
     windows: { update: async () => {} },
     alarms: {
       create: async (name: string, info: { when?: number; periodInMinutes?: number }) => { alarms.set(name, info); },
@@ -341,7 +383,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   /** Chrome fires an alarm. */
   const alarm = async (name: string) => { alarmListener({ name }); await settle(); };
   /** The account answers the extension's latest connection: the pairing handshake, then ready at `protocol`. */
-  const relay = async (protocol = 4) => {
+  const relay = async (protocol = BROWSER_EXTENSION_PROTOCOL) => {
     const socket = sockets.at(-1);
     if (!socket) throw new Error('The extension opened no relay connection');
     socket.readyState = 1;
@@ -349,24 +391,68 @@ export async function installed(options: { local?: Record<string, unknown>; live
     socket.onmessage?.({ data: JSON.stringify({ pairing: 'server' }) }); await settle();
     socket.onmessage?.({ data: JSON.stringify({ ready: true, protocol }) }); await settle();
   };
+  /** The relay sends a message on the extension's latest connection; what follows from it has happened once this
+   * resolves. */
+  const fromRelay = async (message: object) => { sockets.at(-1)?.onmessage?.({ data: JSON.stringify(message) }); await settle(); };
+  let asked = 0;
+  /** The relay sends a request with an id and waits for the extension's answer: its result, or its error thrown. */
+  const ask = async (message: object): Promise<unknown> => {
+    const id = `relay-${++asked}`;
+    await fromRelay({ id, ...message });
+    await waitFor(() => sent.some(entry => entry.id === id));
+    const reply = sent.find(entry => entry.id === id);
+    if (typeof reply?.error === 'object' && reply.error !== null && 'message' in reply.error) throw new Error(String(reply.error.message));
+    return reply?.result;
+  };
+  /** Chrome reports a tab changed (`change`, as `chrome.tabs.onUpdated` gives it). */
+  const updateTab = async (tabId: number, change: Partial<Tab>) => {
+    const tab = tabs.get(tabId);
+    if (!tab) throw new Error(`No tab ${tabId}`);
+    Object.assign(tab, change);
+    for (const listener of tabUpdated) listener(tabId, change, tab);
+    await settle();
+  };
+  /** You close a tab: Chrome removes it, and the debugger leaves it. */
+  const closeTab = async (tabId: number) => {
+    tabs.delete(tabId);
+    for (const listener of tabRemoved) listener(tabId);
+    for (const listener of debuggerDetached) listener({ targetId: `target-${tabId}` });
+    await settle();
+  };
+  /** The popup as Chrome shows it, on the tab in front: its page with `popup.js` running, asking this service worker.
+   * `copied` is what it put on the clipboard; `close` it after the test. */
+  const openPopup = async () => {
+    const window = new Window({ url: 'chrome-extension://extension/popup.html' });
+    const copied: string[] = [];
+    const files = extensionFiles('https://account.gitspace.test');
+    window.document.write((files['popup.html'] ?? '').replace('<script src="popup.js"></script>', ''));
+    Object.assign(window, { chrome: { runtime: { sendMessage: (message: Record<string, unknown>) => deliver(listeners, message, { id: 'extension', url: chrome.runtime.getURL('popup.html') }) } }, setInterval: () => 0 });
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: async (text: string) => { copied.push(text); } } });
+    window.eval(files['popup.js'] ?? '');
+    await settle();
+    return { window, document: window.document, copied, close: () => window.happyDOM.close() };
+  };
   /** The methods the extension sent to tabs for the agent, without those that draw the overlay. */
   const sentCommands = () => commands.filter(({ method, params }) => !OVERLAY_METHODS[method] && params.functionDeclaration !== browserOverlayFunction).map(({ method }) => method);
   /** What the extension asked the overlay of each tab to do, in order. */
   const overlays = (targetId: string) => commands.filter(command => command.targetId === targetId && command.params.functionDeclaration === browserOverlayFunction).map(({ params }) => Array.isArray(params.arguments) ? params.arguments[0]?.value : undefined);
-  /** Whether an upload request is authorized as the account requires: a begin carries this Chrome's signature over its
-   * method, path, body hash, time and nonce; a request to an upload's link carries no signature at all. */
+  /** Whether a request to the account is authorized as the account requires: an upload's begin and a share request
+   * carry this Chrome's signature over their label, method, path, body hash, time and nonce; a request to an upload's
+   * link carries no signature at all. */
   const authorizedAsRequired = async (request: AccountRequest) => {
-    if (request.pathname !== '/api/browser-relay/uploads') return request.pathname.startsWith('/api/uploads/') && request.header === null;
+    const label = request.pathname === '/api/browser-relay/uploads' ? 'upload' : request.pathname === '/api/browser-relay/shares' ? 'share' : null;
+    if (!label) return request.pathname.startsWith('/api/uploads/') && request.header === null;
     if (!request.header) return false;
     const proof = JSON.parse(Buffer.from(request.header, 'base64url').toString());
     const digest = Buffer.from(await crypto.subtle.digest('SHA-256', request.body)).toString('hex');
-    const message = `gitspace-browser-relay-v2:upload:${proof.pairingId}:${proof.generation}:${request.method}:${request.pathname}:${digest}:${proof.issuedAt}:${proof.nonce}`;
+    const message = `gitspace-browser-relay-v2:${label}:${proof.pairingId}:${proof.generation}:${request.method}:${request.pathname}:${digest}:${proof.issuedAt}:${proof.nonce}`;
     return proof.pairingId === pairingId && proof.generation === 1 && crypto.subtle.verify('Ed25519', identity.publicKey, Buffer.from(proof.signature, 'base64'), new TextEncoder().encode(message));
   };
   return {
-    grant, tabs, group, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, ungrouped,
-    requests, uploads, uploaded, files, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
-    execute, authorize, begin, preview, popup, pageEvent, alarm, relay, advance, waitFor,
+    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, ungrouped, stored: state,
+    requests, uploads, uploaded, files, shares, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
+    execute, authorize, begin, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor,
+    activate: (tabId: number) => { activeTabId = tabId; },
     answer: (respond: (command: DebuggerCommand) => unknown) => { answer = respond; },
   };
 }

@@ -5,6 +5,7 @@ import { SessionHistoryPageSchema, SessionHistoryPageRequestSchema } from '@gits
 import { transcriptPageRequestSchema, transcriptContentRequestSchema, transcriptPageSchema, transcriptContentPageSchema } from '@gitspace/blocks';
 import { SessionUsageReportSchema } from './usage.js';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema } from './browser.js';
+import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentViewSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareSchema } from './browser-share.js';
 export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -46,6 +47,13 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserCaptures') }),
   z.object({ type: z.literal('browserCaptureStart'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserCaptureStop'), captureId: z.string().uuid() }),
+  /** Share links (`browser-share.ts`): the workspace's shares; share a tab of its Chrome group; end a share; connect the
+   * tab of a share link you pasted to this workspace; the workspace's page comments. */
+  z.object({ type: z.literal('browserShares') }),
+  z.object({ type: z.literal('browserShareCreate'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256), comment: z.boolean(), expiresInMinutes: RuntimeBrowserShareExpirySchema }),
+  z.object({ type: z.literal('browserShareRevoke'), shareId: z.string().uuid() }),
+  z.object({ type: z.literal('browserShareConnect'), shareId: z.string().uuid(), secret: z.string().min(16).max(128) }),
+  z.object({ type: z.literal('browserPageComments') }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
@@ -66,7 +74,9 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('saveAgentDefinition'), path: z.string(), expectedRevision: z.string().nullable(), content: z.string() }),
 ]);
 export const RuntimeSessionInputSchema = RuntimeIdentitySchema.extend({ conversationId: z.string().optional(), command: RuntimeSessionCommandSchema });
-export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), browserOverview: RuntimeBrowserOverviewSchema.optional(), browserPreview: RuntimeBrowserPreviewSchema.optional(), browserCaptures: z.array(RuntimeBrowserCaptureViewSchema).max(500).optional(), browserCapture: RuntimeBrowserCaptureViewSchema.optional(), setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
+export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), browserOverview: RuntimeBrowserOverviewSchema.optional(), browserPreview: RuntimeBrowserPreviewSchema.optional(), browserCaptures: z.array(RuntimeBrowserCaptureViewSchema).max(500).optional(), browserCapture: RuntimeBrowserCaptureViewSchema.optional(),
+  browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(), browserPageComments: z.array(RuntimeBrowserPageCommentViewSchema).max(500).optional(),
+  setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;
 export type RuntimeSessionResult = z.infer<typeof RuntimeSessionResultSchema>;

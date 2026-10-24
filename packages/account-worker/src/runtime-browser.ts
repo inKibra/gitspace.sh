@@ -3,7 +3,8 @@ import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant, RuntimeBrowserCapture, RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
+import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant, RuntimeBrowserCapture, RuntimeBrowserCaptureView, RuntimeBrowserPageComment, RuntimeBrowserPageCommentView } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareSchema } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
@@ -27,8 +28,14 @@ const MACHINE_UPDATE_REQUIRED = 'Update GitSpace on this machine to see its brow
 const machineCaptureStarted = z.object({ page: z.object({ url: z.string(), title: z.string() }), startedAt: z.iso.datetime() });
 const machineCaptureStopped = z.object({ endedAt: z.iso.datetime(), count: z.number().int().nonnegative(), width: z.number().int().nonnegative(), height: z.number().int().nonnegative(), reason: z.string().nullable(), files: z.record(z.string(), z.string()) });
 const MACHINE_CAPTURE_FILES: CaptureFile[] = ['frames.bin', 'frames.json', 'thumbnail.jpg'];
+/** What the relay answers a `shareConnect`: the connected tab, or the Chrome where the workspace needs a live group first. */
+const ShareConnection = z.union([z.strictObject({ connected: RuntimeBrowserConnectedTabSchema }), z.strictObject({ needsGroup: z.strictObject({ pairingId: z.string().uuid() }) })]);
+/** Where the relay keeps a page comment's crop in the workspace's drive (`browser/comments/<commentId>.jpg`). */
+const PAGE_COMMENT_CROPS = 'browser/comments/';
+/** Page comments the Browser tab shows, newest first. */
+const PAGE_COMMENTS_SHOWN = 100;
 type BrowserStorageTransaction = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> };
-type BrowserStorage = BrowserStorageTransaction & { list(options: { prefix: string }): Promise<Map<string, unknown>>; delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
+type BrowserStorage = BrowserStorageTransaction & { list(options: { prefix: string; reverse?: boolean; limit?: number }): Promise<Map<string, unknown>>; delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
 type BrowserEnvironment = {
   ACCOUNT_ID: Env['ACCOUNT_ID'];
   RELAY_NAME: Env['RELAY_NAME'];
@@ -65,6 +72,14 @@ export async function workspaceBrowsersDocument(storage: { list(options: { prefi
     if (!await storage.get(`runtime.browser.revoked:${group.groupId}`)) chrome.push(group);
   }
   return { chrome: chrome.sort((left, right) => right.reportedAt.localeCompare(left.reportedAt)).slice(0, 32) };
+}
+/** Prefix of this workspace's page comments, `runtime.page-comment:<createdAt>:<commentId>`, written from its shares
+ * (`SpaceAuthorityDO.pageCommentAdded`); it keeps the newest `PAGE_COMMENTS_KEPT`. */
+export const PAGE_COMMENT_ROWS = 'runtime.page-comment:';
+export const PAGE_COMMENTS_KEPT = 2000;
+/** The workspace's page comments (`gitspace.page-comments`), newest first. */
+export async function workspacePageComments(storage: { list(options: { prefix: string; reverse: boolean; limit: number }): Promise<Map<string, unknown>> }, limit: number): Promise<RuntimeBrowserPageComment[]> {
+  return [...(await storage.list({ prefix: PAGE_COMMENT_ROWS, reverse: true, limit })).values()].map(row => RuntimeBrowserPageCommentSchema.parse(row));
 }
 /** Ends this workspace's Chrome groups: revoked here, so a later use starts a new group; its rows go; the relay has
  * each Chrome close the agent's tabs and let yours go. */
@@ -225,8 +240,19 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const rule = settings.defaultPairingId ? 'source:"relay" uses the default Chrome unless you pass an approved pairingId.' : approved.length === 1 ? 'source:"relay" uses the one approved Chrome unless you pass another approved pairingId.' : approved.length ? 'No Chrome is the default: pass the pairingId of an approved Chrome with source:"relay".' : 'None is approved for this project: ask the user to approve one in Plugins → Browsers or in this workspace’s Browser tab.';
     return reply(`Chromes paired with this account:\n${rows.join('\n')}\n${rule} Only an approved, online Chrome takes calls; an offline one is never replaced by another.`);
   }
+  /** `comments`: the workspace's page comments as the agent reads them, newest first, crops as drive addresses. It
+   * touches no browser and signs nothing, so subagents read them too. */
+  async function comments(input: Input, limit: number): Promise<RuntimeToolResult> {
+    const list = (await workspacePageComments(storage, limit)).map(({ commentId, by, text, page, target, region, crop, createdAt, shareId }) => ({
+      commentId, by, text, page, target: target === null ? null : { role: target.role, name: target.name, text: target.text, selectors: target.selectors }, region,
+      crop: crop === null ? null : `drive://workspace/${crop}`, createdAt, shareId,
+    }));
+    return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify(list) }] };
+  }
   async function execute(input: Input): Promise<RuntimeToolResult> {
-    if (RuntimeBrowserToolArgumentsSchema.parse(input.args).action === 'chromes') return chromes(input);
+    const tool = RuntimeBrowserToolArgumentsSchema.parse(input.args);
+    if (tool.action === 'chromes') return chromes(input);
+    if (tool.action === 'comments') return comments(input, tool.limit);
     const { args, sites } = await context(input), origins = sites.origins;
     if (accountPlacement(args)) return account.execute(input, args, sites);
     const saved = savedPreparation.parse(await storage.get(`runtime.browser.prepare:${input.attemptId}`));
@@ -356,10 +382,37 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     } catch (error) { return failed(`The recording did not reach the drive: ${error instanceof Error ? error.message : String(error)}`); }
     return writeCapture(drive, { ...current, endedAt: stopped.endedAt, state: 'saved', reason: stopped.reason, tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: stopped.count, width: stopped.width, height: stopped.height } } });
   }
+  /** The Browser tab's page comments, newest first, each with a sealed `/files/` link to its crop while the crop is in
+   * the drive. */
+  async function pageComments(): Promise<RuntimeBrowserPageCommentView[]> {
+    const drive = options.drive();
+    const [list, crops] = await Promise.all([workspacePageComments(storage, PAGE_COMMENTS_SHOWN), drive.list(PAGE_COMMENT_CROPS)]);
+    const kept = new Set(crops.map(file => file.path));
+    return Promise.all(list.map(async comment => ({ comment, cropUrl: comment.crop !== null && kept.has(comment.crop) ? await drive.url(comment.crop) : null })));
+  }
+  /** Share links on your Chromes (docs/APERTURE-DESIGN.md §8). A pasted share connects to the workspace's group on the
+   * share's Chrome: where the workspace has none live, the group is made or renewed as the agent's `tabs` there does it,
+   * and the share connects to that group. */
+  async function share(conversationId: string, command: RuntimeBrowserManagement) {
+    if (command.action === 'shares') return RuntimeBrowserShareSchema.array().parse(await account.share(conversationId, command));
+    if (command.action !== 'shareConnect') return RuntimeBrowserShareSchema.parse(await account.share(conversationId, command));
+    const asked = ShareConnection.parse(await account.share(conversationId, command));
+    if ('connected' in asked) return asked.connected;
+    const id = crypto.randomUUID();
+    const tabs: Input = { tool: 'browser', args: { action: 'tabs', source: 'relay', pairingId: asked.needsGroup.pairingId }, conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' };
+    const { groupId } = await prepare(tabs);
+    const listed = await execute(tabs);
+    if (listed.status !== 'completed') throw new Error(listed.status === 'failed' ? listed.error.message : 'Making this workspace’s group on that Chrome was interrupted');
+    const connected = ShareConnection.parse(await account.share(conversationId, { ...command, groupId }));
+    if ('needsGroup' in connected) throw new Error('That Chrome did not keep this workspace’s group; connect the link again');
+    return connected.connected;
+  }
   async function manage(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement) {
     if (command.action === 'overview') return overview(conversationId);
     if (command.action === 'captures') return captureViews(options.drive());
     if (command.action === 'captureStart' || command.action === 'captureStop') return capture(conversationId, command);
+    if (command.action === 'pageComments') return pageComments();
+    if (command.action === 'shares' || command.action === 'shareCreate' || command.action === 'shareRevoke' || command.action === 'shareConnect') return share(conversationId, command);
     // A group names its browser: a machine's headless group is previewed on that machine, any other by the account.
     if (command.action === 'preview') {
       const stored = command.groupId ? await storage.get(`runtime.browser.grant:${command.groupId}`) : undefined;

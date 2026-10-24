@@ -1,13 +1,10 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Window } from 'happy-dom';
 import { downloadBlobReadFunction } from '../src/page-files.js';
-import { command, FRAME, installed, settle, type DebuggerCommand } from './installed.js';
+import { command, FRAME, installed, screencasts, settle, type DebuggerCommand } from './installed.js';
 
 const windows: Window[] = [];
 afterEach(async () => { for (const window of windows.splice(0)) await window.happyDOM.close(); });
-
-/** The screencast commands the extension sent to a tab, in order. */
-const screencasts = (commands: DebuggerCommand[], targetId: string) => commands.filter(entry => entry.targetId === targetId && ['Page.startScreencast', 'Page.stopScreencast'].includes(entry.method)).map(({ method, params }) => method === 'Page.startScreencast' ? params : 'stop');
 
 describe('one screencast per tab', () => {
   it('runs at the largest size its consumers need, acknowledges frames for the capture, keeps them from the script, and stops when the last consumer leaves', async () => {
@@ -209,26 +206,5 @@ describe('Capture', () => {
     // The script still drives the tab, which keeps painting.
     expect(screencasts(chrome.commands, 'target-1').at(-1)).toEqual({ format: 'jpeg', quality: 1, maxWidth: 1, maxHeight: 1 });
     expect(chrome.detached).toEqual([]);
-  });
-});
-
-describe('with an account at protocol 4', () => {
-  it('leaves downloads to Chrome and offers no Capture', async () => {
-    const chrome = await installed({ live: true });
-    await chrome.relay(4);
-    const attemptId = await chrome.begin();
-    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
-    await settle();
-    expect(chrome.sentCommands()).toEqual(['Page.startScreencast']);
-    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { capture: 'none' } });
-    await chrome.pageEvent('target-1', 'Page.downloadWillBegin', { frameId: 'main', guid: 'g-1', url: 'https://app.example/report.csv', suggestedFilename: 'report.csv' });
-    await chrome.download({ id: 5, url: 'https://app.example/report.csv', finalUrl: 'https://app.example/report.csv', mime: 'text/csv', filename: '', state: 'in_progress' });
-    await chrome.execute({ operation: 'release', attemptId });
-    expect(chrome.downloadCalls).toEqual([]);
-    expect(chrome.requests).toEqual([]);
-    chrome.captureGrants.add(1);
-    expect((await chrome.popup({ popupState: true })).activeTab).toMatchObject({ capture: { recording: null, unavailable: 'Your GitSpace account does not save captures yet; update GitSpace' } });
-    expect(await chrome.popup({ startCapture: 1 })).toEqual({ error: 'Your GitSpace account does not save captures yet; update GitSpace' });
-    expect(chrome.streamIds).toEqual([]);
   });
 });

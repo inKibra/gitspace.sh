@@ -3,11 +3,12 @@
  * started, or a capture's files, sent over HTTPS in parts as the bytes arrive. Bytes never cross the relay connection.
  * Only the begin request (`POST /api/browser-relay/uploads`) is signed, with the extension's pairing key over its
  * method, path, the SHA-256 of its body, the time and a fresh nonce; the account checks it against the confirmed
- * pairing and answers with the upload's link, the whole authority for its parts, completion and abandonment.
+ * pairing and answers with the upload's link, the whole authority for its parts, completion and abandonment. Share
+ * requests (`share.ts`) are signed the same way under their own label.
  */
 
-/** The request header carrying the signature. */
-export const UPLOAD_HEADER = 'x-gitspace-browser-upload';
+/** The request header carrying the pairing key's signature of an upload's begin request or a share request. */
+export const SIGNATURE_HEADER = 'x-gitspace-browser-upload';
 /** Where an upload begins: the one request signed with the pairing key. */
 const BEGIN_PATH = '/api/browser-relay/uploads';
 /** Every part but the last is exactly 32 MiB, the drive's multipart size (the account appends each as it comes); the
@@ -21,20 +22,31 @@ export type UploadTarget =
 /** Signs one request: the header value for `method` on `pathname` with a body of this SHA-256 (lowercase hex). An
  * upload signs only its begin request, `POST /api/browser-relay/uploads`. */
 export type UploadSigner = (method: string, pathname: string, bodySha256: string) => Promise<string>;
-/** The pairing an upload is signed with. */
-export type UploadIdentity = { privateKey: CryptoKey; pairingId: string; generation: number };
+/** The pairing a request is signed with. */
+export type SigningIdentity = { privateKey: CryptoKey; pairingId: string; generation: number };
 export type UploadResult = { path: string; size: number; mediaType: string };
 
 const hex = (bytes: ArrayBuffer | Uint8Array) => Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+/** The SHA-256 of a request body, as lowercase hex. */
+export async function sha256Hex(body: Uint8Array<ArrayBuffer>): Promise<string> { return hex(await crypto.subtle.digest('SHA-256', body)); }
 
-/** The signature header for one request, made with the pairing key (in the service worker, which holds it). */
-export async function uploadSignature(identity: UploadIdentity, method: string, pathname: string, bodySha256: string): Promise<string> {
+/** The signature header for one request, made with the pairing key (in the service worker, which holds it): `label`
+ * names what the request does, `upload` for an upload's begin and `share` for a share request. */
+export async function relaySignature(identity: SigningIdentity, label: 'upload' | 'share', method: string, pathname: string, bodySha256: string): Promise<string> {
   const issuedAt = Date.now();
   const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
-  const message = `gitspace-browser-relay-v2:upload:${identity.pairingId}:${identity.generation}:${method}:${pathname}:${bodySha256}:${issuedAt}:${nonce}`;
+  const message = `gitspace-browser-relay-v2:${label}:${identity.pairingId}:${identity.generation}:${method}:${pathname}:${bodySha256}:${issuedAt}:${nonce}`;
   const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519', identity.privateKey, new TextEncoder().encode(message)))));
   return btoa(JSON.stringify({ pairingId: identity.pairingId, generation: identity.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+}
+
+/** The value of the account's `ok` reply; otherwise an error with the account's message after `refused`. */
+export async function accountValue(response: Response, refused: string): Promise<unknown> {
+  const reply: unknown = await response.json().catch(() => null);
+  if (typeof reply === 'object' && reply !== null && 'status' in reply && reply.status === 'ok' && 'value' in reply) return reply.value;
+  const message = typeof reply === 'object' && reply !== null && 'error' in reply && typeof reply.error === 'object' && reply.error !== null && 'message' in reply.error && typeof reply.error.message === 'string' ? reply.error.message : `HTTP ${response.status}`;
+  throw new Error(`${refused}${message}`);
 }
 
 /**
@@ -114,18 +126,14 @@ export class Upload {
   /** Begins the upload with the signed request naming its target; the account answers with the upload's link. */
   private async begin(): Promise<string> {
     const body = json(this.target);
-    const header = await this.sign('POST', BEGIN_PATH, hex(await crypto.subtle.digest('SHA-256', body)));
-    const begun = await this.send(new URL(BEGIN_PATH, this.account).href, { method: 'POST', body, headers: { [UPLOAD_HEADER]: header, 'content-type': 'application/json' } });
+    const header = await this.sign('POST', BEGIN_PATH, await sha256Hex(body));
+    const begun = await this.send(new URL(BEGIN_PATH, this.account).href, { method: 'POST', body, headers: { [SIGNATURE_HEADER]: header, 'content-type': 'application/json' } });
     if (typeof begun !== 'object' || begun === null || !('link' in begun) || typeof begun.link !== 'string') throw new Error('The account answered the upload with an unexpected reply');
     return begun.link;
   }
 
   /** One request to the account; resolves with the value of its `ok` reply. */
   private async send(url: string, init: { method: string; body?: Uint8Array<ArrayBuffer>; headers?: Record<string, string> }): Promise<unknown> {
-    const response = await fetch(url, { ...init, credentials: 'omit', cache: 'no-store' });
-    const reply: unknown = await response.json().catch(() => null);
-    if (typeof reply === 'object' && reply !== null && 'status' in reply && reply.status === 'ok' && 'value' in reply) return reply.value;
-    const message = typeof reply === 'object' && reply !== null && 'error' in reply && typeof reply.error === 'object' && reply.error !== null && 'message' in reply.error && typeof reply.error.message === 'string' ? reply.error.message : `HTTP ${response.status}`;
-    throw new Error(`The account refused the upload: ${message}`);
+    return accountValue(await fetch(url, { ...init, credentials: 'omit', cache: 'no-store' }), 'The account refused the upload: ');
   }
 }

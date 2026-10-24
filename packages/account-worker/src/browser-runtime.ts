@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, canonicalBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeBrowserCapture, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, RuntimeBrowserShareExpirySchema, canonicalBrowserAuthorization, type BROWSER_SHARE_EXPIRIES_MINUTES, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { performBrowserAction, type BrowserSemanticTab } from '@gitspace/runtime-machine/browser-semantic';
 import { BrowserOutputStore } from '@gitspace/runtime-machine/browser-output';
 import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
@@ -14,6 +14,13 @@ export type AccountBrowserTransport = {
   /** `captureStart` / `captureStop` on your Chrome (docs/APERTURE-DESIGN.md §11). */
   capture(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeBrowserCapture>;
   revoke(groupId: string, pairingId: string): Promise<void>;
+  /** Share links (docs/APERTURE-DESIGN.md §8), kept by the relay for the workspace that signed: its shares, live and
+   * recently ended; a share of a tab in its group on this Chrome; ending one of its shares; connecting a pasted share's
+   * tab to its group on the share's Chrome (`needsGroup` names that Chrome while the workspace has no live group there). */
+  shares(projectId: string, workspaceId: string): Promise<RuntimeBrowserShare[]>;
+  shareCreate(input: { projectId: string; workspaceId: string; groupId: string; targetId: string; comment: boolean; expiresInMinutes: (typeof BROWSER_SHARE_EXPIRIES_MINUTES)[number] }): Promise<RuntimeBrowserShare>;
+  shareRevoke(projectId: string, workspaceId: string, shareId: string): Promise<RuntimeBrowserShare>;
+  shareConnect(input: { projectId: string; workspaceId: string; shareId: string; secret: string; groupId?: string }): Promise<{ connected: RuntimeBrowserConnectedTab } | { needsGroup: { pairingId: string } }>;
 };
 /** How a cloud tab reaches its workspace's hosted services. `urlPattern` narrows interception to hosted names;
  * `admit` gives the browser its own session for one of the workspace's hostnames, after which the request goes to the
@@ -83,15 +90,32 @@ export class AccountBrowserRuntime {
         }
         return json({ groups, records: [] });
       }
+      // A new share names its group; listing, ending and connecting shares are the signing workspace's own, whichever
+      // of the account's Chromes carried them.
+      if (command.action === 'shares' || command.action === 'shareRevoke' || command.action === 'shareConnect') {
+        const relay = this.options.relay;
+        if (!relay) throw new Error('Account browser relay unavailable');
+        if (command.action === 'shares') return json(await relay.shares(scope.projectId, scope.workspaceId));
+        if (!command.shareId) throw new Error('Name the share');
+        if (command.action === 'shareRevoke') return json(await relay.shareRevoke(scope.projectId, scope.workspaceId, command.shareId));
+        if (!command.secret) throw new Error('Connecting a share takes the secret of its link');
+        return json(await relay.shareConnect({ projectId: scope.projectId, workspaceId: scope.workspaceId, shareId: command.shareId, secret: command.secret, ...(command.groupId ? { groupId: command.groupId } : {}) }));
+      }
       const recording = command.action === 'captureStart' || command.action === 'captureStop';
-      if ((command.action !== 'revoke' && command.action !== 'preview' && !recording) || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
+      if ((command.action !== 'revoke' && command.action !== 'preview' && command.action !== 'shareCreate' && !recording) || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
       const stored = await this.options.storage.get(`browser.account.group:${command.groupId}`);
       const grant = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(command.groupId);
       if (!grant || grant.projectId !== scope.projectId || grant.workspaceId !== scope.workspaceId) throw new Error('Browser group outside workspace');
-      // Previews and captures on your Chrome come from its extension; the cloud browser's from the workspace's browser
-      // session.
-      if (command.action === 'preview' || recording) {
+      // Previews, captures and shares of tabs on your Chrome come from its extension; the cloud browser's previews and
+      // captures from the workspace's browser session.
+      if (command.action === 'preview' || command.action === 'shareCreate' || recording) {
         if (!this.options.relay || canonicalBrowserAuthorization(grant.placement) !== canonicalBrowserAuthorization(scope.placement)) throw new Error('Browser group outside this Chrome');
+        if (command.action === 'shareCreate') {
+          const expiresInMinutes = RuntimeBrowserShareExpirySchema.safeParse(command.expiresInMinutes);
+          if (!command.targetId || command.comment === undefined) throw new Error('A share names its tab and whether people may comment');
+          if (!expiresInMinutes.success) throw new Error('A share lasts 15 minutes, 1 hour, 8 hours or 24 hours');
+          return json(await this.options.relay.shareCreate({ projectId: scope.projectId, workspaceId: scope.workspaceId, groupId: grant.groupId, targetId: command.targetId, comment: command.comment, expiresInMinutes: expiresInMinutes.data }));
+        }
         return json(recording ? await this.options.relay.capture(authorization, signal) : await this.options.relay.preview(authorization, signal));
       }
       await this.options.storage.put(`browser.account.revoked:${grant.groupId}`, true);

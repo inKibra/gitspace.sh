@@ -7,7 +7,7 @@ import { BROWSER_EXTENSION_PROTOCOL, RuntimeBrowserCaptureSchema, RuntimeBrowser
 import type { BrowserChannel } from '../src/browser-cdp.js';
 import { CloudCaptures, captureViews } from '../src/browser-capture.js';
 import { CdpBrowserShim } from '../src/browser-shim.js';
-import { BROWSER_UPLOAD_HEADER, browserUploadSignedText } from '../src/browser-upload.js';
+import { BROWSER_UPLOAD_HEADER, browserSignedText } from '../src/browser-upload.js';
 import type { UserRelayDO } from '../src/index.js';
 import { workspaceDrive } from '../src/workspace-drive.js';
 
@@ -88,7 +88,7 @@ async function step(relay: UserRelayDO, root: Identity, browser: Chrome, project
 async function send(browser: Pick<Chrome, 'identity' | 'pairingId' | 'generation'>, body: object, options: { signed?: Uint8Array<ArrayBuffer>; header?: null } = {}) {
   const path = '/api/browser-relay/uploads', bytes = encoder.encode(JSON.stringify(body));
   const issuedAt = Date.now(), nonce = hex(crypto.getRandomValues(new Uint8Array(32))), bodySha256 = hex(await crypto.subtle.digest('SHA-256', options.signed ?? bytes));
-  const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(browserUploadSignedText({ pairingId: browser.pairingId, generation: browser.generation, method: 'POST', pathname: path, bodySha256, issuedAt, nonce })))));
+  const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(browserSignedText('upload', { pairingId: browser.pairingId, generation: browser.generation, method: 'POST', pathname: path, bodySha256, issuedAt, nonce })))));
   const header = btoa(JSON.stringify({ pairingId: browser.pairingId, generation: browser.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
   const request = async () => {
     const headers: Record<string, string> = options.header === null ? {} : { [BROWSER_UPLOAD_HEADER]: header };
@@ -206,22 +206,6 @@ test('you capture a tab on your Chrome from the Browser tab: the extension uploa
       expect(Object.keys(frames?.files ?? {}).sort()).toEqual(['frames.bin', 'frames.json']);
       const binary = await exports.default.fetch(new Request(z.string().parse(frames?.files['frames.bin'])));
       expect(new Uint8Array(await binary.arrayBuffer())).toEqual(joined(first, second));
-    } finally { browser.socket.close(); }
-  });
-});
-
-test('a Chrome whose extension predates captures is asked to update, and its extension is never asked to record', async () => {
-  const { projectId, workspaceId, drive } = await workspace();
-  await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
-    const root = await keys();
-    const browser = await chrome(relay, root, projectId, { ip: '192.0.2.41', protocol: BROWSER_EXTENSION_PROTOCOL - 1 });
-    try {
-      const { groupId } = await step(relay, root, browser, projectId, workspaceId);
-      if (!browser.placement) throw new Error('Expected an approved Chrome');
-      const captureId = crypto.randomUUID();
-      await expect(relay.browserRelayExecute(await authorization(root, browser.placement, projectId, workspaceId, { type: 'manage', action: 'captureStart', groupId, targetId: 'your-tab', captureId }))).rejects.toThrow('Update the GitSpace extension in Chrome to record captures');
-      expect(browser.operations.map(message => message.operation)).not.toContain('captureStart');
-      expect(await drive.read(`browser/captures/${captureId}/capture.json`)).toBeNull();
     } finally { browser.socket.close(); }
   });
 });

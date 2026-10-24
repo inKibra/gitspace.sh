@@ -2,8 +2,10 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { verticalSliceFixture } from './App.js';
-import { Composer } from './Composer.js';
+import { Composer, type ComposerProps } from './Composer.js';
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
 
@@ -70,4 +72,63 @@ it('keeps the draft and its attachment when the upload fails', async () => {
   expect(container.querySelector('[role=alert]')?.textContent).toBe('The workspace is no longer open on a machine.');
   expect(textarea.value).toBe('Summarize this');
   expect(container.querySelector('[aria-label="Remove report.pdf"]')).not.toBeNull();
+});
+
+const shareId = '00000000-0000-4000-8000-0000000000d1';
+const secret = 'test-share-secret'.padEnd(43, 'x');
+const control: SessionControlView = { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null };
+const greeting: RuntimeBrowserSharePreview = { sharer: 'Brad', page: { title: 'Checkout', site: 'shop.example.com' }, comment: true, expiresAt: '2026-10-24T13:00:00.000Z', ended: null };
+
+async function typeDraft(text: string) {
+  const textarea = container.querySelector('textarea')!;
+  await act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, text);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  // The greeting's fetch, its body and the render it causes.
+  for (let turn = 0; turn < 5; turn += 1) await act(async () => {});
+  return textarea;
+}
+async function send() {
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click(); });
+  for (let turn = 0; turn < 5; turn += 1) await act(async () => {});
+}
+
+it('turns a pasted share link into a chip of its tab, connects the tab before sending and names the tab instead of the link', async () => {
+  const link = `${window.location.origin}/s/${shareId}#${secret}`;
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ status: 'ok', value: greeting }));
+  vi.stubGlobal('fetch', fetch);
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
+  const sessionCommand = vi.fn<NonNullable<ComposerProps['sessionCommand']>>(async () => ({ control, browserConnectedTab: { pairingId: '00000000-0000-4000-8000-0000000000a1', browser: 'Work Chrome', groupId: '00000000-0000-4000-8000-0000000000aa', targetId: 'tab-a', url: 'https://shop.example.com/checkout', title: 'Checkout' } }));
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} sessionCommand={sessionCommand} />));
+
+  const textarea = await typeDraft(`Why does this fail? ${link}`);
+  expect(container.querySelector('[aria-label="Tab Checkout"]')?.textContent).toContain('shop.example.com');
+  expect(fetch).toHaveBeenCalledOnce();
+  const [url, init] = fetch.mock.calls[0]!;
+  expect(String(url)).toBe(`${window.location.origin}/api/shares/${shareId}/preview`);
+  expect(init?.method).toBe('POST');
+  expect(JSON.parse(String(init?.body))).toEqual({ secret });
+
+  await send();
+  expect(sessionCommand.mock.calls.map(([command]) => command)).toEqual([{ type: 'browserShareConnect', shareId, secret }]);
+  expect(sessionCommand.mock.invocationCallOrder[0]).toBeLessThan(onSend.mock.invocationCallOrder[0]!);
+  expect(onSend.mock.calls.map(([text]) => text)).toEqual(['Why does this fail? [Connected tab "Checkout" (https://shop.example.com/checkout) on Work Chrome, pairingId 00000000-0000-4000-8000-0000000000a1, targetId tab-a; use web_browser with source "relay" and this pairingId]']);
+  expect(textarea.value).toBe('');
+});
+
+it('keeps the draft with its link and shows why when the tab cannot be connected', async () => {
+  const link = `${window.location.origin}/s/${shareId}#${secret}`;
+  vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async () => Response.json({ status: 'ok', value: greeting })));
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
+  const sessionCommand = vi.fn<NonNullable<ComposerProps['sessionCommand']>>(async () => { throw new Error('This share has ended.'); });
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} sessionCommand={sessionCommand} />));
+
+  const textarea = await typeDraft(`Look at ${link}`);
+  await send();
+  expect(sessionCommand).toHaveBeenCalledOnce();
+  expect(onSend).not.toHaveBeenCalled();
+  expect(container.querySelector('[role=alert]')?.textContent).toBe('This share has ended.');
+  expect(textarea.value).toBe(`Look at ${link}`);
+  expect(container.querySelector('[aria-label="Tab Checkout"]')).not.toBeNull();
 });

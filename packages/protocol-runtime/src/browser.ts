@@ -24,8 +24,11 @@ export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSche
 /** `chromes` touches no browser: it lists the project's Chromes (names, pairing ids, online, approved, default) for the
  * agent to choose from. */
 export const RuntimeBrowserChromesArgumentsSchema = z.strictObject({ action: z.literal('chromes') });
-/** The browser tool as agents call it: every browser action, plus `chromes`. */
-export const RuntimeBrowserToolArgumentsSchema = z.discriminatedUnion('action', [...RuntimeBrowserArgumentsSchema.options, RuntimeBrowserChromesArgumentsSchema]);
+/** `comments` touches no browser: the workspace's page comments (`gitspace.page-comments`), newest first; people
+ * watching a share link make them (docs/APERTURE-DESIGN.md §8, §9). */
+export const RuntimeBrowserCommentsArgumentsSchema = z.strictObject({ action: z.literal('comments'), limit: z.number().int().min(1).max(100).default(20) });
+/** The browser tool as agents call it: every browser action, plus `chromes` and `comments`. */
+export const RuntimeBrowserToolArgumentsSchema = z.discriminatedUnion('action', [...RuntimeBrowserArgumentsSchema.options, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema]);
 export type RuntimeBrowserToolArguments = z.infer<typeof RuntimeBrowserToolArgumentsSchema>;
 const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
 export const RuntimeBrowserGrantSchema = z.strictObject({ ...executionScope, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
@@ -49,8 +52,13 @@ export const RuntimeBrowserApprovalCardSchema = z.union([RuntimeBrowserPreparati
 export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCardSchema>;
 /** `overview`: the workspace's browsers for the Inspector's Browser tab; `preview`: a small image of one tab
  * (`groupId` and `targetId`; the group names the browser); `captures`: the workspace's captures, newest first;
- * `captureStart` (`groupId`, `targetId`): you start recording a tab's screencast frames; `captureStop` (`captureId`). */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional() });
+ * `captureStart` (`groupId`, `targetId`): you start recording a tab's screencast frames; `captureStop` (`captureId`).
+ * Share links (`browser-share.ts`): `shares` lists the workspace's shares; `shareCreate` (`groupId`, `targetId`,
+ * `comment`, `expiresInMinutes`) shares a tab of the workspace's Chrome group; `shareRevoke` (`shareId`) ends one;
+ * `shareConnect` (`shareId`, `secret`, `groupId`) moves a pasted share's tab into the workspace's group on its Chrome;
+ * `pageComments`: the workspace's page comments, newest first. */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'pageComments']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
+  shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(1440).optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
   accountId: id, projectId: id, workspaceId: id,
@@ -103,8 +111,11 @@ export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserP
  * agent tabs saved to the drive, and uploads into pages from sealed `/files/` links, all moving bytes over HTTPS
  * (`/api/browser-relay/uploads`), never the relay connection. Protocol 5 sends those uploads through upload links: only
  * the begin request is signed with the pairing key, and its parts, completion and abandonment go to the link it answers.
+ * Protocol 6 adds share links: `shareTab`/`shareWatch`/`shareUnwatch`/`shareHit`/`shareAnchor`/`adoptTab`,
+ * `sharePointers`/`shares`/`shareEnded` notifications, `shareFrame` and share `page`/`closed` messages, and signed
+ * `/api/browser-relay/shares` requests.
  */
-export const BROWSER_EXTENSION_PROTOCOL = 5;
+export const BROWSER_EXTENSION_PROTOCOL = 6;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
 export const BROWSER_RUN_LIMIT_MS = 120_000;
 /** Whether a release at protocol `current` refuses an extension at `protocol` as too old. */

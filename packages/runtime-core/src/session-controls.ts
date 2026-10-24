@@ -8,7 +8,7 @@ import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRe
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentViewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab, type RuntimeBrowserPageCommentView } from '@gitspace/protocol-runtime';
 import { isSubagentTool } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
@@ -95,7 +95,7 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
-  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[]>;
+  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserPageCommentView[]>;
 };
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
@@ -206,6 +206,18 @@ export function createSessionControls(services: SessionControlServices) {
         if (command.type === 'browserCaptures') return { control: await control(target), browserCaptures: RuntimeBrowserCaptureViewSchema.array().parse(await services.browser(String(target.id), undefined, { action: 'captures' })) };
         const management: RuntimeBrowserManagement = command.type === 'browserCaptureStart' ? { action: 'captureStart', groupId: command.groupId, targetId: command.targetId } : { action: 'captureStop', captureId: command.captureId };
         return { control: await control(target), browserCapture: RuntimeBrowserCaptureViewSchema.parse(await services.browser(String(target.id), undefined, management)) };
+      }
+      // Share links (docs/APERTURE-DESIGN.md §8): the workspace's shares, sharing a tab of its Chrome group, ending a
+      // share, connecting the tab of a share link you pasted, and the comments people watching shares made.
+      case 'browserShares': case 'browserShareCreate': case 'browserShareRevoke': case 'browserShareConnect': case 'browserPageComments': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        const id = String(target.id);
+        if (command.type === 'browserShares') return { control: await control(target), browserShares: RuntimeBrowserShareSchema.array().parse(await services.browser(id, undefined, { action: 'shares' })) };
+        if (command.type === 'browserPageComments') return { control: await control(target), browserPageComments: RuntimeBrowserPageCommentViewSchema.array().parse(await services.browser(id, undefined, { action: 'pageComments' })) };
+        if (command.type === 'browserShareConnect') return { control: await control(target), browserConnectedTab: RuntimeBrowserConnectedTabSchema.parse(await services.browser(id, undefined, { action: 'shareConnect', shareId: command.shareId, secret: command.secret })) };
+        const management: RuntimeBrowserManagement = command.type === 'browserShareCreate' ? { action: 'shareCreate', groupId: command.groupId, targetId: command.targetId, comment: command.comment, expiresInMinutes: command.expiresInMinutes } : { action: 'shareRevoke', shareId: command.shareId };
+        return { control: await control(target), browserShare: RuntimeBrowserShareSchema.parse(await services.browser(id, undefined, management)) };
       }
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {

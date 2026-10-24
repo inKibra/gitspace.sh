@@ -9,6 +9,7 @@ export * from './execution-contracts.js';
 export * from './rule-interruptions.js';
 export * from './canonical-json.js';
 export * from './browser.js';
+export * from './browser-share.js';
 export * from './tool-arguments.js';
 export * from './apply-patch.js';
 export * from './subagent-policy.js';

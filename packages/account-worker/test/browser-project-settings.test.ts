@@ -4,6 +4,7 @@ import { expect, test } from 'vitest';
 import { z } from 'zod';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { AccountBrowserRelay, type BrowserWorkspaces } from '../src/browser-relay.js';
+import { browserShareAccount } from '../src/browser-share.js';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 import { workspaceDrive } from '../src/workspace-drive.js';
 
@@ -57,7 +58,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       listen(socket);
       return browser;
     }
-    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }, identity => workspaceDrive(env, identity)); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
+    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }, identity => workspaceDrive(env, identity), browserShareAccount(env)); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
 async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>, args: RuntimeBrowserArguments = { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }) {
@@ -228,7 +229,7 @@ test('a Chrome group report reaches its workspace with each tab marked usable or
   if (value.body.command.type !== 'execute') throw new Error('Expected execution');
   const groupId = value.body.command.grant.body.groupId;
   const reports: unknown[] = [];
-  const reader = restart({ getByName: name => ({ browserGroupReported: async (identity, group) => { reports.push({ name, identity, group }); } }) });
+  const reader = restart({ getByName: name => ({ browserGroupReported: async (identity, group) => { reports.push({ name, identity, group }); }, pageCommentAdded: async () => {} }) });
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');
   const tab = (targetId: string, url: string, addedBy: 'agent' | 'page' | 'you', site: string | null) => ({ targetId, url, title: 'Page', addedBy, site });
@@ -253,7 +254,7 @@ test('a script run on your Chrome records its group, so the Chrome’s reports o
   const groupId = value.body.command.grant.body.groupId;
   await relay.scriptBegin(value);
   const reports: unknown[] = [];
-  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); } }) });
+  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); }, pageCommentAdded: async () => {} }) });
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');
   await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId, tabs: [{ targetId: 'agent-tab', url: 'https://example.com/', title: 'Example', addedBy: 'agent', site: null }], running: 1 } }));

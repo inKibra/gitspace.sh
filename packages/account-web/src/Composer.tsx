@@ -1,7 +1,10 @@
 import type { SkillView } from '@gitspace/protocol';
+import { parseBrowserShareLink, RuntimeBrowserSharePreviewSchema, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, Zap } from '@untitledui/icons';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { z } from 'zod';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -23,6 +26,35 @@ async function imageAttachment(file: File): Promise<{ data: string; mimeType: st
   let binary = '';
   for (let offset = 0; offset < bytes.length; offset += 32 * 1024) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32 * 1024));
   return { data: btoa(binary), mimeType: file.type };
+}
+
+type ShareLink = { text: string; shareId: string; secret: string };
+type ShareChip = { state: 'reading' } | { state: 'ready'; preview: RuntimeBrowserSharePreview } | { state: 'failed'; message: string };
+const SharePreviewResponseSchema = z.union([
+  z.object({ status: z.literal('ok'), value: RuntimeBrowserSharePreviewSchema }),
+  z.object({ status: z.literal('error'), error: z.object({ message: z.string() }) }),
+]);
+
+/** The share links of this account in `text` (whitespace-separated words), each once. */
+function shareLinksIn(text: string): ShareLink[] {
+  const links = new Map<string, ShareLink>();
+  for (const word of text.match(/\S+/gu) ?? []) {
+    const link = parseBrowserShareLink(word, window.location.origin);
+    if (link) links.set(word, { text: word, ...link });
+  }
+  return [...links.values()];
+}
+
+/** The greeting of a pasted share link: its page title, or why there is none. */
+async function readShareChip(link: ShareLink): Promise<ShareChip> {
+  try {
+    const response = await fetch(new URL(`/api/shares/${link.shareId}/preview`, window.location.origin), { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: link.secret }) });
+    const body = SharePreviewResponseSchema.safeParse(await response.json().catch(() => null));
+    if (!body.success) return { state: 'failed', message: `The share link could not be read (HTTP ${response.status}).` };
+    return body.data.status === 'ok' ? { state: 'ready', preview: body.data.value } : { state: 'failed', message: body.data.error.message };
+  } catch (failure) {
+    return { state: 'failed', message: rpcErrorMessage(failure, 'Read share link') };
+  }
 }
 
 // ThinkingStep hides `pending` rows (the registry reveals steps as they
@@ -87,10 +119,14 @@ export interface ComposerProps {
   error?: string;
   controlsError?: string;
   onRetryControls?: () => void;
+  /** Runs a command of this workspace's session; with it, a share link of this account in the draft becomes a tab chip
+   * and its tab is connected to the workspace (`browserShareConnect`) before the message is sent. */
+  sessionCommand?: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>;
 }
 
-export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls }: ComposerProps) {
+export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls, sessionCommand }: ComposerProps) {
   const icons = useIcons();
+  const shape = useShape();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
   const profile = inference?.state?.profiles.find((entry) => entry.id === assignment?.profileId);
@@ -104,12 +140,38 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [showHistory, setShowHistory] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const sharing = sessionCommand !== undefined;
+  const shareLinks = useMemo(() => sharing ? shareLinksIn(message) : [], [message, sharing]);
+  const [shareChips, setShareChips] = useState<ReadonlyMap<string, ShareChip>>(new Map());
+  // Greetings are read once per link and kept while the composer is shown, so editing around a link does not reread it.
+  useEffect(() => {
+    const unread = shareLinks.filter((link) => !shareChips.has(link.text));
+    if (!unread.length) return;
+    setShareChips((current) => new Map([...current, ...unread.map((link): [string, ShareChip] => [link.text, { state: 'reading' }])]));
+    for (const link of unread) void readShareChip(link).then((chip) => setShareChips((current) => new Map(current).set(link.text, chip)));
+  }, [shareLinks]);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
-    if (!text || !onSend || pending || recovering || inferenceUnavailable || uploading !== null) return false;
+    if (!text || !onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting) return false;
     setSubmitError(null);
     const sentDraft = workspaceDraft?.capture();
     try {
+      // Each pasted share link's tab joins this workspace before the message naming it is sent.
+      const connected = new Map<string, string>();
+      const links = sessionCommand ? shareLinksIn(text) : [];
+      if (sessionCommand && links.length) {
+        setConnecting(true);
+        try {
+          for (const link of links) {
+            const tab = (await sessionCommand({ type: 'browserShareConnect', shareId: link.shareId, secret: link.secret })).browserConnectedTab;
+            if (!tab) throw new Error('The workspace did not connect the shared tab.');
+            // What the agent reads in place of the link.
+            connected.set(link.text, `[Connected tab "${tab.title}" (${tab.url}) on ${tab.browser}, pairingId ${tab.pairingId}, targetId ${tab.targetId}; use web_browser with source "relay" and this pairingId]`);
+          }
+        } finally { setConnecting(false); }
+      }
+      const prompt = connected.size ? text.replace(/\S+/gu, (word) => connected.get(word) ?? word) : text;
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
       const uploads = files.filter((file) => !file.type.startsWith('text/') || file.size > 256 * 1024);
       const uploaded = new Map<File, string>();
@@ -132,7 +194,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         if (url === undefined) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
         return `<attachment name="${file.name}" url="${url}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
       }));
-      await onSend([text, ...attached].join('\n\n'), behavior, images, sentDraft);
+      await onSend([prompt, ...attached].join('\n\n'), behavior, images, sentDraft);
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
       else setLocalMessage(current => current === draft ? '' : current);
       setAttachments([]);
@@ -219,6 +281,17 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
     {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} profileId={profile?.id} /> : null}
     {workspaceDraft?.error ? <p role="alert" className="text-caption text-destructive">{workspaceDraft.error}</p> : null}
+    {shareLinks.length ? <ul aria-label="Shared tabs" className="flex flex-wrap gap-2">{shareLinks.map((link) => {
+      const chip = shareChips.get(link.text);
+      const title = chip?.state === 'ready' ? chip.preview.page.title || chip.preview.page.site : null;
+      return <li key={link.text} aria-label={`Tab ${title ?? 'from a share link'}`} title="Sending connects this tab to the workspace; the agent reads it as a tab, not the link." className={`${shape.container} flex min-w-0 max-w-full items-center gap-2 bg-surface-3 px-2 py-1 text-caption shadow-surface-1`}>
+        <span className="shrink-0 font-medium">Tab</span>
+        {chip?.state === 'ready' ? <>
+          <span className="min-w-0 truncate">{title}</span>
+          <span className="shrink-0 text-muted-foreground">{chip.preview.ended ? 'share ended' : chip.preview.page.site}</span>
+        </> : <span className={chip?.state === 'failed' ? 'min-w-0 truncate text-destructive' : 'min-w-0 truncate text-muted-foreground'}>{chip?.state === 'failed' ? chip.message : 'Reading the shared tab…'}</span>}
+      </li>;
+    })}</ul> : null}
     <InputMessage
       data-slot="input-message"
       onBlurCapture={() => workspaceDraft?.onBlur()}
@@ -226,7 +299,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onValueChange={setMessage}
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
       placeholder={recovering ? 'Recovering agent…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
-      disabled={!onSend || pending || recovering || inferenceUnavailable || uploading !== null}
+      disabled={!onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting}
       files={attachments}
       onFilesChange={setAttachments}
       accept="image/png,image/jpeg,image/webp,text/*,application/pdf"
@@ -266,6 +339,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       </> : null}
     />
     {uploading !== null ? <p role="status" className="text-caption text-muted-foreground">Uploading {uploading}…</p> : null}
+    {connecting ? <p role="status" className="text-caption text-muted-foreground">Connecting the shared tab…</p> : null}
     {error || submitError ? <p role="alert" className="text-caption text-destructive">{error ?? submitError}</p> : null}
   </div>;
 }

@@ -1,8 +1,9 @@
 /**
- * The in-page overlay on a tab of your Chrome while an agent uses it or a capture records it
- * (docs/APERTURE-DESIGN.md §6.4, §11): a floating control at the bottom of the tab (the workspace group, what is
+ * The in-page overlay on a tab of your Chrome while an agent uses it, a capture records it or people watch its share
+ * (docs/APERTURE-DESIGN.md §6.4, §8, §11): a floating control at the bottom of the tab (the workspace group, what is
  * happening, Capture or Stop capture with REC while recording, and Stop for the agent), a glow in the group colour
- * while a script runs, and the agent's cursor at each point it clicks or moves to.
+ * while a script runs, the agent's cursor at each point it clicks or moves to, and the named pointers of the people
+ * watching the tab's shares.
  *
  * A fixed function the extension calls in its own isolated world (`Runtime.callFunctionOn`), never in the page's. The
  * overlay leaves the page and what the agent reads alone: a closed shadow root under an `aria-hidden` host marked
@@ -12,17 +13,19 @@
  * only) with `stop`, `capture` or `captureStop`.
  *
  * One argument: `{ show?: { mode: 'run' | 'step' | 'capture', name, color, binding, capture: 'none' | 'ready' |
- * 'recording' }, cursor?: { x, y, type }, conceal?: boolean, remove?: true }`. `show` installs the overlay where the
- * document lacks it (after a navigation) and refreshes it; an overlay not refreshed for 75 s removes itself, so one
- * whose debugger channel Chrome dropped does not stay. The cursor travels to each point along a curved path, eased,
- * overshooting slightly and settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms); it presses
- * on `mousePressed` and fades after 5 s idle.
+ * 'recording' } | null, cursor?: { x, y, type }, pointers?: [{ id, name, color, x, y }], conceal?: boolean,
+ * remove?: true }`. `show` installs the overlay where the document lacks it (after a navigation) and refreshes it;
+ * `show: null` hides the control, glow and cursor, leaving the pointers. `pointers` (x and y are fractions of the
+ * viewport) is everyone pointing now: each glides to its new place, eased, and one left out leaves; they install the
+ * overlay too. An overlay not refreshed for 75 s removes itself, so one whose debugger channel Chrome dropped does
+ * not stay. The cursor travels to each point along a curved path, eased, overshooting slightly and settling, in the
+ * time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms); it presses on `mousePressed` and fades after 5 s idle.
  */
 export const browserOverlayFunction = `function(command) {
   const key = '__gitspaceOverlay';
   if (command.remove) { if (globalThis[key]) globalThis[key].dispose(); return true; }
   let overlay = globalThis[key];
-  if (!overlay && !command.show) return false;
+  if (!overlay && !command.show && !command.pointers?.length) return false;
   if (!overlay) {
     for (const stale of document.querySelectorAll('[data-gitspace-overlay]')) stale.remove();
     const make = (tag, css, parent) => { const el = document.createElement(tag); el.style.cssText = css; parent.appendChild(el); return el; };
@@ -33,7 +36,7 @@ export const browserOverlayFunction = `function(command) {
     const root = host.attachShadow({ mode: 'closed' });
     const font = 'font:500 12px/16px system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:0;';
     const glow = make('div', 'position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .4s ease', root);
-    const pill = make('div', font + 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:calc(100vw - 32px);padding:5px 5px 5px 12px;border-radius:999px;background:rgba(17,19,24,.92);color:#f1f3f4;box-shadow:0 6px 20px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.12);pointer-events:none;user-select:none;white-space:nowrap;transition:opacity .2s ease', root);
+    const pill = make('div', font + 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;align-items:center;gap:8px;max-width:calc(100vw - 32px);padding:5px 5px 5px 12px;border-radius:999px;background:rgba(17,19,24,.92);color:#f1f3f4;box-shadow:0 6px 20px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.12);pointer-events:none;user-select:none;white-space:nowrap;transition:opacity .2s ease', root);
     const dot = make('span', 'width:8px;height:8px;border-radius:50%;flex:none', pill);
     const name = make('span', 'font-weight:600;overflow:hidden;text-overflow:ellipsis', pill);
     const what = make('span', 'color:#bdc1c6', pill);
@@ -46,15 +49,22 @@ export const browserOverlayFunction = `function(command) {
     stop.type = 'button'; stop.tabIndex = -1; stop.textContent = 'Stop';
     const cursor = make('div', 'position:fixed;left:0;top:0;pointer-events:none;opacity:0;transition:opacity .4s ease;will-change:transform', root);
     const svgns = 'http://www.w3.org/2000/svg';
-    const arrow = document.createElementNS(svgns, 'svg');
-    arrow.setAttribute('width', '20'); arrow.setAttribute('height', '22'); arrow.setAttribute('viewBox', '0 0 20 22');
-    arrow.style.cssText = 'display:block;overflow:visible;transform-origin:2px 2px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))';
-    const path = document.createElementNS(svgns, 'path');
-    path.setAttribute('d', 'M2 2 L2 18 L6.6 14 L9.6 20.6 L12.4 19.4 L9.4 12.8 L15.6 12.8 Z');
-    path.setAttribute('stroke', '#ffffff'); path.setAttribute('stroke-width', '1.5'); path.setAttribute('stroke-linejoin', 'round');
-    arrow.appendChild(path); cursor.appendChild(arrow);
-    const label = make('span', font + 'position:absolute;left:14px;top:18px;padding:1px 7px;border-radius:999px;color:#fff;font-size:11px;font-weight:600;white-space:nowrap', cursor);
+    const labelCss = font + 'position:absolute;left:14px;top:18px;padding:1px 7px;border-radius:999px;color:#fff;font-size:11px;font-weight:600;white-space:nowrap';
+    // An arrow with a white outline: the agent's cursor, and each person's pointer.
+    const arrowIn = parent => {
+      const arrow = document.createElementNS(svgns, 'svg');
+      arrow.setAttribute('width', '20'); arrow.setAttribute('height', '22'); arrow.setAttribute('viewBox', '0 0 20 22');
+      arrow.style.cssText = 'display:block;overflow:visible;transform-origin:2px 2px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))';
+      const path = document.createElementNS(svgns, 'path');
+      path.setAttribute('d', 'M2 2 L2 18 L6.6 14 L9.6 20.6 L12.4 19.4 L9.4 12.8 L15.6 12.8 Z');
+      path.setAttribute('stroke', '#ffffff'); path.setAttribute('stroke-width', '1.5'); path.setAttribute('stroke-linejoin', 'round');
+      arrow.appendChild(path); parent.appendChild(arrow);
+      return { arrow, path };
+    };
+    const { arrow, path } = arrowIn(cursor);
+    const label = make('span', labelCss, cursor);
     label.textContent = 'agent';
+    const people = make('div', 'position:fixed;inset:0;pointer-events:none', root);
     const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', capture: 'none' };
     const place = (x, y) => { state.x = x; state.y = y; cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)'; };
     const pressAt = () => {
@@ -89,6 +99,32 @@ export const browserOverlayFunction = `function(command) {
       };
       state.frame = requestAnimationFrame(step);
     };
+    // People watching a share: each pointer glides to its latest place (they come about ten times a second).
+    const pointers = new Map();
+    const point = list => {
+      const now = new Set();
+      for (const item of list) {
+        now.add(item.id);
+        let pointer = pointers.get(item.id);
+        if (!pointer) {
+          const element = make('div', 'position:fixed;left:0;top:0;pointer-events:none;will-change:transform', people);
+          pointer = { element, path: arrowIn(element).path, tag: make('span', labelCss, element), x: null, y: null, frame: 0 };
+          pointers.set(item.id, pointer);
+        }
+        pointer.path.setAttribute('fill', item.color); pointer.tag.style.background = item.color; pointer.tag.textContent = item.name;
+        const x = item.x * innerWidth, y = item.y * innerHeight, x0 = pointer.x ?? x, y0 = pointer.y ?? y, start = performance.now();
+        const duration = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 120;
+        cancelAnimationFrame(pointer.frame);
+        const step = time => {
+          const t = duration ? Math.min(1, (time - start) / duration) : 1, s = ease(t);
+          pointer.x = x0 + (x - x0) * s; pointer.y = y0 + (y - y0) * s;
+          pointer.element.style.transform = 'translate(' + pointer.x + 'px,' + pointer.y + 'px)';
+          pointer.frame = t < 1 ? requestAnimationFrame(step) : 0;
+        };
+        step(start);
+      }
+      for (const [id, pointer] of pointers) if (!now.has(id)) { cancelAnimationFrame(pointer.frame); pointer.element.remove(); pointers.delete(id); }
+    };
     // Your own pointer over the control makes it clickable; the agent's pointer (each point it is about to use) never does.
     const hover = event => {
       const box = pill.getBoundingClientRect();
@@ -105,11 +141,13 @@ export const browserOverlayFunction = `function(command) {
     const expiry = setInterval(() => { if (Date.now() - state.seen > 75000) overlay.dispose(); }, 15000);
     overlay = {
       apply(next) {
+        if (next.show !== undefined || next.pointers) { state.seen = Date.now(); if (!host.isConnected) document.documentElement.appendChild(host); }
         if (next.show) {
-          state.seen = Date.now(); state.binding = next.show.binding; state.capture = next.show.capture;
+          state.binding = next.show.binding; state.capture = next.show.capture;
           const color = next.show.color;
           dot.style.background = color; label.style.background = color; path.setAttribute('fill', color);
           pill.style.borderColor = color;
+          pill.style.display = 'flex';
           glow.style.boxShadow = 'inset 0 0 0 2px ' + color + ', inset 0 0 28px 2px ' + color + '66';
           glow.style.opacity = next.show.mode === 'run' ? '1' : '0';
           name.textContent = 'GitSpace · ' + next.show.name;
@@ -118,13 +156,15 @@ export const browserOverlayFunction = `function(command) {
           rec.style.display = next.show.capture === 'recording' ? 'inline-flex' : 'none';
           capture.style.display = next.show.capture === 'none' ? 'none' : '';
           capture.textContent = next.show.capture === 'recording' ? 'Stop capture' : 'Capture';
-          if (!host.isConnected) document.documentElement.appendChild(host);
         }
+        if (next.show === null) { state.binding = ''; pill.style.display = 'none'; glow.style.opacity = '0'; cursor.style.opacity = '0'; }
+        if (next.pointers) point(next.pointers);
         if (next.conceal !== undefined) host.style.visibility = next.conceal ? 'hidden' : 'visible';
         if (next.cursor) move(next.cursor.x, next.cursor.y, next.cursor.type);
       },
       dispose() {
         cancelAnimationFrame(state.frame); clearTimeout(state.fade); clearInterval(expiry);
+        for (const pointer of pointers.values()) cancelAnimationFrame(pointer.frame);
         document.removeEventListener('mousemove', hover, { capture: true });
         host.remove(); delete globalThis[key];
       },

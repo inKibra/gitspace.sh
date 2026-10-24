@@ -4,6 +4,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LiveApp } from './LiveApp.js';
 import { SharedGuide } from './SharedGuide.js';
+import { SharePage, SHARE_PAGE } from './share/SharePage.js';
 import { restoreAppearance } from './appearance.js';
 import { observeAppViewport } from './app-viewport.js';
 import '@gitspace/ui/fluid-theme.css';
@@ -25,7 +26,8 @@ createRoot(root).render(
         <SizeProvider defaultSize="default">
           <IconProvider icons={untitledIcons}>
             <TooltipProvider>
-              {/^\/shared-guides\/[^/]+\/[A-Za-z0-9_-]{43}$/u.test(window.location.pathname) ? <SharedGuide /> : <LiveApp />}
+              {/^\/shared-guides\/[^/]+\/[A-Za-z0-9_-]{43}$/u.test(window.location.pathname) ? <SharedGuide />
+                : SHARE_PAGE.test(window.location.pathname) ? <SharePage /> : <LiveApp />}
             </TooltipProvider>
           </IconProvider>
         </SizeProvider>
