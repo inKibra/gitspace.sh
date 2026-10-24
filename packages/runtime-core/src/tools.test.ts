@@ -65,6 +65,8 @@ test('every registered tool advertises its real object contract and executes thr
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(Object.keys(samples).sort());
     expect(results.filter(result => result.isError)).toEqual([]);
+    // The transcript shows the answer from the result's details, not from its text.
+    expect(results.find(result => result.toolCallId === 'ask')?.details).toEqual({ results: [{ selectedOptions: [], customInput: 'answered' }] });
     // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
     expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);

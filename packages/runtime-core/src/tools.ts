@@ -150,6 +150,23 @@ export function runtimeToolParameters(schema: z.ZodType) {
   return { ...object, type: 'object' as const, properties, required: [...required ?? []], additionalProperties: false };
 }
 
+/**
+ * An answer as the transcript's ask block reads it (`details.results`; one result for GitSpace's one question): what was
+ * chosen and what was written. A person answers with free text or the chosen choices; a session-control answer is a list
+ * of `{ selectedOptions, customInput }`.
+ */
+function askResults(answer: JsonValue): { selectedOptions: string[]; customInput: string | null }[] {
+  if (typeof answer === 'string') return [{ selectedOptions: [], customInput: answer }];
+  if (!Array.isArray(answer)) return [];
+  const chosen = answer.filter(item => typeof item === 'string');
+  if (chosen.length === answer.length) return [{ selectedOptions: chosen, customInput: null }];
+  return answer.flatMap(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const options = item.selectedOptions, written = item.customInput;
+    return [{ selectedOptions: Array.isArray(options) ? options.filter(option => typeof option === 'string') : [], customInput: typeof written === 'string' ? written : null }];
+  });
+}
+
 export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask'], admitCodemodeTool: (call: { id: string; name: string; arguments: Record<string, unknown> }, api: ToolExecutionApi, context: Context) => Promise<void>): ToolRegistration[] {
   const jobs = createJobTool(operations);
   // One queue per conversation, shared by every registered mutator and every tool round.
@@ -253,7 +270,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       if (kind === 'approval') { const plan = await tx.doc(PlanDoc, api.conversationId); plan.text = input.prompt; plan.status = 'proposed'; plan.questionId = id; }
     }, context);
     const answer = await services.question(id, api, context);
-    return { output: [{ type: 'text', text: JSON.stringify(answer) }] };
+    return { output: [{ type: 'text', text: JSON.stringify(answer) }], ...(kind === 'ask' ? { details: { results: askResults(answer) } } : {}) };
   } }));
   return tools;
 }
