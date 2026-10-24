@@ -30,7 +30,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const harness = await Harness.open(new MemoryStorage(), { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
   harnesses.push(harness);
   const root = await harness.root(BACKGROUND_CONTEXT);
-  const state: { root: boolean; projectApproved: boolean; defaultMachineId: string | null; origins: string[]; stepsOnly: string[]; status: RuntimeBrowserStatus; unapproved: RuntimeProjectBrowserSettings['browsers'] } = { root: true, projectApproved: true, defaultMachineId: null, origins: ['example.com', 'other.test'], stepsOnly: [], status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }), unapproved: [] };
+  const state: { root: boolean; projectApproved: boolean; defaultMachineId: string | null; origins: string[]; stepsOnly: string[]; status: RuntimeBrowserStatus; unapproved: RuntimeProjectBrowserSettings['browsers']; machineFailure?: string } = { root: true, projectApproved: true, defaultMachineId: null, origins: ['example.com', 'other.test'], stepsOnly: [], status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }), unapproved: [] };
   const dispatches: Array<RuntimeToolDispatch | RuntimeAccountBrowserAuthorization> = [];
   const pairing = { kind: 'account-relay' as const, accountId: 'account', pairingId: crypto.randomUUID(), generation: 1, approvalId: crypto.randomUUID() };
   const forgottenPairings = new Set<string>();
@@ -58,6 +58,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
       try { return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(answer(RuntimeBrowserManagementSchema.parse(dispatch.args))) }] }; }
       catch (error) { return { status: 'failed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [], error: { code: 'execution', message: error instanceof Error ? error.message : String(error) } }; }
     }
+    if (command.type === 'execute' && state.machineFailure) return { status: 'failed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [], error: { code: 'execution', message: state.machineFailure } };
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
   const sessions: Array<{ name: string; authorization: RuntimeAccountBrowserAuthorization }> = [];
@@ -320,6 +321,19 @@ test('the Browser tab lists each attached machine’s headless tabs; a machine t
     { machineId: 'laptop', groupId: null, tabs: [], error: 'Browser connection is stale' },
     { machineId: 'old', groupId: null, tabs: [], error: 'Update GitSpace on this machine to see its browser' },
   ]);
+});
+test('a headless group the machine ended is ended here too, so the next call starts a new group', async () => {
+  const f = await fixture();
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', on: 'machine' });
+  const first = await f.authority.prepare(f.input);
+  f.state.machineFailure = 'Browser group stale: revoked';
+  const failed = await f.authority.execute(f.input);
+  expect(failed).toMatchObject({ status: 'failed', error: { message: 'Browser group stale: revoked: that browser group ended on the machine. Call again to start a new group.' } });
+  f.state.machineFailure = undefined;
+  const again = { ...f.input, attemptId: 'attempt-2', requestId: 'request-2' };
+  const second = await f.authority.prepare(again);
+  expect(second.groupId).not.toBe(first.groupId);
+  expect(await f.authority.execute(again)).toMatchObject({ status: 'completed' });
 });
 test('a machine’s headless tab is previewed on that machine; an outdated or detached machine gets a tile reason', async () => {
   const f = await fixture();

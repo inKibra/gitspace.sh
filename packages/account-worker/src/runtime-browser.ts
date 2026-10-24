@@ -240,7 +240,14 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       dispatch = await storage.transaction(async tx => { const current = await tx.get(key); if (current) return RuntimeToolDispatchSchema.parse(current); await tx.put(key, candidate); return candidate; });
     }
     if (await storage.get(`runtime.browser.revoked:${body.groupId}`)) throw new Error('Browser group grant expired or revoked');
-    return options.runtime().attachments.execute(dispatch, input.signal ?? AbortSignal.timeout(Math.max(1, Date.parse(dispatch.deadlineAt) - Date.now())));
+    const result = await options.runtime().attachments.execute(dispatch, input.signal ?? AbortSignal.timeout(Math.max(1, Date.parse(dispatch.deadlineAt) - Date.now())));
+    // The machine ended this group (it restarted, or the group was revoked there): end it here too, so the next call
+    // starts a new group instead of failing the same way.
+    if (result.status === 'failed' && /^Browser (group stale|grant expired)/.test(result.error.message)) {
+      await storage.put(`runtime.browser.revoked:${body.groupId}`, true);
+      return { ...result, error: { ...result.error, message: `${result.error.message}: that browser group ended on the machine. Call again to start a new group.` } };
+    }
+    return result;
   }
   /** The workspace's live group on a browser (`cloud` or a pairing id): none until first use or after a revocation. */
   async function liveGroup(browser: string) {
