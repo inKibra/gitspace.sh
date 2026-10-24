@@ -325,10 +325,10 @@ Every item is verified the way the user works, in the browser, before it is repo
 6. **Snapshots are page data:** Done (entry 78): a run's result carries a fixed page-data first line. Views and page text come back marked as content from the page that may contain instructions.
 7. Not taken: blocking a page's requests to other sites during runs (would break too many sites).
 
-**Batch 18 — browsers you can see and manage (proposed 2026-10-24, not decided).** Setting up your Chrome for the browser-relay test took a hidden project setting, an agent guessing at state it cannot read, and a workspace page that showed nothing about Chromes.
+**Batch 18 — browsers you can see and manage (decided 2026-10-24: before Batch 16; not built).** Setting up your Chrome for the browser-relay test took a hidden project setting, an agent guessing at state it cannot read, and a workspace page that showed nothing about Chromes.
 1. **Browsers on the Plugins page:** pair a new Chrome there, and approve each paired Chrome per project (and choose the project default) in the same place, instead of Settings → Connections plus a project settings dialog.
 2. **A Browser tab in the Inspector:** this workspace's browsers in one place, the cloud browser and each approved Chrome with its tab group, live previews of the agent's tabs, approved sites and their levels, runs in progress; Environment keeps only what setup needs.
-3. **The extension:** a popup listing the workspaces and agents using this Chrome; "Share this tab" with a workspace this Chrome is approved for (the tab joins its group); a real look and icon.
+3. **The extension, designed rather than functional only:** a floating control on each tab an agent is using (who is acting, what it is doing, Stop, and later share and take over); clearly on or off at a glance, in the toolbar icon and on the tab; a popup listing the workspaces and agents using this Chrome; "Share this tab" with a workspace this Chrome is approved for (the tab joins its group); a real look and icon.
 4. **An empty agent tab with no approved sites,** so a workspace's group can exist before any site is approved and you can drag tabs into it.
 5. **Agents can see Chromes:** the browser tool reports the approved Chromes (names, pairing ids, online) and why a relay call is refused; its description stops pointing at the human-only `browser_control`.
 6. **Smaller:** no "No browser groups or recovery records" line when there is nothing; a relay call with no Chrome connected says so instead of "An internal error occurred."
