@@ -7,13 +7,14 @@ import type {
   RuntimeBrowserShareTarget,
   RuntimeBrowserShareViewer,
 } from '@gitspace/protocol-runtime';
+import { browserSharePointerColor } from '@gitspace/protocol-runtime';
 import { MessageTextSquare01 } from '@untitledui/icons';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { ShareComments } from './ShareComments.js';
 import { joinShare, openShareLive, ShareRequestError } from './share-client.js';
 import type { ShareJoined, ShareLive } from './share-client.js';
-import { pointerColor, shareEndsText } from './share-format.js';
+import { shareEndsText } from './share-format.js';
 import type { ShareEnd } from './share-format.js';
 
 type Point = { x: number; y: number };
@@ -98,7 +99,6 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const [connected, setConnected] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [commenting, setCommenting] = useState(false);
-  const [local, setLocal] = useState<Point | null>(null);
   const [hit, setHit] = useState<RuntimeBrowserShareTarget | null>(null);
   const [dragBox, setDragBox] = useState<RuntimeBrowserShareBox | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -236,7 +236,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
     if (!rect || rect.width === 0 || rect.height === 0) return null;
     return { x: fraction((event.clientX - rect.left) / rect.width), y: fraction((event.clientY - rect.top) / rect.height) };
   };
-  const point = (at: Point) => { setLocal(at); throttles.pointer.push(at); };
+  const point = (at: Point) => { throttles.pointer.push(at); };
   const onPointerMove = (event: ReactPointerEvent) => {
     const at = pointAt(event);
     if (!at) return;
@@ -282,7 +282,6 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const onPointerLeave = (event: ReactPointerEvent) => {
     // A finger's pointer stays where it last touched.
     if (event.pointerType === 'touch' || press.current) return;
-    setLocal(null);
     throttles.pointer.push(null);
     throttles.hit.cancel();
     if (!draft) setHit(null);
@@ -313,7 +312,6 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const sharer = share.sharer || 'Someone';
   const aspect = page ?? frame ?? { width: 16, height: 10 };
   const fit = stage ? Math.min(stage.width, (stage.height * aspect.width) / aspect.height) : null;
-  const others = watchers.filter(watcher => watcher.viewerId !== self.viewerId && watcher.at !== null);
   const anchor = draft?.kind === 'point' ? draft.at : draft ? { x: draft.region.x + draft.region.width, y: draft.region.y + draft.region.height } : null;
   const title = page?.title || share.page.title || share.page.site;
   return <main className="flex h-dvh flex-col bg-background">
@@ -348,8 +346,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
             {commenting && hit ? <Outline box={hit.box} label={[hit.role, hit.name].filter(Boolean).join(' ')} /> : null}
             {dragBox ? <Outline box={dragBox} label={null} /> : null}
             {draft?.kind === 'region' ? <Outline box={draft.region} label={null} /> : null}
-            {others.map(watcher => watcher.at ? <PointerMark key={watcher.viewerId} at={watcher.at} name={watcher.name} color={pointerColor(watcher.viewerId)} /> : null)}
-            {local && !commenting ? <PointerMark at={local} name={self.name} color={pointerColor(self.viewerId)} /> : null}
+            {/* Everyone's named pointer, yours included, is drawn on the tab itself and arrives in its frames. */}
             {draft && anchor ? <form
               aria-label="New comment"
               onSubmit={event => { event.preventDefault(); submitDraft(); }}
@@ -381,7 +378,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
           <h2 className="text-caption font-medium text-muted-foreground">Watching · {watchers.length}</h2>
           <ul className="flex flex-col gap-1">
             {watchers.map(watcher => <li key={watcher.viewerId} className="flex items-center gap-2 text-body text-foreground">
-              <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ background: pointerColor(watcher.viewerId) }} />
+              <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ background: browserSharePointerColor(watcher.viewerId) }} />
               <span className="truncate">{watcher.name}{watcher.viewerId === self.viewerId ? ' (you)' : ''}</span>
               {watcher.guest ? <Badge size="compact" color="gray">guest</Badge> : null}
             </li>)}
@@ -400,12 +397,5 @@ function Outline({ box, label }: { box: RuntimeBrowserShareBox; label: string | 
     style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
   >
     {label ? <span className="absolute -top-6 left-0 max-w-64 truncate rounded bg-blue-600 px-1.5 py-0.5 text-[11px] text-white">{label}</span> : null}
-  </div>;
-}
-
-function PointerMark({ at, name, color }: { at: Point; name: string; color: string }) {
-  return <div role="img" aria-label={`${name}'s pointer`} className="pointer-events-none absolute z-10 flex items-start" style={{ left: `${at.x * 100}%`, top: `${at.y * 100}%` }}>
-    <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" className="-translate-x-0.5 -translate-y-0.5 drop-shadow"><path d="M1.5 1.5 6.8 14l1.9-5.3L14 6.8Z" fill={color} stroke="white" strokeWidth="1.2" strokeLinejoin="round" /></svg>
-    <span className="mt-3 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium text-white shadow-sm" style={{ background: color }}>{name}</span>
   </div>;
 }

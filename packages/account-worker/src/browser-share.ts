@@ -4,7 +4,7 @@ import {
   BROWSER_SHARE_PER_CHROME, BROWSER_SHARE_VIEWERS, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareAuditSchema, RuntimeBrowserShareBoxSchema,
   RuntimeBrowserShareChromeRequestSchema, RuntimeBrowserShareEndSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareJoinSchema, RuntimeBrowserShareNameSchema,
   RuntimeBrowserSharePointSchema, RuntimeBrowserShareSchema, RuntimeBrowserShareTargetSchema, RuntimeBrowserShareViewerMessageSchema, RuntimeBrowserShareViewerSchema,
-  browserUnbase64,
+  browserSharePointerColor, browserUnbase64,
   type RuntimeBrowserConnectedTab, type RuntimeBrowserPageComment, type RuntimeBrowserShare, type RuntimeBrowserShareAudit, type RuntimeBrowserSharePreview,
   type RuntimeBrowserShareServerMessage, type RuntimeBrowserShareViewer, type RuntimeBrowserShareViewerMessage,
 } from '@gitspace/protocol-runtime';
@@ -51,8 +51,6 @@ const LISTED = 50;
 const FRAME_MAX = 1280;
 const CROP_MAX_BYTES = 400 * 1024;
 const VIEWER_MESSAGE_MAX = 16 * 1024;
-/** Pointer colors: each viewer keeps one, from its id. */
-const POINTER_COLORS = ['#e5484d', '#f76b15', '#ffc53d', '#46a758', '#12a594', '#0090ff', '#8e4ec6', '#d6409f'] as const;
 const SHARE_ROUTE = /^\/api\/shares\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(preview|join|live)$/u;
 const SHARE_VIEWER: SealedTokenKind = { scope: 'share-viewer:v1', context: 'gitspace-share-viewer-v1' };
 const JOIN_BODY_BYTES = 4096;
@@ -121,7 +119,6 @@ export function closeOpenSocket(socket: WebSocket, code: number, reason: string)
 function iso(ms: number) { return new Date(ms).toISOString(); }
 function described(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function refusal(status: number, code: string, message: string): BrowserRequestFailure { return { ok: false, status, code, message }; }
-function pointerColor(viewerId: string) { return POINTER_COLORS[Number.parseInt(viewerId.slice(0, 8), 16) % POINTER_COLORS.length] ?? POINTER_COLORS[0]; }
 
 /** The account's display name from its settings, or null while none is set. */
 async function accountDisplayName(env: Env): Promise<string | null> {
@@ -524,7 +521,7 @@ export class BrowserShares {
     const viewers = this.viewers(record.shareId, gone);
     const listed = viewers.map(({ state, viewer }) => ({ ...viewer, at: state.at }));
     for (const { socket } of viewers) this.send(socket, { type: 'viewers', viewers: listed });
-    this.host.notify(record.pairingId, { operation: 'sharePointers', shareId: record.shareId, pointers: viewers.flatMap(({ state, viewer }) => state.at ? [{ viewerId: viewer.viewerId, name: viewer.name, color: pointerColor(viewer.viewerId), at: state.at }] : []) });
+    this.host.notify(record.pairingId, { operation: 'sharePointers', shareId: record.shareId, pointers: viewers.flatMap(({ state, viewer }) => state.at ? [{ viewerId: viewer.viewerId, name: viewer.name, color: browserSharePointerColor(viewer.viewerId), at: state.at }] : []) });
   }
 
   /** Ends a share once: everyone watching is told why and disconnected, and its Chrome stops streaming and drawing. */

@@ -169,7 +169,7 @@ it('joins signed by this browser’s enrolled device as the account, without ask
   expect(calls[1]).toMatchObject({ action: 'join', body: { secret, name: 'Ada' }, device: expect.any(String) });
 });
 
-it('after Join says hello, offers its size, sends its pointer at most 20 times a second, and shows frames and others’ named pointers', async () => {
+it('after Join says hello, offers its size, sends its pointer at most 20 times a second, and shows frames and who is watching', async () => {
   await open();
   await join();
   const socket = latest();
@@ -191,9 +191,8 @@ it('after Join says hello, offers its size, sends its pointer at most 20 times a
     { viewerId: grace, name: 'Grace', guest: true, joinedAt, at: { x: 0.1, y: 0.1 } },
     { viewerId: linus, name: 'Linus', guest: false, joinedAt, at: { x: 0.25, y: 0.75 } },
   ] });
-  const linusPointer = byLabel('Linus\'s pointer');
-  expect(linusPointer?.style.left).toBe('25%');
-  expect(linusPointer?.style.top).toBe('75%');
+  // Pointers are drawn on the shared tab and arrive in its frames; the viewer draws no second copy.
+  expect(byLabel('Linus\'s pointer')).toBeNull();
   expect(byLabel('Watching')?.textContent).toContain('Grace (you)');
   expect(byLabel('Watching')?.textContent).toContain('Linus');
 });

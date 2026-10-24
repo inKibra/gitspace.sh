@@ -37,6 +37,15 @@ export const RuntimeBrowserShareNameSchema = z.string().trim().min(1).max(60);
 export const RuntimeBrowserShareViewerSchema = z.strictObject({ viewerId: z.string().uuid(), name: RuntimeBrowserShareNameSchema, guest: z.boolean(), joinedAt: z.iso.datetime() });
 export type RuntimeBrowserShareViewer = z.infer<typeof RuntimeBrowserShareViewerSchema>;
 
+/** Pointer colors, one per viewer: the same on the shared tab (drawn by the extension) and in every viewer. */
+const POINTER_COLORS = ['#2563eb', '#db2777', '#16a34a', '#ea580c', '#9333ea', '#0891b2', '#ca8a04', '#dc2626'] as const;
+export function browserSharePointerColor(viewerId: string): string {
+  // FNV-1a: ids differing in a few characters still land on different colors.
+  let hash = 0x811c9dc5;
+  for (const char of viewerId) hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193) >>> 0;
+  return POINTER_COLORS[hash % POINTER_COLORS.length] ?? POINTER_COLORS[0];
+}
+
 /** One audited event of a share: made, a viewer joined or left, a comment, the tab connected to a workspace, ended. */
 export const RuntimeBrowserShareAuditSchema = z.strictObject({
   at: z.iso.datetime(), event: z.enum(['created', 'joined', 'left', 'commented', 'connected', 'ended']),

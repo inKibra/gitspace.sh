@@ -1112,14 +1112,15 @@ async function inShareWorld(debuggee, operation) {
   if (!debuggee.world) await make();
   try { return await operation(debuggee.world); } catch { await make(); return operation(debuggee.world); }
 }
-/** What is under a point of a shared tab (`DOM.getNodeForLocation` at the point's CSS pixels on the layout viewport):
- * the element's box, accessible role and name, a little of its visible text and selectors that find it
+/** What is under a point of a shared tab (`DOM.getNodeForLocation` at the point's CSS pixels on the layout viewport,
+ * passing over what takes no pointer events, as a click would: the in-page overlay and the pointers it draws): the
+ * element's box, accessible role and name, a little of its visible text and selectors that find it
  * (`shareTargetFunction`); null where Chrome finds nothing there, or only the overlay. */
 async function shareTarget(debuggee, viewport, at) {
   const tab = (method, params) => chrome.debugger.sendCommand(debuggee.source, method, params);
   const width = viewport.clientWidth, height = viewport.clientHeight;
   try {
-    const { backendNodeId } = await tab('DOM.getNodeForLocation', { x: Math.min(Math.floor(at.x * width), Math.ceil(width) - 1), y: Math.min(Math.floor(at.y * height), Math.ceil(height) - 1), includeUserAgentShadowDOM: false, ignorePointerEventsNone: true });
+    const { backendNodeId } = await tab('DOM.getNodeForLocation', { x: Math.min(Math.floor(at.x * width), Math.ceil(width) - 1), y: Math.min(Math.floor(at.y * height), Math.ceil(height) - 1), includeUserAgentShadowDOM: false, ignorePointerEventsNone: false });
     const read = await inShareWorld(debuggee, async executionContextId => {
       const { object } = await tab('DOM.resolveNode', { backendNodeId, executionContextId });
       try { const result = await tab('Runtime.callFunctionOn', { functionDeclaration: shareTargetFunction, objectId: object.objectId, returnByValue: true }); return result.exceptionDetails ? null : result.result?.value ?? null; }

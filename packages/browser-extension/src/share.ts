@@ -27,7 +27,10 @@ export async function shareRequest(account: string, identity: SigningIdentity, r
  */
 export const shareTargetFunction = `function() {
   const element = this.nodeType === 1 ? this : this.parentElement;
-  if (!element || element.closest('[data-gitspace-overlay]')) return null;
+  if (!element) return null;
+  // The overlay draws in a closed shadow root, which closest() does not leave: its host is the root's host.
+  const host = element.getRootNode() instanceof ShadowRoot ? element.getRootNode().host : element;
+  if (host.closest('[data-gitspace-overlay]')) return null;
   const text = String(element.innerText ?? element.textContent ?? '').replace(/\\s+/g, ' ').trim().slice(0, 500);
   const selectors = [];
   const add = selector => {

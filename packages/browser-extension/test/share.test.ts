@@ -76,14 +76,30 @@ describe('a share of a tab on your Chrome', () => {
     const page = new Window();
     closing.push(() => page.happyDOM.close());
     page.document.body.innerHTML = '<main><form id="checkout"><button name="pay" class="primary big">Pay now</button><button>Cancel</button></form></main>';
-    const pay = page.document.querySelector('button');
+    const [pay, cancel] = page.document.querySelectorAll('button');
+    // The in-page overlay: a closed shadow root drawing viewers' pointers (no pointer events) and its own controls.
+    const host = page.document.createElement('div');
+    host.setAttribute('data-gitspace-overlay', '');
+    page.document.documentElement.appendChild(host);
+    const control = host.attachShadow({ mode: 'closed' }).appendChild(page.document.createElement('button'));
+    const nodes: Record<number, unknown> = { 42: pay, 43: cancel, 77: control };
     chrome.answer(({ method, params }) => {
       if (method === 'Page.getLayoutMetrics') return viewport;
-      if (method === 'DOM.getNodeForLocation') return params.x === 307 && params.y === 153 ? { backendNodeId: 42, frameId: 'main' } : undefined;
-      if (method === 'DOM.resolveNode' && params.backendNodeId === 42) return { object: { objectId: 'node-42' } };
-      if (method === 'Runtime.callFunctionOn' && params.objectId === 'node-42') return { result: { value: page.eval(`(${shareTargetFunction})`).call(pay) } };
-      if (method === 'DOM.getBoxModel' && params.backendNodeId === 42) return { model: { border: [256, 128, 512, 128, 512, 256, 256, 256] } };
-      if (method === 'Accessibility.getPartialAXTree' && params.backendNodeId === 42) return { nodes: [{ backendDOMNodeId: 42, role: { value: 'button' }, name: { value: 'Pay now' } }] };
+      if (method === 'DOM.getNodeForLocation') {
+        if (params.x === 307 && params.y === 153) return { backendNodeId: 42, frameId: 'main' };
+        // A viewer's named pointer covers Cancel; it takes no pointer events, so a click there reaches Cancel.
+        if (params.x === 614 && params.y === 307) return { backendNodeId: params.ignorePointerEventsNone ? 77 : 43, frameId: 'main' };
+        // The overlay's own control takes pointer events.
+        if (params.x === 716 && params.y === 358) return { backendNodeId: 77, frameId: 'main' };
+        return undefined;
+      }
+      const id = typeof params.backendNodeId === 'number' ? params.backendNodeId : Number(String(params.objectId ?? '').slice(5));
+      if (method === 'DOM.resolveNode' && nodes[id]) return { object: { objectId: `node-${id}` } };
+      if (method === 'Runtime.callFunctionOn' && nodes[id]) return { result: { value: page.eval(`(${shareTargetFunction})`).call(nodes[id]) } };
+      if (method === 'DOM.getBoxModel' && id === 42) return { model: { border: [256, 128, 512, 128, 512, 256, 256, 256] } };
+      if (method === 'DOM.getBoxModel' && id === 43) return { model: { border: [512, 256, 768, 256, 768, 384, 512, 384] } };
+      if (method === 'DOM.getBoxModel' && id === 77) return { model: { border: [700, 340, 740, 340, 740, 380, 700, 380] } };
+      if (method === 'Accessibility.getPartialAXTree' && nodes[id]) return { nodes: [{ backendDOMNodeId: id, role: { value: 'button' }, name: { value: id === 42 ? 'Pay now' : id === 43 ? 'Cancel' : 'Stop' } }] };
       return method === 'Page.captureScreenshot' ? { data: 'CROP' } : undefined;
     });
     const shareId = crypto.randomUUID();
@@ -91,6 +107,8 @@ describe('a share of a tab on your Chrome', () => {
     const target = { box: { x: 0.25, y: 0.25, width: 0.25, height: 0.25 }, role: 'button', name: 'Pay now', text: 'Pay now', selectors: ['button[name="pay"]', 'button.primary.big', '#checkout > button:nth-of-type(1)'] };
     expect(await chrome.ask({ operation: 'shareHit', shareId, at: { x: 0.3, y: 0.3 } })).toEqual({ target });
     expect(await chrome.ask({ operation: 'shareHit', shareId, at: { x: 0.9, y: 0.9 } })).toEqual({ target: null });
+    expect(await chrome.ask({ operation: 'shareHit', shareId, at: { x: 0.6, y: 0.6 } })).toMatchObject({ target: { role: 'button', name: 'Cancel', text: 'Cancel' } });
+    expect(await chrome.ask({ operation: 'shareHit', shareId, at: { x: 0.7, y: 0.7 } })).toEqual({ target: null });
 
     expect(await chrome.ask({ operation: 'shareAnchor', shareId, at: { x: 0.3, y: 0.3 } })).toEqual({ page: { url: 'https://elsewhere.example/', title: 'Elsewhere' }, target, region: target.box, viewport: { width: 1024, height: 512 }, scroll: { x: 0, y: 300 }, crop: 'CROP' });
     expect(await chrome.ask({ operation: 'shareAnchor', shareId, region: { x: 0.5, y: 0.5, width: 0.25, height: 0.5 } })).toMatchObject({ target: null, region: { x: 0.5, y: 0.5, width: 0.25, height: 0.5 }, crop: 'CROP' });
