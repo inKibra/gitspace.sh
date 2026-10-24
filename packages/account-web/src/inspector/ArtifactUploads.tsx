@@ -46,7 +46,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
   const [uploaded, setUploaded] = useState<readonly ArtifactReference[]>([]);
   const [highlighted, setHighlighted] = useState<readonly string[]>([]);
   const pending = useRef(new Map<string, PendingUpload>());
-  const chunkQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const partQueue = useRef<Promise<unknown>>(Promise.resolve());
   const update = (id: string, patch: Partial<ArtifactUploadRow>): void => setRows((current) => current.map((row) => row.id === id ? { ...row, ...patch } : row));
 
   useEffect(() => () => {
@@ -96,16 +96,15 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
     add: (files) => {
       if (!client) return;
       setHighlighted([]);
-      // The routed transport batches same-tick calls into one request body, so concurrent files
-      // send one chunk at a time to keep every body under the Worker's size cap.
+      // Concurrent files send one part at a time, so at most one part is held in memory and in flight.
       const serialized: ArtifactUploadClient = {
         ...client,
-        chunk: (input, signal) => {
-          const request = chunkQueue.current.then(() => {
+        part: (input, signal) => {
+          const request = partQueue.current.then(() => {
             signal.throwIfAborted();
-            return client.chunk(input, signal);
+            return client.part(input, signal);
           });
-          chunkQueue.current = request.catch(() => undefined);
+          partQueue.current = request.catch(() => undefined);
           return request;
         },
       };

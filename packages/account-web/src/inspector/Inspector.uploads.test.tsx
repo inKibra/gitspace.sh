@@ -3,7 +3,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DRIVE_FILE_MAX_BYTES } from '@gitspace/protocol';
-import { ARTIFACT_UPLOAD_CHUNK_BYTES, rpcErrors } from '@gitspace/protocol/rpc-contract';
+import { rpcErrors } from '@gitspace/protocol/rpc-contract';
+
+/** A small part size from begin, so files of a few parts stay small. */
+const PART = 256 * 1024;
 import { Inspector, type InspectorProps } from './Inspector.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
 
@@ -38,11 +41,11 @@ async function click(label: string) {
   await act(async () => button!.click());
   await settle();
 }
-function client(chunk: ArtifactUploadClient['chunk']) {
+function client(part: ArtifactUploadClient['part']) {
   let begun = 0;
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: `${fileName}#${begun += 1}`, url: `drive://workspace/uploads/${fileName}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES })),
-    chunk: vi.fn<ArtifactUploadClient['chunk']>(chunk),
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: `${fileName}#${begun += 1}`, url: `drive://workspace/uploads/${fileName}`, partBytes: PART })),
+    part: vi.fn<ArtifactUploadClient['part']>(part),
     commit: vi.fn<ArtifactUploadClient['commit']>(async (uploadId) => {
       const name = uploadId.split('#')[0]!;
       return { kind: 'artifact', url: `drive://workspace/uploads/${name}`, hash: 'hash', label: `uploads/${name}`, mediaType: null, generation: 1 };
@@ -50,7 +53,7 @@ function client(chunk: ArtifactUploadClient['chunk']) {
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
   };
 }
-const acknowledge: ArtifactUploadClient['chunk'] = async ({ offset, data }) => ({ received: offset + atob(data).length });
+const acknowledge: ArtifactUploadClient['part'] = async ({ partNumber, bytes }) => ({ received: (partNumber - 1) * PART + bytes.length });
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -70,28 +73,28 @@ afterEach(async () => { await act(() => root.unmount()); container.remove(); if 
 describe('Inspector artifact uploads', () => {
   it('shows acknowledged progress and releases the server upload when cancelled mid-transfer', async () => {
     const uploads = client(async (input, signal) => {
-      if (input.offset === 0) return acknowledge(input, signal);
+      if (input.partNumber === 1) return acknowledge(input, signal);
       const { promise, reject } = Promise.withResolvers<never>();
       signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       return promise;
     });
     props.artifactUpload = uploads;
     await render();
-    await choose(new File([new Uint8Array(ARTIFACT_UPLOAD_CHUNK_BYTES * 2)], 'data.zip'));
+    await choose(new File([new Uint8Array(PART * 2)], 'data.zip'));
 
-    expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe(String(ARTIFACT_UPLOAD_CHUNK_BYTES));
+    expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe(String(PART));
     expect(container.textContent).toContain('256 KiB of 512 KiB · 50%');
     const uploadId = (await uploads.begin.mock.results[0]!.value).uploadId;
 
     await click('Cancel data.zip');
 
-    expect(uploads.chunk.mock.calls[1]?.[1].aborted).toBe(true);
+    expect(uploads.part.mock.calls[1]?.[1].aborted).toBe(true);
     expect(uploads.abort).toHaveBeenCalledExactlyOnceWith(uploadId);
     expect(uploads.commit).not.toHaveBeenCalled();
     expect(container.querySelector('[role="progressbar"]')).toBeNull();
   });
 
-  it('offers Retry after a rejected chunk, restarts the upload, and highlights the committed artifact', async () => {
+  it('offers Retry after a rejected part, restarts the upload, and highlights the committed artifact', async () => {
     let fail = true;
     const uploads = client(async (input, signal) => {
       if (fail) { fail = false; throw rpcErrors.inspectorState({ resource: 'upload', message: 'Chunk hash mismatch.' }); }
@@ -117,7 +120,7 @@ describe('Inspector artifact uploads', () => {
     expect(container.querySelector(`[data-artifact-url="${url}"]`)?.hasAttribute('data-selected')).toBe(true);
   });
 
-  it('sends one chunk request at a time across concurrent files and lists both before the catalog publishes them', async () => {
+  it('sends one part at a time across concurrent files and lists both before the catalog publishes them', async () => {
     let inFlight = 0;
     let peak = 0;
     const uploads = client(async (input, signal) => {
@@ -132,9 +135,9 @@ describe('Inspector artifact uploads', () => {
     props.artifactUpload = uploads;
     await render();
 
-    await choose(new File([new Uint8Array(ARTIFACT_UPLOAD_CHUNK_BYTES + 1)], 'a.zip'), new File([new Uint8Array(ARTIFACT_UPLOAD_CHUNK_BYTES + 1)], 'b.zip'));
+    await choose(new File([new Uint8Array(PART + 1)], 'a.zip'), new File([new Uint8Array(PART + 1)], 'b.zip'));
 
-    expect(uploads.chunk).toHaveBeenCalledTimes(4);
+    expect(uploads.part).toHaveBeenCalledTimes(4);
     expect(peak).toBe(1);
     expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/a.zip"]')?.hasAttribute('data-selected')).toBe(true);
     expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/b.zip"]')?.hasAttribute('data-selected')).toBe(true);

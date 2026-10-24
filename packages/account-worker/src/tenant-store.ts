@@ -266,9 +266,13 @@ export class TenantStore {
     return sendSized(part.stream.pipeThrough(verifying(part)), size, body => upload.uploadPart(partNumber, body, { ssecKey }));
   }
 
-  /** A completed object whose parts do not add up to its declared (or `expected`) size is deleted rather than left readable. */
+  /** A completed object whose parts do not add up to its declared (or `expected`) size is deleted rather than left
+   * readable. Deployed R2 returns no custom metadata from `complete` (workers-sdk#5936), so the stored object is read
+   * back with `head`, which has it. */
   async completeMultipart(name: string, scope: string, uploadId: string, parts: R2UploadedPart[], expected?: TenantExpected): Promise<TenantObjectMetadata> {
-    const completed = await this.bucket.resumeMultipartUpload(this.key(name), uploadId).complete(parts);
+    await this.bucket.resumeMultipartUpload(this.key(name), uploadId).complete(parts);
+    const completed = await this.bucket.head(this.key(name));
+    if (!completed) throw new TenantObjectIntegrityError('The completed tenant object is missing');
     try {
       return storedMetadata(completed, scope, expected);
     } catch (error) {

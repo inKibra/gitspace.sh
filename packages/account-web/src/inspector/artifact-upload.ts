@@ -6,9 +6,10 @@ type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
 /** Authority calls for one workspace's `uploads/` artifact folder; every method throws the RPC error on failure. */
 export interface ArtifactUploadClient {
   /** `sha256` is the lowercase hex digest of the whole file; commit refuses bytes that do not match it. */
-  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null }): Promise<{ uploadId: string; url: string; chunkBytes: number }>;
-  /** `data` is the chunk's base64 encoding; `sha256` is the lowercase hex digest of its raw bytes. */
-  chunk(input: { uploadId: string; offset: number; sha256: string; data: string }, signal: AbortSignal): Promise<{ received: number }>;
+  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null }): Promise<{ uploadId: string; url: string; partBytes: number }>;
+  /** Sends part `partNumber` (1-based): `partBytes` raw bytes, or the rest of the file for the last part. Resending
+   * the last acknowledged part is safe. Resolves with the bytes the authority now holds. */
+  part(input: { uploadId: string; partNumber: number; bytes: Uint8Array<ArrayBuffer> }, signal: AbortSignal): Promise<{ received: number }>;
   /** Resolves with the registered artifact, which may precede its appearance in the published catalog. */
   commit(uploadId: string): Promise<ArtifactReference>;
   abort(uploadId: string): Promise<void>;
@@ -18,13 +19,13 @@ export interface ArtifactUploadClient {
 export interface ArtifactUploadSession {
   uploadId: string;
   url: string;
-  chunkBytes: number;
+  partBytes: number;
   received: number;
 }
 
 export class ArtifactUploadRejected extends Error {}
 
-// Only failures that leave the server's upload state intact are retried at the same offset.
+// Only failures that leave the server's upload state intact are retried with the same part.
 const transientTags: Readonly<Record<string, true>> = {
   [ClientOffline.tag]: true,
   [ClientNetworkFailure.tag]: true,
@@ -71,15 +72,15 @@ export interface UploadArtifactOptions {
   resume?: ArtifactUploadSession;
   /** Called as the whole file is hashed before begin, with the bytes hashed so far. */
   onHashed?(hashed: number): void;
-  /** Called after begin and after every acknowledged chunk. */
+  /** Called after begin and after every acknowledged part. */
   onSession(session: ArtifactUploadSession): void;
-  /** Backoff before each same-offset retry of a transient chunk failure; its length bounds the retries. */
+  /** Backoff before each retry of a transient part failure; its length bounds the retries. */
   retryDelaysMs?: readonly number[];
 }
 
 /**
- * Hashes `file` slice by slice (the authority stores it under its digest), then streams it to the authority one
- * chunk at a time: only the current slice is ever in memory, and chunks are sent strictly in offset order.
+ * Hashes `file` slice by slice (the authority stores it under its digest), then sends it as raw parts of the size begin
+ * names, strictly in order: only the current part is ever in memory.
  */
 export async function uploadArtifactFile(client: ArtifactUploadClient, file: File, options: UploadArtifactOptions): Promise<ArtifactReference> {
   const rejection = uploadRejection(file);
@@ -102,15 +103,12 @@ export async function uploadArtifactFile(client: ArtifactUploadClient, file: Fil
   }
   while (session.received < file.size) {
     const offset = session.received;
-    const bytes = new Uint8Array(await file.slice(offset, Math.min(file.size, offset + session.chunkBytes)).arrayBuffer());
-    const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('');
-    let binary = '';
-    for (let start = 0; start < bytes.length; start += 32 * 1024) binary += String.fromCharCode(...bytes.subarray(start, start + 32 * 1024));
-    const data = btoa(binary);
+    const bytes = new Uint8Array(await file.slice(offset, Math.min(file.size, offset + session.partBytes)).arrayBuffer());
+    const partNumber = offset / session.partBytes + 1;
     for (let attempt = 0; ; attempt += 1) {
       signal.throwIfAborted();
       try {
-        const { received } = await client.chunk({ uploadId: session.uploadId, offset, sha256, data }, signal);
+        const { received } = await client.part({ uploadId: session.uploadId, partNumber, bytes }, signal);
         if (received !== offset + bytes.byteLength) throw new Error(`The authority stored ${formatBytes(received)} where ${formatBytes(offset + bytes.byteLength)} was expected.`);
         session = { ...session, received };
         break;

@@ -417,7 +417,7 @@ export class InspectorCloudArtifacts {
     const upload = this.files.begin(this.stagingScope, { declared: { sha256: `sha256:${sha256}`, size } });
     const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation: this.source.placement?.generation ?? 0, path: `uploads/${name}`, size, mediaType, received: 0, last: null, upload };
     await this.saveUpload(upload.id, state);
-    return { uploadId: upload.id, url: driveUrl(this.writable().mount, state.path), chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES };
+    return { uploadId: upload.id, url: driveUrl(this.writable().mount, state.path), chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES, partBytes: upload.partBytes };
   }
 
   /** Staged uploads untouched for a day were abandoned (a closed tab, a failed send); a new upload removes them. A
@@ -453,6 +453,24 @@ export class InspectorCloudArtifacts {
     const upload = received - sent === state.upload.partBytes && received < state.size ? await this.files.append(state.upload, await this.staged(uploadId, sent, received)) : state.upload;
     await this.saveUpload(uploadId, { ...state, received, last: { offset, sha256 }, upload });
     if (upload.size > sent) await this.store.delete(Array.from({ length: (upload.size - sent) / ARTIFACT_UPLOAD_CHUNK_BYTES }, (_, index) => this.uploadKey(uploadId, String(sent + index * ARTIFACT_UPLOAD_CHUNK_BYTES))));
+    return { received };
+  }
+
+  /** Stores part `partNumber` (1-based) straight into the upload's multipart object: every part `upload.partBytes`
+   * except the last. Resending the last stored part is acknowledged without storing it again. Not mixed with chunks:
+   * an upload that staged chunks finishes through them. */
+  async uploadPart(uploadId: string, partNumber: number, bytes: Uint8Array) {
+    const state = await this.requireUpload(uploadId);
+    const sha256 = (await digest(bytes)).slice(7);
+    const offset = (partNumber - 1) * state.upload.partBytes;
+    if (state.last?.offset === offset && state.last.sha256 === sha256) return { received: state.received };
+    if (state.received !== state.upload.size) throw new Error('This upload is being sent in chunks');
+    if (!Number.isSafeInteger(partNumber) || partNumber < 1 || offset !== state.received) throw new Error(`Expected part ${state.received / state.upload.partBytes + 1}`);
+    const expected = Math.min(state.upload.partBytes, state.size - offset);
+    if (expected <= 0 || bytes.byteLength !== expected) throw new Error(`Part ${partNumber} must be ${expected} bytes`);
+    const upload = await this.files.append(state.upload, bytes);
+    const received = offset + bytes.byteLength;
+    await this.saveUpload(uploadId, { ...state, received, last: { offset, sha256 }, upload });
     return { received };
   }
 

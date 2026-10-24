@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { artifactObjectKey, createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, DRIVE_FILE_MAX_BYTES, signDeviceInvite, TENANT_OBJECT_PART_BYTES, type ArtifactManifest } from '@gitspace/protocol';
-import { ARTIFACT_UPLOAD_CHUNK_BYTES, gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, DRIVE_UPLOAD_PATH, gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
@@ -73,8 +73,9 @@ async function fixture() {
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return worker.fetch(new Request(input, init), env);
   }) as typeof fetch;
-  const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: createSignedRpcFetch({ deviceId: binding.deviceId, userId, signingPrivateKey: deviceKey, fetch: fetcher }) }) });
-  return { client, authority, projectId, workspaceId, publish, publishLarge, origin, store };
+  const signed = createSignedRpcFetch({ deviceId: binding.deviceId, userId, signingPrivateKey: deviceKey, fetch: fetcher });
+  const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: signed }) });
+  return { client, authority, projectId, workspaceId, publish, publishLarge, origin, store, signed, fetcher };
 }
 
 async function readBytes(stream: AsyncIterable<{ status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown }>): Promise<Buffer> {
@@ -462,5 +463,43 @@ describe('user artifact flows', () => {
     const whole = await worker.fetch(new Request(url), env);
     expect([whole.status, whole.headers.get('content-length')]).toEqual([200, String(size)]);
     expect(await streamedSha256(whole.body!)).toBe(`sha256:${hash}`);
+  }, 180_000);
+
+  it('takes raw device-signed parts of a declared upload into a workspace scope and publishes it once the digest matches', async () => {
+    const { client, signed, fetcher, workspaceId, projectId, origin } = await fixture();
+    const request = { spaceId: workspaceId, expectedGeneration: 0 };
+    const size = TENANT_OBJECT_PART_BYTES + 7;
+    const digest = createHash('sha256').update(pattern(0, TENANT_OBJECT_PART_BYTES)).update(pattern(TENANT_OBJECT_PART_BYTES, 7)).digest('hex');
+    const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'release-check.bin', size, sha256: digest, mediaType: 'application/octet-stream' });
+    if (begun.status === 'error') throw begun.error;
+    expect(begun.value.partBytes).toBe(TENANT_OBJECT_PART_BYTES);
+    const put = (partNumber: number, bytes: Uint8Array<ArrayBuffer>, options: { spaceId?: string; send?: typeof fetch } = {}) => (options.send ?? signed)(
+      `${origin}${DRIVE_UPLOAD_PATH}/${begun.value.uploadId}/parts/${partNumber}?spaceId=${options.spaceId ?? workspaceId}&expectedGeneration=0`,
+      { method: 'PUT', body: bytes, headers: { 'content-length': String(bytes.byteLength) } },
+    );
+    const first = pattern(0, TENANT_OBJECT_PART_BYTES);
+    // Unsigned, or signed for another space, a part is refused.
+    expect((await put(1, first, { send: fetcher })).status).toBe(401);
+    expect((await put(1, pattern(0, 7), { spaceId: projectId })).status).toBe(409);
+    expect((await put(1, pattern(0, 7))).status).toBe(409);
+    const stored = await put(1, first);
+    expect([stored.status, await stored.json()]).toEqual([200, { status: 'ok', value: { received: TENANT_OBJECT_PART_BYTES } }]);
+    // A resent part is acknowledged; a skipped one is refused.
+    expect(await (await put(1, first)).json()).toEqual({ status: 'ok', value: { received: TENANT_OBJECT_PART_BYTES } });
+    expect((await put(3, pattern(0, 7))).status).toBe(409);
+    expect(await (await put(2, pattern(TENANT_OBJECT_PART_BYTES, 7))).json()).toEqual({ status: 'ok', value: { received: size } });
+    const committed = await client.inspector.artifacts.uploadCommit({ ...request, uploadId: begun.value.uploadId });
+    if (committed.status === 'error') throw committed.error;
+    expect(committed.value).toMatchObject({ path: 'uploads/release-check.bin', hash: `sha256:${digest}`, size, scope: 'workspace', workspaceId });
+    const minted = await client.inspector.artifacts.file({ ...request, url: committed.value.url, hash: null });
+    if (minted.status === 'error') throw minted.error;
+    const ranged = await worker.fetch(new Request(new URL(minted.value.url, origin), { headers: { range: `bytes=${TENANT_OBJECT_PART_BYTES - 3}-${TENANT_OBJECT_PART_BYTES + 2}` } }), env);
+    expect([ranged.status, new Uint8Array(await ranged.arrayBuffer())]).toEqual([206, pattern(TENANT_OBJECT_PART_BYTES - 3, 6)]);
+
+    // Raw parts that miss the declared digest are never published.
+    const wrong = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'wrong.bin', size: 3, sha256: '0'.repeat(64), mediaType: null });
+    if (wrong.status === 'error') throw wrong.error;
+    expect((await signed(`${origin}${DRIVE_UPLOAD_PATH}/${wrong.value.uploadId}/parts/1?spaceId=${workspaceId}&expectedGeneration=0`, { method: 'PUT', body: new Uint8Array([1, 2, 3]), headers: { 'content-length': '3' } })).status).toBe(409);
+    expect(await client.inspector.artifacts.uploadCommit({ ...request, uploadId: wrong.value.uploadId })).toMatchObject({ status: 'error' });
   }, 180_000);
 });

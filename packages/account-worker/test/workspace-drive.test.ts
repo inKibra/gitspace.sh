@@ -5,7 +5,7 @@ import { artifactObjectKey, credentialProtocolBase64, driveScopeKeyPrefix, TENAN
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
 import { DriveFiles } from '../src/drive-files.js';
-import { tenantObjectKey, tenantStore } from '../src/tenant-store.js';
+import { TenantStore, tenantObjectKey, tenantStore } from '../src/tenant-store.js';
 import { workspaceDrive } from '../src/workspace-drive.js';
 import { pattern, streamedSha256 } from './drive-bytes.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -110,5 +110,38 @@ describe('workspace drive', () => {
     const whole = await drive.finish(await drive.append(await drive.upload(), note), 'browser/captures/1b2d/note.txt', 'text/plain');
     expect(whole).toEqual({ path: 'browser/captures/1b2d/note.txt', size: note.byteLength, blobHash: sha256(note) });
     expect(await drive.read('browser/captures/1b2d/note.txt')).toEqual(note);
+  }, 60_000);
+
+  it('completes a multipart drive file in a workspace scope although R2 returns no metadata from complete', async () => {
+    const { workspaceId } = await fixture();
+    // Deployed R2 answers `complete` with an object missing its custom metadata (workers-sdk#5936); the local one does
+    // not, so the test bucket drops it.
+    const withoutCompletedMetadata = (upload: R2MultipartUpload) => new Proxy(upload, {
+      get(target, property) {
+        if (property === 'complete') return async (parts: R2UploadedPart[]) => new Proxy(await target.complete(parts), { get: (object, key) => key === 'customMetadata' ? {} : Reflect.get(object, key) });
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const bucket = new Proxy(env.DATA, {
+      get(target, property) {
+        if (property === 'resumeMultipartUpload') return (key: string, uploadId: string) => withoutCompletedMetadata(target.resumeMultipartUpload(key, uploadId));
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const scope = `space:${workspaceId}`;
+    const files = new DriveFiles(new TenantStore(bucket, env.ACCOUNT_ID, async name => new Uint8Array(await env.CREDENTIALS.getByName(env.ACCOUNT_ID).scopeKey(name))), env.ACCOUNT_ID);
+    const part = 5 * 1024 * 1024;
+    const size = part + 9;
+    const blobHash = sha256(pattern(0, size));
+    // Declared first (an Inspector upload) and streamed (a capture): both complete as one object.
+    const declared = await files.append(await files.append(files.begin(scope, { declared: { sha256: blobHash, size }, partBytes: part }), pattern(0, part)), pattern(part, 9));
+    expect(await files.finish(declared)).toEqual({ blobHash, size });
+    const streamed = await files.append(await files.append(files.begin(scope, { partBytes: part }), pattern(0, part)), pattern(part, 9));
+    const file = await files.finish(streamed);
+    expect(file).toMatchObject({ blobHash, size });
+    const reader = new DriveFiles(tenantStore(env), env.ACCOUNT_ID);
+    for (const ref of [{ blobHash }, file]) expect(await reader.head(scope, ref)).toEqual({ scope, sha256: blobHash, size });
   }, 60_000);
 });

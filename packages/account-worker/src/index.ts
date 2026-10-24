@@ -48,6 +48,8 @@ import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { BROWSER_UPLOAD_PATH, serveBrowserUpload, type BrowserUploadStep } from './browser-upload.js';
+import { serveDriveUploadPart } from './drive-upload-route.js';
+import { DRIVE_UPLOAD_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
 import { RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
@@ -1055,6 +1057,8 @@ export default {
     }
     if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).fetch(request);
     // Files from your Chrome (downloads, captures) come over HTTPS signed by its pairing key, never over its WebSocket.
+    // Inspector upload parts travel raw and device-signed, outside RPC's base64 chunks.
+    if (url.pathname.startsWith(`${DRIVE_UPLOAD_PATH}/`)) return serveDriveUploadPart(request, env);
     if (url.pathname === BROWSER_UPLOAD_PATH || url.pathname.startsWith(`${BROWSER_UPLOAD_PATH}/`)) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), drive: identity => workspaceDrive(env, identity) });
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|rename|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');

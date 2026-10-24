@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-import { ARTIFACT_UPLOAD_CHUNK_BYTES } from '@gitspace/protocol/rpc-contract';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -26,8 +25,8 @@ afterEach(async () => {
 
 function client(commit: ArtifactUploadClient['commit']) {
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: fileName, url: `drive://workspace/uploads/${fileName}`, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES })),
-    chunk: vi.fn<ArtifactUploadClient['chunk']>(async ({ offset, data }) => ({ received: offset + atob(data).length })),
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: fileName, url: `drive://workspace/uploads/${fileName}`, partBytes: 256 * 1024 })),
+    part: vi.fn<ArtifactUploadClient['part']>(async ({ partNumber, bytes }) => ({ received: (partNumber - 1) * 256 * 1024 + bytes.length })),
     commit: vi.fn<ArtifactUploadClient['commit']>(commit),
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
   };
