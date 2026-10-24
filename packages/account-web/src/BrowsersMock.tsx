@@ -1,4 +1,5 @@
-// Batch 18 mockup (kept in the repo: the agreed design; do not delete)s: Plugins → Browsers, the Inspector's Browser tab, and the extension. Static data only.
+// Batch 18 mockups (kept in the repo: the agreed design; do not delete): Plugins → Browsers, the Inspector's Browser tab,
+// and the extension. Static data only.
 import {
   Badge, Button, Card, CardDescription, CardFooter, CardGroup, CardHeader, CardMedia, CardTitle,
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
