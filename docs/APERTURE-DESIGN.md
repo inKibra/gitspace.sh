@@ -194,7 +194,8 @@ Modeled on Playwriter's remote control.
 
 - `https://<account-host>/s/<shareId>#<secret>`; the secret is in the URL fragment, so it never reaches the server in the request line or logs. The landing page redeems it for a short-lived session token.
 - A share is one session (a tab, or a cloud page) with capabilities chosen at creation: `view`, `control` (takes the lease), `comment`. An expiry is required.
-- Created from the extension toolbar or the UI; revocable from either. The link dies when revoked, expired, or when the tab closes or leaves the workspace group.
+- Created from the extension popup (copying the link creates it) or the UI; revocable from either. The link dies when revoked, expired, or when the tab closes.
+- **The same link serves agents.** Pasted by the account owner into one of their workspaces' composer, it becomes a tab chip; sending connects the tab to that workspace's group, and the agent sees the tab, never the link. Only the owner's own workspaces can redeem it this way; anyone else gets the viewer.
 - Recipients without a GitSpace account get the viewer only; no credentials, no Playwright endpoint, no other tabs.
 - With `comment`, people on the share comment on the same live tab the agent is using (§9); their comments land in the workspace under the name they give.
 - Every redemption and lease change is audited.
