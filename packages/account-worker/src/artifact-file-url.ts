@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DriveFiles } from './drive-files.js';
+import { openToken, sealToken, type SealedTokenKind } from './sealed-token.js';
 import { tenantStore, type TenantRange } from './tenant-store.js';
 
 /** How long a minted file URL serves its file. A media element keeps requesting ranges while it plays, so a URL
@@ -21,30 +22,13 @@ const FileGrantSchema = z.object({
 });
 export type ArtifactFileGrant = Omit<z.infer<typeof FileGrantSchema>, 'version' | 'expiresAt'>;
 
-const GRANT_CONTEXT = new TextEncoder().encode('gitspace-artifact-file-url-v1');
-
-/** Sealing key for file URLs: the vault's key for a scope no stored object takes (objects' scopes are `space:<id>` and
- * `lfs:<id>`), so a URL shares no key with stored bytes. */
-async function grantKey(env: Env): Promise<CryptoKey> {
-  const key = new Uint8Array(await env.CREDENTIALS.getByName(env.ACCOUNT_ID).scopeKey('file-url:v1'));
-  return crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt', 'decrypt']);
-}
+const FILE_URL: SealedTokenKind = { scope: 'file-url:v1', context: 'gitspace-artifact-file-url-v1' };
 
 /** A sealed URL for one file version: it names nothing readable and cannot be altered or extended. */
 export async function mintArtifactFileUrl(env: Env, grant: ArtifactFileGrant): Promise<{ url: string; downloadUrl: string; expiresAt: string }> {
   const expiresAt = Date.now() + ARTIFACT_FILE_URL_MS;
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const body = new TextEncoder().encode(JSON.stringify(FileGrantSchema.parse({ version: 1, ...grant, expiresAt })));
-  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce, additionalData: GRANT_CONTEXT }, await grantKey(env), body));
-  const token = Buffer.concat([nonce, sealed]).toString('base64url');
+  const token = await sealToken(env, FILE_URL, FileGrantSchema.parse({ version: 1, ...grant, expiresAt }));
   return { url: `/files/${token}`, downloadUrl: `/files/${token}?download=1`, expiresAt: new Date(expiresAt).toISOString() };
-}
-
-async function openFileGrant(env: Env, token: string): Promise<z.infer<typeof FileGrantSchema>> {
-  const bytes = Buffer.from(token, 'base64url');
-  if (bytes.byteLength <= 12 + 16) throw new Error('Malformed file URL');
-  const body = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.subarray(0, 12), additionalData: GRANT_CONTEXT }, await grantKey(env), bytes.subarray(12));
-  return FileGrantSchema.parse(JSON.parse(new TextDecoder().decode(body)));
 }
 
 /** One `bytes=` range of a file of `size` bytes; null serves the whole file (no range, or several, which HTTP lets a
@@ -71,7 +55,7 @@ export async function serveArtifactFile(request: Request, env: Env): Promise<Res
   const match = /^\/files\/([A-Za-z0-9_-]{40,2048})$/u.exec(url.pathname);
   if (!match) return new Response('Not found', { status: 404, headers });
   let grant: z.infer<typeof FileGrantSchema>;
-  try { grant = await openFileGrant(env, match[1]!); }
+  try { grant = FileGrantSchema.parse(await openToken(env, FILE_URL, match[1]!)); }
   catch { return new Response('Not found', { status: 404, headers }); }
   const remaining = grant.expiresAt - Date.now();
   if (remaining <= 0) return new Response('This file link expired; open the file again', { status: 404, headers });

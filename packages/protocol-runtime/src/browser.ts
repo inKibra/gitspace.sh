@@ -101,9 +101,10 @@ export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserP
  * previews (`manage` `preview`) and running-script counts in group reports. Protocol 4 adds captures (your Capture
  * click records the tab with `chrome.tabCapture`; `captureStart`/`captureStop` record screencast frames), downloads of
  * agent tabs saved to the drive, and uploads into pages from sealed `/files/` links, all moving bytes over HTTPS
- * (`/api/browser-relay/uploads`), never the relay connection.
+ * (`/api/browser-relay/uploads`), never the relay connection. Protocol 5 sends those uploads through upload links: only
+ * the begin request is signed with the pairing key, and its parts, completion and abandonment go to the link it answers.
  */
-export const BROWSER_EXTENSION_PROTOCOL = 4;
+export const BROWSER_EXTENSION_PROTOCOL = 5;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
 export const BROWSER_RUN_LIMIT_MS = 120_000;
 /** Whether a release at protocol `current` refuses an extension at `protocol` as too old. */

@@ -48,7 +48,7 @@ export const FRAME = browserBase64(Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0x00
 /** The installed service worker on a Chrome whose workspace group (Chrome group 7) holds an agent tab on each of
  * app.example, a.docs.example and bank.example; bank.example allows single steps only. Timers are fake (`advance`).
  * `local` seeds `chrome.storage.local`; `live` keeps the extension's own relay connection (`relay` completes it)
- * instead of a connected stand-in, which speaks `protocol` (an account that saves captures and downloads from 4).
+ * instead of a connected stand-in, which speaks `protocol` (an account that saves captures and downloads from 5).
  * The account answers uploads (`requests`, `uploads`) and serves sealed drive files (`files`); `hold` delays an
  * upload request until the test lets it go. Capture's offscreen document runs as Chrome would load it (`recorders`). */
 export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number } = {}) {
@@ -146,18 +146,23 @@ export async function installed(options: { local?: Record<string, unknown>; live
     requests.push(request);
     notify();
     for (const hold of held) if (hold.matches(request)) await hold.release;
-    const [, , , uploadId, step, index] = url.pathname.split('/').slice(1);
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/uploads') {
       const begin = JSON.parse(new TextDecoder().decode(request.body));
       const id = `upload-${uploads.size + 1}`;
       uploads.set(id, { begin, parts: [], completed: false, aborted: false });
-      return json({ status: 'ok', value: { uploadId: id, expiresAt: new Date(Date.now() + 900_000).toISOString(), path: `drive://workspace/${begin.file ?? begin.name}` } });
+      return json({ status: 'ok', value: { link: `${url.origin}/api/uploads/${id}`, expiresAt: new Date(Date.now() + 900_000).toISOString(), path: `drive://workspace/${begin.file ?? begin.name}` } });
     }
-    const upload = uploadId ? uploads.get(uploadId) : undefined;
-    if (!upload) return json({ status: 'error', error: { code: 'NotFound', message: 'Unknown upload' } });
-    if (request.method === 'PUT' && step === 'parts') { upload.parts[Number(index)] = request.body; return json({ status: 'ok', value: { index: Number(index), received: upload.parts.reduce((sum, part) => sum + part.byteLength, 0) } }); }
+    // The upload's link: parts numbered from 1, each the next one, then complete or abandon.
+    const [api, route, uploadId, step, index] = url.pathname.split('/').slice(1);
+    const upload = api === 'api' && route === 'uploads' && uploadId ? uploads.get(uploadId) : undefined;
+    if (!upload) return new Response(JSON.stringify({ status: 'error', error: { code: 'UPLOAD_LINK_UNKNOWN', message: 'Unknown upload link' } }), { status: 404 });
+    if (request.method === 'PUT' && step === 'parts') {
+      if (Number(index) !== upload.parts.length + 1) return new Response(JSON.stringify({ status: 'error', error: { code: 'UPLOAD_PART_REFUSED', message: `Expected part ${upload.parts.length + 1}` } }), { status: 409 });
+      upload.parts.push(request.body);
+      return json({ status: 'ok', value: { received: upload.parts.reduce((sum, part) => sum + part.byteLength, 0) } });
+    }
     if (request.method === 'POST' && step === 'complete') { upload.completed = true; const size = upload.parts.reduce((sum, part) => sum + part.byteLength, 0); return json({ status: 'ok', value: { path: `drive://workspace/${upload.begin.file ?? upload.begin.name}`, size, mediaType: upload.begin.mediaType } }); }
-    if (request.method === 'DELETE') { upload.aborted = true; return json({ status: 'ok', value: {} }); }
+    if (request.method === 'DELETE' && step === undefined) { upload.aborted = true; return json({ status: 'ok', value: {} }); }
     throw new Error(`Unexpected account request ${request.method} ${url.pathname}`);
   };
   /** Holds the account's answer to matching upload requests until `release` runs. */
@@ -221,7 +226,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
 
   const chrome = {
     runtime: {
-      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.4.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
+      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.5.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
       getContexts: async () => offscreenOpen ? [{ contextType: 'OFFSCREEN_DOCUMENT' }] : [],
       sendMessage: (message: Record<string, unknown>) => deliver(offscreenListeners, message, workerSender),
     },
@@ -288,7 +293,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
     sent, notify,
   });
   runInContext(extensionFiles('https://account.gitspace.test')['background.js'] ?? '', context);
-  if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 3};`, context);
+  if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4};`, context);
   await settle();
   /** Runs the timers due within `ms` of fake time, in order. */
   const advance = async (ms: number) => {
@@ -336,7 +341,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   /** Chrome fires an alarm. */
   const alarm = async (name: string) => { alarmListener({ name }); await settle(); };
   /** The account answers the extension's latest connection: the pairing handshake, then ready at `protocol`. */
-  const relay = async (protocol = 3) => {
+  const relay = async (protocol = 4) => {
     const socket = sockets.at(-1);
     if (!socket) throw new Error('The extension opened no relay connection');
     socket.readyState = 1;
@@ -348,8 +353,10 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const sentCommands = () => commands.filter(({ method, params }) => !OVERLAY_METHODS[method] && params.functionDeclaration !== browserOverlayFunction).map(({ method }) => method);
   /** What the extension asked the overlay of each tab to do, in order. */
   const overlays = (targetId: string) => commands.filter(command => command.targetId === targetId && command.params.functionDeclaration === browserOverlayFunction).map(({ params }) => Array.isArray(params.arguments) ? params.arguments[0]?.value : undefined);
-  /** Whether an upload request carries this Chrome's signature over its method, path, body hash, time and nonce. */
-  const signedByThisChrome = async (request: AccountRequest) => {
+  /** Whether an upload request is authorized as the account requires: a begin carries this Chrome's signature over its
+   * method, path, body hash, time and nonce; a request to an upload's link carries no signature at all. */
+  const authorizedAsRequired = async (request: AccountRequest) => {
+    if (request.pathname !== '/api/browser-relay/uploads') return request.pathname.startsWith('/api/uploads/') && request.header === null;
     if (!request.header) return false;
     const proof = JSON.parse(Buffer.from(request.header, 'base64url').toString());
     const digest = Buffer.from(await crypto.subtle.digest('SHA-256', request.body)).toString('hex');
@@ -358,7 +365,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   };
   return {
     grant, tabs, group, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, ungrouped,
-    requests, uploads, uploaded, files, hold, signedByThisChrome, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
+    requests, uploads, uploaded, files, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
     execute, authorize, begin, preview, popup, pageEvent, alarm, relay, advance, waitFor,
     answer: (respond: (command: DebuggerCommand) => unknown) => { answer = respond; },
   };

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { posix } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   artifactManifestSchema, credentialProtocolBase64, DRIVE_FILE_MAX_BYTES,
   type ArtifactCopyRecord, type ArtifactManifest, type ArtifactShareRecord, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
@@ -18,6 +19,7 @@ import { readRuntimeTranscript } from './runtime-transcript-reader.js';
 import { tenantStore, type TenantStore } from './tenant-store.js';
 import { DriveFiles, DriveUploadSchema, type DriveFile, type DriveFileRef } from './drive-files.js';
 import { mintArtifactFileUrl } from './artifact-file-url.js';
+import { mintUploadLink } from './upload-link.js';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES } from '@gitspace/protocol/rpc-contract';
 
 export class InspectorWorkspaceMissing extends Error {
@@ -408,16 +410,19 @@ export class InspectorCloudArtifacts {
   }
 
   /** Reserves `uploads/<fileName>` in this session's writable scope; the file is listed only after commit. The file is
-   * stored under the digest the browser declares, and commit refuses other bytes. */
+   * stored under the digest the browser declares, and commit refuses other bytes. `link` is the upload's link
+   * (`upload-link.ts`): its parts, commit and abort without further signatures. */
   async beginUpload(fileName: string, size: number, sha256: string, mediaType: string | null) {
     const name = (fileName.split(/[\\/]/u).at(-1) ?? '').replace(/[\u0000-\u001f\u007f]/gu, '').trim();
     if (!name || name === '.' || name === '..' || name.length > 255) throw new Error('Choose a file with a valid name');
     if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('Declare the file’s SHA-256 as 64 hexadecimal digits');
     await this.deleteAbandonedUploads();
     const upload = this.files.begin(this.stagingScope, { declared: { sha256: `sha256:${sha256}`, size } });
-    const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation: this.source.placement?.generation ?? 0, path: `uploads/${name}`, size, mediaType, received: 0, last: null, upload };
+    const generation = this.source.placement?.generation ?? 0;
+    const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation, path: `uploads/${name}`, size, mediaType, received: 0, last: null, upload };
     await this.saveUpload(upload.id, state);
-    return { uploadId: upload.id, url: driveUrl(this.writable().mount, state.path), chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES, partBytes: upload.partBytes };
+    const link = await mintUploadLink(this.env, { kind: 'drive', spaceId: state.spaceId, generation, uploadId: upload.id });
+    return { uploadId: upload.id, url: driveUrl(this.writable().mount, state.path), link, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES, partBytes: upload.partBytes };
   }
 
   /** Staged uploads untouched for a day were abandoned (a closed tab, a failed send); a new upload removes them. A
@@ -456,20 +461,24 @@ export class InspectorCloudArtifacts {
     return { received };
   }
 
-  /** Stores part `partNumber` (1-based) straight into the upload's multipart object: every part `upload.partBytes`
-   * except the last. Resending the last stored part is acknowledged without storing it again. Not mixed with chunks:
-   * an upload that staged chunks finishes through them. */
-  async uploadPart(uploadId: string, partNumber: number, bytes: Uint8Array) {
+  /** Streams part `partNumber` (1-based) straight into the upload's multipart object: every part `upload.partBytes`
+   * except the last. The last stored part sent again (a lost acknowledgement) is acknowledged when its bytes match,
+   * without storing it twice. Not mixed with chunks: an upload that staged chunks finishes through them. */
+  async uploadPart(uploadId: string, partNumber: number, part: { stream: ReadableStream<Uint8Array>; size: number }) {
     const state = await this.requireUpload(uploadId);
-    const sha256 = (await digest(bytes)).slice(7);
     const offset = (partNumber - 1) * state.upload.partBytes;
-    if (state.last?.offset === offset && state.last.sha256 === sha256) return { received: state.received };
+    if (state.last?.offset === offset && offset + part.size === state.received) {
+      const hash = createHash('sha256');
+      for await (const chunk of streamBytes(part.stream)) hash.update(chunk);
+      if (hash.digest('hex') !== state.last.sha256) throw new Error(`Part ${partNumber} was already stored with other bytes`);
+      return { received: state.received };
+    }
     if (state.received !== state.upload.size) throw new Error('This upload is being sent in chunks');
     if (!Number.isSafeInteger(partNumber) || partNumber < 1 || offset !== state.received) throw new Error(`Expected part ${state.received / state.upload.partBytes + 1}`);
     const expected = Math.min(state.upload.partBytes, state.size - offset);
-    if (expected <= 0 || bytes.byteLength !== expected) throw new Error(`Part ${partNumber} must be ${expected} bytes`);
-    const upload = await this.files.append(state.upload, bytes);
-    const received = offset + bytes.byteLength;
+    if (expected <= 0 || part.size !== expected) throw new Error(`Part ${partNumber} must be ${expected} bytes`);
+    const { upload, sha256 } = await this.files.appendStream(state.upload, part.stream, part.size);
+    const received = offset + part.size;
     await this.saveUpload(uploadId, { ...state, received, last: { offset, sha256 }, upload });
     return { received };
   }

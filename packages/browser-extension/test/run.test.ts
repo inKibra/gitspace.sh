@@ -72,7 +72,7 @@ describe('script commands on your Chrome', () => {
   it('puts only the account’s sealed drive links into a file input', () => {
     const file = { url: 'https://account.gitspace.test/files/token', name: 'a.txt', mediaType: 'text/plain', size: 5 };
     expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [file] }, tab)).toEqual({ send: { backendNodeId: 12, files: [file] } });
-    for (const url of ['https://attacker.example/files/token', 'http://account.gitspace.test/files/token', 'https://account.gitspace.test/api/browser-relay/uploads', 'file:///etc/passwd'])
+    for (const url of ['https://attacker.example/files/token', 'http://account.gitspace.test/files/token', 'https://account.gitspace.test/api/uploads/token', 'file:///etc/passwd'])
       expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [{ ...file, url }] }, tab)).toEqual({ refused: 'GitSpace.setInputFilesFromUrls takes sealed drive links only' });
     expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: Array.from({ length: 9 }, () => file) }, tab)).toHaveProperty('refused');
     expect(relayRunCommand('GitSpace.setInputFilesFromUrls', { backendNodeId: 12, files: [{ ...file, size: 51 * 1024 * 1024 }] }, tab)).toHaveProperty('refused');

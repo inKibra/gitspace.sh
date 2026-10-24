@@ -1716,21 +1716,22 @@ export const inspectorWriteArtifactContract = gitspaceRpc
 export const ARTIFACT_UPLOAD_CHUNK_BYTES = 256 * 1024;
 const artifactUploadRequestFields = { spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), uploadId: wire.string };
 
-/** Where device-signed raw upload parts go: `<DRIVE_UPLOAD_PATH>/<uploadId>/parts/<n>`. */
-export const DRIVE_UPLOAD_PATH = '/api/drive/uploads';
+/** Where upload links live: `<UPLOAD_LINK_PATH>/<token>`. A link is one begun upload's capability: `PUT <link>/parts/<n>`
+ * (1-based raw parts with their Content-Length), `POST <link>/complete`, `DELETE <link>`; no other authentication. */
+export const UPLOAD_LINK_PATH = '/api/uploads';
 
 /** Reserves `uploads/<fileName>` in the space's writable mount; the file is listed only after commit. `sha256` is the
  * whole file's hexadecimal SHA-256 (`Sha256State` hashes a large `File` slice by slice): the file is stored under it as
  * it arrives, up to `DRIVE_FILE_MAX_BYTES`, and commit refuses bytes that do not match it. Bytes travel either as
- * `chunkBytes` base64 chunks over RPC, or as raw `partBytes` parts in device-signed
- * `PUT /api/drive/uploads/<uploadId>/parts/<n>?spaceId=&expectedGeneration=` requests (`DRIVE_UPLOAD_PATH`). */
+ * `chunkBytes` base64 chunks over RPC, or as raw `partBytes` parts through `link` (`UPLOAD_LINK_PATH`), which also
+ * commits (answering with the artifact) and aborts. */
 export const inspectorBeginArtifactUploadContract = gitspaceRpc
   .procedure()
   .input(wire.object({
     spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), fileName: wire.string,
     size: wire.integer({ min: 1, max: DRIVE_FILE_MAX_BYTES }), sha256: wire.string, mediaType: wire.nullable(wire.string),
   }))
-  .output(wire.object({ uploadId: wire.string, url: wire.string, chunkBytes: wire.integer({ min: 1 }), partBytes: wire.integer({ min: 1 }) }))
+  .output(wire.object({ uploadId: wire.string, url: wire.string, link: wire.string, chunkBytes: wire.integer({ min: 1 }), partBytes: wire.integer({ min: 1 }) }))
   .errors(inspectorMutationErrors)
   .mutation();
 

@@ -8,6 +8,7 @@ import { ArtifactUploadRejected, uploadArtifactFile, uploadRejection, type Artif
 /** A small part size from begin, so files of a few parts stay small. */
 const PART = 256 * 1024;
 const url = 'drive://workspace/uploads/data.zip';
+const link = 'https://account.test/api/uploads/token-1';
 const artifact = { kind: 'artifact' as const, url, hash: 'hash', label: 'uploads/data.zip', mediaType: null, generation: 1 };
 
 function contents(size: number): Uint8Array<ArrayBuffer> {
@@ -22,11 +23,11 @@ function authority(failures: Array<(offset: number) => Error | null> = [], partB
   const offsets: number[] = [];
   const sizes: number[] = [];
   const client = {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async () => ({ uploadId: 'upload-1', url, partBytes })),
-    part: vi.fn<ArtifactUploadClient['part']>(async ({ uploadId, partNumber, bytes }) => {
+    begin: vi.fn<ArtifactUploadClient['begin']>(async () => ({ link, url, partBytes })),
+    part: vi.fn<ArtifactUploadClient['part']>(async ({ link: partLink, partNumber, bytes }) => {
       const offset = (partNumber - 1) * partBytes;
       offsets.push(offset);
-      expect(uploadId).toBe('upload-1');
+      expect(partLink).toBe(link);
       const failure = failures.shift()?.(offset);
       if (failure) throw failure;
       expect(offset).toBe(stored.length);
@@ -58,7 +59,7 @@ describe('uploadArtifactFile', () => {
     expect(offsets).toEqual([0, PART, PART * 2]);
     expect(sessions.map((session) => session.received)).toEqual([0, PART, PART * 2, bytes.length]);
     expect(stored()).toEqual(bytes);
-    expect(client.commit).toHaveBeenCalledExactlyOnceWith('upload-1');
+    expect(client.commit).toHaveBeenCalledExactlyOnceWith(link);
     expect(client.commit.mock.invocationCallOrder[0]).toBeGreaterThan(client.part.mock.invocationCallOrder.at(-1)!);
     expect(wholeRead).not.toHaveBeenCalled();
   });
@@ -68,7 +69,7 @@ describe('uploadArtifactFile', () => {
     const { client } = authority();
     const controller = new AbortController();
     // Stop after begin: this test is about the digest, not the parts.
-    client.begin.mockImplementationOnce(async () => { controller.abort(); return { uploadId: 'upload-1', url, partBytes: PART }; });
+    client.begin.mockImplementationOnce(async () => { controller.abort(); return { link, url, partBytes: PART }; });
     const hashed: number[] = [];
 
     await expect(uploadArtifactFile(client, new File([bytes], 'big.bin'), { signal: controller.signal, onSession() {}, onHashed: (count) => hashed.push(count) })).rejects.toThrow();
@@ -114,9 +115,9 @@ describe('uploadArtifactFile', () => {
   it('resumes an acknowledged session without beginning a new upload', async () => {
     const bytes = contents(PART + 10);
     const { client, offsets } = authority();
-    await client.part({ uploadId: 'upload-1', partNumber: 1, bytes: bytes.subarray(0, PART) }, new AbortController().signal);
+    await client.part({ link, partNumber: 1, bytes: bytes.subarray(0, PART) }, new AbortController().signal);
 
-    await uploadArtifactFile(client, new File([bytes], 'data.zip'), { signal: new AbortController().signal, onSession() {}, resume: { uploadId: 'upload-1', url, partBytes: PART, received: PART } });
+    await uploadArtifactFile(client, new File([bytes], 'data.zip'), { signal: new AbortController().signal, onSession() {}, resume: { link, url, partBytes: PART, received: PART } });
 
     expect(client.begin).not.toHaveBeenCalled();
     expect(offsets).toEqual([0, PART]);

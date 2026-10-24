@@ -25,7 +25,7 @@ afterEach(async () => {
 
 function client(commit: ArtifactUploadClient['commit']) {
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: fileName, url: `drive://workspace/uploads/${fileName}`, partBytes: 256 * 1024 })),
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ link: 'https://account.test/api/uploads/token-1', url: `drive://workspace/uploads/${fileName}`, partBytes: 256 * 1024 })),
     part: vi.fn<ArtifactUploadClient['part']>(async ({ partNumber, bytes }) => ({ received: (partNumber - 1) * 256 * 1024 + bytes.length })),
     commit: vi.fn<ArtifactUploadClient['commit']>(commit),
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
@@ -48,13 +48,13 @@ async function draftWithAttachment(text: string, file: File) {
 
 it('uploads attachments that are not sent inline and links them in the prompt', async () => {
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
-  const uploads = client(async (uploadId) => ({ kind: 'artifact', url: `drive://workspace/uploads/${encodeURIComponent(uploadId)}`, hash: 'hash', label: `uploads/${uploadId}`, mediaType: 'application/pdf', generation: 1 }));
+  const uploads = client(async () => ({ kind: 'artifact', url: 'drive://workspace/uploads/report%20(1).pdf', hash: 'hash', label: 'uploads/report (1).pdf', mediaType: 'application/pdf', generation: 1 }));
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={onSend} />));
 
   const textarea = await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report (1).pdf', { type: 'application/pdf' }));
 
   expect(uploads.begin).toHaveBeenCalledWith({ fileName: 'report (1).pdf', size: 10, sha256: '01d448afd928065458cf670b60f5a594d735af0172c8d67f22a81680132681ca', mediaType: 'application/pdf' });
-  expect(uploads.commit).toHaveBeenCalledWith('report (1).pdf');
+  expect(uploads.commit).toHaveBeenCalledWith('https://account.test/api/uploads/token-1');
   expect(onSend.mock.calls.map(([text]) => text)).toEqual(['Summarize this\n\n<attachment name="report (1).pdf" url="drive://workspace/uploads/report%20(1).pdf" type="application/pdf" size="10" />']);
   expect(textarea.value).toBe('');
 });

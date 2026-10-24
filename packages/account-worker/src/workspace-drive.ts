@@ -25,10 +25,10 @@ export interface WorkspaceDrive {
   url(path: string): Promise<string>;
   /** A new upload into this workspace's scope: JSON to keep between requests. Nothing is stored yet. */
   upload(): Promise<DriveUpload>;
-  /** Stores the next part and returns the upload after it. Every part but the last is a multiple of
-   * `TENANT_OBJECT_PART_BYTES` (32 MiB); a shorter part ends the upload. Appending the same part to the same upload again
-   * is safe. */
-  append(upload: DriveUpload, bytes: Uint8Array): Promise<DriveUpload>;
+  /** Stores the next part, `size` bytes arriving as `stream`, and returns the upload after it. Every part but the last
+   * is `TENANT_OBJECT_PART_BYTES` (32 MiB); a shorter part ends the upload. Appending the same part to the same upload
+   * again is safe. */
+  append(upload: DriveUpload, stream: ReadableStream<Uint8Array>, size: number): Promise<DriveUpload>;
   /** Publishes the appended bytes at `path`; finishing the same upload again publishes the same file. */
   finish(upload: DriveUpload, path: string, mediaType: string | null): Promise<WorkspaceDriveWritten>;
   /** Abandons an unfinished upload's parts. */
@@ -80,8 +80,8 @@ export function workspaceDrive(env: Env, workspace: { projectId: string; workspa
     async upload() {
       return (await artifacts()).files.begin(scopeId);
     },
-    async append(upload, bytes) {
-      return (await artifacts()).files.append(owned(upload), bytes);
+    async append(upload, stream, size) {
+      return (await (await artifacts()).files.appendStream(owned(upload), stream, size)).upload;
     },
     async finish(upload, path, mediaType) {
       const drive = await artifacts();

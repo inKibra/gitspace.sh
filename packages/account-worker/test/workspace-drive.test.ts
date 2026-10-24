@@ -85,18 +85,21 @@ describe('workspace drive', () => {
     expect(await env.DATA.head(tenantObjectKey(env.ACCOUNT_ID, artifactObjectKey(env.ACCOUNT_ID, `space:${workspaceId}`, sha256(bytes))))).not.toBeNull();
   });
 
-  it('resumes an upload across requests in whole parts; a retried part and a retried finish change nothing', async () => {
+  it('resumes an upload across requests in whole parts as they stream in; a retried part and a retried finish change nothing', async () => {
     const { workspaceId, drive } = await fixture();
+    const send = (upload: Parameters<typeof drive.append>[0], bytes: Uint8Array<ArrayBuffer>, size = bytes.byteLength) => drive.append(upload, new Blob([bytes]).stream(), size);
     // R2's smallest part, so the test stays small.
     const part = 5 * 1024 * 1024;
     const size = 2 * part + 9;
     const begun = new DriveFiles(tenantStore(env), env.ACCOUNT_ID).begin(`space:${workspaceId}`, { partBytes: part });
-    await drive.append(begun, pattern(0, part));
+    await send(begun, pattern(0, part));
     // The first part's acknowledgement was lost: it is sent again from the same upload.
-    const first = await drive.append(begun, pattern(0, part));
-    // A whole part and the short last one.
-    const last = await drive.append(first, pattern(part, part + 9));
-    await expect(drive.append(last, pattern(size, 1))).rejects.toThrow('Only the last part');
+    const first = await send(begun, pattern(0, part));
+    const second = await send(first, pattern(part, part));
+    // A part that ends before its declared size is refused, and the upload stays where it was.
+    await expect(send(second, pattern(2 * part, 8), 9)).rejects.toThrow('shorter than its declared size');
+    const last = await send(second, pattern(2 * part, 9));
+    await expect(send(last, pattern(size, 1))).rejects.toThrow('Only the last part');
     const path = 'browser/captures/1b2d/video.webm';
     const finished = await drive.finish(last, path, 'video/webm');
     expect(finished).toEqual({ path, size, blobHash: sha256(pattern(0, size)) });
@@ -107,7 +110,7 @@ describe('workspace drive', () => {
 
     // An upload of one short part is a whole file under its digest.
     const note = new TextEncoder().encode('one short part');
-    const whole = await drive.finish(await drive.append(await drive.upload(), note), 'browser/captures/1b2d/note.txt', 'text/plain');
+    const whole = await drive.finish(await send(await drive.upload(), note), 'browser/captures/1b2d/note.txt', 'text/plain');
     expect(whole).toEqual({ path: 'browser/captures/1b2d/note.txt', size: note.byteLength, blobHash: sha256(note) });
     expect(await drive.read('browser/captures/1b2d/note.txt')).toEqual(note);
   }, 60_000);

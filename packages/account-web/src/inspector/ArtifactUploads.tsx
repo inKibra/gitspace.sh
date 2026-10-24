@@ -52,7 +52,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
   useEffect(() => () => {
     for (const entry of pending.current.values()) {
       if (entry.controller) entry.controller.abort();
-      else if (entry.session) settle(entry.client.abort(entry.session.uploadId));
+      else if (entry.session) settle(entry.client.abort(entry.session.link));
     }
     pending.current.clear();
   }, []);
@@ -61,7 +61,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
     const controller = new AbortController();
     entry.controller = controller;
     const resume = entry.resumable && entry.session ? entry.session : undefined;
-    if (!resume && entry.session) settle(entry.client.abort(entry.session.uploadId));
+    if (!resume && entry.session) settle(entry.client.abort(entry.session.link));
     if (!resume) entry.session = null;
     update(id, { status: resume ? resume.received === entry.file.size ? 'committing' : 'uploading' : 'hashing', error: null, received: resume?.received ?? 0 });
     try {
@@ -80,7 +80,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
       setHighlighted((current) => [...current, artifact.url]);
     } catch (error) {
       if (controller.signal.aborted) {
-        if (entry.session) settle(entry.client.abort(entry.session.uploadId));
+        if (entry.session) settle(entry.client.abort(entry.session.link));
         return;
       }
       entry.controller = null;
@@ -129,7 +129,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
       if (!entry) return;
       // A running upload releases its server session once its in-flight request settles.
       if (entry.controller) entry.controller.abort();
-      else if (entry.session) settle(entry.client.abort(entry.session.uploadId));
+      else if (entry.session) settle(entry.client.abort(entry.session.link));
     },
   };
 }

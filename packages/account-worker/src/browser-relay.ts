@@ -50,8 +50,9 @@ type Connection = { socket: WebSocket; product: string; sequence: number; pendin
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
  * once the script connects. */
 type ScriptRun = { authorization: RuntimeAccountBrowserAuthorization; grant: RuntimeAccountBrowserSignedGrant; pairingId: string; attemptId: string; deadline: number; connection: Connection; browser?: RelayBrowser; socket?: WebSocket };
-/** The first extension protocol that records captures and uploads downloads into the drive. */
-const CAPTURE_PROTOCOL = 4;
+/** The first extension protocol that records captures and uploads downloads into the drive (through upload links; an
+ * extension at protocol 4 sent its parts to signed routes that are gone). */
+const CAPTURE_PROTOCOL = 5;
 /** A capture stop waits this long for the extension to finish uploading the frames. */
 const CAPTURE_STOP_MS = 120_000;
 /** A script's release waits this long for the extension to finish uploading its downloads. */

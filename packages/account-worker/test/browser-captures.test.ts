@@ -83,28 +83,35 @@ async function step(relay: UserRelayDO, root: Identity, browser: Chrome, project
   return { groupId: signed.body.command.grant.body.groupId, attemptId: signed.body.scope.attemptId };
 }
 
-/** One upload request from the extension, signed with its pairing key over `signed` (default: the body sent). */
-async function send(browser: Pick<Chrome, 'identity' | 'pairingId' | 'generation'>, method: string, path: string, body: Uint8Array<ArrayBuffer> | object | null, options: { signed?: Uint8Array<ArrayBuffer>; header?: null } = {}) {
-  const bytes = body === null ? new Uint8Array() : body instanceof Uint8Array ? body : encoder.encode(JSON.stringify(body));
+/** The signed request from the extension that begins an upload, signed with its pairing key over `signed` (default:
+ * the body sent). */
+async function send(browser: Pick<Chrome, 'identity' | 'pairingId' | 'generation'>, body: object, options: { signed?: Uint8Array<ArrayBuffer>; header?: null } = {}) {
+  const path = '/api/browser-relay/uploads', bytes = encoder.encode(JSON.stringify(body));
   const issuedAt = Date.now(), nonce = hex(crypto.getRandomValues(new Uint8Array(32))), bodySha256 = hex(await crypto.subtle.digest('SHA-256', options.signed ?? bytes));
-  const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(browserUploadSignedText({ pairingId: browser.pairingId, generation: browser.generation, method, pathname: path, bodySha256, issuedAt, nonce })))));
+  const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(browserUploadSignedText({ pairingId: browser.pairingId, generation: browser.generation, method: 'POST', pathname: path, bodySha256, issuedAt, nonce })))));
   const header = btoa(JSON.stringify({ pairingId: browser.pairingId, generation: browser.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
   const request = async () => {
     const headers: Record<string, string> = options.header === null ? {} : { [BROWSER_UPLOAD_HEADER]: header };
-    const response = await exports.default.fetch(new Request(`https://test.gitspace.sh${path}`, body === null ? { method, headers } : { method, headers, body: bytes }));
+    const response = await exports.default.fetch(new Request(`https://test.gitspace.sh${path}`, { method: 'POST', headers, body: bytes }));
     return { ...Reply.parse(await response.json()), status: response.status };
   };
   return { ...await request(), again: request };
 }
+/** One unsigned request through an upload link. */
+async function through(link: string, method: string, body: Uint8Array<ArrayBuffer> | object | null = null) {
+  const bytes = body === null ? null : body instanceof Uint8Array ? body : encoder.encode(JSON.stringify(body));
+  const response = await exports.default.fetch(new Request(link, bytes === null ? { method } : { method, body: bytes }));
+  return { ...Reply.parse(await response.json()), status: response.status };
+}
+const linkOf = (begun: { value?: unknown }) => z.object({ link: z.string().url() }).parse(begun.value).link;
 /** Uploads `parts` as one file and completes it. */
 async function upload(browser: Chrome, begin: object, parts: Uint8Array<ArrayBuffer>[]) {
-  const begun = await send(browser, 'POST', '/api/browser-relay/uploads', begin);
-  const { uploadId } = z.object({ uploadId: z.string() }).parse(begun.value);
-  for (const [index, part] of parts.entries()) expect((await send(browser, 'PUT', `/api/browser-relay/uploads/${uploadId}/parts/${index}`, part)).status).toBe(200);
-  return send(browser, 'POST', `/api/browser-relay/uploads/${uploadId}/complete`, { parts: parts.length, size: parts.reduce((total, part) => total + part.byteLength, 0) });
+  const link = linkOf(await send(browser, begin));
+  for (const [index, part] of parts.entries()) expect((await through(`${link}/parts/${index + 1}`, 'PUT', part)).status).toBe(200);
+  return through(`${link}/complete`, 'POST', { parts: parts.length, size: parts.reduce((total, part) => total + part.byteLength, 0) });
 }
 
-test('an upload from your Chrome is refused unsigned, wrongly signed, replayed, from an unconfirmed Chrome, for a group not its own and once expired; its parts land in the drive as one file', async () => {
+test('an upload from your Chrome begins only signed by a confirmed Chrome for its own live group, once; its link takes its parts in order and lands them in the drive as one file until the session lapses', async () => {
   const { projectId, workspaceId, drive } = await workspace();
   await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
     const root = await keys();
@@ -113,40 +120,41 @@ test('an upload from your Chrome is refused unsigned, wrongly signed, replayed, 
     try {
       const { groupId, attemptId } = await step(relay, root, browser, projectId, workspaceId);
       const begin = { kind: 'download', groupId, attemptId, name: 'Q3 report.csv', mediaType: 'text/csv' };
-      expect(await send(browser, 'POST', '/api/browser-relay/uploads', begin, { header: null })).toMatchObject({ status: 401, error: { code: 'UPLOAD_SIGNATURE_REQUIRED' } });
-      expect(await send(browser, 'POST', '/api/browser-relay/uploads', begin, { signed: encoder.encode('{"kind":"download"}') })).toMatchObject({ status: 401, error: { code: 'UPLOAD_SIGNATURE_INVALID' } });
-      expect(await send(stranger, 'POST', '/api/browser-relay/uploads', begin)).toMatchObject({ status: 401, error: { code: 'BROWSER_PAIRING_UNCONFIRMED' } });
-      expect(await send(browser, 'POST', '/api/browser-relay/uploads', { ...begin, groupId: crypto.randomUUID() })).toMatchObject({ status: 403, error: { code: 'UPLOAD_GROUP_UNKNOWN' } });
-      expect(await send(browser, 'POST', '/api/browser-relay/uploads', { ...begin, attemptId: crypto.randomUUID() })).toMatchObject({ status: 403, error: { code: 'UPLOAD_ATTEMPT_ENDED' } });
+      expect(await send(browser, begin, { header: null })).toMatchObject({ status: 401, error: { code: 'UPLOAD_SIGNATURE_REQUIRED' } });
+      expect(await send(browser, begin, { signed: encoder.encode('{"kind":"download"}') })).toMatchObject({ status: 401, error: { code: 'UPLOAD_SIGNATURE_INVALID' } });
+      expect(await send(stranger, begin)).toMatchObject({ status: 401, error: { code: 'BROWSER_PAIRING_UNCONFIRMED' } });
+      expect(await send(browser, { ...begin, groupId: crypto.randomUUID() })).toMatchObject({ status: 403, error: { code: 'UPLOAD_GROUP_UNKNOWN' } });
+      expect(await send(browser, { ...begin, attemptId: crypto.randomUUID() })).toMatchObject({ status: 403, error: { code: 'UPLOAD_ATTEMPT_ENDED' } });
 
-      const begun = await send(browser, 'POST', '/api/browser-relay/uploads', begin);
+      const begun = await send(browser, begin);
       expect(await begun.again()).toMatchObject({ status: 401, error: { code: 'UPLOAD_NONCE_REUSED' } });
-      const { uploadId } = z.object({ uploadId: z.string(), path: z.string() }).parse(begun.value);
-      const part = (index: number, bytes: Uint8Array<ArrayBuffer>) => send(browser, 'PUT', `/api/browser-relay/uploads/${uploadId}/parts/${index}`, bytes);
+      const link = linkOf(begun);
+      const part = (number: number, bytes: Uint8Array<ArrayBuffer>) => through(`${link}/parts/${number}`, 'PUT', bytes);
       // Every part but the last is exactly the drive's part size.
       const full = new Uint8Array(TENANT_OBJECT_PART_BYTES), tail = encoder.encode('q3,42\n'), size = full.byteLength + tail.byteLength;
       for (let offset = 0; offset < full.byteLength; offset += 4096) full[offset] = (offset / 4096) % 251;
-      expect(await part(1, tail)).toMatchObject({ status: 409, error: { code: 'UPLOAD_PART_OUT_OF_ORDER' } });
-      expect(await part(0, full)).toMatchObject({ status: 200, value: { index: 0, received: full.byteLength } });
-      expect(await part(1, tail)).toMatchObject({ status: 200, value: { index: 1, received: size } });
-      // The same last part again only keeps the session alive; after a short part only completing is left.
-      expect(await part(1, tail)).toMatchObject({ status: 200, value: { index: 1, received: size } });
-      expect(await part(2, tail)).toMatchObject({ status: 409, error: { code: 'UPLOAD_PART_SHORT' } });
-      expect(await send(browser, 'POST', `/api/browser-relay/uploads/${uploadId}/complete`, { parts: 3, size: size + tail.byteLength })).toMatchObject({ status: 409, error: { code: 'UPLOAD_INCOMPLETE' } });
+      expect(await part(2, tail)).toMatchObject({ status: 409, error: { code: 'UPLOAD_PART_OUT_OF_ORDER' } });
+      expect(await part(1, full)).toMatchObject({ status: 200, value: { received: full.byteLength } });
+      expect(await part(2, tail)).toMatchObject({ status: 200, value: { received: size } });
+      // After a short part only completing is left.
+      expect(await part(3, tail)).toMatchObject({ status: 409, error: { code: 'UPLOAD_PART_SHORT' } });
+      expect(await through(`${link}/complete`, 'POST', { parts: 3, size: size + tail.byteLength })).toMatchObject({ status: 409, error: { code: 'UPLOAD_INCOMPLETE' } });
       const day = new Date().toISOString().slice(0, 10), path = `browser/downloads/${day}/Q3 report.csv`;
-      expect(await send(browser, 'POST', `/api/browser-relay/uploads/${uploadId}/complete`, { parts: 2, size })).toMatchObject({ status: 200, value: { path: `drive://workspace/browser/downloads/${day}/Q3%20report.csv`, size, mediaType: 'text/csv' } });
+      expect(await through(`${link}/complete`, 'POST', { parts: 2, size })).toMatchObject({ status: 200, value: { path: `drive://workspace/browser/downloads/${day}/Q3%20report.csv`, size, mediaType: 'text/csv' } });
       expect((await drive.list(`browser/downloads/${day}/`)).find(entry => entry.path === path)?.size).toBe(size);
       expect(await drive.read(path, { offset: 0, length: 1024 })).toEqual(full.slice(0, 1024));
       expect(await drive.read(path, { offset: full.byteLength - 2, length: tail.byteLength + 2 })).toEqual(Uint8Array.from([...full.slice(-2), ...tail]));
+      // Completed, its link stores nothing more.
+      expect(await part(3, tail)).toMatchObject({ status: 404, error: { code: 'UPLOAD_UNKNOWN' } });
       // A second download of the same name keeps the first.
       expect((await upload(browser, begin, [encoder.encode('q4,7\n')])).value).toMatchObject({ path: `drive://workspace/browser/downloads/${day}/Q3%20report%20(2).csv` });
 
-      const idle = z.object({ uploadId: z.string() }).parse((await send(browser, 'POST', '/api/browser-relay/uploads', begin)).value).uploadId;
+      const idle = linkOf(await send(browser, begin));
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(Date.now() + 46 * 60_000);
-      expect(await send(browser, 'PUT', `/api/browser-relay/uploads/${idle}/parts/0`, encoder.encode('late'))).toMatchObject({ status: 410, error: { code: 'UPLOAD_EXPIRED' } });
-      expect(await send(browser, 'PUT', `/api/browser-relay/uploads/${idle}/parts/0`, encoder.encode('late'))).toMatchObject({ status: 404, error: { code: 'UPLOAD_UNKNOWN' } });
-    } finally { browser.socket.close(); stranger.socket.close(); }
+      expect(await through(`${idle}/parts/1`, 'PUT', encoder.encode('late'))).toMatchObject({ status: 410, error: { code: 'UPLOAD_EXPIRED' } });
+      expect(await through(`${idle}/parts/1`, 'PUT', encoder.encode('late'))).toMatchObject({ status: 404, error: { code: 'UPLOAD_UNKNOWN' } });
+    } finally { vi.useRealTimers(); browser.socket.close(); stranger.socket.close(); }
   });
 });
 
@@ -166,7 +174,7 @@ test('you capture a tab on your Chrome from the Browser tab: the extension uploa
         return RuntimeBrowserCaptureSchema.parse(JSON.parse(reply?.type === 'text' ? reply.text : ''));
       };
       // Files for a capture nobody started are refused.
-      expect(await send(browser, 'POST', '/api/browser-relay/uploads', { kind: 'capture', groupId, captureId, file: 'frames.bin', mediaType: 'application/octet-stream' })).toMatchObject({ status: 403, error: { code: 'UPLOAD_CAPTURE_UNKNOWN' } });
+      expect(await send(browser, { kind: 'capture', groupId, captureId, file: 'frames.bin', mediaType: 'application/octet-stream' })).toMatchObject({ status: 403, error: { code: 'UPLOAD_CAPTURE_UNKNOWN' } });
 
       const started = await manage({ type: 'manage', action: 'captureStart', groupId, targetId: 'your-tab', captureId });
       expect(browser.operations.filter(message => message.operation === 'captureStart')).toEqual([{ operation: 'captureStart', captureId, groupId, targetId: 'your-tab' }]);
@@ -180,7 +188,7 @@ test('you capture a tab on your Chrome from the Browser tab: the extension uploa
       expect(await drive.read(`${folder}frames.bin`)).toEqual(joined(first, second));
       expect(RuntimeBrowserFramesIndexSchema.parse(JSON.parse(decoder.decode(await drive.read(`${folder}frames.json`) ?? new Uint8Array())))).toEqual(index);
       // Saved, it takes no more files.
-      expect(await send(browser, 'POST', '/api/browser-relay/uploads', { kind: 'capture', groupId, captureId, file: 'thumbnail.jpg', mediaType: 'image/jpeg' })).toMatchObject({ status: 403, error: { code: 'UPLOAD_CAPTURE_UNKNOWN' } });
+      expect(await send(browser, { kind: 'capture', groupId, captureId, file: 'thumbnail.jpg', mediaType: 'image/jpeg' })).toMatchObject({ status: 403, error: { code: 'UPLOAD_CAPTURE_UNKNOWN' } });
 
       // Your click on Capture in the extension: announced, its video uploaded, then ended.
       const video = crypto.randomUUID(), clip = encoder.encode('webm-bytes');

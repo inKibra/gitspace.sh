@@ -1,7 +1,8 @@
 import { env, runInDurableObject } from 'cloudflare:test';
+import { z } from 'zod';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { artifactObjectKey, createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, DRIVE_FILE_MAX_BYTES, signDeviceInvite, TENANT_OBJECT_PART_BYTES, type ArtifactManifest } from '@gitspace/protocol';
-import { ARTIFACT_UPLOAD_CHUNK_BYTES, DRIVE_UPLOAD_PATH, gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, UPLOAD_LINK_PATH, gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
@@ -465,41 +466,55 @@ describe('user artifact flows', () => {
     expect(await streamedSha256(whole.body!)).toBe(`sha256:${hash}`);
   }, 180_000);
 
-  it('takes raw device-signed parts of a declared upload into a workspace scope and publishes it once the digest matches', async () => {
-    const { client, signed, fetcher, workspaceId, projectId, origin } = await fixture();
+  it('takes raw parts of a declared upload through its link alone and publishes it once the digest matches', async () => {
+    const { client, fetcher, workspaceId, origin } = await fixture();
     const request = { spaceId: workspaceId, expectedGeneration: 0 };
     const size = TENANT_OBJECT_PART_BYTES + 7;
     const digest = createHash('sha256').update(pattern(0, TENANT_OBJECT_PART_BYTES)).update(pattern(TENANT_OBJECT_PART_BYTES, 7)).digest('hex');
     const begun = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'release-check.bin', size, sha256: digest, mediaType: 'application/octet-stream' });
     if (begun.status === 'error') throw begun.error;
     expect(begun.value.partBytes).toBe(TENANT_OBJECT_PART_BYTES);
-    const put = (partNumber: number, bytes: Uint8Array<ArrayBuffer>, options: { spaceId?: string; send?: typeof fetch } = {}) => (options.send ?? signed)(
-      `${origin}${DRIVE_UPLOAD_PATH}/${begun.value.uploadId}/parts/${partNumber}?spaceId=${options.spaceId ?? workspaceId}&expectedGeneration=0`,
-      { method: 'PUT', body: bytes, headers: { 'content-length': String(bytes.byteLength) } },
-    );
+    const { link } = begun.value;
+    expect(link.startsWith(`${origin}${UPLOAD_LINK_PATH}/`)).toBe(true);
+    // Unsigned: the link is the whole authority.
+    const put = (partNumber: number, bytes: Uint8Array<ArrayBuffer>, to = link) => fetcher(`${to}/parts/${partNumber}`, { method: 'PUT', body: bytes, headers: { 'content-length': String(bytes.byteLength) } });
     const first = pattern(0, TENANT_OBJECT_PART_BYTES);
-    // Unsigned, or signed for another space, a part is refused.
-    expect((await put(1, first, { send: fetcher })).status).toBe(401);
-    expect((await put(1, pattern(0, 7), { spaceId: projectId })).status).toBe(409);
+    // An altered link opens nothing; a part of the wrong size is refused.
+    const altered = `${link.slice(0, -2)}${link.endsWith('AA') ? 'BB' : 'AA'}`;
+    expect((await put(1, pattern(0, 7), altered)).status).toBe(404);
     expect((await put(1, pattern(0, 7))).status).toBe(409);
     const stored = await put(1, first);
     expect([stored.status, await stored.json()]).toEqual([200, { status: 'ok', value: { received: TENANT_OBJECT_PART_BYTES } }]);
-    // A resent part is acknowledged; a skipped one is refused.
+    // A resent part is acknowledged; the same part with other bytes, or a skipped one, is refused.
     expect(await (await put(1, first)).json()).toEqual({ status: 'ok', value: { received: TENANT_OBJECT_PART_BYTES } });
+    const other = pattern(1, TENANT_OBJECT_PART_BYTES);
+    expect(await (await put(1, other)).json()).toMatchObject({ status: 'error', error: { message: 'Part 1 was already stored with other bytes' } });
     expect((await put(3, pattern(0, 7))).status).toBe(409);
     expect(await (await put(2, pattern(TENANT_OBJECT_PART_BYTES, 7))).json()).toEqual({ status: 'ok', value: { received: size } });
-    const committed = await client.inspector.artifacts.uploadCommit({ ...request, uploadId: begun.value.uploadId });
-    if (committed.status === 'error') throw committed.error;
-    expect(committed.value).toMatchObject({ path: 'uploads/release-check.bin', hash: `sha256:${digest}`, size, scope: 'workspace', workspaceId });
-    const minted = await client.inspector.artifacts.file({ ...request, url: committed.value.url, hash: null });
+    const committed = await fetcher(`${link}/complete`, { method: 'POST' });
+    expect(committed.status).toBe(200);
+    const artifact = z.object({ status: z.literal('ok'), value: z.object({ url: z.string() }).passthrough() }).parse(await committed.json()).value;
+    expect(artifact).toMatchObject({ path: 'uploads/release-check.bin', hash: `sha256:${digest}`, size, scope: 'workspace', workspaceId });
+    const minted = await client.inspector.artifacts.file({ ...request, url: artifact.url, hash: null });
     if (minted.status === 'error') throw minted.error;
     const ranged = await worker.fetch(new Request(new URL(minted.value.url, origin), { headers: { range: `bytes=${TENANT_OBJECT_PART_BYTES - 3}-${TENANT_OBJECT_PART_BYTES + 2}` } }), env);
     expect([ranged.status, new Uint8Array(await ranged.arrayBuffer())]).toEqual([206, pattern(TENANT_OBJECT_PART_BYTES - 3, 6)]);
+    // Committed, the upload is gone: its link stores nothing more.
+    expect((await put(1, pattern(0, 7))).status).toBe(409);
 
     // Raw parts that miss the declared digest are never published.
     const wrong = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'wrong.bin', size: 3, sha256: '0'.repeat(64), mediaType: null });
     if (wrong.status === 'error') throw wrong.error;
-    expect((await signed(`${origin}${DRIVE_UPLOAD_PATH}/${wrong.value.uploadId}/parts/1?spaceId=${workspaceId}&expectedGeneration=0`, { method: 'PUT', body: new Uint8Array([1, 2, 3]), headers: { 'content-length': '3' } })).status).toBe(409);
-    expect(await client.inspector.artifacts.uploadCommit({ ...request, uploadId: wrong.value.uploadId })).toMatchObject({ status: 'error' });
+    expect((await put(1, new Uint8Array([1, 2, 3]), wrong.value.link)).status).toBe(409);
+    expect((await fetcher(`${wrong.value.link}/complete`, { method: 'POST' })).status).toBe(409);
+
+    // A day later the link has expired.
+    const late = await client.inspector.artifacts.uploadBegin({ ...request, fileName: 'late.bin', size: 3, sha256: createHash('sha256').update(new Uint8Array([1, 2, 3])).digest('hex'), mediaType: null });
+    if (late.status === 'error') throw late.error;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 24 * 60 * 60_000 + 1);
+      expect(await (await put(1, new Uint8Array([1, 2, 3]), late.value.link)).json()).toMatchObject({ status: 'error', error: { code: 'UPLOAD_LINK_EXPIRED' } });
+    } finally { vi.useRealTimers(); }
   }, 180_000);
 });

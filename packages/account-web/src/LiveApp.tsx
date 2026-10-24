@@ -268,8 +268,8 @@ export function LiveInspector({
     } : undefined}
     artifactUpload={{
       ...artifactUpload,
-      commit: async (uploadId) => {
-        try { return await artifactUpload.commit(uploadId); } finally { await artifactCatalog.refetch(); }
+      commit: async (link) => {
+        try { return await artifactUpload.commit(link); } finally { await artifactCatalog.refetch(); }
       },
     }}
     guideShares={{

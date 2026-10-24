@@ -73,9 +73,9 @@ async function authorize(authorization) {
 }
 const EXTENSION_PROTOCOL = BROWSER_EXTENSION_PROTOCOL;
 /** The protocol the connected account speaks (0 while not connected). Captures, downloads saved to the drive and
- * uploads into pages need an account at protocol 4; with one at 3, downloads stay Chrome's and Capture says why not. */
+ * uploads into pages need an account at protocol 5; with one at 4, downloads stay Chrome's and Capture says why not. */
 let accountProtocol = 0;
-const MEDIA_PROTOCOL = 4;
+const MEDIA_PROTOCOL = 5;
 /** Set when the account refuses this extension, or this extension refuses the account, as incompatible. */
 let incompatible = false;
 let socket;
@@ -636,7 +636,7 @@ function management(action, fields) {
   authorization.used.add(action);
   return authorization;
 }
-/** Signs one upload to the account (`upload.ts`) with this Chrome's pairing key. */
+/** Signs the begin request of one upload to the account (`upload.ts`) with this Chrome's pairing key. */
 async function signUpload(method, pathname, bodySha256) {
   const identity = await stored('identity');
   if (!identity) throw new Error('Human pairing required');
@@ -1305,12 +1305,12 @@ function popupRequest(message) {
   if (Number.isInteger(message.startCapture)) return startCapture(message.startCapture, null).then(popupState);
   if (typeof message.stopCapture === 'string') { const capture = captures.get(message.stopCapture); return (capture ? endCapture(capture, null, true) : Promise.resolve()).then(popupState); }
 }
-/** The offscreen document's requests: signing its upload requests, and a recording that ended on its own. Hearing
+/** The offscreen document's requests: signing the begin request of its uploads, and a recording that ended on its own. Hearing
  * from it at all keeps this worker running while it records. */
 function offscreenRequest(message, respond) {
   if (message.uploadSign) {
     const { captureId, method, pathname, bodySha256 } = message.uploadSign;
-    const signing = captures.get(captureId)?.track === 'video' && typeof pathname === 'string' && pathname.startsWith('/api/browser-relay/uploads') ? signUpload(method, pathname, bodySha256) : Promise.reject(new Error('This capture is not recording'));
+    const signing = captures.get(captureId)?.track === 'video' && method === 'POST' && pathname === '/api/browser-relay/uploads' ? signUpload(method, pathname, bodySha256) : Promise.reject(new Error('This capture is not recording'));
     void signing.then(header => respond({ header }), error => respond({ error: error.message }));
     return true;
   }

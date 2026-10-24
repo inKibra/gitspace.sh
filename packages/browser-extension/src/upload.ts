@@ -1,12 +1,15 @@
 /**
  * The extension's uploads to its account (docs/SIMPLIFICATION.md Batch 16 items 2 and 4): a download an agent tab
- * started, or a capture's files, sent over HTTPS to `/api/browser-relay/uploads` in parts as the bytes arrive. Bytes
- * never cross the relay connection. Each request is signed with the extension's pairing key over its method, path,
- * the SHA-256 of its body, the time and a fresh nonce; the account checks it against the confirmed pairing.
+ * started, or a capture's files, sent over HTTPS in parts as the bytes arrive. Bytes never cross the relay connection.
+ * Only the begin request (`POST /api/browser-relay/uploads`) is signed, with the extension's pairing key over its
+ * method, path, the SHA-256 of its body, the time and a fresh nonce; the account checks it against the confirmed
+ * pairing and answers with the upload's link, the whole authority for its parts, completion and abandonment.
  */
 
 /** The request header carrying the signature. */
 export const UPLOAD_HEADER = 'x-gitspace-browser-upload';
+/** Where an upload begins: the one request signed with the pairing key. */
+const BEGIN_PATH = '/api/browser-relay/uploads';
 /** Every part but the last is exactly 32 MiB, the drive's multipart size (the account appends each as it comes); the
  * last is whatever remains. An upload idle for 45 minutes is forgotten, longer than a capture records. */
 const PART_BYTES = 32 * 1024 * 1024;
@@ -15,7 +18,8 @@ const PART_BYTES = 32 * 1024 * 1024;
 export type UploadTarget =
   | { kind: 'download'; groupId: string; attemptId: string; name: string; mediaType: string }
   | { kind: 'capture'; groupId: string; captureId: string; file: 'video.webm' | 'frames.bin' | 'frames.json' | 'thumbnail.jpg'; mediaType: string };
-/** Signs one request: the header value for `method` on `pathname` with a body of this SHA-256 (lowercase hex). */
+/** Signs one request: the header value for `method` on `pathname` with a body of this SHA-256 (lowercase hex). An
+ * upload signs only its begin request, `POST /api/browser-relay/uploads`. */
 export type UploadSigner = (method: string, pathname: string, bodySha256: string) => Promise<string>;
 /** The pairing an upload is signed with. */
 export type UploadIdentity = { privateKey: CryptoKey; pairingId: string; generation: number };
@@ -42,7 +46,7 @@ export class Upload {
   private bufferedBytes = 0;
   private size = 0;
   private parts = 0;
-  private uploadId: string | null = null;
+  private link: string | null = null;
   private requests: Promise<void> = Promise.resolve();
   private failure: Error | null = null;
   constructor(private readonly account: string, private readonly sign: UploadSigner, private readonly target: UploadTarget) {}
@@ -62,8 +66,8 @@ export class Upload {
   async complete(): Promise<UploadResult> {
     await this.flush(true);
     const result = await this.enqueue(async () => {
-      if (this.uploadId === null) throw new Error('Nothing was recorded to upload');
-      return this.request('POST', `/api/browser-relay/uploads/${this.uploadId}/complete`, json({ parts: this.parts, size: this.size }));
+      if (this.link === null) throw new Error('Nothing was recorded to upload');
+      return this.send(`${this.link}/complete`, { method: 'POST', body: json({ parts: this.parts, size: this.size }), headers: { 'content-type': 'application/json' } });
     });
     if (typeof result !== 'object' || result === null || !('path' in result) || typeof result.path !== 'string' || !('size' in result) || typeof result.size !== 'number' || !('mediaType' in result) || typeof result.mediaType !== 'string') throw new Error('The account answered the upload with an unexpected reply');
     return { path: result.path, size: result.size, mediaType: result.mediaType };
@@ -73,7 +77,7 @@ export class Upload {
   async abort(): Promise<void> {
     this.failure ??= new Error('Upload aborted');
     await this.requests;
-    if (this.uploadId !== null) await this.request('DELETE', `/api/browser-relay/uploads/${this.uploadId}`, new Uint8Array(0)).catch(() => {});
+    if (this.link !== null) await this.send(this.link, { method: 'DELETE' }).catch(() => {});
   }
 
   /** Sends each full part waiting, and with `all` the rest as the last; resolves once they were sent. */
@@ -92,12 +96,8 @@ export class Upload {
       this.bufferedBytes -= part.byteLength;
       const index = this.parts++;
       void this.enqueue(async () => {
-        if (this.uploadId === null) {
-          const begun = await this.request('POST', '/api/browser-relay/uploads', json(this.target));
-          if (typeof begun !== 'object' || begun === null || !('uploadId' in begun) || typeof begun.uploadId !== 'string') throw new Error('The account answered the upload with an unexpected reply');
-          this.uploadId = begun.uploadId;
-        }
-        await this.request('PUT', `/api/browser-relay/uploads/${this.uploadId}/parts/${index}`, part);
+        this.link ??= await this.begin();
+        await this.send(`${this.link}/parts/${index + 1}`, { method: 'PUT', body: part, headers: { 'content-type': 'application/octet-stream' } });
       }).catch(() => {});
     }
     await this.requests;
@@ -111,13 +111,18 @@ export class Upload {
     return step;
   }
 
-  private async request(method: string, pathname: string, body: Uint8Array<ArrayBuffer>): Promise<unknown> {
-    const header = await this.sign(method, pathname, hex(await crypto.subtle.digest('SHA-256', body)));
-    const response = await fetch(new URL(pathname, this.account), {
-      method, credentials: 'omit', cache: 'no-store',
-      headers: { [UPLOAD_HEADER]: header, ...(body.byteLength ? { 'content-type': method === 'PUT' ? 'application/octet-stream' : 'application/json' } : {}) },
-      ...(body.byteLength ? { body } : {}),
-    });
+  /** Begins the upload with the signed request naming its target; the account answers with the upload's link. */
+  private async begin(): Promise<string> {
+    const body = json(this.target);
+    const header = await this.sign('POST', BEGIN_PATH, hex(await crypto.subtle.digest('SHA-256', body)));
+    const begun = await this.send(new URL(BEGIN_PATH, this.account).href, { method: 'POST', body, headers: { [UPLOAD_HEADER]: header, 'content-type': 'application/json' } });
+    if (typeof begun !== 'object' || begun === null || !('link' in begun) || typeof begun.link !== 'string') throw new Error('The account answered the upload with an unexpected reply');
+    return begun.link;
+  }
+
+  /** One request to the account; resolves with the value of its `ok` reply. */
+  private async send(url: string, init: { method: string; body?: Uint8Array<ArrayBuffer>; headers?: Record<string, string> }): Promise<unknown> {
+    const response = await fetch(url, { ...init, credentials: 'omit', cache: 'no-store' });
     const reply: unknown = await response.json().catch(() => null);
     if (typeof reply === 'object' && reply !== null && 'status' in reply && reply.status === 'ok' && 'value' in reply) return reply.value;
     const message = typeof reply === 'object' && reply !== null && 'error' in reply && typeof reply.error === 'object' && reply.error !== null && 'message' in reply.error && typeof reply.error.message === 'string' ? reply.error.message : `HTTP ${response.status}`;

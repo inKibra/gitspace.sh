@@ -9,7 +9,7 @@ import type { WorkspaceDrive } from './workspace-drive.js';
  * protocol (read once, when a capture or an upload first needs them). */
 export type ScriptRunBrowser =
   | { source: 'headless'; groupId: string }
-  | { source: 'relay'; groupId: string; chrome: () => Promise<{ name: string; protocol: number }> };
+  | { source: 'relay'; groupId: string; chrome: () => Promise<{ name: string }> };
 /** The drive files an upload sets: bytes for Playwright on the cloud browser; on your Chrome sealed `/files/` links,
  * which the extension fetches itself (`GitSpace.setInputFilesFromUrls`), so the bytes never cross the relay. */
 export type ScriptUploadFiles =
@@ -25,8 +25,6 @@ export const SCRIPT_CAPTURES = 5;
 /** One upload sets at most this many files, this many bytes in all: on the cloud browser Playwright carries them in one
  * CDP message. */
 const UPLOAD_FILES = 8, UPLOAD_BYTES = 20 * 1024 * 1024;
-/** The first extension protocol that sets file inputs from sealed drive links. */
-const UPLOAD_PROTOCOL = 4;
 /** The largest image side models take (docs/SIMPLIFICATION.md entry 66); a script's capture aims at 1600. */
 const IMAGE_PIXELS = 2000;
 /** After its script ends, a run's result waits this long for downloads still being saved. */
@@ -66,11 +64,11 @@ export class ScriptRunFiles {
   private capturing = 0;
   private readonly downloads: FollowedDownload[] = [];
   private readonly saving: Promise<unknown>[] = [];
-  private chrome: Promise<{ name: string; protocol: number }> | undefined;
+  private chrome: Promise<{ name: string }> | undefined;
 
   constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url'>, readonly browser: ScriptRunBrowser) {}
 
-  private chromeInfo(browser: Extract<ScriptRunBrowser, { source: 'relay' }>): Promise<{ name: string; protocol: number }> {
+  private chromeInfo(browser: Extract<ScriptRunBrowser, { source: 'relay' }>): Promise<{ name: string }> {
     this.chrome ??= browser.chrome();
     return this.chrome;
   }
@@ -107,7 +105,6 @@ export class ScriptRunFiles {
       if (resource?.kind !== 'drive' || resource.mount !== 'workspace' || resource.suffix) throw new Error(`${url} is not a file of this workspace's drive: upload() takes drive://workspace/<path>`);
       return resource.path;
     });
-    if (this.browser.source === 'relay' && (await this.chromeInfo(this.browser)).protocol < UPLOAD_PROTOCOL) throw new Error('Update the GitSpace extension in Chrome to upload drive files into pages');
     const listed = await this.drive.list('');
     const entries = paths.map((path, index) => {
       const entry = listed.find(candidate => candidate.path === path);

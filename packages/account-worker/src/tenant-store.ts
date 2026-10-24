@@ -254,16 +254,18 @@ export class TenantStore {
     return (await this.bucket.createMultipartUpload(this.key(name), { customMetadata, ssecKey: await this.ssecKey(scope) })).uploadId;
   }
 
-  /** A streamed part is checked against its digest and size as it passes; a mismatch fails the part before its last bytes. */
-  async uploadPart(name: string, scope: string, uploadId: string, partNumber: number, part: Uint8Array | { stream: ReadableStream<Uint8Array>; size: number; sha256: Sha256 }): Promise<R2UploadedPart> {
+  /** A streamed part with a digest is checked against it and its size as it passes (a mismatch fails the part before
+   * its last bytes); one without (a drive upload hashing the whole file as it arrives) is only held to its size. */
+  async uploadPart(name: string, scope: string, uploadId: string, partNumber: number, part: Uint8Array | { stream: ReadableStream<Uint8Array>; size: number; sha256?: Sha256 }): Promise<R2UploadedPart> {
     const size = part instanceof Uint8Array ? part.byteLength : part.size;
     if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > R2_PART_LIMIT) throw new Error('Tenant object part number is invalid');
     if (!Number.isSafeInteger(size) || size < 1 || size > TENANT_OBJECT_PART_BYTES) throw new Error('Tenant object part size is invalid');
     const upload = this.bucket.resumeMultipartUpload(this.key(name), uploadId);
     const ssecKey = await this.ssecKey(scope);
     if (part instanceof Uint8Array) return upload.uploadPart(partNumber, part, { ssecKey });
-    declaredMetadata(scope, part);
-    return sendSized(part.stream.pipeThrough(verifying(part)), size, body => upload.uploadPart(partNumber, body, { ssecKey }));
+    const stream = part.sha256 === undefined ? part.stream : part.stream.pipeThrough(verifying({ sha256: part.sha256, size }));
+    if (part.sha256 !== undefined) declaredMetadata(scope, { sha256: part.sha256, size });
+    return sendSized(stream, size, body => upload.uploadPart(partNumber, body, { ssecKey }));
   }
 
   /** A completed object whose parts do not add up to its declared (or `expected`) size is deleted rather than left

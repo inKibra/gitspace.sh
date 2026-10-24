@@ -146,21 +146,6 @@ test('upload() on your Chrome sends the extension sealed /files/ links to drive 
   });
 });
 
-test('upload() on a Chrome whose extension predates sealed links asks for an update and sends nothing', async () => {
-  const { projectId, workspaceId, drive } = await workspace();
-  await drive.write('report.csv', 'text/csv', encoder.encode('q3,42\n'));
-  await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
-    const root = await keys();
-    const browser = await chrome(relay, root, projectId, BROWSER_EXTENSION_PROTOCOL - 1, () => undefined);
-    try {
-      const authorization = await runAuthorization(root, browser.placement, projectId, workspaceId, `await upload('b0c0ffee:7', 'drive://workspace/report.csv');`);
-      const reply = (await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${projectId}:${workspaceId}`).execute(authorization)).content[0];
-      expect(JSON.parse(reply?.type === 'text' ? reply.text : '')).toMatchObject({ ok: false, error: expect.stringContaining('Update the GitSpace extension in Chrome to upload drive files into pages') });
-      expect(browser.commands.map(command => command.method)).not.toContain('GitSpace.setInputFilesFromUrls');
-    } finally { browser.socket.close(); }
-  });
-});
-
 test('on the cloud browser upload() gets the drive file’s bytes, and a run saves at most five captures', async () => {
   const { drive } = await workspace();
   const bytes = encoder.encode('quarter,total\nq3,42\n');

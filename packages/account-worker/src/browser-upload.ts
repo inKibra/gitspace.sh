@@ -8,13 +8,10 @@ import type { WorkspaceDrive } from './workspace-drive.js';
 /**
  * Files from your Chrome into the workspace's drive (docs/APERTURE-DESIGN.md §11, Batch 16): downloads a script or step
  * started there, and the media of captures. The extension sends them over HTTPS to the account, never over the relay
- * WebSocket, each request signed with its pairing key; the relay object checks the signature against the confirmed
- * pairing and keeps each upload session, and the bytes go straight to the drive part by part.
- *
- * `POST /api/browser-relay/uploads` begins one; `PUT …/<uploadId>/parts/<index>` sends parts in order, each exactly
- * 32 MiB but the last (the drive's multipart part size; resending the last part with the same bytes only keeps the
- * session alive); `POST …/<uploadId>/complete` names the file in the drive; `DELETE …/<uploadId>` abandons it. A session
- * lapses 45 minutes after its last request, longer than a capture records.
+ * WebSocket. `POST /api/browser-relay/uploads`, signed with its pairing key, begins one: the relay object checks the
+ * signature against the confirmed pairing and keeps the upload session, and the reply carries an upload link
+ * (`upload-link.ts`) for its parts, completion and abandonment, so the bytes go straight to the drive part by part. A
+ * session lapses 45 minutes after its last part, longer than a capture records.
  */
 export const BROWSER_UPLOAD_PATH = '/api/browser-relay/uploads';
 export const BROWSER_UPLOAD_HEADER = 'x-gitspace-browser-upload';
@@ -44,27 +41,27 @@ const Complete = z.strictObject({ parts: z.number().int().positive(), size: z.nu
 const Upload = z.object({
   uploadId: z.string().uuid(), pairingId: z.string().uuid(), projectId: z.string(), workspaceId: z.string(), groupId: z.string().uuid(),
   target: z.discriminatedUnion('kind', [z.object({ kind: z.literal('download'), attemptId: z.string() }), z.object({ kind: z.literal('capture'), captureId: z.string().uuid(), file: Begin.options[1].shape.file })]),
-  path: z.string(), mediaType: z.string(), parts: z.number().int().nonnegative(), size: z.number().int().nonnegative(), last: z.string().nullable(), drive: DriveUploadSchema, expiresAt: z.number().int(),
+  path: z.string(), mediaType: z.string(), parts: z.number().int().nonnegative(), size: z.number().int().nonnegative(), drive: DriveUploadSchema, expiresAt: z.number().int(),
 });
 export type BrowserUpload = z.infer<typeof Upload>;
 /** A finished download, kept for the run that started it (workspace-relative drive path). */
 export const BrowserDownloadSchema = z.object({ path: z.string(), size: z.number().int().nonnegative(), mediaType: z.string(), expiresAt: z.number().int() });
 
-/** One signed request as the route saw it. */
+/** The signed request that begins an upload, as the route saw it. */
 export type BrowserUploadRequest = { method: string; pathname: string; header: string | null; bodySha256: string };
+/** `begin` is signed; the rest come through the upload's link, which names the pairing that began it. */
 export type BrowserUploadStep =
   | { op: 'begin'; request: BrowserUploadRequest; body: unknown }
-  | { op: 'part'; request: BrowserUploadRequest; uploadId: string; index: number }
-  | { op: 'stored'; uploadId: string; index: number; bodySha256: string; size: number; drive: z.infer<typeof DriveUploadSchema> }
-  | { op: 'complete'; request: BrowserUploadRequest; uploadId: string; body: unknown }
-  | { op: 'abort'; request: BrowserUploadRequest; uploadId: string };
+  | { op: 'part'; pairingId: string; uploadId: string; index: number }
+  | { op: 'stored'; uploadId: string; index: number; size: number; drive: z.infer<typeof DriveUploadSchema> }
+  | { op: 'complete'; pairingId: string; uploadId: string; body: unknown }
+  | { op: 'abort'; pairingId: string; uploadId: string };
 type Failure = { ok: false; status: number; code: string; message: string };
 export type BrowserUploadReply = { ok: true; value: Record<string, unknown> } | Failure;
-/** What `part` tells the route: store the part from `drive` in that workspace's drive, or nothing to store. */
-export const BrowserUploadPartSchema = z.discriminatedUnion('store', [
-  z.object({ store: z.literal(true), projectId: z.string(), workspaceId: z.string(), drive: DriveUploadSchema }),
-  z.object({ store: z.literal(false), index: z.number().int(), received: z.number().int() }),
-]);
+/** What `part` tells the link's route: store the part in that workspace's drive, continuing `drive`. */
+export const BrowserUploadPartSchema = z.object({ projectId: z.string(), workspaceId: z.string(), drive: DriveUploadSchema });
+/** What `begin` tells the route, which answers with the upload's link instead of its ids. */
+export const BrowserUploadBegunSchema = z.object({ uploadId: z.string().uuid(), pairingId: z.string().uuid(), path: z.string(), expiresAt: z.string() });
 /** The drive as uploads use it. */
 export type BrowserUploadDrive = Pick<WorkspaceDrive, 'list' | 'upload' | 'append' | 'finish' | 'discard'>;
 
@@ -107,25 +104,19 @@ export class BrowserUploads {
 
   async step(step: BrowserUploadStep): Promise<BrowserUploadReply> {
     if (step.op === 'stored') return this.stored(step);
-    const signer = await this.signer(step.request);
-    if (!signer.ok) return signer;
-    if (step.op === 'begin') return this.begin(signer.pairingId, step.body);
-    const upload = await this.session(signer.pairingId, step.uploadId);
+    if (step.op === 'begin') {
+      const signer = await this.signer(step.request);
+      return signer.ok ? this.begin(signer.pairingId, step.body) : signer;
+    }
+    const upload = await this.session(step.pairingId, step.uploadId);
     if (!upload.ok) return upload;
     if (step.op === 'abort') { await this.forget(upload.value); return { ok: true, value: {} }; }
     if (step.op === 'complete') return this.complete(upload.value, step.body);
     const row = upload.value;
-    if (step.index === row.parts) {
-      // Only the last part may be short: a short part ends the drive's upload.
-      if (row.size % BROWSER_UPLOAD_PART_BYTES !== 0) return fail(409, 'UPLOAD_PART_SHORT', `Every part but the last is exactly ${BROWSER_UPLOAD_PART_BYTES / 1024 / 1024} MiB; complete this upload`);
-      return { ok: true, value: { store: true, projectId: row.projectId, workspaceId: row.workspaceId, drive: row.drive } };
-    }
-    // The same last part again keeps the session alive (the extension's keep-alive while a recording is quiet).
-    if (step.index === row.parts - 1 && step.request.bodySha256 === row.last) {
-      await this.storage.put(`${UPLOAD}${row.uploadId}`, { ...row, expiresAt: Date.now() + BROWSER_UPLOAD_IDLE_MS });
-      return { ok: true, value: { store: false, index: step.index, received: row.size } };
-    }
-    return fail(409, 'UPLOAD_PART_OUT_OF_ORDER', `Expected part ${row.parts}`);
+    if (step.index !== row.parts) return fail(409, 'UPLOAD_PART_OUT_OF_ORDER', `Expected part ${row.parts + 1}`);
+    // Only the last part may be short: a short part ends the drive's upload.
+    if (row.size % BROWSER_UPLOAD_PART_BYTES !== 0) return fail(409, 'UPLOAD_PART_SHORT', `Every part but the last is exactly ${BROWSER_UPLOAD_PART_BYTES / 1024 / 1024} MiB; complete this upload`);
+    return { ok: true, value: { projectId: row.projectId, workspaceId: row.workspaceId, drive: row.drive } };
   }
 
   /** The confirmed pairing whose key signed this request, once per nonce. */
@@ -185,21 +176,21 @@ export class BrowserUploads {
     const path = input.kind === 'capture' ? `${captureFolder(input.captureId)}${input.file}` : await browserDownloadPath(drive, input.name, now, sameWorkspace);
     if (input.kind === 'capture' && sameWorkspace.includes(path)) return fail(409, 'UPLOAD_IN_PROGRESS', `${input.file} of this capture is already being uploaded`);
     const uploadId = crypto.randomUUID(), expiresAt = now + BROWSER_UPLOAD_IDLE_MS;
-    const row: BrowserUpload = { uploadId, pairingId, ...group, groupId: input.groupId, target: input.kind === 'download' ? { kind: 'download', attemptId: input.attemptId } : { kind: 'capture', captureId: input.captureId, file: input.file }, path, mediaType: input.mediaType, parts: 0, size: 0, last: null, drive: await drive.upload(), expiresAt };
+    const row: BrowserUpload = { uploadId, pairingId, ...group, groupId: input.groupId, target: input.kind === 'download' ? { kind: 'download', attemptId: input.attemptId } : { kind: 'capture', captureId: input.captureId, file: input.file }, path, mediaType: input.mediaType, parts: 0, size: 0, drive: await drive.upload(), expiresAt };
     await this.storage.put(`${UPLOAD}${uploadId}`, row);
-    return { ok: true, value: { uploadId, expiresAt: new Date(expiresAt).toISOString(), path: `drive://workspace/${path.split('/').map(encodeURIComponent).join('/')}` } };
+    return { ok: true, value: { uploadId, pairingId, expiresAt: new Date(expiresAt).toISOString(), path: `drive://workspace/${path.split('/').map(encodeURIComponent).join('/')}` } satisfies z.infer<typeof BrowserUploadBegunSchema> };
   }
 
-  /** The route stored part `index` in the drive; the session moves on to the next. */
+  /** The link's route stored part `index` in the drive; the session moves on to the next. */
   private async stored(step: Extract<BrowserUploadStep, { op: 'stored' }>): Promise<BrowserUploadReply> {
     const stored = await this.storage.get(`${UPLOAD}${step.uploadId}`);
     if (!stored) return SESSION_GONE;
     const row = Upload.parse(stored);
-    if (row.parts !== step.index) return fail(409, 'UPLOAD_PART_OUT_OF_ORDER', `Expected part ${row.parts}`);
+    if (row.parts !== step.index) return fail(409, 'UPLOAD_PART_OUT_OF_ORDER', `Expected part ${row.parts + 1}`);
     if (row.size + step.size > DRIVE_FILE_MAX_BYTES) { await this.forget(row); return fail(413, 'UPLOAD_TOO_LARGE', `Drive files are limited to ${DRIVE_FILE_MAX_BYTES / 1024 / 1024 / 1024} GiB`); }
-    const next = { ...row, parts: row.parts + 1, size: row.size + step.size, last: step.bodySha256, drive: step.drive, expiresAt: Date.now() + BROWSER_UPLOAD_IDLE_MS };
+    const next = { ...row, parts: row.parts + 1, size: row.size + step.size, drive: step.drive, expiresAt: Date.now() + BROWSER_UPLOAD_IDLE_MS };
     await this.storage.put(`${UPLOAD}${row.uploadId}`, next);
-    return { ok: true, value: { index: step.index, received: next.size } };
+    return { ok: true, value: { received: next.size } };
   }
 
   private async complete(row: BrowserUpload, body: unknown): Promise<BrowserUploadReply> {
@@ -214,55 +205,22 @@ export class BrowserUploads {
   }
 }
 
-/** Reads a request body of at most `limit` bytes, or null when it is longer. */
-async function boundedBody(request: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
-  const declared = request.headers.get('content-length');
-  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > limit)) return null;
-  if (!request.body) return new Uint8Array();
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  const reader = request.body.getReader();
-  for (let read = await reader.read(); !read.done; read = await reader.read()) {
-    size += read.value.byteLength;
-    if (size > limit) { await reader.cancel(); return null; }
-    parts.push(read.value);
-  }
-  const body = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) { body.set(part, offset); offset += part.byteLength; }
-  return body;
-}
-
-/** The public route (`BROWSER_UPLOAD_PATH`): parses and hashes each request, has the relay check and keep the session,
- * and stores each part's bytes in the workspace's drive from here, so they never pass through the relay object. */
-export async function serveBrowserUpload(request: Request, dependencies: { relay: { browserRelayUpload(step: BrowserUploadStep): Promise<BrowserUploadReply> }; drive(identity: { projectId: string; workspaceId: string }): Pick<WorkspaceDrive, 'append'> }): Promise<Response> {
-  const reply = (result: BrowserUploadReply) => result.ok ? Response.json({ status: 'ok', value: result.value }, { headers: { 'cache-control': 'no-store' } }) : Response.json({ status: 'error', error: { code: result.code, message: result.message } }, { status: result.status, headers: { 'cache-control': 'no-store' } });
+/** `POST BROWSER_UPLOAD_PATH`, signed with the pairing key: begins an upload and answers with its link (`upload-link.ts`),
+ * the drive path it will have and when its session lapses if no part arrives. */
+export async function serveBrowserUpload(request: Request, dependencies: { relay: { browserRelayUpload(step: BrowserUploadStep): Promise<BrowserUploadReply> }; link(target: { pairingId: string; uploadId: string }): Promise<string> }): Promise<Response> {
+  const reply = (status: number, body: { status: 'ok'; value: unknown } | { status: 'error'; error: { code: string; message: string } }) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
   const url = new URL(request.url);
-  const [uploadId, kind, index, ...rest] = url.pathname.slice(BROWSER_UPLOAD_PATH.length).split('/').filter(Boolean);
-  const route = !uploadId ? (request.method === 'POST' ? 'begin' : null)
-    : !z.string().uuid().safeParse(uploadId).success || rest.length ? null
-      : kind === 'parts' && index !== undefined && /^(0|[1-9][0-9]{0,5})$/u.test(index) ? (request.method === 'PUT' ? 'part' : null)
-        : kind === 'complete' && index === undefined ? (request.method === 'POST' ? 'complete' : null)
-          : kind === undefined ? (request.method === 'DELETE' ? 'abort' : null) : null;
-  if (!route || !uploadId && route !== 'begin') return reply(fail(404, 'UPLOAD_ROUTE_UNKNOWN', 'Unknown upload request'));
-  const body = await boundedBody(request, route === 'part' ? BROWSER_UPLOAD_PART_BYTES : JSON_BODY_BYTES);
-  if (!body) return reply(fail(413, 'UPLOAD_PART_TOO_LARGE', route === 'part' ? `Upload parts are at most ${BROWSER_UPLOAD_PART_BYTES / 1024 / 1024} MiB` : 'Upload request too large'));
+  if (url.pathname !== BROWSER_UPLOAD_PATH) return reply(404, { status: 'error', error: { code: 'UPLOAD_ROUTE_UNKNOWN', message: 'Unknown upload request' } });
+  if (request.method !== 'POST') return reply(405, { status: 'error', error: { code: 'METHOD_NOT_ALLOWED', message: 'Begin an upload with POST' } });
+  const declared = Number(request.headers.get('content-length'));
+  if (!request.headers.has('content-length') || !Number.isSafeInteger(declared) || declared > JSON_BODY_BYTES) return reply(413, { status: 'error', error: { code: 'UPLOAD_INVALID', message: `Begin an upload with at most ${JSON_BODY_BYTES} bytes of JSON and its Content-Length` } });
+  const body = new Uint8Array(await request.arrayBuffer());
+  if (body.byteLength !== declared) return reply(400, { status: 'error', error: { code: 'UPLOAD_INVALID', message: 'The request does not match its Content-Length' } });
   const bodySha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', body))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-  const signed = { method: request.method, pathname: url.pathname, header: request.headers.get(BROWSER_UPLOAD_HEADER), bodySha256 };
-  let json: unknown = null;
-  if (route === 'begin' || route === 'complete') {
-    try { json = JSON.parse(new TextDecoder().decode(body)); } catch { return reply(fail(400, 'UPLOAD_INVALID', 'Upload request must be JSON')); }
-  }
-  if (route === 'begin') return reply(await dependencies.relay.browserRelayUpload({ op: 'begin', request: signed, body: json }));
-  if (!uploadId) return reply(SESSION_GONE);
-  if (route === 'complete') return reply(await dependencies.relay.browserRelayUpload({ op: 'complete', request: signed, uploadId, body: json }));
-  if (route === 'abort') return reply(await dependencies.relay.browserRelayUpload({ op: 'abort', request: signed, uploadId }));
-  if (!body.byteLength) return reply(fail(400, 'UPLOAD_PART_EMPTY', 'An upload part holds at least one byte'));
-  const part = Number(index);
-  const checked = await dependencies.relay.browserRelayUpload({ op: 'part', request: signed, uploadId, index: part });
-  if (!checked.ok) return reply(checked);
-  const next = BrowserUploadPartSchema.parse(checked.value);
-  if (!next.store) return reply({ ok: true, value: { index: next.index, received: next.received } });
-  const drive = await dependencies.drive(next).append(next.drive, body);
-  return reply(await dependencies.relay.browserRelayUpload({ op: 'stored', uploadId, index: part, bodySha256, size: body.byteLength, drive }));
+  let json: unknown;
+  try { json = JSON.parse(new TextDecoder().decode(body)); } catch { return reply(400, { status: 'error', error: { code: 'UPLOAD_INVALID', message: 'Upload request must be JSON' } }); }
+  const begun = await dependencies.relay.browserRelayUpload({ op: 'begin', request: { method: request.method, pathname: url.pathname, header: request.headers.get(BROWSER_UPLOAD_HEADER), bodySha256 }, body: json });
+  if (!begun.ok) return reply(begun.status, { status: 'error', error: { code: begun.code, message: begun.message } });
+  const { uploadId, pairingId, path, expiresAt } = BrowserUploadBegunSchema.parse(begun.value);
+  return reply(200, { status: 'ok', value: { link: await dependencies.link({ pairingId, uploadId }), path, expiresAt } });
 }

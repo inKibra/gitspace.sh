@@ -3,21 +3,22 @@ import { ClientHttpFailure, ClientNetworkFailure, ClientOffline, ClientTimeout, 
 
 type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
 
-/** Authority calls for one workspace's `uploads/` artifact folder; every method throws the RPC error on failure. */
+/** Authority calls for one workspace's `uploads/` artifact folder; every method throws the authority's error on failure.
+ * Begin answers with the upload's link, the whole authority for the parts, commit and abort that follow. */
 export interface ArtifactUploadClient {
   /** `sha256` is the lowercase hex digest of the whole file; commit refuses bytes that do not match it. */
-  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null }): Promise<{ uploadId: string; url: string; partBytes: number }>;
-  /** Sends part `partNumber` (1-based): `partBytes` raw bytes, or the rest of the file for the last part. Resending
-   * the last acknowledged part is safe. Resolves with the bytes the authority now holds. */
-  part(input: { uploadId: string; partNumber: number; bytes: Uint8Array<ArrayBuffer> }, signal: AbortSignal): Promise<{ received: number }>;
+  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null }): Promise<{ link: string; url: string; partBytes: number }>;
+  /** Sends part `partNumber` (1-based) through `link`: `partBytes` raw bytes, or the rest of the file for the last
+   * part. Resending the last acknowledged part is safe. Resolves with the bytes the authority now holds. */
+  part(input: { link: string; partNumber: number; bytes: Uint8Array<ArrayBuffer> }, signal: AbortSignal): Promise<{ received: number }>;
   /** Resolves with the registered artifact, which may precede its appearance in the published catalog. */
-  commit(uploadId: string): Promise<ArtifactReference>;
-  abort(uploadId: string): Promise<void>;
+  commit(link: string): Promise<ArtifactReference>;
+  abort(link: string): Promise<void>;
 }
 
 /** Server-acknowledged position of an upload; resuming continues at `received`. */
 export interface ArtifactUploadSession {
-  uploadId: string;
+  link: string;
   url: string;
   partBytes: number;
   received: number;
@@ -108,7 +109,7 @@ export async function uploadArtifactFile(client: ArtifactUploadClient, file: Fil
     for (let attempt = 0; ; attempt += 1) {
       signal.throwIfAborted();
       try {
-        const { received } = await client.part({ uploadId: session.uploadId, partNumber, bytes }, signal);
+        const { received } = await client.part({ link: session.link, partNumber, bytes }, signal);
         if (received !== offset + bytes.byteLength) throw new Error(`The authority stored ${formatBytes(received)} where ${formatBytes(offset + bytes.byteLength)} was expected.`);
         session = { ...session, received };
         break;
@@ -121,5 +122,5 @@ export async function uploadArtifactFile(client: ArtifactUploadClient, file: Fil
     options.onSession(session);
   }
   signal.throwIfAborted();
-  return client.commit(session.uploadId);
+  return client.commit(session.link);
 }

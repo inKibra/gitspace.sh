@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import { DRIVE_FILE_MAX_BYTES, SHA256_STATE_PATTERN, Sha256State, TENANT_OBJECT_PART_BYTES, artifactObjectKey, driveUploadObjectKey } from '@gitspace/protocol';
 import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
-import type { TenantExpected, TenantObject, TenantRange, TenantStore } from './tenant-store.js';
+import { TenantObjectIntegrityError, type TenantExpected, type TenantObject, type TenantRange, type TenantStore } from './tenant-store.js';
 
 /**
  * Drive file bytes: always one SSE-C tenant object, so `/files/` and every reader use R2's own range reads.
@@ -162,6 +162,40 @@ export class DriveFiles {
       parts.push({ partNumber, etag });
     }
     return { ...current, multipart, parts, size, sha256: sha256.save() };
+  }
+
+  /** `append` for one part of `size` bytes arriving as a stream (an upload link's `PUT`): it goes to R2 as it arrives,
+   * hashed on the way, so no part is held in memory; only a whole file of one short part is collected first, to be
+   * named by its digest. Returns the upload after it and the part's own SHA-256 (hex). */
+  async appendStream(upload: DriveUpload, stream: ReadableStream<Uint8Array>, size: number): Promise<{ upload: DriveUpload; sha256: string }> {
+    const current = DriveUploadSchema.parse(upload);
+    if (!Number.isSafeInteger(size) || size < 1 || size > current.partBytes) throw new Error(`A part is 1 to ${current.partBytes} bytes`);
+    if (current.size === 0 && size < current.partBytes) {
+      const bytes = await collectBytes(streamBytes(stream), size);
+      if (bytes.byteLength !== size) throw new Error('The part is shorter than its declared size');
+      return { upload: await this.append(current, bytes), sha256: createHash('sha256').update(bytes).digest('hex') };
+    }
+    if (current.whole || current.size % current.partBytes) throw new Error('Only the last part of a drive upload may be shorter than its part size');
+    const total = current.size + size;
+    if (total > (current.declared?.size ?? DRIVE_FILE_MAX_BYTES)) throw new Error(current.declared ? 'The upload exceeds its declared size' : limit);
+    const running = new Sha256State(current.sha256), part = createHash('sha256');
+    let seen = 0;
+    const hashed = stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        if (seen > size) throw new TenantObjectIntegrityError('The part is longer than its declared size');
+        running.update(chunk);
+        part.update(chunk);
+        controller.enqueue(chunk);
+      },
+      flush() {
+        if (seen !== size) throw new TenantObjectIntegrityError('The part is shorter than its declared size');
+      },
+    }));
+    const name = this.uploadName(current);
+    const multipart = current.multipart ?? await this.store.createMultipart(name, current.scopeId, current.declared);
+    const { partNumber, etag } = await this.store.uploadPart(name, current.scopeId, multipart, current.size / current.partBytes + 1, { stream: hashed, size });
+    return { upload: { ...current, multipart, parts: [...current.parts, { partNumber, etag }], size: total, sha256: running.save() }, sha256: part.digest('hex') };
   }
 
   /** Completes the upload as one object and returns the file a manifest entry names. Finishing the same upload again

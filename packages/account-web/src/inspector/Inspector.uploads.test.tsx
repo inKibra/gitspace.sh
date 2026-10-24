@@ -42,12 +42,16 @@ async function click(label: string) {
   await settle();
 }
 function client(part: ArtifactUploadClient['part']) {
-  let begun = 0;
+  const names = new Map<string, string>();
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ uploadId: `${fileName}#${begun += 1}`, url: `drive://workspace/uploads/${fileName}`, partBytes: PART })),
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => {
+      const link = `https://account.test/api/uploads/token-${names.size + 1}`;
+      names.set(link, fileName);
+      return { link, url: `drive://workspace/uploads/${fileName}`, partBytes: PART };
+    }),
     part: vi.fn<ArtifactUploadClient['part']>(part),
-    commit: vi.fn<ArtifactUploadClient['commit']>(async (uploadId) => {
-      const name = uploadId.split('#')[0]!;
+    commit: vi.fn<ArtifactUploadClient['commit']>(async (link) => {
+      const name = names.get(link)!;
       return { kind: 'artifact', url: `drive://workspace/uploads/${name}`, hash: 'hash', label: `uploads/${name}`, mediaType: null, generation: 1 };
     }),
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
@@ -84,12 +88,12 @@ describe('Inspector artifact uploads', () => {
 
     expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe(String(PART));
     expect(container.textContent).toContain('256 KiB of 512 KiB · 50%');
-    const uploadId = (await uploads.begin.mock.results[0]!.value).uploadId;
+    const link = (await uploads.begin.mock.results[0]!.value).link;
 
     await click('Cancel data.zip');
 
     expect(uploads.part.mock.calls[1]?.[1].aborted).toBe(true);
-    expect(uploads.abort).toHaveBeenCalledExactlyOnceWith(uploadId);
+    expect(uploads.abort).toHaveBeenCalledExactlyOnceWith(link);
     expect(uploads.commit).not.toHaveBeenCalled();
     expect(container.querySelector('[role="progressbar"]')).toBeNull();
   });
@@ -105,7 +109,7 @@ describe('Inspector artifact uploads', () => {
     await choose(new File([new Uint8Array(10)], 'data.zip'));
 
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Chunk hash mismatch.');
-    const firstUpload = (await uploads.begin.mock.results[0]!.value).uploadId;
+    const firstUpload = (await uploads.begin.mock.results[0]!.value).link;
 
     await click('Retry data.zip');
 

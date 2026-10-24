@@ -11,7 +11,7 @@ const screencasts = (commands: DebuggerCommand[], targetId: string) => commands.
 
 describe('one screencast per tab', () => {
   it('runs at the largest size its consumers need, acknowledges frames for the capture, keeps them from the script, and stops when the last consumer leaves', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const groupId = chrome.grant.body.groupId;
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
@@ -40,11 +40,11 @@ describe('one screencast per tab', () => {
     expect(chrome.uploaded(begin => begin.captureId === captureId).map(({ begin, bytes }) => [begin.file, begin.groupId, bytes.byteLength])).toEqual([['frames.bin', groupId, frames.byteLength], ['frames.json', groupId, expect.any(Number)], ['thumbnail.jpg', groupId, frames.byteLength]]);
     const index = chrome.uploaded(begin => begin.file === 'frames.json')[0]?.bytes.toString();
     expect(JSON.parse(index ?? '')).toEqual({ version: 1, frames: [{ t: expect.any(Number), offset: 0, length: frames.byteLength }] });
-    for (const request of chrome.requests) expect(await chrome.signedByThisChrome(request)).toBe(true);
+    for (const request of chrome.requests) expect(await chrome.authorizedAsRequired(request)).toBe(true);
   });
 
   it('records the Browser tab’s capture only on a tab the agent uses, once per signed request', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const groupId = chrome.grant.body.groupId;
     const captureId = crypto.randomUUID();
     await chrome.authorize({ type: 'manage', action: 'captureStart', groupId, targetId: 'target-2', captureId }, 'browser_control');
@@ -56,7 +56,7 @@ describe('one screencast per tab', () => {
 
 describe('a download an agent tab starts', () => {
   it('goes to the workspace’s drive, not your Downloads folder, before the script’s release is answered', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const groupId = chrome.grant.body.groupId;
     // One of yours, in no agent tab, stays Chrome's.
     await chrome.download({ id: 4, url: 'https://elsewhere.example/yours.zip', finalUrl: 'https://elsewhere.example/yours.zip', mime: 'application/zip', filename: '', state: 'in_progress' });
@@ -78,13 +78,13 @@ describe('a download an agent tab starts', () => {
     complete();
     await release;
     expect(chrome.uploaded(begin => begin.kind === 'download')).toEqual([{ begin: { kind: 'download', groupId, attemptId, name: 'report.csv', mediaType: 'text/csv' }, bytes: Buffer.from('a,b\n1,2\n') }]);
-    for (const request of chrome.requests) expect(await chrome.signedByThisChrome(request)).toBe(true);
+    for (const request of chrome.requests) expect(await chrome.authorizedAsRequired(request)).toBe(true);
     await chrome.advance(10_000);
     expect(chrome.downloadCalls).toEqual(['cancel:5', 'erase:5']);
   });
 
   it('is taken out of your Downloads folder when Chrome reported it first and already saved it there', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     chrome.answer(({ method, params }) => method === 'Runtime.callFunctionOn' && params.functionDeclaration === downloadBlobReadFunction ? { result: { value: { total: 2, type: 'application/json', data: btoa('{}') } } } : undefined);
@@ -116,7 +116,7 @@ describe('a drive file into a page’s file input', () => {
   }
 
   it('fetches each sealed link itself, sets the input’s files and fires input and change', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     const big = Uint8Array.from({ length: 3.5 * 1024 * 1024 }, (_, index) => index % 251);
@@ -135,7 +135,7 @@ describe('a drive file into a page’s file input', () => {
   });
 
   it('refuses two files for an input that takes one, and a file the drive holds at another size', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     chrome.files.set('/files/token-a', new TextEncoder().encode('hello'));
@@ -150,7 +150,7 @@ describe('a drive file into a page’s file input', () => {
 
 describe('Capture', () => {
   it('in the popup records the tab with its sound through the offscreen document, and Stop saves it to the drive', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const groupId = chrome.grant.body.groupId;
     // You opened the popup on tab 1: Chrome lets the extension capture it.
     chrome.captureGrants.add(1);
@@ -183,14 +183,14 @@ describe('Capture', () => {
     expect([...video?.bytes.subarray(0, 4) ?? []]).toEqual([1, 2, 3, 7]);
     expect([...video?.bytes.subarray(-4) ?? []]).toEqual([7, 7, 9, 9]);
     expect(thumbnail).toEqual({ begin: { kind: 'capture', groupId, captureId, file: 'thumbnail.jpg', mediaType: 'image/jpeg' }, bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) });
-    for (const request of chrome.requests) expect(await chrome.signedByThisChrome(request)).toBe(true);
+    for (const request of chrome.requests) expect(await chrome.authorizedAsRequired(request)).toBe(true);
     expect(chrome.sent.filter(message => message.capture).at(-1)).toEqual({ capture: { event: 'end', captureId, state: 'saved', reason: null, endedAt: expect.any(String), tracks: { video: { path: 'video.webm', mediaType: 'video/webm', sound: true, durationMs: expect.any(Number) } } } });
     expect(chrome.isOffscreenOpen()).toBe(false);
     expect(chrome.toolbar.at(-1)?.badge).toBe('');
   });
 
   it('on a tab’s in-page control records its screencast frames where Chrome gives no video of it', async () => {
-    const chrome = await installed({ protocol: 4 });
+    const chrome = await installed({ protocol: 5 });
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await settle();
@@ -212,10 +212,10 @@ describe('Capture', () => {
   });
 });
 
-describe('with an account at protocol 3', () => {
+describe('with an account at protocol 4', () => {
   it('leaves downloads to Chrome and offers no Capture', async () => {
     const chrome = await installed({ live: true });
-    await chrome.relay(3);
+    await chrome.relay(4);
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await settle();
