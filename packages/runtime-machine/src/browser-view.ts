@@ -70,7 +70,7 @@ function fieldLabel(node: AxNode): string {
  * `- text:` lines unless the nearest named element's name already contains it. Nothing typed into a field appears: a field shows its label, and
  * everything inside it (or inside any editable region) is left out.
  */
-export function renderBrowserView(nodes: readonly AxNode[], document: number): BrowserViewLine[] {
+export function renderBrowserView(nodes: readonly AxNode[], document: string | number): BrowserViewLine[] {
   const byId = new Map(nodes.map(node => [node.nodeId, node]));
   const children = new Map<string, string[]>();
   const listed = new Set<string>();
@@ -132,4 +132,22 @@ export function renderBrowserView(nodes: readonly AxNode[], document: number): B
   };
   for (const node of nodes) if ((!node.parentId || !byId.has(node.parentId)) && !listed.has(node.nodeId)) walk(node.nodeId, 0, '');
   return lines;
+}
+
+/** The bytes of view one result carries. */
+export const BROWSER_VIEW_PAGE_BYTES = 24_000;
+
+/** The lines from `offset` that fit one result (at most `limit` lines and `BROWSER_VIEW_PAGE_BYTES`), and where the
+ * next page starts (null after the last line). */
+export function browserViewPage(lines: readonly BrowserViewLine[], offset: number, limit: number): { lines: BrowserViewLine[]; nextOffset: number | null } {
+  const page: BrowserViewLine[] = [];
+  let bytes = 0;
+  for (const line of lines.slice(offset, offset + limit)) {
+    const size = new TextEncoder().encode(line.text).byteLength + 1;
+    if (bytes + size > BROWSER_VIEW_PAGE_BYTES) break;
+    bytes += size;
+    page.push(line);
+  }
+  const next = offset + page.length;
+  return { lines: page, nextOffset: next < lines.length ? next : null };
 }

@@ -4,9 +4,36 @@ import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 type ExecutorContent = RuntimeToolResult['content'];
 import { BROWSER_IMAGE_BYTES, BROWSER_TEXT_BYTES } from './browser-output.js';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from './browser-screenshot.js';
-import { AxTree, renderBrowserView } from './browser-view.js';
+import { AxTree, browserViewPage, renderBrowserView } from './browser-view.js';
 const Evaluation = z.object({ result: z.object({ value: z.unknown().optional(), objectId: z.string().optional() }), exceptionDetails: z.unknown().optional() });
 const Box = z.object({ model: z.object({ content: z.array(z.number()).length(8) }) });
+const KEY_CODES: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Space: 32 };
+
+/**
+ * One click, fill or key press on a node, as a person makes it: the pointer at the node's center, typing into it
+ * focused. Your Chrome's extension admits exactly this sequence for a single step. `current` is asked right before
+ * the pointer goes down, so a node whose page changed meanwhile gets no click.
+ */
+export async function actOnNode(send: (method: string, params?: Record<string, unknown>) => Promise<unknown>, backendNodeId: number, operation: 'click' | 'fill' | 'press', value: string | undefined, selectAllModifier: number, current: () => boolean | Promise<boolean>): Promise<void> {
+  if (operation === 'click') {
+    await send('DOM.scrollIntoViewIfNeeded', { backendNodeId });
+    const quad = Box.parse(await send('DOM.getBoxModel', { backendNodeId })).model.content;
+    const x = (quad[0]! + quad[2]! + quad[4]! + quad[6]!) / 4, y = (quad[1]! + quad[3]! + quad[5]! + quad[7]!) / 4;
+    if (!await current()) throw new Error('Element document changed');
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }); await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    return;
+  }
+  await send('DOM.focus', { backendNodeId });
+  if (operation === 'fill') {
+    if (value === undefined) throw new Error('Fill requires value');
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: selectAllModifier, commands: ['selectAll'] }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA' }); await send('Input.insertText', { text: value });
+    return;
+  }
+  const code = value === undefined ? undefined : KEY_CODES[value];
+  if (!value || !code) throw new Error('Unsupported key');
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: value, windowsVirtualKeyCode: code }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: value, windowsVirtualKeyCode: code });
+}
+
 export type BrowserSemanticTab = { grant: Pick<RuntimeBrowserGrant, 'source' | 'groupId'>; targetId: string; refs: Map<string, number>; document: number };
 export async function performBrowserAction(options: { tab: BrowserSemanticTab; args: RuntimeBrowserArguments; frame: { id: string }; signal: AbortSignal; send(method: string, params?: Record<string, unknown>): Promise<unknown>; close(): Promise<void>; allows(url: string): boolean; artifact(text: string): unknown; selectAllModifier: number }): Promise<ExecutorContent> {
  const { tab, args, frame, signal, send } = options; const grant = tab.grant;
@@ -35,16 +62,14 @@ export async function performBrowserAction(options: { tab: BrowserSemanticTab; a
           tab.document = tree.gitspaceDocument;
         }
         const lines = renderBrowserView(tree.nodes, tab.document);
-        const shown: string[] = [];
-        let bytes = 0, next = args.offset;
-        for (const line of lines.slice(args.offset, args.offset + args.limit)) {
-          const size = Buffer.byteLength(line.text) + 1; if (bytes + size > 24_000) break;
-          bytes += size; next++; shown.push(line.text); if (line.ref) tab.refs.set(line.ref.ref, line.ref.backendNodeId);
-        }
+        const page = browserViewPage(lines, args.offset, args.limit);
+        for (const line of page.lines) if (line.ref) tab.refs.set(line.ref.ref, line.ref.backendNodeId);
         while (tab.refs.size > 1000) tab.refs.delete(tab.refs.keys().next().value!);
-        result = { groupId: grant.groupId, targetId: tab.targetId, nextOffset: next < lines.length ? next : null, total: lines.length };
-        view = shown.join('\n');
+        result = { groupId: grant.groupId, targetId: tab.targetId, nextOffset: page.nextOffset, total: lines.length };
+        view = page.lines.map(line => line.text).join('\n');
       } else if (args.action === 'act') {
+        // A script's view names its document by its load (`<loaderId>:<node>`); this action takes observe's refs.
+        if (!/^\d+:\d+$/u.test(args.ref)) throw new Error('That ref comes from a script\'s view: use act() inside a script, or observe to get refs for this action');
         const backendNodeId = tab.refs.get(args.ref);
         if (!backendNodeId) throw new Error('Element reference stale; observe again');
         const node = z.object({ node: z.object({ backendNodeId: z.number(), nodeName: z.string() }) }).parse(await send('DOM.describeNode', { backendNodeId }));
@@ -57,23 +82,7 @@ export async function performBrowserAction(options: { tab: BrowserSemanticTab; a
           finally { await send('Runtime.releaseObject', { objectId: object.object.objectId }); }
         }
         if (!connected || tab.refs.get(args.ref) !== backendNodeId) throw new Error('Element reference detached or document changed');
-        if (args.operation === 'click') {
-          await send('DOM.scrollIntoViewIfNeeded', { backendNodeId });
-          const quad = Box.parse(await send('DOM.getBoxModel', { backendNodeId })).model.content;
-          const x = (quad[0]! + quad[2]! + quad[4]! + quad[6]!) / 4, y = (quad[1]! + quad[3]! + quad[5]! + quad[7]!) / 4;
-          if (tab.refs.get(args.ref) !== backendNodeId) throw new Error('Element document changed');
-          await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }); await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-        } else {
-          await send('DOM.focus', { backendNodeId });
-          if (args.operation === 'fill') {
-            if (args.value === undefined) throw new Error('Fill requires value');
-            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: options.selectAllModifier, commands: ['selectAll'] }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA' }); await send('Input.insertText', { text: args.value });
-          } else {
-            const keys: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Space: 32 };
-            if (!args.value || !keys[args.value]) throw new Error('Unsupported key');
-            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: args.value, windowsVirtualKeyCode: keys[args.value] }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: args.value, windowsVirtualKeyCode: keys[args.value] });
-          }
-        }
+        await actOnNode(send, backendNodeId, args.operation, args.value, options.selectAllModifier, () => tab.refs.get(args.ref) === backendNodeId);
       }
       if (args.action === 'screenshot' || (args.action === 'observe' && args.screenshot)) {
         const refs = [...tab.refs].slice(0, 100).map(([ref, backendNodeId]) => ({ ref, backendNodeId }));

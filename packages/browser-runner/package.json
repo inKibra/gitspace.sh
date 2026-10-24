@@ -7,10 +7,13 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit -p tsconfig.json"
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun test src"
   },
   "dependencies": {
     "@cloudflare/playwright": "1.3.6",
-    "esbuild": "^0.28.1"
+    "@gitspace/runtime-machine": "workspace:*",
+    "esbuild": "^0.28.1",
+    "zod": "^4.4.3"
   }
 }

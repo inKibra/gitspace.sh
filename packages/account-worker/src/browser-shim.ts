@@ -58,6 +58,12 @@ export class CdpShimClient {
   private readonly contexts = new Set<string>();
   /** Attaches in flight by target, so the creation reply and the creation event never attach one page twice. */
   private readonly attaching = new Map<string, Promise<string>>();
+  /** What Playwright's `newCDPSession` makes: a browser-level session of this client's own, and on it, per page, an
+   * alias of the client's session on that page (`aliases`: alias → that session and the browser session it is on). A
+   * page has one session per client (your Chrome gives a tab exactly one), so a second CDP session on a page is an
+   * alias: its commands go through the page's session, and it gets no events of its own. */
+  private readonly browserSessions = new Set<string>();
+  private readonly aliases = new Map<string, { session: string; browser: string }>();
   private autoAttach = false;
   private discover = false;
   private closed = false;
@@ -75,14 +81,14 @@ export class CdpShimClient {
       if (!this.sessions.has(sessionId)) return;
       // A page's frames and workers attach under its session; they belong to the same client.
       if (method === 'Target.attachedToTarget' && typeof params.sessionId === 'string') this.sessions.set(params.sessionId, null);
-      if (method === 'Target.detachedFromTarget' && typeof params.sessionId === 'string') this.sessions.delete(params.sessionId);
+      if (method === 'Target.detachedFromTarget' && typeof params.sessionId === 'string') this.forget(params.sessionId);
       this.emit({ method, params, sessionId });
       return;
     }
     // Top-level attaches are announced per client from its own attaches; the upstream's are everyone's.
     if (method === 'Target.attachedToTarget') return;
     if (method === 'Target.detachedFromTarget') {
-      if (typeof params.sessionId === 'string' && this.sessions.delete(params.sessionId)) this.emit({ method, params });
+      if (typeof params.sessionId === 'string' && this.sessions.has(params.sessionId)) { this.forget(params.sessionId); this.emit({ method, params }); }
       return;
     }
     if (method === 'Target.targetCreated' || method === 'Target.targetInfoChanged' || method === 'Target.targetDestroyed') {
@@ -119,16 +125,49 @@ export class CdpShimClient {
     return sessionId;
   }
 
+  /** A session's detach: it and the aliases of it go, and each alias's browser session hears so. */
+  private forget(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    for (const [alias, { session, browser }] of this.aliases) if (session === sessionId) {
+      this.aliases.delete(alias);
+      this.emit({ method: 'Target.detachedFromTarget', params: { sessionId: alias }, sessionId: browser });
+    }
+  }
+
+  private async target(targetId: unknown): Promise<Params & { targetId: string }> {
+    if (typeof targetId !== 'string') throw new Error('Target.attachToTarget needs a targetId');
+    const info = targetsOf(await this.upstream.send('Target.getTargets', {})).find(target => target.targetId === targetId);
+    if (!info) throw new Error(`No target ${targetId}`);
+    return info;
+  }
+
+  /** A browser session of this client's own: it only attaches to pages (as aliases) and detaches them. */
+  private async onBrowserSession(method: string, params: Params, browser: string): Promise<unknown> {
+    if (method === 'Target.attachToTarget') {
+      const session = await this.attachOnce(await this.target(params.targetId));
+      const alias = `${session}.${crypto.randomUUID()}`;
+      this.aliases.set(alias, { session, browser });
+      return { sessionId: alias };
+    }
+    if (method === 'Target.detachFromTarget' && typeof params.sessionId === 'string' && this.aliases.get(params.sessionId)?.browser === browser) {
+      this.aliases.delete(params.sessionId);
+      return {};
+    }
+    throw new Error(`${method} is not available on a browser session`);
+  }
+
   async send(method: string, params: Params = {}, sessionId?: string): Promise<unknown> {
     if (this.closed) throw new Error('Browser client closed');
+    if (sessionId && this.browserSessions.has(sessionId)) return this.onBrowserSession(method, params, sessionId);
+    const session = sessionId === undefined ? undefined : this.aliases.get(sessionId)?.session ?? sessionId;
     const refused = REFUSED_COMMANDS[method];
-    const refusal = refused ? `${method} ${refused} and is not allowed` : this.options.policy?.(method, params, sessionId) ?? null;
+    const refusal = refused ? `${method} ${refused} and is not allowed` : this.options.policy?.(method, params, session) ?? null;
     if (refusal) throw new Error(refusal);
     if ((method === 'Page.navigate' || method === 'Target.createTarget') && typeof params.url === 'string') await this.options.navigating?.(params.url);
-    if (sessionId) {
-      if (!this.sessions.has(sessionId)) throw new Error(`Session ${sessionId} does not belong to this client`);
-      const result = await this.upstream.send(method, params, sessionId);
-      if (this.options.cursor) this.drawCursor(method, params, sessionId);
+    if (session) {
+      if (!this.sessions.has(session)) throw new Error(`Session ${session} does not belong to this client`);
+      const result = await this.upstream.send(method, params, session);
+      if (this.options.cursor) this.drawCursor(method, params, session);
       return result;
     }
     switch (method) {
@@ -145,15 +184,16 @@ export class CdpShimClient {
         if (this.autoAttach) for (const info of targetsOf(await this.upstream.send('Target.getTargets', {}))) if (isPage(info) && !attached.has(info.targetId)) await this.attachOnce(info);
         return {};
       }
-      case 'Target.attachToTarget': {
-        if (typeof params.targetId !== 'string') throw new Error('Target.attachToTarget needs a targetId');
-        const info = (targetsOf(await this.upstream.send('Target.getTargets', {}))).find(target => target.targetId === params.targetId);
-        if (!info) throw new Error(`No target ${params.targetId}`);
-        return { sessionId: await this.attachOnce(info) };
+      case 'Target.attachToTarget': return { sessionId: await this.attachOnce(await this.target(params.targetId)) };
+      case 'Target.attachToBrowserTarget': {
+        const sessionId = `browser.${crypto.randomUUID()}`;
+        this.browserSessions.add(sessionId);
+        return { sessionId };
       }
       case 'Target.detachFromTarget': {
         const id = params.sessionId;
-        if (typeof id !== 'string' || !this.sessions.delete(id)) throw new Error('Session does not belong to this client');
+        if (typeof id !== 'string' || !this.sessions.has(id)) throw new Error('Session does not belong to this client');
+        this.forget(id);
         await this.upstream.send(method, { sessionId: id });
         this.emit({ method: 'Target.detachedFromTarget', params: { sessionId: id } });
         return {};
@@ -205,6 +245,8 @@ export class CdpShimClient {
     ]);
     this.sessions.clear();
     this.contexts.clear();
+    this.aliases.clear();
+    this.browserSessions.clear();
   }
 }
 

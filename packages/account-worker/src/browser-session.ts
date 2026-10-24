@@ -15,7 +15,7 @@ import { BudgetedDurableObject } from './storage-quarantine.js';
 const IDLE_CLOSE_MS = 5 * 60_000;
 /** A service session lasts 15 minutes from each mint; a request that finds it older than this mints again. */
 const SERVICE_RENEW_MS = 10 * 60_000;
-const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
+const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), view: z.string().optional(), viewError: z.string().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
 
 /** A client of the shared browser as the agent tools use it: the browser channel shape over a shim client. */
 function shimChannel(shim: CdpBrowserShim, label: string): BrowserChannel {
@@ -153,7 +153,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     const run = crypto.randomUUID();
     const sandbox = this.env.CODEMODE_LOADER.load({
       compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], mainModule: 'runner.js',
-      modules: { 'runner.js': BROWSER_RUNNER_SOURCE, 'script.js': `export default async function ({ page, context, browser, state, snapshot }) {\n${script}\n}` },
+      modules: { 'runner.js': BROWSER_RUNNER_SOURCE, 'script.js': `export default async function ({ page, context, browser, state, view, act }) {\n${script}\n}` },
       env: { CDP: this.ctx.exports.BrowserSessionCdp({ props: { session: name, run, ...(relayToken ? { relayToken } : {}) } }) },
       globalOutbound: null,
       limits: { cpuMs: 30_000 },
@@ -173,8 +173,9 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     }
     const result = RunResult.parse(JSON.parse(text));
     if (!result.stateError) await this.ctx.storage.put(stateKey, result.state);
-    const { state: _state, ...reply } = result;
-    return { status: 'completed', requestId: scope.requestId, attemptId: scope.attemptId, content: [{ type: 'text', text: JSON.stringify(reply) }] };
+    const { state: _state, view, ...reply } = result;
+    // The view of the page the script ended on follows as its own text, the indented page observe shows.
+    return { status: 'completed', requestId: scope.requestId, attemptId: scope.attemptId, content: [{ type: 'text', text: JSON.stringify(reply) }, ...(view === undefined ? [] : [{ type: 'text' as const, text: view }])] };
   }
 
   /** A cloud script's CDP connection, from the sandbox through `BrowserSessionCdp`: `/script/<run>/<cursor label>`. */

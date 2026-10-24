@@ -57,6 +57,31 @@ describe('CdpBrowserShim', () => {
     await expect(b.send('Runtime.evaluate', { expression: '1' }, 'session-1')).rejects.toThrow('does not belong');
   });
 
+  it('a second CDP session on a page a client already drives is its own, through the page session (newCDPSession)', async () => {
+    const browser = fakeBrowser();
+    const shim = await CdpBrowserShim.open(browser.channel);
+    const events: CdpEvent[] = [];
+    const a = shim.client(event => events.push(event)), b = shim.client(() => {});
+    await a.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    const root = (await a.send('Target.attachToBrowserTarget') as { sessionId: string }).sessionId;
+    const second = (await a.send('Target.attachToTarget', { targetId: 'existing', flatten: true }, root) as { sessionId: string }).sessionId;
+    expect(second).not.toBe('session-1');
+    await a.send('Accessibility.getFullAXTree', {}, second);
+    await a.send('Page.getFrameTree', {}, 'session-1');
+    expect(browser.calls.filter(call => call.method === 'Accessibility.getFullAXTree' || call.method === 'Page.getFrameTree')).toEqual([
+      { method: 'Accessibility.getFullAXTree', params: {}, sessionId: 'session-1' },
+      { method: 'Page.getFrameTree', params: {}, sessionId: 'session-1' },
+    ]);
+    expect(browser.calls.filter(call => call.method === 'Target.attachToTarget')).toHaveLength(1);
+    await expect(b.send('Runtime.evaluate', { expression: '1' }, second)).rejects.toThrow('does not belong');
+    await expect(a.send('Runtime.evaluate', { expression: '1' }, root)).rejects.toThrow('not available on a browser session');
+    // The page's session going ends the second one, which its browser session hears.
+    browser.emit({ method: 'Target.detachedFromTarget', params: { sessionId: 'session-1' } });
+    await settle();
+    expect(events).toContainEqual({ method: 'Target.detachedFromTarget', params: { sessionId: second }, sessionId: root });
+    await expect(a.send('Runtime.evaluate', { expression: '1' }, second)).rejects.toThrow('does not belong');
+  });
+
   it('announces a page it creates before answering, as Chrome does for an auto-attaching client', async () => {
     const browser = fakeBrowser();
     const shim = await CdpBrowserShim.open(browser.channel);

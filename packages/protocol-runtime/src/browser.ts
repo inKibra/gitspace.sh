@@ -15,7 +15,7 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('evaluate'), ...tab, expression: z.string().min(1).max(32768) }),
   z.strictObject({ action: z.literal('screenshot'), ...tab }),
   z.strictObject({ action: z.literal('close'), ...tab }),
-  /** A Playwright script, the body of an async function of `{ page, context, browser, state, snapshot }` (docs/APERTURE-DESIGN.md §6.1).
+  /** A Playwright script, the body of an async function of `{ page, context, browser, state, view, act }` (docs/APERTURE-DESIGN.md §6.1).
    * On your Chrome `sites` names the granted sites (exact patterns) the script may use; omitted, every granted site
    * that allows scripts. The cloud browser ignores it. */
   z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536), sites: z.array(BrowserOriginPatternSchema).max(32).optional() }),

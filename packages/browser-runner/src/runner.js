@@ -1,8 +1,9 @@
 // Runs one agent-written Playwright script inside a Worker Loader sandbox (docs/APERTURE-DESIGN.md §6.1). The sandbox
 // has no network of its own: `env.CDP` is its only way out, a WebSocket to the browser through GitSpace's CDP layer.
-// `./script.js` is the agent's script, an async function of `{ page, context, browser, state, snapshot }`.
+// `./script.js` is the agent's script, an async function of `{ page, context, browser, state, view, act }`.
 import { connect } from '@cloudflare/playwright';
 import { WorkerEntrypoint } from 'cloudflare:workers';
+import { scriptTools } from './tools.ts';
 import script from './script.js';
 
 const OUTPUT_LIMIT = 64 * 1024;
@@ -36,12 +37,16 @@ export default class Runner extends WorkerEntrypoint {
       const [context] = browser.contexts();
       if (!context) throw new Error('The browser session has no default context');
       const page = context.pages().at(-1) ?? await context.newPage();
-      // The page's accessibility tree as YAML with `[ref=eN]` marks; `page.locator('aria-ref=eN')` finds the element,
-      // within the same run (the refs live in this connection's injected script).
-      const snapshot = async (target = page) => (await target._snapshotForAI()).full;
-      const value = await script({ page, context, browser, state, snapshot });
+      // `view()` shows a page as observe does, with refs that `act()` takes in this run or a later one.
+      const { view, act } = scriptTools(context);
+      const value = await script({ page, context, browser, state, view, act });
+      // A script that returns nothing ends with the view of its latest page, which the next run's `page` is.
+      if (value === undefined) {
+        try { return finish({ ok: true, value: null, view: await view() }); }
+        catch (error) { return finish({ ok: true, value: null, viewError: String(error?.message ?? error).slice(0, 1024) }); }
+      }
       let returned;
-      try { returned = JSON.parse(JSON.stringify(value === undefined ? null : value)); } catch { returned = String(value); }
+      try { returned = JSON.parse(JSON.stringify(value)); } catch { returned = String(value); }
       return finish({ ok: true, value: returned });
     } catch (error) {
       return finish({ ok: false, error: String(error?.stack ?? error).slice(0, 8192) });
