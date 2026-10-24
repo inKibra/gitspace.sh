@@ -23,7 +23,7 @@ In scope (V1, milestones B0–B4):
 - the control lease and takeover;
 - share links for a tab;
 - comments on pages;
-- skill recording;
+- captures (skill recording, video and comment sessions in one);
 - password management for your enrolled Chrome;
 - cookie copy into a cloud browser;
 - the service mesh: browsers and machines reaching workspace services through the relay.
@@ -214,8 +214,8 @@ Modeled on Playwriter's remote control.
 - Anchors on other sites rely on quoted text plus context (as Hypothesis does), with selectors and bounds as fallbacks; a comment whose target disappeared is flagged, not dropped.
 - Screenshot crops can show private, logged-in content: they stay as private as the workspace and appear in a share only when that share includes `comment`.
 - Agents list, read and resolve comments with a tool, so "fix what I commented" works end to end. Resolving records the commit that fixed it.
-- **Comment sessions:** comments are made inside a named session ("Pizza form review"), started from the in-page toolbar and renamed any time; a session can span pages and tabs. Each comment saves a snapshot of the whole visible page with it (`drive://browser/comments/<session>/…`), so a saved session opens without the live tab: the pins sit on the snapshots, threads continue, and the agent reads it the same way. Sessions are listed in the workspace's Browser tab; you mention one in the chat to point the agent at it.
-- **Sharing a session:** its own share link (view, or view and comment) opens the saved session for people, with the §8 greeting saying it contains screenshots of the page; it works while your Chrome is offline and ends when revoked or expired. A live share of the tab stays separate.
+- **Comments live in captures (§11):** "Comment" in the in-page toolbar starts a capture with the comment tool on; while capturing you press C to comment. A comment-only session is just a capture whose tracks are mostly comments; it is named, saved, listed in the Browser tab and shared like any capture.
+- **Comments on a recording:** anyone viewing a saved capture can comment at any moment of its timeline. Hovering or clicking the frame resolves against the layout track kept at that time (element boxes, role, name, selector), giving the same anchor as a live comment, marked approximate; where no element matches, the comment keeps the time, a region and a crop. When the live page is open again at the same URL, approximate anchors are matched to real elements by quoted text and context.
 
 ## 10. Identity
 
@@ -239,15 +239,22 @@ The original draft's §13 invariants stand:
   - sites may challenge a session that appears from a new IP and browser, and some block Browser Run's signed bot headers.
 - For those sites, the answer is your Chrome with takeover.
 
-## 11. Skill recording
+## 11. Captures
 
-Modeled on Playwriter's skill recorder.
+One way to record a browser session; skill recording, video and comment sessions are all captures (decided 2026-10-24). Modeled in part on Playwriter's skill recorder.
 
-- **Record** in the in-page toolbar (or the agent's `recorder.start`). Captured per step: Playwright locator code (`getByRole(...)`), navigations, typed values with secrets masked, mutating network requests, a JPEG per visual change, plus a timeline. The recording attaches to the workspace group's tabs and stops after 20 minutes.
-- On **done**, the recording is saved, named and listed in the workspace's Browser tab; nothing goes into the repository and no agent turn starts by itself.
-- **Using it:** you mention the recording in the chat; the agent reads the thin timeline (steps, locators, frames, the video's times), can check each locator against the live page and replay it through `browser.run`, and, if it decides to or you ask, writes a skill into the repository (`SKILL.md` with steps and expected outcomes, plus a small replay script) and commits it like any change. When a replayed step fails because the page differs, the agent observes the page and fixes the script.
-- Recordings (timeline and frames) are saved under `drive://browser/recordings/…` and can be attached to goals and test reports.
-- **Separate from video** (Batch 16; on your Chrome video is `chrome.tabCapture` WebM with sound, on the cloud browser screencast frames): "Record skill" and "Record video" are two buttons with their own indicators and may run at once. They share one clock, so each step links to its moment in the video; the frames stay, because the agent reads images, not video.
+- **A capture is tracks on one clock:**
+  - **steps:** your actions as Playwright locator code (`getByRole(...)`), navigations, typed values with secrets masked, requests that change data;
+  - **video:** `chrome.tabCapture` WebM with sound on your Chrome (your click on Capture is the gesture Chrome requires; an agent starting one there needs the video power), screencast frames on the cloud browser and as the fallback;
+  - **layout:** the visible elements' boxes, roles, names and selectors (`DOMSnapshot.captureSnapshot`, visible area only), taken on load, when scrolling stops and when the page settles, so comments can point at elements in the recording;
+  - **comments** (§9);
+  - **frames:** a still per visible change, which the agent reads (it reads images, not video).
+  A screenshot (a script's `capture()`, the agent, or you) is a one-frame capture with its layout.
+- **Starting:** "Capture" in the in-page toolbar (or the agent's `recorder.start`), with sound on or off; "Comment" starts one with the comment tool on. While capturing you act normally and press C to comment; comments land among the steps, so the agent reads what you did and why. Stops at 30 minutes or 1 GB.
+- **Done:** the capture is saved, named and listed in the workspace's Browser tab under Captures (filters: steps, comments, video, screenshots). Nothing goes into the repository and no agent turn starts by itself.
+- **Using one:** mention it in the chat. The agent reads the thin timeline (steps, comments, frames, video times), can check each locator against the live page and replay the steps through `browser.run`, follows up on comments, and writes a skill into the repository (`SKILL.md` with steps and expected outcomes, plus a small replay script) only if it decides to or you ask. When a replayed step fails because the page differs, it observes the page and fixes the script.
+- **Playing and sharing:** one player for every capture: scrub, steps and comments as timeline markers, comments appearing where they were made, "Comment at <time>". A capture's share link (view, or view and comment; §8 greeting says it is a recording of everything visible during the session) sends the **whole recording** by default, with Trim and Snapshots only as choices; it works while your Chrome is offline.
+- Stored under `drive://browser/captures/…` (chunked, Batch 16) and attachable to goals and test reports.
 
 ## 12. Service mesh relay
 
@@ -299,8 +306,8 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 |---|---|---|
 | **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.run` as the main agent surface on both sources (session state, `aria-ref` locators, CDP allowlist widened for Playwright); `browser.observe`/`act` with freshness; the ghost cursor (§6.4); per-grant CDP endpoint used by Playwright from a machine; the Tester uses the cloud browser (your Chrome stays main-agent-only, §4.1); cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
 | **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view and comment, live pointers, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
-| **B2** | Comments | Comment mode, named comment sessions saved with page snapshots (open and share them while the browser is offline), threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
-| **B3** | Skill recording | Recorder, timeline and frames; recordings saved and listed in the Browser tab, mentioned in the chat; the agent replays one successfully and writes `SKILL.md` plus a replay script into the repository when asked; recordings in `drive://`. |
+| **B2** | Comments | Comment tool in captures and live shares, comments on a recording's timeline anchored through the layout track, threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
+| **B3** | Captures | Steps, video, layout, comments and frames on one clock; Captures list and one player in the Browser tab; mention in the chat; the agent replays one successfully and writes `SKILL.md` plus a replay script into the repository when asked; share links for the whole recording. |
 | **B4** | Passwords and cookie copy | Enrollment as the `operator` realm; vault credentials with one owner; capture during takeover; credential grants; `credentials.fill` with realm and origin checks and no plaintext in context; per-site cookie copy into a cloud profile; audit. |
 
 ## 15. Risks
