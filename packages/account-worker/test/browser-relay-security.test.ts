@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { runInDurableObject } from 'cloudflare:test';
+import { runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
@@ -18,6 +18,16 @@ async function prove(connection: Connection, identity: Identity, pairing: { code
 async function fixture(run: (relay: HostedBrowserRelay, state: DurableObjectState) => Promise<void>) { await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => { try { await run(hostedBrowserRelay(instance), state); } finally { for (const socket of sockets.splice(0)) socket.close(); } }); }
 const trust = { algorithm: 'Ed25519' as const, accountId: env.ACCOUNT_ID, publicKey: 'AA==' };
 
+test('a Chrome extension reaches the relay through the public route and is challenged', async () => {
+  await env.RELAY.getByName(env.RELAY_NAME).browserRelayPair(trust, new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws'));
+  const response = await SELF.fetch(new URL('/api/browser-relay/extension', env.ACCOUNT_URL), { headers: { upgrade: 'websocket', origin, 'cf-connecting-ip': '192.0.2.9' } });
+  expect(response.status).toBe(101);
+  const socket = response.webSocket;
+  if (!socket) throw new Error('Missing Worker WebSocket');
+  const challenge = frame(socket); socket.accept(); sockets.push(socket);
+  expect(z.object({ serverNonce: z.string() }).parse(await challenge).serverNonce).toMatch(/\S/u);
+  for (const open of sockets.splice(0)) open.close();
+});
 test('forged browser Origin cannot enter Worker extension channel', () => fixture(async relay => { await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'); expect((await relay.fetch(request(undefined, 'https://evil.test'))).status).toBe(403); }));
 test('unproven candidate does not occupy the account Chrome connection', () => fixture(async relay => { await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'); const first = await connect(relay); const second = await connect(relay, '192.0.2.2'); expect(first.challenge.serverNonce).not.toBe(second.challenge.serverNonce); }));
 test('new extension key cannot provide agent placement before fingerprint confirmation', () => fixture(async relay => { const pairing = await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'); await prove(await connect(relay), await keys(), pairing); await expect(relay.placement('project', pairing.pairingId)).rejects.toThrow(/confirm/i); }));

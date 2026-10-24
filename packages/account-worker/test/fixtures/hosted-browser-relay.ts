@@ -7,7 +7,7 @@ export type HostedBrowserRelay = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 's
  * that accepted them, never a separately constructed `AccountBrowserRelay`. */
 export function hostedBrowserRelay(relay: UserRelayDO): HostedBrowserRelay {
   return {
-    fetch: request => relay.browserRelayFetch(request),
+    fetch: request => relay.fetch(request),
     pair: (trust, endpoint) => relay.browserRelayPair(trust, endpoint),
     status: () => relay.browserRelayStatus(),
     confirm: (pairingId, fingerprint) => relay.browserRelayConfirm(pairingId, fingerprint),

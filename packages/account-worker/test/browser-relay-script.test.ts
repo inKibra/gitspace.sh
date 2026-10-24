@@ -17,7 +17,7 @@ function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socke
  * `open` with a url adds an agent tab; every operation is recorded. */
 async function chrome(relay: UserRelayDO, root: Identity, protocol: number) {
   const pairing = await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
-  const response = await relay.browserRelayFetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': '192.0.2.1' } }));
+  const response = await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': '192.0.2.1' } }));
   const socket = response.webSocket;
   if (!socket) throw new Error('Missing extension socket');
   const challenge = frame(socket); socket.accept();

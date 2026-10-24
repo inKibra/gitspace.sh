@@ -418,7 +418,6 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!service || machine?.readyState !== 1) return;
     machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId: service.requestId, code: 1000, reason: '' } satisfies TunnelRequestMessage));
   }
-  browserRelayFetch(request: Request) { return this.browserRelay.fetch(request); }
   browserRelayPair(trust: RuntimeBrowserTrust, endpoint: string) { return this.browserRelay.pair(trust, endpoint); }
   browserRelayStatus() { return this.browserRelay.status(); }
   browserRelayPlacement(projectId: string, pairingId?: string) { return this.browserRelay.placement(projectId, pairingId); }
@@ -531,8 +530,11 @@ export class UserRelayDO extends BudgetedDurableObject {
     const url = new URL(request.url);
     if (url.pathname === '/ws') return this.acceptSocket(request);
     if (url.pathname.startsWith('/tunnel/')) return this.openTunnel(request);
+    // A Chrome extension's socket. It arrives here through the stub's `fetch`, never as an RPC argument: an incoming
+    // request carries its abort signal, which RPC cannot pass.
+    if (url.pathname === '/api/browser-relay/extension') return this.browserRelay.fetch(request);
     // A script's CDP connection to a Chrome, from the browser session's sandbox binding. The public handler forwards
-    // only `/ws` and `/tunnel/` here, so this path is internal; its token admits a live run alone.
+    // only `/ws`, `/tunnel/` and the extension's socket here, so this path is internal; its token admits a live run alone.
     if (url.pathname.startsWith(BROWSER_SCRIPT_PATH)) return this.browserRelay.scriptFetch(request);
     return jsonError(404, 'NOT_FOUND', 'Relay route not found');
   }
@@ -1047,7 +1049,7 @@ export default {
       approval.searchParams.set('returnTo', safeServiceReturn(`${url.pathname}${url.search}`) ? `${url.pathname}${url.search}` : '/');
       return new Response(null, { status: 303, headers: { location: approval.href, 'cache-control': 'no-store', 'set-cookie': `${SERVICE_STATE_COOKIE}=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300` } });
     }
-    if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).browserRelayFetch(request);
+    if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).fetch(request);
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');
