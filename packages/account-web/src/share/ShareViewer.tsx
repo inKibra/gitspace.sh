@@ -334,7 +334,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
           <div
             ref={screenRef}
             aria-label="Shared tab"
-            className={`relative touch-none select-none ${commenting ? 'cursor-crosshair' : 'cursor-none'}`}
+            className={`relative touch-none select-none ${commenting ? 'cursor-crosshair' : 'cursor-default'}`}
             style={{ aspectRatio: `${aspect.width} / ${aspect.height}`, width: fit === null ? '100%' : `${fit}px` }}
             onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerLeave={onPointerLeave}
           >
