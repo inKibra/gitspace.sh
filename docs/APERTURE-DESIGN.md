@@ -62,9 +62,9 @@ Workspace (Workspace DO)
 |---|---|
 | **Browser source** | Where a tab lives: `chrome` (your Chrome, a paired extension) or `cloud` (Browser Run). Machine-hosted Chromium is a later source behind the same tools. |
 | **Workspace group** | One stable Chrome tab group per workspace: the workspace's name and a fixed color. Tabs in the group are the tabs the workspace may use. Cloud sources use one browser context per workspace instead. |
-| **Grant** | Signed authority for a workspace over its group: allowed origins, capabilities (`observe`, `navigate`, `input`, `playwright`, `record`, `comment`, `view`, `control`), expiry. Renewal extends the grant without replacing the group. |
+| **Grant** | Signed authority for a workspace over its group: allowed origins, capabilities (`observe`, `navigate`, `input`, `playwright`, `record`, `comment`, `view`), expiry. Renewal extends the grant without replacing the group. |
 | **Session** | A live tab or cloud page that agents and people attach to. |
-| **Control lease** | At most one writer: an agent (by name), a person, or none. Observers are unlimited. |
+| **Control lease** | At most one writer: an agent (by name), you (from any of your signed-in devices), or none. Observers are unlimited. |
 | **Share** | A capability link to one session with chosen capabilities and an expiry. |
 | **Credential realm** | Whose credentials a browser may receive: `operator/<user>` for your enrolled Chrome, `agent/<workspace>` for cloud profiles, none for shared sessions opened by others. |
 
@@ -176,24 +176,26 @@ Any session can be watched and driven from any signed-in GitSpace device: anothe
 - The GitSpace UI opens a session viewer: a live image of the tab, its URL and title, who holds the lease, and controls.
 - **Your own Chrome from your phone:** your desktop Chrome keeps running the tab; the phone views it through the relay and can take control. Nothing needs to be shared first: the phone is your signed-in device, and the session belongs to your account.
 - Frames: CDP `Page.startScreencast` (JPEG frames sent only on change, scaled to the viewer's size) from the extension or the cloud session, relayed to viewers over the account relay. Same mechanism for both sources. **[unverified]** bandwidth and latency through the relay at phone resolutions; `chrome.tabCapture` plus WebRTC is the upgrade path if screencast is too slow (Playwriter uses `tabCapture` for recording).
-- Input: the viewer sends pointer, touch, scroll and key events; the relay forwards them as CDP `Input.dispatch*` events only when the viewer holds the lease. Phones map taps and swipes to touch events and provide a text field for typing; the tab keeps its desktop viewport.
+- Input: your viewer sends pointer, touch, scroll and key events; the relay forwards them as CDP `Input.dispatch*` events only while you hold the lease. A share-link viewer sends only its pointer position (§7.3). Phones map taps and swipes to touch events and provide a text field for typing; the tab keeps its desktop viewport.
 
 ### 7.2 Lease and takeover
 
 - Taking control moves the lease to you and the relay holds back **all** of the agent's CDP traffic for that tab, not only input: a script can click through `Runtime.evaluate`, and Playwright runs most of its work through `evaluate`. An `act` call waits; a running `browser.run` script ends at its next command.
 - Handing back invalidates old observation IDs; the agent must `observe` again, and decides whether to rerun an interrupted script.
 - Takeover is also available without an agent asking. Lease changes are journal entries.
+- **Who holds it:** you, from any of your signed-in devices, can always take it; the agent never takes it back but asks you to hand back (the `ask` flow, as `ask_takeover`). Share-link viewers never hold it.
+- **Touching the tab takes it:** the extension cannot hold back your real mouse and keyboard, so your first trusted click or key on an agent's tab in Chrome moves the lease to you (the agent pauses, the in-page toolbar says "You're in control"); the person at the keyboard wins over your remote devices.
 
 ### 7.3 Presence
 
-Viewers are listed on the session (name, device). Pointer presence on the page is later.
+Viewers are listed on the session (name, device). Every viewer's pointer is drawn live on the tab with their name, as the agent's cursor is (§6.4), in your Chrome and in every viewer: people point and comment; only the lease holder clicks or types. Pointers are left out of the agent's views and screenshots.
 
 ## 8. Share links
 
 Modeled on Playwriter's remote control.
 
 - `https://<account-host>/s/<shareId>#<secret>`; the secret is in the URL fragment, so it never reaches the server in the request line or logs. The landing page redeems it for a short-lived session token.
-- A share is one session (a tab, or a cloud page) with capabilities chosen at creation: `view`, `control` (takes the lease), `comment`. An expiry is required.
+- A share is one session (a tab, or a cloud page) with capabilities chosen at creation: `view` (always, with a live pointer) and `comment`. An expiry is required. **No `control`:** a tab in your Chrome carries your signed-in sessions, and pointing plus comments cover guiding someone; handing a present viewer control from your toolbar, ending when you take it back, is a later option if it is ever needed.
 - Created from the extension popup (copying the link creates it) or the UI; revocable from either. The link dies when revoked, expired, or when the tab closes.
 - **The same link serves agents.** Pasted by the account owner into one of their workspaces' composer, it becomes a tab chip; sending connects the tab to that workspace's group, and the agent sees the tab, never the link. Only the owner's own workspaces can redeem it this way; anyone else gets the viewer.
 - Recipients without a GitSpace account get the viewer only; no credentials, no Playwright endpoint, no other tabs.
@@ -240,7 +242,8 @@ Modeled on Playwriter's skill recorder.
 - **Record** in the in-page toolbar (or the agent's `recorder.start`). Captured per step: Playwright locator code (`getByRole(...)`), navigations, typed values with secrets masked, mutating network requests, a JPEG per visual change, plus a timeline. The recording attaches to the workspace group's tabs and stops after 20 minutes.
 - On **done**, the agent reads the thin timeline, checks each locator against the live page, and writes a skill into the project's skills: a `SKILL.md` with steps and expected outcomes, and a small replay script.
 - The agent then replays the script end to end to check it. Later replays run the script through `browser.run`; when a step fails because the page differs, the agent observes the page and fixes the script.
-- Recordings (timeline, frames, optional `tabCapture` video) are saved under `drive://browser/recordings/…` and can be attached to goals and test reports.
+- Recordings (timeline and frames) are saved under `drive://browser/recordings/…` and can be attached to goals and test reports.
+- **Separate from video** (Batch 16; on your Chrome video is `chrome.tabCapture` WebM with sound, on the cloud browser screencast frames): "Record skill" and "Record video" are two buttons with their own indicators and may run at once. They share one clock, so each step links to its moment in the video; the frames stay, because the agent reads images, not video.
 
 ## 12. Service mesh relay
 
@@ -291,7 +294,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 | ID | Milestone | Exit criteria |
 |---|---|---|
 | **B0** | Grants, groups, Playwright, mesh fixes | Extension protocol version in the hello, N/N−1 acceptance and "Update required" (§12a); stable workspace group with drag-in/drag-out grants; `gitspace.browsers` document; `browser.run` as the main agent surface on both sources (session state, `aria-ref` locators, CDP allowlist widened for Playwright); `browser.observe`/`act` with freshness; the ghost cursor (§6.4); per-grant CDP endpoint used by Playwright from a machine; the Tester uses the cloud browser (your Chrome stays main-agent-only, §4.1); cloud sessions in `BrowserSessionDO`; cloud browser loads hosted services directly (WebSocket preview works); `service.expose`. One extension update. |
-| **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view/control/comment, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
+| **B1** | Remote view, control, takeover, share links | Session viewer on desktop and phone; lease and mechanical suspension; `browser.ask_takeover` deep link; share links with view and comment, live pointers, fragment secret, revocation and audit. Golden test: an agent hits a sign-in, you take over from your phone, sign in, hand back, the agent finishes. |
 | **B2** | Comments | Comment mode, threads, overlays on workspace and shared sessions; agent tool to list and resolve; preview comments carry workspace and commit. |
 | **B3** | Skill recording | Recorder, timeline and frames; agent writes `SKILL.md` plus replay script and replays it successfully; recordings in `drive://`. |
 | **B4** | Passwords and cookie copy | Enrollment as the `operator` realm; vault credentials with one owner; capture during takeover; credential grants; `credentials.fill` with realm and origin checks and no plaintext in context; per-site cookie copy into a cloud profile; audit. |
@@ -311,7 +314,7 @@ Not taken: its localhost relay on port 19988 (our extension connects to the acco
 
 1. Does the session viewer need pointer presence for several people at once in V1, or one controller plus observers?
 2. Is the 20-minute recording cap right, and where do recordings count against storage?
-3. Should a share's `control` capability ever allow filling a credential (it does not in this draft)?
+3. Removed: share links have no `control` (decided 2026-10-24), so no viewer can fill a credential.
 4. Machine-hosted headless Chromium: which milestone, now that the cloud browser can reach services directly?
 5. When does Aperture's API become public for Zerbly, and does the relay move to its own Worker then?
 6. Should the extension get a local channel to a GitSpace machine on the same computer (Chrome native messaging), so scripts against your Chrome skip the round trip through Cloudflare? Decide after measuring `browser.run` through the relay.
