@@ -197,6 +197,9 @@ export class BrowserShares {
   private readonly throttles = new Map<string, { last: number; pending: boolean }>();
   /** A viewer's hit test in flight, and the latest point asked while it runs. */
   private readonly hits = new WeakMap<WebSocket, { next: Point | null }>();
+  /** A viewer's hello being checked: the object takes other messages while it awaits the token's key, and a viewer
+   * sends its size and pointer right after hello, so those wait for it. */
+  private readonly helloing = new WeakMap<WebSocket, Promise<void>>();
   constructor(private readonly ctx: DurableObjectState, private readonly host: BrowserShareHost, private readonly account: BrowserShareAccount) {}
 
   /** Whether the host's socket is a viewer's. */
@@ -310,13 +313,18 @@ export class BrowserShares {
 
   /** A message on a viewer's socket. */
   async message(socket: WebSocket, data: string | ArrayBuffer): Promise<void> {
+    await this.helloing.get(socket);
     const state = ViewerSocket.parse(socket.deserializeAttachment());
     let message: RuntimeBrowserShareViewerMessage;
     try {
       if (typeof data !== 'string' || data.length > VIEWER_MESSAGE_MAX) throw new Error('Invalid share message');
       message = RuntimeBrowserShareViewerMessageSchema.parse(JSON.parse(data));
     } catch { return closeOpenSocket(socket, 1008, 'Invalid share message'); }
-    if (!state.viewer) return this.hello(socket, state, message);
+    if (!state.viewer) {
+      const hello = this.hello(socket, state, message);
+      this.helloing.set(socket, hello);
+      try { return await hello; } finally { if (this.helloing.get(socket) === hello) this.helloing.delete(socket); }
+    }
     const viewer = state.viewer, record = await this.current(state.shareId);
     if (!record || record.endedAt) {
       if (record?.endReason) this.send(socket, { type: 'ended', reason: record.endReason });

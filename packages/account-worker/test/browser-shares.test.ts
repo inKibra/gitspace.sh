@@ -340,6 +340,14 @@ test('a share ends for its viewers and its Chrome when it expires or its tab clo
       const forged = await socket(shareId);
       forged.socket.send(JSON.stringify({ type: 'hello', token: 'not-a-token' }));
       expect(await forged.closed).toEqual({ code: 1008, reason: 'Invalid share token' });
+      // A viewer sends its size and pointer right after hello, while the hello is still being checked.
+      const eagerJoin = Joined.parse((await route(shareId, 'join', { secret, name: 'Eager' })).value), eager = await socket(shareId);
+      eager.socket.send(JSON.stringify({ type: 'hello', token: eagerJoin.token }));
+      eager.socket.send(JSON.stringify({ type: 'size', width: 640, height: 480 }));
+      eager.socket.send(JSON.stringify({ type: 'pointer', at: { x: 0.5, y: 0.5 } }));
+      expect(await eager.next('joined')).toMatchObject({ viewerId: eagerJoin.viewerId });
+      expect((await eager.next('viewers')).viewers).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Eager', at: { x: 0.5, y: 0.5 } })]));
+      eager.socket.close();
       const silent = await socket(shareId);
       const pointless = await socket(shareId);
       pointless.socket.send(JSON.stringify({ type: 'pointer', at: { x: 0.5, y: 0.5 } }));
