@@ -71,8 +71,9 @@ const ShareRecord = z.object({
 type ShareRecord = z.infer<typeof ShareRecord>;
 type ShareEnd = NonNullable<ShareRecord['endReason']>;
 type Point = z.infer<typeof RuntimeBrowserSharePointSchema>;
-/** A viewer socket's attachment: its share, and once it said hello its viewer, pointer and screen area. */
-const ViewerSocket = z.object({ shareId: z.string().uuid(), deadline: z.number(), viewer: RuntimeBrowserShareViewerSchema.nullable(), at: RuntimeBrowserSharePointSchema.nullable(), size: Viewport.nullable() });
+/** A viewer socket's attachment: its id (per-socket state in memory is keyed by it: each event may hand over a new
+ * object for the same socket), its share, and once it said hello its viewer, pointer and screen area. */
+const ViewerSocket = z.object({ socketId: z.string().uuid(), shareId: z.string().uuid(), deadline: z.number(), viewer: RuntimeBrowserShareViewerSchema.nullable(), at: RuntimeBrowserSharePointSchema.nullable(), size: Viewport.nullable() });
 type ViewerSocket = z.infer<typeof ViewerSocket>;
 /** What a join's sealed token holds. */
 const ShareViewerToken = z.object({ shareId: z.string().uuid(), viewerId: z.string().uuid(), name: RuntimeBrowserShareNameSchema, guest: z.boolean(), expiresAt: z.iso.datetime() });
@@ -195,11 +196,11 @@ export class BrowserShares {
   private readonly watching = new Map<string, { width: number; height: number }>();
   /** Each share's pointer and viewer broadcasts, at most one per `POINTERS_MS`. */
   private readonly throttles = new Map<string, { last: number; pending: boolean }>();
-  /** A viewer's hit test in flight, and the latest point asked while it runs. */
-  private readonly hits = new WeakMap<WebSocket, { next: Point | null }>();
-  /** A viewer's hello being checked: the object takes other messages while it awaits the token's key, and a viewer
-   * sends its size and pointer right after hello, so those wait for it. */
-  private readonly helloing = new WeakMap<WebSocket, Promise<void>>();
+  /** A viewer socket's hit test in flight, and the latest point asked while it runs. */
+  private readonly hits = new Map<string, { next: Point | null }>();
+  /** A viewer socket's hello being checked: the object takes other messages while it awaits the token's key, and a
+   * viewer sends its size and pointer right after hello, so those wait for it. */
+  private readonly helloing = new Map<string, Promise<void>>();
   constructor(private readonly ctx: DurableObjectState, private readonly host: BrowserShareHost, private readonly account: BrowserShareAccount) {}
 
   /** Whether the host's socket is a viewer's. */
@@ -305,7 +306,7 @@ export class BrowserShares {
     // Sockets yet to say hello count too, so the share's sockets stay bounded.
     if (this.sockets(record.shareId).length >= 2 * BROWSER_SHARE_VIEWERS) return new Response('This share is full', { status: 429 });
     const [client, socket] = Object.values(new WebSocketPair());
-    socket.serializeAttachment({ shareId: record.shareId, deadline: Date.now() + HELLO_MS, viewer: null, at: null, size: null } satisfies ViewerSocket);
+    socket.serializeAttachment({ socketId: crypto.randomUUID(), shareId: record.shareId, deadline: Date.now() + HELLO_MS, viewer: null, at: null, size: null } satisfies ViewerSocket);
     this.ctx.acceptWebSocket(socket, [VIEWER_TAG, `${VIEWER_TAG}:${record.shareId}`]);
     await this.schedule();
     return new Response(null, { status: 101, webSocket: client });
@@ -313,7 +314,8 @@ export class BrowserShares {
 
   /** A message on a viewer's socket. */
   async message(socket: WebSocket, data: string | ArrayBuffer): Promise<void> {
-    await this.helloing.get(socket);
+    const { socketId } = ViewerSocket.parse(socket.deserializeAttachment());
+    await this.helloing.get(socketId);
     const state = ViewerSocket.parse(socket.deserializeAttachment());
     let message: RuntimeBrowserShareViewerMessage;
     try {
@@ -322,8 +324,8 @@ export class BrowserShares {
     } catch { return closeOpenSocket(socket, 1008, 'Invalid share message'); }
     if (!state.viewer) {
       const hello = this.hello(socket, state, message);
-      this.helloing.set(socket, hello);
-      try { return await hello; } finally { if (this.helloing.get(socket) === hello) this.helloing.delete(socket); }
+      this.helloing.set(socketId, hello);
+      try { return await hello; } finally { if (this.helloing.get(socketId) === hello) this.helloing.delete(socketId); }
     }
     const viewer = state.viewer, record = await this.current(state.shareId);
     if (!record || record.endedAt) {
@@ -331,18 +333,22 @@ export class BrowserShares {
       return closeOpenSocket(socket, 1000, 'Share ended');
     }
     if (message.type === 'hello') return this.send(socket, { type: 'error', message: 'You already joined this share' });
-    if (message.type === 'pointer') { socket.serializeAttachment({ ...state, at: message.at } satisfies ViewerSocket); return this.changed(record); }
-    if (message.type === 'size') { socket.serializeAttachment({ ...state, size: { width: message.width, height: message.height } } satisfies ViewerSocket); return this.watch(record); }
+    // Other messages may have changed the attachment while this one awaited the share.
+    const latest = ViewerSocket.parse(socket.deserializeAttachment());
+    if (message.type === 'pointer') { socket.serializeAttachment({ ...latest, at: message.at } satisfies ViewerSocket); return this.changed(record); }
+    if (message.type === 'size') { socket.serializeAttachment({ ...latest, size: { width: message.width, height: message.height } } satisfies ViewerSocket); return this.watch(record); }
     if (!record.comment) return this.send(socket, { type: 'error', message: VIEW_ONLY });
-    if (message.type === 'hit') return this.hit(socket, record, message.at);
+    if (message.type === 'hit') return this.hit(socket, socketId, record, message.at);
     return this.comment(socket, viewer, record, message);
   }
 
   /** A viewer's socket closed: they left. */
   async closed(socket: WebSocket): Promise<void> {
-    this.hits.delete(socket);
     const state = ViewerSocket.safeParse(socket.deserializeAttachment());
-    if (!state.success || !state.data.viewer) return;
+    if (!state.success) return;
+    this.hits.delete(state.data.socketId);
+    this.helloing.delete(state.data.socketId);
+    if (!state.data.viewer) return;
     const viewer = state.data.viewer, record = await this.current(state.data.shareId);
     if (!record || record.endedAt) return;
     await this.audit(record.shareId, 'left', viewer.name, viewer.guest, null);
@@ -430,11 +436,11 @@ export class BrowserShares {
   }
 
   /** What is under a viewer's point; while one test runs, only the latest point asked is tested next and answered. */
-  private async hit(socket: WebSocket, record: ShareRecord, at: Point): Promise<void> {
-    const running = this.hits.get(socket);
+  private async hit(socket: WebSocket, socketId: string, record: ShareRecord, at: Point): Promise<void> {
+    const running = this.hits.get(socketId);
     if (running) { running.next = at; return; }
     const flight: { next: Point | null } = { next: at };
-    this.hits.set(socket, flight);
+    this.hits.set(socketId, flight);
     try {
       for (let point = flight.next; point; point = flight.next) {
         flight.next = null;
@@ -443,7 +449,7 @@ export class BrowserShares {
         catch (error) { answer = { type: 'error', message: `Nothing could be found there: ${described(error)}`.slice(0, 1024) }; }
         if (!flight.next) this.send(socket, answer);
       }
-    } finally { this.hits.delete(socket); }
+    } finally { this.hits.delete(socketId); }
   }
 
   /** A viewer's comment on a comment share: the extension anchors it, its crop goes to the workspace's drive and the
@@ -632,10 +638,11 @@ export class BrowserShares {
 
   /** Open viewer sockets, of one share or all; `gone` is one closing now. */
   private sockets(shareId?: string, gone?: WebSocket): { socket: WebSocket; state: ViewerSocket }[] {
+    const goneId = gone ? ViewerSocket.safeParse(gone.deserializeAttachment()).data?.socketId : undefined;
     const open: { socket: WebSocket; state: ViewerSocket }[] = [];
     for (const socket of this.ctx.getWebSockets(shareId ? `${VIEWER_TAG}:${shareId}` : VIEWER_TAG)) {
       const state = ViewerSocket.safeParse(socket.deserializeAttachment());
-      if (socket !== gone && socket.readyState === 1 && state.success) open.push({ socket, state: state.data });
+      if (socket.readyState === 1 && state.success && state.data.socketId !== goneId) open.push({ socket, state: state.data });
     }
     return open;
   }
