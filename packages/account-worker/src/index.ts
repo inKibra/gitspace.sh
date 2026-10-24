@@ -1086,7 +1086,7 @@ export default {
         if (!project.success) return jsonError(400, 'PROJECT_BROWSER_REQUEST_INVALID', 'Project identity is required');
         if (url.pathname.endsWith('/project-status')) return Response.json({ status: 'ok', value: await relay.browserRelayProjectSettings(project.data.projectId) });
         const update = z.object({ expectedRevision: z.number().int().nonnegative(), preferences: RuntimeProjectBrowserPreferencesSchema }).safeParse(raw);
-        if (!update.success) return jsonError(400, 'PROJECT_BROWSER_REQUEST_INVALID', 'Invalid project Chrome preferences');
+        if (!update.success) return jsonError(400, 'PROJECT_BROWSER_REQUEST_INVALID', `Invalid project Chrome preferences: ${update.error.issues.map(issue => issue.message).join('; ')}`);
         try {
           const value = await relay.browserRelaySetProjectSettings(project.data.projectId, update.data.expectedRevision, update.data.preferences);
           return Response.json({ status: 'ok', value });

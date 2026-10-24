@@ -138,7 +138,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   async projectSettings(projectId: string) {
     const [preferences, registry] = await Promise.all([this.projectPreferences(projectId), this.registry()]);
     const confirmed = registry.pairings.filter(pairing => pairing.state === 'confirmed'), name = await this.names(confirmed);
-    return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId: preferences.defaultPairingId, browsers: confirmed.map(pairing => {
+    // A default whose Chrome was forgotten, re-paired or reset is no default: the project has none until one is chosen.
+    const defaultPairingId = preferences.approvals.some(item => item.pairingId === preferences.defaultPairingId && confirmed.some(pairing => pairing.pairingId === item.pairingId && pairing.generation === item.generation)) ? preferences.defaultPairingId : null;
+    return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId, browsers: confirmed.map(pairing => {
       const approval = preferences.approvals.find(item => item.pairingId === pairing.pairingId && item.generation === pairing.generation);
       return { pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), note: approval?.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval };
     }) });
@@ -249,7 +251,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const name = await this.names(confirmed), list = (pairings: StoredPairing[]) => pairings.map(item => this.describe(item, name)).join(', ');
     const approved = confirmed.filter(item => preferences.approvals.some(approval => approval.pairingId === item.pairingId && approval.generation === item.generation));
     if (!approved.length) throw new Error(`No Chrome is approved for this project. Paired: ${list(confirmed)}. ${APPROVE_HINT}`);
-    const selected = pairingId ?? preferences.defaultPairingId ?? (approved.length === 1 ? approved[0]?.pairingId : undefined);
+    // A default whose Chrome was forgotten, re-paired or reset is no default (as `projectSettings` reports it).
+    const fallback = approved.some(item => item.pairingId === preferences.defaultPairingId) ? preferences.defaultPairingId : null;
+    const selected = pairingId ?? fallback ?? (approved.length === 1 ? approved[0]?.pairingId : undefined);
     if (!selected) throw new Error(`Several Chromes are approved for this project and none is its default: ${list(approved)}. Pass the pairingId of the one to use.`);
     const pairing = approved.find(item => item.pairingId === selected);
     if (!pairing) throw new Error(`${pairingId ? `Chrome ${pairingId}` : 'The project default Chrome'} is not approved for this project. Approved: ${list(approved)}. Pass one of their pairingIds, or ask the user to approve that Chrome in Plugins → Browsers or in this workspace’s Browser tab.`);

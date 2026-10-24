@@ -15,7 +15,11 @@ async function request(...[action, body]:
   const device = await currentDevice();
   if (!device) throw new Error('Reconnect your account browser first');
   const response = await signedFetch(new URL(`/api/browser-relay/${action}`, window.location.origin), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: device.userId, ...body }) });
-  if (!response.ok) throw new Error(`Account browser ${action} failed (${response.status})`);
+  if (!response.ok) {
+    // The account explains a refusal ("Default Chrome must be approved…"); the status alone says nothing.
+    const reason = z.object({ error: z.object({ message: z.string() }) }).safeParse(await response.json().catch(() => null));
+    throw new Error(reason.success ? reason.data.error.message : `Account browser ${action} failed (${response.status})`);
+  }
   return response;
 }
 export async function accountBrowserStatus() {

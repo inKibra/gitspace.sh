@@ -260,6 +260,19 @@ test('a script run on your Chrome records its group, so the Chrome’s reports o
   expect(reports[0]).toMatchObject({ groupId, running: 1, tabs: [{ targetId: 'agent-tab', usable: true }] });
 }));
 
+test('a forgotten default Chrome is no default: approving its replacement makes it the default and relay uses it', () => fixture(async (relay, chrome) => {
+  const old = await chrome('Old');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: old.pairingId, approvals: [{ pairingId: old.pairingId, note: '' }] });
+  await relay.unpair(old.pairingId);
+  const replacement = await chrome('New');
+  const settings = await relay.projectSettings('project');
+  expect(settings.defaultPairingId).toBeNull();
+  // What Plugins → Browsers sends when you approve the replacement: the project's default, else the replacement.
+  await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? replacement.pairingId, approvals: [{ pairingId: replacement.pairingId, note: '' }] });
+  expect((await relay.projectSettings('project')).defaultPairingId).toBe(replacement.pairingId);
+  expect(await relay.placement('project')).toMatchObject({ pairingId: replacement.pairingId });
+}));
+
 test('a relay call that cannot run says why and what to do, naming the Chromes it could use', () => fixture(async (relay, chrome) => {
   const unhelpful = /browser_control|project Settings/;
   await expect(relay.placement('project')).rejects.toThrow(/^No Chrome is paired with this account\. Ask the user to pair one in Plugins → Browsers\.$/);
