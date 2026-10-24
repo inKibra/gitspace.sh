@@ -61,8 +61,10 @@ export async function acquireCheckout(input: {
     await command('git', ['config', 'remote.origin.url', input.source.remote], env, input.directory);
     await command('git', ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], env, input.directory);
     // Artifacts holds recent history only, and a boundary it never recorded makes a full fetch ask for objects it was
-    // never sent (HTTP 500, 2026-10-20). Fetch exactly what the checkout uses, each commit without its history.
-    await command('git', ['fetch', '--depth', '1', '--update-shallow', '--no-tags', input.source.remote, input.source.ref, ...input.source.layers ?? []], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
+    // never sent (HTTP 500, 2026-10-20). Fetch exactly what the checkout uses, each commit without its history. The
+    // assigned commit is fetched by id, not through its ref: the workspace may checkpoint again between the assignment
+    // and this fetch, moving the ref past it, and the newer state arrives through sync once the checkout is up.
+    await command('git', ['fetch', '--depth', '1', '--update-shallow', '--no-tags', input.source.remote, input.source.commit, ...input.source.layers ?? []], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
     const acquired = await command('git', ['rev-parse', 'FETCH_HEAD^{commit}'], env, input.directory);
     if (acquired !== input.source.commit) throw new Error('Acquired source differs from assigned commit');
     const branch = input.source.ref.startsWith('refs/heads/') ? input.source.ref.slice('refs/heads/'.length) : input.source.ref;

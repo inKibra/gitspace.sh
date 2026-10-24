@@ -34,6 +34,10 @@ async function watcherProof(run: (proof: {
   restart(): Promise<MachineExecutorRuntime>;
   /** The simulated time of each snapshot commit attempt. */
   commitTimes(): number[];
+  /** The cloud asks for the checkout again (attaching) and refuses its next `count` ready announcements. */
+  reattach(count: number): void;
+  /** The attachment's state as the cloud holds it. */
+  attachmentState(): string;
 }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-watcher-proof-'));
   const checkout = join(root, 'spaces', 'project', 'workspace');
@@ -52,7 +56,7 @@ async function watcherProof(run: (proof: {
     let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     let checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null = null;
     let captureAction: (() => Promise<void>) | undefined;
-    let refusals = 0, refusal = '';
+    let refusals = 0, refusal = '', readyRefusals = 0;
     const attempts: number[] = [];
     const uploads: string[][] = [], publications: string[][] = [];
     const final = Promise.withResolvers<void>();
@@ -69,7 +73,10 @@ async function watcherProof(run: (proof: {
           attachment = { ...attachment, state: 'attaching' };
           return schema.parse({ attachment });
         }
-        if (operation === 'runtime.attachment.ready') { attachment = { ...attachment, state: 'ready' }; return schema.parse({ attachment }); }
+        if (operation === 'runtime.attachment.ready') {
+          if (readyRefusals > 0) { readyRefusals--; throw new Error('internal error; reference = attach-proof'); }
+          attachment = { ...attachment, state: 'ready' }; return schema.parse({ attachment });
+        }
         if (operation === 'runtime.heartbeat') return schema.parse({ attachment });
         throw new Error(`Unexpected operation: ${operation}`);
       }
@@ -109,7 +116,7 @@ async function watcherProof(run: (proof: {
     runtime = await start();
     await clock.until(runtime.sync());
     uploads.length = 0; publications.length = 0; attempts.length = 0;
-    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: (count, reason = 'internal error; reference = proof') => { refusals = count; refusal = reason; }, commitTimes: () => attempts, waitForFinal: async () => {
+    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: (count, reason = 'internal error; reference = proof') => { refusals = count; refusal = reason; }, commitTimes: () => attempts, reattach: count => { readyRefusals = count; attachment = { ...attachment, state: 'attaching' }; }, attachmentState: () => attachment.state, waitForFinal: async () => {
       await clock.until(final.promise);
     }, restart: async () => {
       await runtime?.close();
@@ -119,6 +126,17 @@ async function watcherProof(run: (proof: {
     } });
   } finally { await runtime?.close(); await rm(root, { recursive: true, force: true }); }
 }
+
+test('an attach that fails is tried again after a pause, with no notice to prompt it', () => watcherProof(async ({ clock, reattach, attachmentState, restart }) => {
+  // Both reads at startup (the catch-up and the restart's own) are refused; only the timed retry can attach.
+  reattach(2);
+  const runtime = await restart();
+  expect(attachmentState()).toBe('attaching');
+  await clock.pending(15_000);
+  clock.advance(15_000);
+  await clock.until(runtime.sync());
+  expect(attachmentState()).toBe('ready');
+}), 20_000);
 
 test('manual watcher waits reject missing completion and missing timers within a deadline', async () => {
   const clock = new ManualWorktreeClock();

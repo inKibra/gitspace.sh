@@ -261,6 +261,24 @@ for (const shallowSource of [false, true]) it(`publishes a bounded historical fa
   if (shallowSource) expect(readFileSync(join(f.root, '.git/shallow'), 'utf8')).toBe(`${rootCommit}\n`);
 }, 120_000);
 
+it('acquires the assigned commit even after its checkpoint ref moved on', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'assigned'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'assigned');
+  const assigned = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'push', f.remote, `${assigned}:${f.checkpointRef}`);
+  // The workspace checkpoints again between the assignment and the machine's fetch.
+  writeFileSync(join(f.root, 'file'), 'newer'); git(f.root, 'commit', '-am', 'newer');
+  git(f.root, 'push', f.remote, `HEAD:${f.checkpointRef}`);
+  const directory = join(f.root, 'moved-ref');
+  const acquired = await acquireCheckout({
+    name: 'moved-ref', directory, source: { remote: 'https://artifacts.invalid/repository', ref: f.checkpointRef, commit: assigned, layers: [] },
+    fixed: true, requiresFiltersOrSubmodules: false, signal: new AbortController().signal, hydrateLfs: async () => {}, submoduleEnvironment: async () => ({}),
+    host: { root: f.root, ensureDaemon: async () => { throw new Error('Git acquisition must not start a daemon'); }, gitEnvironment: async () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${f.remote}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://artifacts.invalid/repository' }) },
+  });
+  expect(acquired.commit).toBe(assigned);
+  expect(readFileSync(join(directory, 'file'), 'utf8')).toBe('assigned');
+}, 60_000);
+
 it('materializes and restores a shallow checkpoint, preserves full caches, and can deepen through origin', async () => {
   const f = fixture();
   writeFileSync(join(f.root, 'old.bin'), Buffer.alloc(32_000_001));

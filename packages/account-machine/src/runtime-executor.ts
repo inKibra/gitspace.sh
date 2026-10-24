@@ -37,6 +37,12 @@ const OBSERVATION_SETTLE_MS = 1_000;
 /** How long closing waits for in-flight work, well inside the 120 s a replacement allows a generation to stop. */
 const CLOSE_GRACE_MS = 30_000;
 /** The first wait before retrying a failed sync, and the longest it doubles to. */
+/** A failed attach is tried again after this pause, twice as long after each further failure, up to the maximum, for
+ * at most `ATTACH_RETRY_ATTEMPTS` tries (about 45 minutes): each read of the assignments wakes the workspace in the
+ * cloud. A notice or an agent's use of the workspace reads them sooner, and after the last try. */
+const ATTACH_RETRY_FIRST_MS = 15_000;
+const ATTACH_RETRY_MAX_MS = 15 * 60_000;
+const ATTACH_RETRY_ATTEMPTS = 8;
 const SYNC_RETRY_FIRST_MS = 5_000;
 const SYNC_RETRY_MAX_MS = 300_000;
 /** Automatic attempts a failing sync gets (about 10 minutes on that backoff) before it waits for an edit, a newer cloud
@@ -581,7 +587,7 @@ export async function createMachineExecutor(options: {
       if (attachment.state === 'attaching') {
         const commit = committedOf(key)?.worktreeCommit ?? assignment.source?.commit;
         if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no synced version to report'));
-        local = await announceReady(local, commit, stopping.signal);
+        local = await announceReady(local, commit, stopping.signal).catch(failedDuring('materialize'));
       }
       if (local.attachment.state === 'ready') clearMaterializeFailure(local.attachment);
       if (local.attachment.state === 'ready') await keepSyncing(local, assignment.checkpoint).catch(failedDuring('sync'));
@@ -666,7 +672,8 @@ export async function createMachineExecutor(options: {
     const commit = committedOf(key)?.worktreeCommit ?? sourceCheckpoint?.worktreeCommit ?? source?.commit;
     if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no version to report'));
     const live = saveCache(local, { ...cacheFor(journal.attachment(attachment.attachmentId) ?? local), state: 'live' });
-    const ready = await announceReady(live, commit, signal);
+    // Announcing the checkout ready is the last step of attaching it.
+    const ready = await announceReady(live, commit, signal).catch(failedDuring('materialize'));
     clearMaterializeFailure(ready.attachment);
     if (setupFailure !== null) recordFailure(ready, new AttachmentOperationFailure('setup', setupFailure));
     if (ready.attachment.state === 'ready') await keepSyncing(ready).catch(failedDuring('sync'));
@@ -679,9 +686,26 @@ export async function createMachineExecutor(options: {
       await processAssignment(assignment);
     } catch (error) {
       recordFailure({ ...assignment.grant, rootPath: canonicalPathOf(attachment), prerequisitesComplete: false }, error);
+      // A failing sync keeps its own bounded retries; only an attach that failed is tried again here.
+      if (error instanceof AttachmentOperationFailure && error.operation === 'materialize') retryLater(attachment.attachmentId);
       return;
     }
+    attachPauses.delete(attachment.attachmentId);
     if (journal.attachment(attachment.attachmentId)?.attachment.failure?.operation !== 'setup') clearFailure(attachment);
+  };
+  /** Each failing attachment's next pause and tries so far; one retry is scheduled at a time and reads every assignment. */
+  const attachPauses = new Map<string, { pause: number; tries: number }>();
+  let retryScheduled = false;
+  let cancelRetry = () => {};
+  const retryLater = (attachmentId: string) => {
+    const { pause, tries } = attachPauses.get(attachmentId) ?? { pause: ATTACH_RETRY_FIRST_MS, tries: 0 };
+    attachPauses.set(attachmentId, { pause: Math.min(pause * 2, ATTACH_RETRY_MAX_MS), tries: tries + 1 });
+    if (stopped || retryScheduled || tries >= ATTACH_RETRY_ATTEMPTS) return;
+    retryScheduled = true;
+    cancelRetry = clock.schedule(pause, () => {
+      retryScheduled = false;
+      if (!stopped) void sync().catch(error => console.error('[runtime-attachments]', message(error)));
+    });
   };
   /** Work on one checkout stays serialized while different checkouts proceed independently. A lane busy with
    * earlier work keeps only the newest assignment per attachment and runs it next. */
@@ -761,6 +785,7 @@ export async function createMachineExecutor(options: {
     close: async () => {
       stopped = true;
       stopping.abort();
+      cancelRetry();
       for (const entry of watchers.values()) entry.close();
       for (const entry of observations.values()) entry.settling?.();
       try {
