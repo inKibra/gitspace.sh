@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
-import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
@@ -522,6 +522,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const claim = `browser.account.claim:${scope.projectId}:${scope.workspaceId}:${scope.attemptId}`;
     if (await this.ctx.storage.get(claim)) throw new Error('Browser authorization already consumed');
     await this.ctx.storage.put(claim, body.expiresAt);
+    await this.runtime.recordGroup(scope, RuntimeAccountBrowserGrantSchema.parse(command.grant.body));
     await this.request(placement.pairingId, { operation: 'authorize', authorization });
     const token = [...crypto.getRandomValues(new Uint8Array(32))].map(byte => byte.toString(16).padStart(2, '0')).join('');
     this.scripts.set(token, { authorization, grant: command.grant, pairingId: placement.pairingId, attemptId: scope.attemptId, deadline: Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)), connection });

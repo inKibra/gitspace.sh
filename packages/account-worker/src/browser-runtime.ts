@@ -33,6 +33,23 @@ export class AccountBrowserRuntime {
     const settled = operation.then(() => {}, () => {}); this.queues.set(scope, settled);
     try { return await operation; } finally { if (this.queues.get(scope) === settled) this.queues.delete(scope); }
   }
+  /** Keeps a group's grant and its workspace index, so the browser's reports reach the workspace and status finds it.
+   * A single step records it here; a script on your Chrome records it when the relay begins the run. A renewal may move
+   * the expiry, the approved origins and the group's name; the workspace, browser and source make it the same group,
+   * so anything else under the same id is refused. */
+  async recordGroup(scope: { projectId: string; workspaceId: string }, grant: RuntimeAccountBrowserGrant): Promise<void> {
+    if (await this.options.storage.get(`browser.account.revoked:${grant.groupId}`)) throw new Error('Browser group revoked');
+    if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Browser group expired');
+    const stored = await this.options.storage.get(`browser.account.group:${grant.groupId}`);
+    const previous = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(grant.groupId);
+    const same = (value: RuntimeAccountBrowserGrant) => canonicalBrowserAuthorization({ projectId: value.projectId, workspaceId: value.workspaceId, placement: value.placement, source: value.source });
+    if (previous && same(previous) !== same(grant)) throw new Error('Browser group grant changed');
+    this.groups.set(grant.groupId, grant);
+    await this.options.storage.put(`browser.account.group:${grant.groupId}`, grant);
+    const indexKey = `browser.account.groups:${scope.projectId}:${scope.workspaceId}`;
+    const ids = z.array(z.string().uuid()).parse(await this.options.storage.get(indexKey) ?? []);
+    if (!ids.includes(grant.groupId)) await this.options.storage.put(indexKey, [...ids, grant.groupId]);
+  }
   private async perform(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization, { command, scope } = body;
     signal.throwIfAborted();
@@ -84,19 +101,7 @@ export class AccountBrowserRuntime {
       return json(await this.options.relay.tabs(authorization, signal));
     }
     const grant = RuntimeAccountBrowserGrantSchema.parse(command.grant.body), args = command.args;
-    if (await this.options.storage.get(`browser.account.revoked:${grant.groupId}`)) throw new Error('Browser group revoked');
-    if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Browser group expired');
-    const stored = await this.options.storage.get(`browser.account.group:${grant.groupId}`);
-    const previous = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(grant.groupId);
-    // A renewal may move the expiry, the approved origins and the group's name; the workspace, browser and source make
-    // it the same group, so anything else under the same id is refused.
-    const same = (value: RuntimeAccountBrowserGrant) => canonicalBrowserAuthorization({ projectId: value.projectId, workspaceId: value.workspaceId, placement: value.placement, source: value.source });
-    if (previous && same(previous) !== same(grant)) throw new Error('Browser group grant changed');
-    this.groups.set(grant.groupId, grant);
-    await this.options.storage.put(`browser.account.group:${grant.groupId}`, grant);
-    const indexKey = `browser.account.groups:${scope.projectId}:${scope.workspaceId}`;
-    const ids = z.array(z.string().uuid()).parse(await this.options.storage.get(indexKey) ?? []);
-    if (!ids.includes(grant.groupId)) await this.options.storage.put(indexKey, [...ids, grant.groupId]);
+    await this.recordGroup(scope, grant);
     if (args.action === 'tabs') {
       if (grant.source === 'relay') {
         if (!this.options.relay) throw new Error('Account browser relay unavailable');

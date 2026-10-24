@@ -1,7 +1,7 @@
 import type { AccountBrowserRelay } from '../../src/browser-relay.js';
 import type { UserRelayDO } from '../../src/index.js';
 
-export type HostedBrowserRelay = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 'status' | 'confirm' | 'rename' | 'placement' | 'unpair' | 'execute' | 'projectSettings' | 'setProjectSettings' | 'retireWorkspace'>;
+export type HostedBrowserRelay = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 'status' | 'confirm' | 'rename' | 'placement' | 'unpair' | 'execute' | 'scriptBegin' | 'projectSettings' | 'setProjectSettings' | 'retireWorkspace'>;
 
 /** The browser relay of a live relay object. Extension sockets are hibernatable, so their frames reach the relay object
  * that accepted them, never a separately constructed `AccountBrowserRelay`. */
@@ -15,6 +15,7 @@ export function hostedBrowserRelay(relay: UserRelayDO): HostedBrowserRelay {
     placement: (projectId, pairingId) => relay.browserRelayPlacement(projectId, pairingId),
     unpair: pairingId => relay.browserRelayUnpair(pairingId),
     execute: authorization => relay.browserRelayExecute(authorization),
+    scriptBegin: authorization => relay.browserRelayScriptBegin(authorization),
     projectSettings: projectId => relay.browserRelayProjectSettings(projectId),
     setProjectSettings: (projectId, expectedRevision, preferences) => relay.browserRelaySetProjectSettings(projectId, expectedRevision, preferences),
     retireWorkspace: (projectId, workspaceId) => relay.browserRelayRetireWorkspace(projectId, workspaceId),

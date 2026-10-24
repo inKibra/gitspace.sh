@@ -167,7 +167,7 @@ export type RuntimeBrowsersDocumentGroup = RuntimeBrowsersDocument['chrome'][num
 /** A tab as the Inspector's Browser tab shows it. `addedBy` is null on the cloud browser, where only agents open tabs. */
 export const RuntimeBrowserTabViewSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema.nullable(), usable: z.boolean() });
 /** The workspace's browsers for the Inspector's Browser tab (`manage` `overview`): the approved sites, the cloud
- * browser, and every Chrome confirmed on the account with whether this project approved it. `groupId` is the
+ * browser, the attached machines' headless browsers, and every Chrome confirmed on the account with whether this project approved it. `groupId` is the
  * workspace's group on that browser, null until one exists. */
 export const RuntimeBrowserOverviewSchema = z.strictObject({
   sites: z.strictObject({ origins: z.array(BrowserOriginPatternSchema), stepsOnly: z.array(BrowserOriginPatternSchema) }),
@@ -176,6 +176,9 @@ export const RuntimeBrowserOverviewSchema = z.strictObject({
     pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema, note: z.string().max(2048), connected: z.boolean(), approved: z.boolean(), isDefault: z.boolean(),
     groupId: z.string().uuid().nullable(), groupName: id.nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200),
   })).max(32),
+  /** Headless browsers on the workspace's attached machines (agents' headless steps run there when one is ready);
+   * `error` when that machine could not answer. */
+  machines: z.array(z.strictObject({ machineId: id, groupId: z.string().uuid().nullable(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200), error: z.string().max(1024).nullable() })).max(16),
 });
 export type RuntimeBrowserOverview = z.infer<typeof RuntimeBrowserOverviewSchema>;
 /** One tab's preview (`manage` `preview`): a small JPEG, or why there is none (on your Chrome, a tab shows one only

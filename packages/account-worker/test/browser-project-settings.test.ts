@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { z } from 'zod';
-import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { AccountBrowserRelay, type BrowserWorkspaces } from '../src/browser-relay.js';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
@@ -59,13 +59,13 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
     try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
-async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>) {
+async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>, args: RuntimeBrowserArguments = { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }) {
   const workspace = await keys(), expiresAt = new Date(Date.now() + 60_000).toISOString(), issuedAt = new Date().toISOString();
   const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId, workspaceId, publicKey: workspace.publicKey, issuedAt, expiresAt }, root.key.privateKey);
   const placement = { kind: 'account-relay' as const, accountId: env.ACCOUNT_ID, pairingId: pairing.pairingId, generation: pairing.generation, ...(pairing.approvalId ? { approvalId: pairing.approvalId } : {}) };
   const grant = await signRuntimeAccountBrowserGrant({ projectId, workspaceId, placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt }, workspace.key.privateKey, authority);
   const attemptId = crypto.randomUUID();
-  return signRuntimeAccountBrowserAuthorization({ scope: { projectId, workspaceId, placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: manage ? 'browser_control' : 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: manage ?? { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority);
+  return signRuntimeAccountBrowserAuthorization({ scope: { projectId, workspaceId, placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: manage ? 'browser_control' : 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: manage ?? { type: 'execute', args, grant } }, workspace.key.privateKey, authority);
 }
 
 test('confirmed Chrome rejects signed unapproved project dispatch before any extension operation', () => fixture(async (relay, chrome, root) => {
@@ -242,6 +242,22 @@ test('a Chrome group report reaches its workspace with each tab marked usable or
     groupId, pairingId: browser.pairingId, browser: 'Work Chrome', origins: ['example.com'], running: 2,
     tabs: [{ targetId: 'agent-tab', usable: true }, { targetId: 'your-tab', usable: true }, { targetId: 'popup', usable: false }],
   } });
+}));
+
+test('a script run on your Chrome records its group, so the Chrome’s reports of that group reach the workspace', () => fixture(async (relay, chrome, root, restart, sockets) => {
+  const browser = await chrome('A');
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId, note: '' }] });
+  const value = await authorization(root, await relay.placement('project'), 'workspace', 'project', undefined, { action: 'run', source: 'relay', pairingId: browser.pairingId, script: 'return 1;' });
+  if (value.body.command.type !== 'execute') throw new Error('Expected execution');
+  const groupId = value.body.command.grant.body.groupId;
+  await relay.scriptBegin(value);
+  const reports: unknown[] = [];
+  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); } }) });
+  const [socket] = sockets();
+  if (!socket) throw new Error('Missing extension socket');
+  await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId, tabs: [{ targetId: 'agent-tab', url: 'https://example.com/', title: 'Example', addedBy: 'agent', site: null }], running: 1 } }));
+  await expect.poll(() => reports.length).toBe(1);
+  expect(reports[0]).toMatchObject({ groupId, running: 1, tabs: [{ targetId: 'agent-tab', usable: true }] });
 }));
 
 test('a relay call that cannot run says why and what to do, naming the Chromes it could use', () => fixture(async (relay, chrome) => {

@@ -158,6 +158,27 @@ test('corrupt recovery record does not reject startup or authorize a process kil
     expect(other.records).toEqual([]);
   } finally { await browser.close(); await rm(directory, { recursive: true, force: true }); }
 });
+test('the Browser tab sees only this workspace’s headless group, never launches a browser for it, and previews refuse other groups', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'browser-overview-')), authority = await browserTestAuthority(), relay = new Relay();
+  const browser = new MachineBrowser({ directory, enabled: true, relay, executablePath: '/nonexistent/browser-overview-must-not-launch', verifyAuthorization: authority.verifyAuthorization });
+  const invoke = browserInvoker(browser, authority, local), other = browserInvoker(browser, authority, local, 'other');
+  const manage = async (command: { action: 'overview' | 'status' | 'preview'; groupId?: string; targetId?: string }, workspaceId = 'workspace') => browserText(await browser.execute(await authority.dispatch(command, { type: 'manage', ...command }, workspaceId), local, AbortSignal.timeout(1000)));
+  try {
+    const relayTab = browserText(await invoke({ action: 'open', source: 'relay', targetId: 'relay-tab' }));
+    await other({ action: 'tabs', source: 'headless' });
+    expect(await manage({ action: 'overview' })).toEqual({ groupId: null, tabs: [] });
+    await invoke({ action: 'tabs', source: 'headless' });
+    const groups: { groupId: string; source: string }[] = (await manage({ action: 'status' })).groups;
+    const headless = groups.find(group => group.source === 'headless')!.groupId;
+    const foreign: string = (await manage({ action: 'status' }, 'other')).groups[0].groupId;
+    expect(await manage({ action: 'overview' })).toEqual({ groupId: headless, tabs: [] });
+    expect(await manage({ action: 'overview' }, 'other')).toEqual({ groupId: foreign, tabs: [] });
+    expect(await manage({ action: 'preview', groupId: headless, targetId: 'page' })).toMatchObject({ targetId: 'page', image: null, reason: 'The headless browser is not running' });
+    expect(await manage({ action: 'preview', groupId: crypto.randomUUID(), targetId: 'page' })).toMatchObject({ image: null, reason: 'This tab’s group has ended' });
+    await expect(manage({ action: 'preview', groupId: foreign, targetId: 'page' })).rejects.toThrow('Browser group outside workspace');
+    await expect(manage({ action: 'preview', groupId: relayTab.groupId, targetId: relayTab.targetId })).rejects.toThrow('Browser group outside workspace');
+  } finally { await browser.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 for (const evidence of ['prior', 'same', 'legacy', 'unavailable', 'unrecorded'] as const) {
 test(`corrupt browser recovery requires positive boot absence: ${evidence}`, async () => {

@@ -27,8 +27,8 @@ function useVisibleInterval(tick: () => void, ms: number) {
   }, [ms]);
 }
 
-/** The Inspector's Browser tab: this workspace's browsers (the cloud browser and each Chrome this project approved,
- * with its tab group, tabs and previews), the approved sites, and recovery records when there are any. */
+/** The Inspector's Browser tab: this workspace's browsers (the cloud browser, each attached machine's headless browser and
+ * each Chrome this project approved, with its tab group, tabs and previews), the approved sites, and recovery records when there are any. */
 export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEnvironment }: { snapshot: RuntimeSnapshot; conversationId?: string; machines: readonly { id: string; label: string }[]; onOpenEnvironment(): void }) {
   const shape = useShape();
   const identity = useMemo(() => RuntimeIdentitySchema.parse(snapshot), [snapshot.projectId, snapshot.workspaceId]);
@@ -82,9 +82,11 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
     await updateProjectBrowserSettings(identity.projectId, settings.revision, approveChrome(settings, chrome.pairingId));
     await readOverview();
   });
-  const revoke = (groupId: string) => {
-    if (window.confirm('Revoke access? This ends this workspace’s tab group on that browser and stops its agents using it; the next use starts a new group.')) void act(`revoke:${groupId}`, async () => { await request({ type: 'browserRevoke', groupId }); await readOverview(); });
+  /** `machineId` names the attached machine whose headless browser holds the group; omitted for the cloud browser and Chromes. */
+  const revoke = (groupId: string, machineId?: string) => {
+    if (window.confirm('Revoke access? This ends this workspace’s tab group on that browser and stops its agents using it; the next use starts a new group.')) void act(`revoke:${groupId}`, async () => { await request({ type: 'browserRevoke', ...(machineId === undefined ? {} : { machineId }), groupId }); await readOverview(); });
   };
+  const machineLabel = (machineId: string) => machines.find(machine => machine.id === machineId)?.label ?? machineId;
   const recovery = records.filter(row => row.records.length > 0 || row.error !== null);
   const approved = overview?.chromes.filter(chrome => chrome.approved) ?? [];
   const card = `${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`;
@@ -122,10 +124,15 @@ export function RuntimeBrowserTab({ snapshot, conversationId, machines, onOpenEn
         <h4 className="text-body font-medium">Cloud browser</h4>
         <GroupTabs groupId={overview.cloud.groupId} groupName={null} running={overview.cloud.running} tabs={overview.cloud.tabs} empty="Not started. It starts when an agent first browses." request={request} pending={pending} onRevoke={revoke} />
       </section>
+      {overview.machines.map(machine => <section key={machine.machineId} aria-label={`Headless browser on ${machineLabel(machine.machineId)}`} className={card}>
+        <h4 className="min-w-0 break-words text-body font-medium">Headless browser on {machineLabel(machine.machineId)}</h4>
+        {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
+        <GroupTabs groupId={machine.groupId} groupName={null} running={0} tabs={machine.tabs} empty="No tabs open." request={request} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} />
+      </section>)}
       {recovery.length ? <section aria-label="Browser recovery" className={card}>
         <h4 className="text-caption font-semibold">Recovery</h4>
         {recovery.map(row => <div key={row.machineId ?? 'account'} className="flex flex-col gap-2">
-          <p className="text-caption font-medium">{row.machineId === null ? 'Your account' : machines.find(machine => machine.id === row.machineId)?.label ?? row.machineId}</p>
+          <p className="text-caption font-medium">{row.machineId === null ? 'Your account' : machineLabel(row.machineId)}</p>
           {row.error ? <p role="alert" className="text-caption text-destructive">{row.error}</p> : null}
           {row.records.map(record => <div key={record.id} className="flex flex-col gap-2 rounded-lg bg-surface-3 p-3">
             <div className="flex items-center gap-2"><Badge color={record.state === 'stopped' ? 'gray' : 'amber'}>{record.state}</Badge><span className="break-all font-mono text-caption">{record.id}</span></div>

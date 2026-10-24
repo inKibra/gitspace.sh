@@ -25,13 +25,13 @@ function button(text: string): HTMLButtonElement {
   if (!element) throw new Error(`Missing button ${text}`);
   return element;
 }
-async function render() { await act(async () => root.render(<RuntimeBrowserTab snapshot={snapshot} machines={[]} onOpenEnvironment={() => {}} />)); }
+async function render(machines: readonly { id: string; label: string }[] = []) { await act(async () => root.render(<RuntimeBrowserTab snapshot={snapshot} machines={machines} onOpenEnvironment={() => {}} />)); }
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   vi.clearAllMocks();
-  overview = { sites: { origins: ['https://app.example.com', 'https://bank.example.com'], stepsOnly: ['https://bank.example.com'] }, cloud: { groupId: null, running: 0, tabs: [] }, chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }] };
+  overview = { sites: { origins: ['https://app.example.com', 'https://bank.example.com'], stepsOnly: ['https://bank.example.com'] }, cloud: { groupId: null, running: 0, tabs: [] }, machines: [], chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }] };
   previews = {};
   rpc.session.mockImplementation(async ({ command }: { command: RuntimeSessionCommand }) => {
     if (command.type === 'browserOverview') return { status: 'ok', value: { control: {}, browserOverview: overview } };
@@ -117,4 +117,24 @@ it('revokes this workspace\'s group on a Chrome only after you confirm, then sho
   await act(async () => button('Revoke access').click());
   expect(commands('browserRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserRevoke', groupId: group }]);
   expect(container.querySelector('[aria-label="Work Chrome"]')?.textContent).toContain('No tab group yet');
+});
+
+it('shows each attached machine\'s headless browser with its tabs and previews, and revokes its group on that machine', async () => {
+  const machineGroup = '00000000-0000-4000-8000-0000000000bb';
+  overview = { ...overview, machines: [
+    { machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null },
+    { machineId: 'old-box', groupId: null, tabs: [], error: 'Update GitSpace on this machine to see its browser' },
+  ] };
+  previews = { 'tab-m': { targetId: 'tab-m', capturedAt: '2026-10-23T12:00:00.000Z', image: null, reason: 'The headless browser is busy' } };
+  vi.stubGlobal('confirm', vi.fn(() => true));
+  await render([{ id: 'darktop', label: 'Darktop' }]);
+  const darktop = container.querySelector('[aria-label="Headless browser on Darktop"]')!;
+  expect(darktop.textContent).toContain('Dashboard');
+  expect(darktop.textContent).toContain('The headless browser is busy');
+  expect(commands('browserPreview').map(([input]) => input.command)).toEqual([{ type: 'browserPreview', groupId: machineGroup, targetId: 'tab-m' }]);
+  const old = container.querySelector('[aria-label="Headless browser on old-box"]')!;
+  expect(old.textContent).toContain('Update GitSpace on this machine to see its browser');
+  expect(old.textContent).toContain('No tabs open.');
+  await act(async () => button('Revoke access').click());
+  expect(commands('browserRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserRevoke', machineId: 'darktop', groupId: machineGroup }]);
 });

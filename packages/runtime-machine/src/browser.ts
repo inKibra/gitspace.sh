@@ -3,7 +3,7 @@ import { chmod, mkdir, readFile, readdir, rm, open, stat } from 'node:fs/promise
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { Browser, detectBrowserPlatform, getInstalledBrowsers, install, resolveBuildId } from '@puppeteer/browsers';
 import { ProcessSupervisor, DaemonStartSpecSchema, DaemonSpecSchema, ProcessIdentitySchema, processIdentity, sameProcess } from '@gitspace/supervisor';
-import { RuntimeBrowserArgumentsSchema, RuntimeBrowserGrantSchema, canonicalJson, type RuntimeBrowserAuthorization, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserGrant, type RuntimeBrowserSignedGrant, type RuntimeBrowserPreparation, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserGrantSchema, canonicalJson, type RuntimeBrowserAuthorization, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserGrant, type RuntimeBrowserSignedGrant, type RuntimeBrowserPreparation, type RuntimeBrowserPreview, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import type { ExecutorContent } from './tools.js';
@@ -21,6 +21,10 @@ const supervisors = new Map<string, Promise<ProcessSupervisor>>();
 type ManagedRecord = z.infer<typeof ManagedRecord>;
 const TargetInfo = z.object({ targetInfo: z.object({ targetId: z.string(), type: z.literal('page'), title: z.string(), url: z.string() }) });
 const FrameTree = z.object({ frameTree: z.object({ frame: z.object({ id: z.string(), url: z.string() }) }) });
+const PageTargets = z.object({ targetInfos: z.array(z.object({ targetId: z.string(), type: z.string(), url: z.string(), title: z.string() })) });
+const LayoutMetrics = z.object({ cssVisualViewport: z.object({ pageX: z.number(), pageY: z.number(), clientWidth: z.number().positive(), clientHeight: z.number().positive() }) });
+/** Previews are at most this wide, small enough to refresh often. */
+const PREVIEW_WIDTH = 480;
 type Tab = { grant: RuntimeBrowserGrant; scope: string; channel: RuntimeBrowserRelayChannel; targetId: string; sessionId: string; refs: Map<string, number>; document: number; stale: boolean; reason?: string; timer: NodeJS.Timeout; unsubscribe: () => void; closeServices?: () => Promise<void>; servicePolicy?: BrowserServicePolicy; profileKey?: string };
 type Profile = { connection: BrowserConnection; record: ManagedRecord; path: string; tabs: number };
 type Recovery = { id: string; projectId: string; workspaceId: string; state: 'uncertain' | 'fenced' | 'stopped'; reason: string; path: string; record?: ManagedRecord; expiresAt?: string; targetId?: string; groupId?: string };
@@ -206,6 +210,10 @@ export class MachineBrowser {
     if (grant.source === 'headless') return true;
     return url === 'about:blank' || grant.origins.some(pattern => browserOriginMatches(pattern, new URL(url).hostname));
   }
+  /** Whether a grant is one of the dispatching workspace's headless groups. */
+  private ownHeadless(grant: RuntimeBrowserGrant, dispatch: RuntimeToolDispatch) {
+    return grant.source === 'headless' && grant.projectId === dispatch.projectId && grant.workspaceId === dispatch.workspaceId;
+  }
   async closeAttachment(local: LocalAttachment) {
     const tabs = [...this.tabs.values()].filter(tab => tab.grant.attachmentId === local.attachment.attachmentId && tab.grant.generation === local.attachment.generation);
     for (const tab of tabs) { tab.stale = true; tab.refs.clear(); }
@@ -279,6 +287,8 @@ export class MachineBrowser {
     if (command.action === 'status') {
       result = { groups: [...this.groups.values()].filter(item => item.grant.projectId === dispatch.projectId && item.grant.workspaceId === dispatch.workspaceId).slice(0, 200).map(item => ({ ...item.grant, state: [...this.tabs.values()].some(tab => tab.grant.groupId === item.grant.groupId && tab.stale) ? 'fenced' : 'active' })), records: [...this.records.values()].filter(item => (item.projectId === 'unknown' || item.projectId === dispatch.projectId) && (item.workspaceId === 'unknown' || item.workspaceId === dispatch.workspaceId)).slice(0, 200).map(({ id, projectId, workspaceId, state, reason, expiresAt, groupId }) => ({ id, projectId, workspaceId, state, reason, expiresAt, groupId, actions: state === 'stopped' ? ['discard'] : ['reconcile'] })) };
     } else if (command.action === 'artifact') result = this.outputs.read(JSON.stringify([dispatch.projectId, dispatch.workspaceId]), command.artifactId ?? '', command.offset, command.limit);
+    else if (command.action === 'overview') result = await this.overview(dispatch);
+    else if (command.action === 'preview') result = await this.preview(dispatch, command.groupId, command.targetId);
     else if (command.action === 'revoke') {
       const tab = this.groups.get(command.groupId ?? '');
       if (!tab || tab.grant.projectId !== dispatch.projectId || tab.grant.workspaceId !== dispatch.workspaceId) throw new Error('Browser tab outside workspace');
@@ -304,6 +314,38 @@ export class MachineBrowser {
       }
     }
     return [{ type: 'text', text: JSON.stringify(result) }];
+  }
+  /** The workspace's headless browser for the Inspector's Browser tab: its newest group and the pages its groups
+   * opened. It never launches a browser: none running, no pages. */
+  private async overview(dispatch: RuntimeToolDispatch): Promise<{ groupId: string | null; tabs: { targetId: string; url: string; title: string }[] }> {
+    const newest = [...this.groups.values()].map(item => item.grant).filter(grant => this.ownHeadless(grant, dispatch)).sort((a, b) => Date.parse(b.expiresAt) - Date.parse(a.expiresAt))[0];
+    const profile = this.profiles.get(this.profileKey(dispatch));
+    if (!profile) return { groupId: newest?.groupId ?? null, tabs: [] };
+    const owned = new Set([...this.tabs.values()].filter(tab => !tab.stale && this.ownHeadless(tab.grant, dispatch)).map(tab => tab.targetId));
+    const tabs = PageTargets.parse(await profile.connection.send('Target.getTargets')).targetInfos.filter(target => target.type === 'page' && owned.has(target.targetId)).slice(0, 200).map(({ targetId, url, title }) => ({ targetId, url: url.slice(0, 8192), title: title.slice(0, 500) }));
+    return { groupId: newest?.groupId ?? null, tabs };
+  }
+  /** A small JPEG of one of the workspace's headless pages, shown only to its owner. No browser running, the group
+   * ended or the tab gone: no image, and why. */
+  private async preview(dispatch: RuntimeToolDispatch, groupId: string | undefined, targetId: string | undefined): Promise<RuntimeBrowserPreview> {
+    if (!groupId || !targetId) throw new Error('A preview names its group and tab');
+    const none = (reason: string): RuntimeBrowserPreview => ({ targetId, capturedAt: new Date().toISOString(), image: null, reason });
+    const group = this.groups.get(groupId);
+    if (!group) return none('This tab’s group has ended');
+    if (!this.ownHeadless(group.grant, dispatch)) throw new Error('Browser group outside workspace');
+    if (!this.profiles.has(this.profileKey(dispatch))) return none('The headless browser is not running');
+    const tab = this.tabs.get(targetId);
+    if (!tab) return none('This tab has closed');
+    if (!this.ownHeadless(tab.grant, dispatch)) throw new Error('Browser target outside workspace');
+    try {
+      const viewport = LayoutMetrics.parse(await tab.channel.send('Page.getLayoutMetrics', {}, tab.sessionId)).cssVisualViewport;
+      const clip = { x: viewport.pageX, y: viewport.pageY, width: viewport.clientWidth, height: viewport.clientHeight, scale: Math.min(1, PREVIEW_WIDTH / viewport.clientWidth) };
+      const { data } = z.object({ data: z.string() }).parse(await tab.channel.send('Page.captureScreenshot', { format: 'jpeg', quality: 50, captureBeyondViewport: false, clip }, tab.sessionId));
+      if (data.length > 600_000) return none('This tab’s preview is too large');
+      return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data }, reason: null };
+    } catch {
+      return none(tab.stale ? 'This tab has closed' : 'This tab could not be captured');
+    }
   }
   private async perform(dispatch: RuntimeToolDispatch, local: LocalAttachment, args: z.infer<typeof RuntimeBrowserArgumentsSchema>, signed: RuntimeBrowserSignedGrant, signal: AbortSignal): Promise<ExecutorContent> {
     const grant = signed.body;

@@ -2,8 +2,8 @@ import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/
 import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
-import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
@@ -18,6 +18,10 @@ export interface RuntimeBrowserAuthority {
 }
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 const savedPreparation = z.object({ fingerprint: z.string(), card: RuntimeBrowserApprovalCardSchema });
+/** A machine's answer to `overview`: its headless browser's group for the workspace and the pages it opened. */
+const machineOverview = z.object({ groupId: z.string().uuid().nullable(), tabs: z.array(z.object({ targetId: z.string(), url: z.string(), title: z.string() })).max(200) });
+/** What the Browser tab shows for a machine whose release cannot answer `overview` or `preview`. */
+const MACHINE_UPDATE_REQUIRED = 'Update GitSpace on this machine to see its browser';
 type BrowserStorageTransaction = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> };
 type BrowserStorage = BrowserStorageTransaction & { list(options: { prefix: string }): Promise<Map<string, unknown>>; delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
 type BrowserEnvironment = {
@@ -87,6 +91,17 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if (!candidates.length) throw new Error(args.source === 'relay' ? 'No eligible user-owned physical browser machine is ready' : 'No eligible browser executor is ready');
     return options.selectExecution(args, candidates);
   }
+  /** The machines whose headless browser runs this workspace's headless steps: ready, with one, not removed. One
+   * attachment per machine. */
+  async function headlessMachines() {
+    const found = new Map<string, RuntimeAttachment>();
+    for (const attachment of options.runtime().attachments.list()) {
+      if (found.has(attachment.machineId) || !isAttachmentReady(attachment) || !attachment.capabilities.includes('browser.headless')) continue;
+      const machine = await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).getMachine(attachment.machineId);
+      if (machine && machine.desiredState !== 'removed') found.set(attachment.machineId, attachment);
+    }
+    return [...found.values()];
+  }
   async function signing() {
     const { privateKey, publicKey } = await runtimeBrowserKey(storage);
     const issuedAt = new Date().toISOString();
@@ -105,6 +120,22 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const { privateKey, authority, issuedAt } = await signing();
     dispatch.browserAuthorization = await signRuntimeBrowserAuthorization({ scope, issuedAt, expiresAt, dispatch: { version: 1, tool: command.type === 'execute' ? 'browser' : 'browser_control', deadlineAt: expiresAt, replay: input.replay, ...(input.parentAttemptId ? { parentAttemptId: input.parentAttemptId } : {}) }, command }, privateKey, authority);
     return dispatch;
+  }
+  /** Signs one management command for a machine's browser, runs it there and returns its JSON answer. */
+  async function control(conversationId: string, placement: RuntimeAttachment, command: RuntimeBrowserManagement): Promise<unknown> {
+    const id = crypto.randomUUID();
+    const dispatch = await signed({ tool: 'browser_control', args: command, conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' }, placement, { type: 'manage', ...command }, new Date(Date.now() + 60_000).toISOString());
+    const result = await options.runtime().attachments.execute(dispatch, AbortSignal.timeout(60_000));
+    if (result.status !== 'completed') {
+      const message = result.status === 'failed' ? result.error.message : result.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
+      // LEGACY: releases before machine overviews take `overview` and `preview` for recovery commands (Batch 18) or
+      // refuse the action while checking its authorization (earlier); remove once every machine answers them.
+      if ((command.action === 'overview' || command.action === 'preview') && (message.includes('Browser recovery record outside workspace') || message.includes('Invalid option'))) throw new Error(MACHINE_UPDATE_REQUIRED);
+      throw new Error(message);
+    }
+    const text = result.content.find(part => part.type === 'text');
+    if (!text || text.type !== 'text') throw new Error('Browser returned no structured response');
+    return JSON.parse(text.text);
   }
   async function context(input: Input) {
     const conversation = await options.runtime().browserConversation(input.conversationId);
@@ -216,13 +247,22 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const groupId = z.string().uuid().optional().parse(await storage.get(`runtime.browser.account.group:${browser}`));
     return groupId && !await storage.get(`runtime.browser.revoked:${groupId}`) ? groupId : null;
   }
-  /** The Inspector's Browser tab: approved sites, the cloud browser's tabs, and every Chrome confirmed on the account
-   * with this workspace's group there. Only the main conversation sees the user's Chromes. Nothing here opens a browser. */
+  /** The Inspector's Browser tab: approved sites, the cloud browser's tabs, each attached machine's headless browser,
+   * and every Chrome confirmed on the account with this workspace's group there. Only the main conversation sees the
+   * user's Chromes. Nothing here opens a browser; a machine that cannot answer shows why. */
   async function overview(conversationId: string): Promise<RuntimeBrowserOverview> {
     const conversation = await options.runtime().browserConversation(conversationId);
     const approved = await options.approvedSites();
     const cloudGroup = await liveGroup('cloud');
     const cloud = cloudGroup && env.BROWSER_SESSION ? await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).overview() : { tabs: [], running: 0 };
+    const machines = await Promise.all((await headlessMachines()).slice(0, 16).map(async (placement): Promise<RuntimeBrowserOverview['machines'][number]> => {
+      try {
+        const answer = machineOverview.parse(await control(conversationId, placement, { action: 'overview' }));
+        return { machineId: placement.machineId, groupId: answer.groupId, tabs: answer.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })), error: null };
+      } catch (error) {
+        return { machineId: placement.machineId, groupId: null, tabs: [], error: (error instanceof Error ? error.message : String(error)).slice(0, 1024) };
+      }
+    }));
     const chromes: RuntimeBrowserOverview['chromes'] = [];
     if (conversation.root && env.RELAY) {
       const settings = await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId);
@@ -237,10 +277,26 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
           tabs: row?.tabs.map(tab => ({ targetId: tab.targetId, url: tab.url, title: tab.title, addedBy: tab.addedBy, usable: tab.usable })) ?? [] });
       }
     }
-    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, chromes });
+    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, machines, chromes });
+  }
+  /** One tab's preview on a machine's headless browser, captured there. A machine that is gone or cannot answer gets
+   * no image and the reason, so the tile says why. */
+  async function machinePreview(conversationId: string, grant: RuntimeBrowserGrant, targetId: string): Promise<RuntimeBrowserPreview> {
+    const none = (reason: string): RuntimeBrowserPreview => ({ targetId, capturedAt: new Date().toISOString(), image: null, reason: reason.slice(0, 256) });
+    const placement = (await headlessMachines()).find(item => item.machineId === grant.machineId);
+    if (!placement) return none('This machine is not attached: attach it to see this tab');
+    try { return RuntimeBrowserPreviewSchema.parse(await control(conversationId, placement, { action: 'preview', groupId: grant.groupId, targetId })); }
+    catch (error) { return none(error instanceof Error ? error.message : String(error)); }
   }
   async function manage(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement) {
     if (command.action === 'overview') return overview(conversationId);
+    // A group names its browser: a machine's headless group is previewed on that machine, any other by the account.
+    if (command.action === 'preview') {
+      const stored = command.groupId ? await storage.get(`runtime.browser.grant:${command.groupId}`) : undefined;
+      if (!stored) return account.manage(conversationId, command);
+      if (!command.targetId) throw new Error('A preview names its group and tab');
+      return machinePreview(conversationId, RuntimeBrowserSignedGrantSchema.parse(stored).body, command.targetId);
+    }
     if (!machineId) return account.manage(conversationId, command);
     const placements = machineId ? [await eligible(machineId)] : await Promise.all([...new Set(options.runtime().attachments.list().filter(item => item.state === 'ready' && item.capabilities.some(cap => cap.startsWith('browser.'))).map(item => item.machineId))].map(id => eligible(id)));
     if (command.action !== 'status' && placements.length !== 1) throw new Error('Browser management requires an exact machine');
@@ -252,13 +308,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     const results: unknown[] = [];
     for (const placement of placements) {
-      const id = crypto.randomUUID();
-      const dispatch = await signed({ tool: 'browser_control', args: command, conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' }, placement, { type: 'manage', ...command }, new Date(Date.now() + 60_000).toISOString());
-      const result = await options.runtime().attachments.execute(dispatch, AbortSignal.timeout(60_000));
-      if (result.status !== 'completed') throw new Error(result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
-      const text = result.content.find(part => part.type === 'text');
-      if (!text || text.type !== 'text') throw new Error('Browser returned no structured response');
-      const response: unknown = JSON.parse(text.text);
+      const response = await control(conversationId, placement, command);
       if (command.action !== 'artifact') {
         const status = RuntimeBrowserStatusSchema.parse(response);
         for (const group of status.groups) {

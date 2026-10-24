@@ -8,7 +8,7 @@ import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowse
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
-import { BROWSER_EXTENSION_PROTOCOL, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserPreview, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { BROWSER_EXTENSION_PROTOCOL, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPreview, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { UserRelayDO } from '../src/index.js';
 /** The relay object as the browser tools reach it. */
 type BrowserRelayObject = Pick<UserRelayDO, 'browserRelayPlacement' | 'browserRelayProjectSettings' | 'browserRelayExecute'>;
@@ -48,9 +48,16 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
       return {status:'completed', requestId:authorization.body.scope.requestId,attemptId:authorization.body.scope.attemptId,content:[{type:'text',text:JSON.stringify(authorization.body.command.type === 'manage' ? state.status : {targetId:'target'})}]};
     },
   };
+  /** How a machine answers management commands, by machine id; a throw is the machine's failure. */
+  const machineAnswers = new Map<string, (command: RuntimeBrowserManagement) => unknown>();
   const runtime = { harness, defaultExecutionMachine: () => state.defaultMachineId, browserConversation: async (_id: string) => ({ id: root.id, root: state.root, tools: null }), attachments: { list: () => attachments, execute: async (dispatch: RuntimeToolDispatch): Promise<RuntimeToolResult> => {
     const { command } = RuntimeBrowserAuthorizationSchema.parse(dispatch.browserAuthorization).body;
     dispatches.push(dispatch);
+    const answer = command.type === 'manage' ? machineAnswers.get(dispatch.machineId) : undefined;
+    if (answer) {
+      try { return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(answer(RuntimeBrowserManagementSchema.parse(dispatch.args))) }] }; }
+      catch (error) { return { status: 'failed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [], error: { code: 'execution', message: error instanceof Error ? error.message : String(error) } }; }
+    }
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
   const sessions: Array<{ name: string; authorization: RuntimeAccountBrowserAuthorization }> = [];
@@ -67,7 +74,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     return selected;
   }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly }), groupName: async () => 'Workspace' });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, sessions, attachments, machines, attachment, pairing, forgottenPairings, offlinePairings, storage };
+  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, forgottenPairings, offlinePairings, storage };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -287,6 +294,7 @@ test('the Browser tab sees the approved sites, the cloud browser and every confi
   expect(RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' }))).toEqual({
     sites: { origins: ['example.com', 'other.test'], stepsOnly: [] },
     cloud: { groupId: cloud.groupId, running: 1, tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true }] },
+    machines: [],
     chromes: [
       { pairingId: f.pairing.pairingId, name: 'Work Chrome', note: 'Production account', connected: true, approved: true, isDefault: true, groupId: relay.groupId, groupName: 'Workspace', running: 2, tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', usable: true }] },
       { pairingId: home, name: 'Home', note: '', connected: false, approved: false, isDefault: false, groupId: null, groupName: null, running: 0, tabs: [] },
@@ -295,6 +303,36 @@ test('the Browser tab sees the approved sites, the cloud browser and every confi
   f.state.root = false;
   expect(RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' })).chromes).toEqual([]);
   expect(f.dispatches).toEqual([]);
+});
+test('the Browser tab lists each attached machine’s headless tabs; a machine that cannot answer says why, and an outdated one asks for an update', async () => {
+  const f = await fixture();
+  for (const machineId of ['laptop', 'old', 'plain']) {
+    f.attachments.push(RuntimeAttachmentSchema.parse({ ...f.attachment, machineId, attachmentId: `${machineId}-attachment`, capabilities: machineId === 'plain' ? ['browser', 'browser_control'] : f.attachment.capabilities }));
+    f.machines.set(machineId, { kind: 'physical', desiredState: 'online' });
+  }
+  const groupId = crypto.randomUUID();
+  f.machineAnswers.set('machine', command => { if (command.action !== 'overview') throw new Error(`unexpected ${command.action}`); return { groupId, tabs: [{ targetId: 'machine-tab', url: 'https://example.com/', title: 'Example' }] }; });
+  f.machineAnswers.set('laptop', () => { throw new Error('Browser connection is stale'); });
+  f.machineAnswers.set('old', () => { throw new Error('Browser recovery record outside workspace'); });
+  f.machineAnswers.set('plain', () => { throw new Error('a machine without a headless browser is never asked'); });
+  expect(RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' })).machines).toEqual([
+    { machineId: 'machine', groupId, tabs: [{ targetId: 'machine-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true }], error: null },
+    { machineId: 'laptop', groupId: null, tabs: [], error: 'Browser connection is stale' },
+    { machineId: 'old', groupId: null, tabs: [], error: 'Update GitSpace on this machine to see its browser' },
+  ]);
+});
+test('a machine’s headless tab is previewed on that machine; an outdated or detached machine gets a tile reason', async () => {
+  const f = await fixture();
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', on: 'machine' });
+  const card = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  f.machineAnswers.set('machine', command => ({ targetId: command.targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: `jpeg:${command.groupId}` }, reason: null }));
+  const preview = async () => RuntimeBrowserPreviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'preview', groupId: card.groupId, targetId: 'machine-tab' }));
+  expect(await preview()).toMatchObject({ targetId: 'machine-tab', image: { mediaType: 'image/jpeg', data: `jpeg:${card.groupId}` }, reason: null });
+  expect(f.sessions).toEqual([]);
+  f.machineAnswers.set('machine', () => { throw new Error('Invalid option: expected one of "status"|"revoke"|"reconcile"|"discard"|"artifact"'); });
+  expect(await preview()).toMatchObject({ image: null, reason: 'Update GitSpace on this machine to see its browser' });
+  f.attachments.splice(0);
+  expect(await preview()).toMatchObject({ image: null, reason: 'This machine is not attached: attach it to see this tab' });
 });
 
 const Frame = z.object({ serverNonce: z.string().optional() });
