@@ -4,10 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MachineBrowser } from './browser.js';
-import { browserTestAuthority, browserInvoker, browserText } from './browser-test-support.js';
+import { browserTestAuthority, browserInvoker, browserText, browserView } from './browser-test-support.js';
 import type { LocalAttachment } from './journal.js';
 import { z } from 'zod';
 import { openServiceForward } from '../../account-machine/src/service-forward.js';
+
+/** The ref on the first outline line that matches `pattern`. */
+function viewRef(lines: string[], pattern: RegExp): string | undefined {
+  return /\[ref=([^\]]+)\]/u.exec(lines.find(line => pattern.test(line)) ?? '')?.[1];
+}
 
 /** Opt-in actual Chromium and supervisor proof; no user Chrome connection is used. */
 export async function runBrowserSmoke(options: { executablePath: string }) {
@@ -81,10 +86,9 @@ export async function runBrowserSmoke(options: { executablePath: string }) {
     };
     const clickPrivate = async (name: string) => {
       for (let retry = 0; retry < 50; retry++) {
-        const observation = browserText(await invoke({ action: 'observe', targetId: privateTab.targetId }));
-        const node = observation.nodes.find((node: { role: string; name: string }) => ['link', 'button'].includes(node.role) && node.name === name);
-        if (node) {
-          await invoke({ action: 'act', targetId: privateTab.targetId, ref: node.ref, operation: 'click' });
+        const ref = viewRef(browserView(await invoke({ action: 'observe', targetId: privateTab.targetId })).lines, new RegExp(`- (link|button) ${JSON.stringify(name)}`));
+        if (ref) {
+          await invoke({ action: 'act', targetId: privateTab.targetId, ref, operation: 'click' });
           return;
         }
         await delay(40);
@@ -164,34 +168,34 @@ export async function runBrowserSmoke(options: { executablePath: string }) {
     await assert.rejects(() => otherWorkspace({ action: 'observe', targetId }), /outside group/);
     const observe = async () => {
       for (let retry = 0; retry < 50; retry++) {
-        const value = browserText(await invoke({ action: 'observe', targetId }));
-        if (value.nodes.some((node: {role:string;name:string}) => node.role === 'textbox' && node.name === 'Name')) return value;
+        const value = browserView(await invoke({ action: 'observe', targetId })).lines;
+        if (viewRef(value, /- textbox "Name"/)) return value;
         await delay(100);
       }
       throw new Error('Actual Chromium fixture did not become ready');
     };
     let observed = await observe();
     assert(!JSON.stringify(observed).includes('SECRET-'));
-    const input = observed.nodes.find((node: {role:string;name:string}) => node.role === 'textbox' && node.name === 'Name');
+    const input = viewRef(observed, /- textbox "Name"/)!;
     await delay(80);
-    await invoke({ action: 'act', targetId, ref: input.ref, operation: 'fill', value: 'Browser' });
+    await invoke({ action: 'act', targetId, ref: input, operation: 'fill', value: 'Browser' });
     observed = await observe();
-    const button = observed.nodes.find((node: {role:string}) => node.role === 'button');
-    await delay(80); await invoke({ action: 'act', targetId, ref: button.ref, operation: 'click' });
+    const button = viewRef(observed, /- button /)!;
+    await delay(80); await invoke({ action: 'act', targetId, ref: button, operation: 'click' });
     for (let retry = 0; retry < 50; retry++) {
       observed = await observe();
-      if (observed.nodes.some((node: {name:string}) => node.name === 'Hello Browser')) break;
+      if (observed.some(line => line.includes('Hello Browser'))) break;
       await delay(100);
     }
-    assert(observed.nodes.some((node: {name:string}) => node.name === 'Hello Browser'));
-    const screenshot = (await invoke({ action: 'observe', targetId, screenshot: true }))[1];
+    assert(observed.some(line => line.includes('Hello Browser')));
+    const screenshot = (await invoke({ action: 'observe', targetId, screenshot: true })).find(entry => entry.type === 'image');
     assert(screenshot?.type === 'image'); assert.equal(screenshot.mimeType, 'image/jpeg'); assert(Buffer.from(screenshot.data, 'base64').length <= 512000); assert.equal(Buffer.from(screenshot.data, 'base64').subarray(0, 2).toString('hex'), 'ffd8');
     const profileName = (await readdir(join(directory, 'profiles')))[0]!;
     assert(!(await readdir(join(directory, 'profiles', profileName))).includes('DevToolsActivePort'));
     const inspector = [...browser['profiles'].values()][0]!.connection;
     try {
       const session = z.object({ sessionId: z.string() }).parse(await inspector.send('Target.attachToTarget', { targetId: opened.targetId, flatten: true }));
-      const box = z.object({ model: z.object({ content: z.array(z.number()).length(8) }) }).parse(await inspector.send('DOM.getBoxModel', { backendNodeId: Number(button.ref.split(':')[1]) }, session.sessionId));
+      const box = z.object({ model: z.object({ content: z.array(z.number()).length(8) }) }).parse(await inspector.send('DOM.getBoxModel', { backendNodeId: Number(button.split(':')[1]) }, session.sessionId));
       // Inspect the captured pixels, not merely calls to the masking helper.
       // This connection is to the proof's private Chrome, never a user relay.
       const pixels = z.object({ result: z.object({ value: z.array(z.array(z.number())) }) }).parse(await inspector.send('Runtime.evaluate', {
@@ -212,7 +216,7 @@ export async function runBrowserSmoke(options: { executablePath: string }) {
     assert(groupTabs.some((tab: { targetId: string }) => tab.targetId === sibling.targetId));
     await invoke({ action: 'close', targetId: sibling.targetId });
     await delay(200);
-    assert(JSON.stringify(browserText(await invoke({ action: 'observe', targetId: second.targetId }))).includes('proof=persistent'));
+    assert(browserView(await invoke({ action: 'observe', targetId: second.targetId })).lines.some(line => line.includes('proof=persistent')));
     const profilesBefore = await readdir(join(directory, 'profiles'));
     const launchName = (await readdir(join(directory, 'launches')))[0]!;
     const unknown = JSON.parse(await readFile(join(directory, 'launches', launchName), 'utf8'));
@@ -237,7 +241,7 @@ export async function runBrowserSmoke(options: { executablePath: string }) {
       assert.deepEqual(await readdir(join(directory, 'profiles')), profilesBefore);
       const invokeRecovered = browserInvoker(recovered, authority, local);
       const third = browserText(await invokeRecovered({ action: 'open', source: 'headless', url: `${url}/cookie` }));
-      await delay(200); assert(JSON.stringify(browserText(await invokeRecovered({ action: 'observe', targetId: third.targetId }))).includes('proof=persistent'));
+      await delay(200); assert(browserView(await invokeRecovered({ action: 'observe', targetId: third.targetId })).lines.some(line => line.includes('proof=persistent')));
       await invokeRecovered({ action: 'close', targetId: third.targetId });
     } finally { await recovered.close(); }
     console.log('PASS actual headless Chromium: signed dispatch, mutating document refs, fill/click, bounded masked JPEG, group scopes, persistent profile and recovery');

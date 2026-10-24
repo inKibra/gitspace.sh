@@ -10,7 +10,7 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('open'), ...selection, targetId: id.optional(), url: z.string().max(8192).optional() }),
   z.strictObject({ action: z.literal('tabs'), ...selection }),
   z.strictObject({ action: z.literal('navigate'), ...tab, url: z.string().max(8192) }),
-  z.strictObject({ action: z.literal('observe'), ...tab, screenshot: z.boolean().default(false), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(100) }),
+  z.strictObject({ action: z.literal('observe'), ...tab, screenshot: z.boolean().default(false), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(1000).default(400) }),
   z.strictObject({ action: z.literal('act'), ...tab, ref: id, operation: z.enum(['click', 'fill', 'press']), value: z.string().max(16384).optional() }),
   z.strictObject({ action: z.literal('evaluate'), ...tab, expression: z.string().min(1).max(32768) }),
   z.strictObject({ action: z.literal('screenshot'), ...tab }),

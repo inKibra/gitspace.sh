@@ -9,6 +9,11 @@ export interface BrowserTestAuthority {
   dispatch(args: unknown, command: RuntimeBrowserAuthorizationBody['command'], workspaceId?: string, conversationId?: string): Promise<RuntimeToolDispatch>;
 }
 export function browserText(content: ExecutorContent) { return JSON.parse(content[0]?.type === 'text' ? content[0].text : 'null'); }
+/** An observation's outline (the text after its metadata) as lines, and the refs those lines carry in order. */
+export function browserView(content: ExecutorContent): { lines: string[]; refs: string[] } {
+  const lines = content[1]?.type === 'text' ? content[1].text.split('\n') : [];
+  return { lines, refs: lines.flatMap(line => /\[ref=([^\]]+)\]/u.exec(line)?.[1] ?? []) };
+}
 export async function browserTestAuthority(): Promise<BrowserTestAuthority> {
   const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const root = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MachineBrowser } from './browser.js';
 import { BrowserOutputStore, BROWSER_ARTIFACT_BYTES, boundedText } from './browser-output.js';
-import { browserTestAuthority, browserInvoker, browserText } from './browser-test-support.js';
+import { browserTestAuthority, browserInvoker, browserText, browserView } from './browser-test-support.js';
 import { RuntimeBrowserArgumentsSchema, type RuntimeBrowserArguments, type RuntimeBrowserSignedGrant } from '@gitspace/protocol-runtime';
 import type { RuntimeBrowserRelay, RuntimeBrowserRelayChannel } from './browser-relay-transport.js';
 import type { LocalAttachment } from './journal.js';
@@ -63,13 +63,14 @@ test('signed relay commands enforce identity, stable document refs, redaction, b
   try {
     const opened = browserText(await invoke({ action: 'open', source: 'relay', targetId: 'tab' }));
     expect(opened.targetId).toBe('tab');
-    const observed = browserText(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId, limit: 200 }));
-    expect(observed.nodes[0].name).toBe('[form field]'); expect(JSON.stringify(observed)).not.toContain('secret'); expect(Buffer.byteLength(JSON.stringify(observed))).toBeLessThan(32768); expect(observed.nextOffset).toBeGreaterThan(0);
-    await invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: observed.nodes[1].ref, operation: 'click' });
+    const observedContent = await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId, limit: 1000 });
+    const observed = browserText(observedContent), view = browserView(observedContent);
+    expect(view.lines[0]).toBe('- textbox "[form field]" [ref=0:1]'); expect(JSON.stringify(observedContent)).not.toContain('secret'); expect(Buffer.byteLength(view.lines.join('\n'))).toBeLessThanOrEqual(24_000); expect(observed.nextOffset).toBe(view.lines.length);
+    await invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: view.refs[1]!, operation: 'click' });
     relay.detached = true;
-    await expect(invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: observed.nodes[1].ref, operation: 'click' })).rejects.toThrow('detached');
-    const shared = browserText(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId }, 'other'));
-    expect(shared.nodes[0].name).toBe('[form field]');
+    await expect(invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: view.refs[1]!, operation: 'click' })).rejects.toThrow('detached');
+    const shared = browserView(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId }, 'other'));
+    expect(shared.lines[0]).toBe('- textbox "[form field]" [ref=0:1]');
     const args = RuntimeBrowserArgumentsSchema.parse({ action: 'observe', source: 'relay', targetId: opened.targetId });
     const grant = relay.channels.get(opened.targetId)!.grant;
     const signed = await authority.dispatch(args, { type: 'execute', args, grant });
@@ -106,7 +107,7 @@ test('one signed group discovers multiple targets and closing a tab preserves si
     expect(second.groupId).toBe(first.groupId);
     expect(browserText(await invoke({ action: 'tabs', source: 'relay' })).map((tab: { targetId: string }) => tab.targetId)).toEqual(['first', 'second']);
     await invoke({ action: 'close', source: 'relay', targetId: first.targetId });
-    expect(browserText(await invoke({ action: 'observe', source: 'relay', targetId: second.targetId })).nodes[0].name).toBe('[form field]');
+    expect(browserView(await invoke({ action: 'observe', source: 'relay', targetId: second.targetId })).lines[0]).toContain('"[form field]"');
     await browser.execute(await authority.dispatch({ action: 'revoke', groupId: first.groupId }, { type: 'manage', action: 'revoke', groupId: first.groupId }), local, AbortSignal.timeout(1000));
     await expect(invoke({ action: 'observe', source: 'relay', targetId: second.targetId })).rejects.toThrow('stale');
   } finally { await browser.close(); await rm(directory, { recursive: true, force: true }); }
@@ -133,9 +134,9 @@ test('different workspaces progress independently and uncertain effects retain r
   try {
     const a = browserText(await blocked({ action: 'open', source: 'relay', targetId: 'a' })), b = browserText(await free({ action: 'open', source: 'relay', targetId: 'b' }));
     const pending = blocked({ action: 'observe', source: 'relay', targetId: a.targetId });
-    const observation = browserText(await free({ action: 'observe', source: 'relay', targetId: b.targetId }));
+    const observation = browserView(await free({ action: 'observe', source: 'relay', targetId: b.targetId }));
     relay.uncertain = true;
-    await expect(free({ action: 'act', source: 'relay', targetId: b.targetId, ref: observation.nodes[1].ref, operation: 'click' })).rejects.toBeInstanceOf(BrowserEffectUncertain);
+    await expect(free({ action: 'act', source: 'relay', targetId: b.targetId, ref: observation.refs[1]!, operation: 'click' })).rejects.toBeInstanceOf(BrowserEffectUncertain);
     const status = browserText(await browser.execute(await authority.dispatch({ action: 'status' }, { type: 'manage', action: 'status' }, 'free'), local, AbortSignal.timeout(1000)));
     expect(status.records.some((record: {state:string}) => record.state === 'fenced')).toBe(true);
     gate.resolve(); await pending;
@@ -212,10 +213,10 @@ test('spontaneous cross-origin navigation revokes subsequent commands but unrela
   const invoke = browserInvoker(browser, authority, local);
   try {
     const opened = browserText(await invoke({ action: 'open', source: 'relay', targetId: 'origin-tab' }));
-    const observation = browserText(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId }));
+    const observation = browserView(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId }));
     const entry = relay.channels.get(opened.targetId)!;
     entry.listener?.({ method: 'DOM.childNodeInserted', sessionId: opened.targetId });
-    await invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: observation.nodes[1].ref, operation: 'click' });
+    await invoke({ action: 'act', source: 'relay', targetId: opened.targetId, ref: observation.refs[1]!, operation: 'click' });
     entry.listener?.({ method: 'Page.frameNavigated', sessionId: opened.targetId, params: { frame: { id: 'frame', url: 'https://unapproved.test' } } });
     await expect(invoke({ action: 'observe', source: 'relay', targetId: opened.targetId })).rejects.toThrow('stale');
 
@@ -240,8 +241,10 @@ test('AX redacts editable descendants before pagination including ignored roots 
   const invoke = browserInvoker(browser, authority, local);
   try {
     const opened = browserText(await invoke({ action: 'open', source: 'relay', targetId: 'sensitive-tab' }));
-    const observed = browserText(await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId, offset: 1, limit: 10 }));
-    expect(observed.nodes.map((node: { name: string }) => node.name)).toEqual(['[form field]', '[form field]', '[form field]', 'Public description', 'Name', 'Card holder', '[form field]']);
-    expect(JSON.stringify(observed)).not.toContain('secret');
+    const whole = await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId });
+    expect(browserView(whole).lines).toEqual(['- textbox "[form field]"', '- text: "Public description"', '- textbox "Name"', '- textbox "Card holder"', '- textbox "[form field]"']);
+    const paged = await invoke({ action: 'observe', source: 'relay', targetId: opened.targetId, offset: 1, limit: 10 });
+    expect(browserView(paged).lines[0]).toBe('- text: "Public description"');
+    expect(JSON.stringify([whole, paged])).not.toContain('secret');
   } finally { await browser.close(); await rm(directory, { recursive: true, force: true }); }
 });
