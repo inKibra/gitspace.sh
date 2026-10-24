@@ -1,4 +1,4 @@
-// Throwaway Batch 18 mockup, part 4: joining through a share link. The greeting page, then the viewer with comment
+// Batch 18 mockup (kept in the repo: the agreed design; do not delete), part 4: joining through a share link. The greeting page, then the viewer with comment
 // mode. Hover outlines are resolved locally here; for real they come from the live tab (DOM.getNodeForLocation).
 import { Button, InputField, InputGroup, TabsSubtle, TabsSubtleItem } from '@gitspace/ui';
 import { MessagePlusSquare } from '@untitledui/icons';

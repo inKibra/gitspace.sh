@@ -1,4 +1,4 @@
-// Throwaway Batch 18 mockup, part 3: the extension. Toolbar icon, popup, in-page toolbar, the agent's cursor,
+// Batch 18 mockup (kept in the repo: the agreed design; do not delete), part 3: the extension. Toolbar icon, popup, in-page toolbar, the agent's cursor,
 // comments on pages and recording a skill. Static data; the cursor and the recording are simulated.
 import { Button, InputCopy, Switch, TabsSubtle, TabsSubtleItem } from '@gitspace/ui';
 import { MessagePlusSquare, Recording01 } from '@untitledui/icons';
