@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { browserOriginMatches } from './browser-origin.js';
+import { BROWSER_SITE_LEVELS } from './browser-site-level.js';
 import { EnvironmentError, EnvironmentFailureSchema } from './errors.js';
 
 const identifierSchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/u);
@@ -273,15 +274,15 @@ export function parseLifecycleBindingsJson(source: string, secrets: readonly str
   }
   return parsed.data;
 }
-/** What an approved browser site lets agents do on your Chrome: scripts and single steps, or single steps only (a bank,
- * a production admin). */
-export const BrowserSiteLevelSchema = z.enum(['scripts', 'steps']);
-export type BrowserSiteLevel = z.infer<typeof BrowserSiteLevelSchema>;
+/** A browser site's level as people set it (`browser-site-level.ts`). */
+export const BrowserSiteLevelSchema = z.enum(BROWSER_SITE_LEVELS);
 /** `level` is a browser site's, set on every browser-origin approval; approvals stored before levels have none and
- * allow scripts. */
+ * count as `full`. LEGACY: approvals stored before 2026-10-25 say `scripts` (now `full`) or `steps` (now `interact`);
+ * `browserOriginLevel` reads them so. A stored approval is rewritten only when its site is approved again, so remove
+ * these two once a scan of every workspace's stored lifecycle state and every project's shared approvals finds none. */
 export const LifecycleApprovalSchema = z.object({
   scope: z.enum(['project', 'workspace']), executionHash: executionHashSchema,
-  approvedBy: lifecycleIdSchema, approvedAt: z.string(), level: BrowserSiteLevelSchema.optional(),
+  approvedBy: lifecycleIdSchema, approvedAt: z.string(), level: z.enum([...BROWSER_SITE_LEVELS, 'scripts', 'steps']).optional(),
 }).strict();
 export const LifecycleIncidentSchema = z.object({
   id: lifecycleIdSchema, kind: z.enum(['domain', 'transport']), message: z.string(), occurredAt: z.string().datetime(),

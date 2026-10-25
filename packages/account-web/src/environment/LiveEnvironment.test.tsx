@@ -165,22 +165,25 @@ it('asks for approval of the routes services.json opens to signed callers, and r
   expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
 });
 
-it('approves a browser site for single steps only, and changes the level of every approval of it', async () => {
+it('approves a browser site at read, interact or full, shows stored steps and scripts approvals as interact, and changes the level of every approval of it', async () => {
   const hash = await browserOriginHash('bank.example');
   const unapproved = environment();
   reads.set('environment', { ...unapproved, lifecycle: { ...unapproved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }] } });
   await render(snapshot([{ id: 'darktop' }]));
   await click('Review & approve', step('Browser access'));
-  await click('Approve single steps only');
-  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'steps' });
+  expect([...document.querySelectorAll('[role="dialog"] button')].map(button => button.textContent).filter(text => text?.startsWith('Approve'))).toEqual(['Approve read', 'Approve interact', 'Approve full']);
+  await click('Approve read');
+  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'read' });
   const approved = environment();
+  // Approvals stored before the levels were renamed: steps (now interact) and scripts (now full).
   reads.set('environment', { ...approved, lifecycle: { ...approved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }], approvals: [...approved.lifecycle.approvals, { scope: 'project', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'steps' }, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'scripts' }] } });
   await render(snapshot([{ id: 'darktop' }]));
   const level = step('Browser access').querySelector<HTMLSelectElement>('select[aria-label="Level for bank.example"]')!;
-  expect(level.value).toBe('steps');
+  expect([...level.options].map(option => option.value)).toEqual(['read', 'interact', 'full']);
+  expect(level.value).toBe('interact');
   rpc.approve.mockClear();
-  await act(async () => { level.value = 'scripts'; level.dispatchEvent(new Event('change', { bubbles: true })); });
-  expect(rpc.approve.mock.calls).toEqual([[{ spaceId: 'workspace', scope: 'project', executionHash: hash, level: 'scripts' }], [{ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'scripts' }]]);
+  await act(async () => { level.value = 'full'; level.dispatchEvent(new Event('change', { bubbles: true })); });
+  expect(rpc.approve.mock.calls).toEqual([[{ spaceId: 'workspace', scope: 'project', executionHash: hash, level: 'full' }], [{ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'full' }]]);
 });
 
 it('lists secrets and values by name and never renders a value', async () => {

@@ -55,7 +55,8 @@ export const png = (n: number) => Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d,
 const DEFAULT_FAVICON = png(0);
 
 /** The installed service worker on a Chrome whose workspace group (Chrome group 7) holds an agent tab on each of
- * app.example, a.docs.example and bank.example; bank.example allows single steps only. Timers are fake (`advance`).
+ * app.example, a.docs.example and bank.example; the grant has bank.example at interact (single steps only) and
+ * news.example at read (looking only). Timers are fake (`advance`).
  * `local` seeds `chrome.storage.local`; `live` keeps the extension's own relay connection (`relay` completes it)
  * instead of a connected stand-in, which speaks `protocol` (an account that saves captures and downloads from 5) and,
  * with `activity`, takes each group's colour and agents in its reports.
@@ -72,7 +73,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const expiresAt = new Date(now + 60_000).toISOString();
   const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: 'account', projectId, workspaceId, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', workspace.publicKey))), issuedAt, expiresAt }, root.privateKey);
   // As the relay passes it on: parsed, in schema order.
-  const grant = RuntimeAccountBrowserSignedGrantSchema.parse(await signRuntimeAccountBrowserGrant({ projectId, workspaceId, placement, groupId: crypto.randomUUID(), groupName: 'Checkout', source: 'relay', origins: ['app.example', '*.docs.example', 'bank.example'], stepsOnly: ['bank.example'], expiresAt }, workspace.privateKey, authority));
+  const grant = RuntimeAccountBrowserSignedGrantSchema.parse(await signRuntimeAccountBrowserGrant({ projectId, workspaceId, placement, groupId: crypto.randomUUID(), groupName: 'Checkout', source: 'relay', origins: ['app.example', '*.docs.example', 'bank.example', 'news.example'], stepsOnly: ['bank.example'], read: ['news.example'], expiresAt }, workspace.privateKey, authority));
   const key = 'group:' + JSON.stringify(['account', pairingId, projectId, workspaceId]);
   const state = new Map<string, unknown>([
     ['identity', { privateKey: identity.privateKey, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', root.publicKey))), trust: { accountId: 'account', publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', root.publicKey))) }, pairingId, generation: 1 }],

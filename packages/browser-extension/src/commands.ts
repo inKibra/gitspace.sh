@@ -1,4 +1,5 @@
 import { browserOriginMatches } from '@gitspace/protocol-environment/browser-origin';
+import { readSiteRefusal } from '@gitspace/protocol-environment/browser-site-level';
 import { groupTitle } from './runs.js';
 
 /** Whether a page at `url` is inside the grant: about:blank, or http(s) on one of its origins. */
@@ -58,35 +59,71 @@ export function relayCommandAllowed(grant: { origins: string[] }, targetId: stri
   return ['Page.enable', 'Page.getFrameTree', 'Page.getLayoutMetrics', 'Page.captureScreenshot', 'DOM.enable', 'DOM.describeNode', 'DOM.getBoxModel', 'DOM.focus', 'DOM.scrollIntoViewIfNeeded', 'Accessibility.enable', 'Accessibility.getFullAXTree', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'GitSpace.screenshotPrepare', 'GitSpace.screenshotRestore', 'GitSpace.validateRef'].includes(method);
 }
 
-/** A workspace group grant as scripts see it: its sites, and those of them that allow single steps only. */
-export type RelayRunGrant = { origins: string[]; stepsOnly: string[] };
+/** The DevTools commands a single step sends that only read the page, so a tab on a site at read takes them (with
+ * `READ_SITE_ACTIONS` in protocol-environment): attaching to, describing and closing the tab, navigating it (within the
+ * grant, `relayCommandAllowed`), enabling domains, the frame tree and layout metrics, the accessibility snapshot,
+ * describing a node and its box, checking a ref, and screenshots with the extension's ref labels drawn and removed.
+ * Every other command a step sends can change the page or submit it: `Runtime.evaluate` (page JavaScript),
+ * `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`, `DOM.focus` and
+ * `DOM.scrollIntoViewIfNeeded` (clicking, typing, pressing). */
+export const READ_SITE_METHODS: Record<string, true> = {
+  'Target.attachToTarget': true, 'Target.getTargetInfo': true, 'Target.closeTarget': true, 'Page.navigate': true,
+  'Page.enable': true, 'Page.getFrameTree': true, 'Page.getLayoutMetrics': true, 'Page.captureScreenshot': true,
+  'DOM.enable': true, 'DOM.describeNode': true, 'DOM.getBoxModel': true, 'Accessibility.enable': true, 'Accessibility.getFullAXTree': true,
+  'GitSpace.validateRef': true, 'GitSpace.screenshotPrepare': true, 'GitSpace.screenshotRestore': true,
+};
+
+/** The site `url` shows when one of `patterns` covers it, else none. */
+function siteUnder(patterns: string[], url: string | undefined): string | null {
+  const site = siteOf(url);
+  return site !== null && patterns.some(pattern => browserOriginMatches(pattern, site)) ? site : null;
+}
+
+/** Why a single step may not send `method` to a tab, or none: the tab shows a site at read (`read`, a grant's) and the
+ * command can change the page. A tab on a read site that goes to a site at interact or full takes that site's level. */
+export function readSiteStepRefusal(read: string[], urls: TabUrls, method: string): string | null {
+  if (READ_SITE_METHODS[method]) return null;
+  for (const url of [urls.tabUrl, urls.pendingUrl, urls.targetUrl]) {
+    const site = siteUnder(read, url);
+    if (site) return readSiteRefusal(site);
+  }
+  return null;
+}
+
+/** A workspace group grant as scripts see it: its sites, those at interact (`stepsOnly`) and those at read (`read`,
+ * none from an account that sends no levels). Scripts run on neither. */
+export type RelayRunGrant = { origins: string[]; stepsOnly: string[]; read?: string[] };
 
 const STEPS_ONLY = 'allows single steps only, not scripts';
 
 /**
- * The sites one script may use: the ones it names, each exactly one of the grant's; else every site of the grant that
- * allows scripts. A named site the grant lacks, or one that allows single steps only, refuses the script.
+ * The sites one script may use: the ones it names, each exactly one of the grant's; else every site of the grant at
+ * full. A named site the grant lacks, or one at interact or read, refuses the script.
  */
 export function runSites(grant: RelayRunGrant, sites: string[] | undefined): string[] {
-  if (!sites) return grant.origins.filter(pattern => !grant.stepsOnly.includes(pattern));
+  const read = grant.read ?? [];
+  if (!sites) return grant.origins.filter(pattern => !grant.stepsOnly.includes(pattern) && !read.includes(pattern));
   for (const site of sites) {
     if (!grant.origins.includes(site)) throw new Error(`${site} is not a site of this workspace group`);
+    if (read.includes(site)) throw new Error(readSiteRefusal(site));
     if (grant.stepsOnly.includes(site)) throw new Error(`${site} ${STEPS_ONLY}`);
   }
   return sites;
 }
 
-/** The site `url` shows when it is one that allows single steps only, else none. */
-export function stepsOnlySite(stepsOnly: string[], url: string | undefined): string | null {
-  const site = siteOf(url);
-  return site !== null && stepsOnly.some(pattern => browserOriginMatches(pattern, site)) ? site : null;
+/** Why a script may not load or use a page at `url`, or none: it shows a site at read or at interact. */
+function levelRefusal(tab: { stepsOnly: string[]; read: string[] }, url: string | undefined): string | null {
+  const read = siteUnder(tab.read, url);
+  if (read) return readSiteRefusal(read);
+  const steps = siteUnder(tab.stepsOnly, url);
+  return steps ? `${steps} ${STEPS_ONLY}` : null;
 }
 
-/** Why a script may not use a tab, or none: the tab is on a site that allows single steps only, or off the script's sites. */
-export function runTabRefusal(tab: { grant: { origins: string[] }; stepsOnly: string[]; urls: TabUrls }): string | null {
+/** Why a script may not use a tab, or none: the tab is on a site at read or interact, or off the script's sites. */
+export function runTabRefusal(tab: { grant: { origins: string[] }; stepsOnly: string[]; read: string[]; urls: TabUrls }): string | null {
   for (const url of [tab.urls.tabUrl, tab.urls.pendingUrl, tab.urls.targetUrl]) {
-    const site = stepsOnlySite(tab.stepsOnly, url);
-    if (site) return `${site} ${STEPS_ONLY}`;
+    const refusal = levelRefusal(tab, url);
+    if (refusal) return refusal;
   }
   return tabWithinGrant(tab.grant, tab.urls) ? null : 'This tab is outside the sites of this script';
 }
@@ -96,8 +133,9 @@ export type RelayRunTab = {
   /** The sites the script may use on this tab (`runSites`, and the site a tab you dragged in showed then when the
    * script named no sites). */
   grant: { origins: string[] };
-  /** The grant's sites that allow single steps only. */
+  /** The grant's sites at interact and at read: a script runs on neither. */
   stepsOnly: string[];
+  read: string[];
   urls: TabUrls;
   targetId: string;
   /** The tab's lease session; a command naming another session is refused. */
@@ -170,11 +208,11 @@ function destinationAllowed(grant: { origins: string[] }, value: unknown): boole
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, url.hostname)); } catch { return false; }
 }
 
-/** Why a script may not load `url` (navigating or opening a tab), or none: a site that allows single steps only, or
- * one off the script's sites. */
-export function runDestinationRefusal(tab: { grant: { origins: string[] }; stepsOnly: string[] }, url: unknown): string | null {
-  const site = typeof url === 'string' ? stepsOnlySite(tab.stepsOnly, url) : null;
-  if (site) return `${site} ${STEPS_ONLY}`;
+/** Why a script may not load `url` (navigating or opening a tab), or none: a site at read or interact, or one off the
+ * script's sites. */
+export function runDestinationRefusal(tab: { grant: { origins: string[] }; stepsOnly: string[]; read: string[] }, url: unknown): string | null {
+  const refusal = typeof url === 'string' ? levelRefusal(tab, url) : null;
+  if (refusal) return refusal;
   return destinationAllowed(tab.grant, url) ? null : `${String(url)} is outside the sites of this script`;
 }
 

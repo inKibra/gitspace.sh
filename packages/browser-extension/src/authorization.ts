@@ -27,8 +27,9 @@ export async function verifyRelayAuthorization(authorization: RuntimeBrowserAuth
     if (grant.projectId !== certificate.body.projectId || grant.workspaceId !== certificate.body.workspaceId) throw new Error('Group grant authority scope mismatch');
     if ('placement' in grant && 'placement' in body.scope) {
       if (canonical(grant.placement) !== canonical(body.scope.placement)) throw new Error('Grant placement mismatch');
-      // The sites of the grant that allow single steps only, refused to scripts.
+      // `stepsOnly`: the grant's sites at interact (single steps, no scripts); `read`: those at read (looking only).
       if (!Array.isArray(grant.stepsOnly) || !grant.stepsOnly.every(pattern => grant.origins.includes(pattern))) throw new Error('Invalid relay group grant');
+      if (grant.read !== undefined && (!Array.isArray(grant.read) || !grant.read.length || !grant.read.every(pattern => grant.origins.includes(pattern) && !grant.stepsOnly.includes(pattern)))) throw new Error('Invalid relay group grant');
     } else if ('machineId' in grant && 'machineId' in body.scope) {
       for (const key of ['machineId', 'attachmentId', 'generation'] as const) if (grant[key] !== body.scope[key]) throw new Error('Grant machine scope mismatch');
     } else throw new Error('Grant placement kind mismatch');

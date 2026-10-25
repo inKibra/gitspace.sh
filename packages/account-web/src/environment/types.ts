@@ -80,7 +80,7 @@ export interface EnvironmentViewProps {
   onRunPhase(machineId: string, phase: LifecycleRunPhase, options?: { rerun?: boolean; interactive?: boolean; retire?: boolean }): void;
   onApprove(targetId: string): void;
   onRevoke(targetId: string): void;
-  /** Sets an approved browser site to scripts and single steps, or single steps only. */
+  /** Sets an approved browser site to read, interact or full. */
   onBrowserLevel(hash: string, level: BrowserSiteLevel): void;
   onOpenScript(scriptId: string): void;
   onOpenLog(runId: string, script: { id: string; label: string }): void;

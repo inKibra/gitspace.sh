@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useResultQuery } from 'result-rpc/react';
 import { RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeSyncRequestInput, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime';
-import { EnvironmentBundleSchema, browserOriginLevel, executionHash, isLifecycleRunActive, latestExecutionRun, lifecycleExecutionOutcome, projectEnvironmentState, type BrowserSiteLevel, type LifecycleRunPhase } from '@gitspace/protocol-environment';
+import { BROWSER_SITE_LEVELS, EnvironmentBundleSchema, browserOriginLevel, executionHash, isLifecycleRunActive, latestExecutionRun, lifecycleExecutionOutcome, projectEnvironmentState, type BrowserSiteLevel, type LifecycleRunPhase } from '@gitspace/protocol-environment';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@gitspace/ui';
 import { rpcClient } from '../rpc-client.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
@@ -67,7 +67,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
     void (async () => {
       const origin = remote.lifecycle.browserOrigins.find(entry => entry.hash === targetId);
       if (origin) {
-        setEvidence({ title: `Browser origin: ${origin.pattern}`, output: `Allow logged-in Chrome access to ${origin.pattern}.\nOnly tabs in this workspace's browser group are accessible.\nScripts and single steps: agents may also run Playwright scripts on this site.\nSingle steps only: agents act one step at a time and scripts are refused (for a bank or a production admin).`, site: true, ...(approve ? { approvalHash: origin.hash } : {}) });
+        setEvidence({ title: `Browser origin: ${origin.pattern}`, output: `Allow logged-in Chrome access to ${origin.pattern}.\nOnly tabs in this workspace's browser group are accessible.\nRead: agents may open, observe and screenshot this site, never click, type or run scripts on it.\nInteract: agents also click and type, one step at a time; scripts are refused (for a bank or a production admin).\nFull: agents may also run Playwright scripts on this site.`, site: true, ...(approve ? { approvalHash: origin.hash } : {}) });
         return;
       }
       const execution = remote.executions.find(item => item.id === targetId);
@@ -179,7 +179,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
         if (approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: approval.scope, executionHash: approval.executionHash }); if (result.status === 'error') throw result.error; });
       }}
       onBrowserLevel={(hash, level) => mutate(async () => {
-        // Every approval of the site takes the level: single steps only holds while any approval says so.
+        // Every approval of the site takes the level: an origin is at the most restrictive level any approval says.
         for (const approval of remote.lifecycle.approvals.filter(entry => entry.executionHash === hash)) {
           const result = await rpcClient.environment.approve({ spaceId, scope: approval.scope, executionHash: hash, level });
           if (result.status === 'error') throw result.error;
@@ -231,7 +231,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
         <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{evidence?.output || 'No content.'}</pre>
         {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
         <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.approvalHash ? evidence.site
-          ? <><Button variant="secondary" disabled={busy} onClick={() => approveEvidence('steps')}>Approve single steps only</Button><Button variant="primary" disabled={busy} onClick={() => approveEvidence('scripts')}>Approve scripts and steps</Button></>
+          ? BROWSER_SITE_LEVELS.map(level => <Button key={level} variant={level === 'full' ? 'primary' : 'secondary'} disabled={busy} onClick={() => approveEvidence(level)}>Approve {level}</Button>)
           : <Button variant="primary" disabled={busy} onClick={() => approveEvidence()}>Approve this content</Button> : null}</DialogFooter>
       </DialogContent>
     </Dialog>

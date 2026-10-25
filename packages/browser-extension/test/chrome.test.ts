@@ -210,7 +210,7 @@ describe('the popup', () => {
     expect(chrome.stored.get('identity')).toMatchObject({ pairingId, generation: 1, trust });
     await chrome.relay();
     expect(chrome.sent.find(message => message.pairing === 'client')).toMatchObject({ pairingId, code: 'long-secret' });
-    expect(chrome.sent.find(message => message.hello)).toMatchObject({ platform: 'Windows' });
+    expect(chrome.sent.find(message => message.hello)).toMatchObject({ platform: 'Windows', siteLevels: true });
   });
 
   it('a code the account refuses changes nothing, and a Chrome paired already spends no code', async () => {

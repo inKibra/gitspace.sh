@@ -8,7 +8,7 @@ import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInp
 import { RuntimeBrowserPageCommentSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserPageComment, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
 import { BROWSER_GROUP_ROWS, PAGE_COMMENT_ROWS, PAGE_COMMENTS_KEPT, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { createRuntimeQaServices } from './runtime-services.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
@@ -22,7 +22,7 @@ import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshot
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { CheckoutSourceFactsSchema, RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
-import { notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
+import { confirmMachinePresence, notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
@@ -396,7 +396,12 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return createAccountWorkspaceRuntime(this.ctx, this.env, identity, timestamp => this.scheduleAlarm('runtime', timestamp), machineId => this.runtimeCacheAttachmentRequest({ ...identity, machineId }), this);
   }
 
-  async runtimeSnapshot(raw: unknown): Promise<Response> { return Response.json(await (await this.getRuntime(raw)).snapshot()); }
+  /** A machine whose heartbeat lapsed is reported offline before its attachments are read. */
+  async runtimeSnapshot(raw: unknown): Promise<Response> {
+    const runtime = await this.getRuntime(raw);
+    await confirmMachinePresence(this.env, runtime.attachments.list().filter(item => isAttachmentOnline(item)).map(item => item.machineId));
+    return Response.json(await runtime.snapshot());
+  }
   /** Attachment records for authorizing a machine, read without starting the runtime: every git authentication asks,
    * and an idle workspace must not wake for it. An object without runtime state has none. */
   async runtimeAttachmentRecords(raw: unknown): Promise<RuntimeAttachment[]> {

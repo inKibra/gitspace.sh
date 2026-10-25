@@ -6,8 +6,9 @@ import { z } from 'zod';
 type FixtureEnv = { RELAY: DurableObjectNamespace<BrowserRelayFixture> };
 export class BrowserRelayFixture extends DurableObject<FixtureEnv> {
   // This fixture hosts the relay alone, with no workspaces: group reports and page comments have nowhere to go and are
-  // dropped, there is no drive for captures or uploads, and share links have no account to name or seal their viewers.
-  private readonly browser = new AccountBrowserRelay(this.ctx, { ACCOUNT_ID: 'account', SPACE_AUTHORITY: { getByName: () => ({ browserGroupReported: async () => {}, pageCommentAdded: async () => {} }) }, USER_PROJECTS: { getByName: () => ({ list: async () => [] }) } }, () => { throw new Error('This fixture has no drive'); }, { url: 'https://account.test', name: async () => 'account', viewer: async () => null });
+  // dropped, there is no drive for captures or uploads, share links have no account to name or seal their viewers, and
+  // there is no alarm for their deadlines.
+  private readonly browser = new AccountBrowserRelay(this.ctx, { ACCOUNT_ID: 'account', SPACE_AUTHORITY: { getByName: () => ({ browserGroupReported: async () => {}, pageCommentAdded: async () => {} }) }, USER_PROJECTS: { getByName: () => ({ list: async () => [] }) } }, () => { throw new Error('This fixture has no drive'); }, { url: 'https://account.test', name: async () => 'account', viewer: async () => null }, async () => {});
   async fetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === '/api/browser-relay/extension') return this.browser.fetch(request);

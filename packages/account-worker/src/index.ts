@@ -1,5 +1,6 @@
 import { accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
+import { appendRuntimeQa } from './runtime-services.js';
 import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import {
   RELAY_HEARTBEAT_LEASE_MS,
@@ -52,7 +53,7 @@ import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './br
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
-import { RuntimeBrowserNameSchema, RuntimeBrowserNoteSchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserNameSchema, RuntimeBrowserNoteSchema, RuntimeIdentitySchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
 export {
@@ -80,7 +81,6 @@ const INTERNAL_HEADERS: Record<string, true> = {
 };
 const ARTIFACT_PATH = /^\/artifacts\/([a-f0-9]{64})$/u;
 const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
-const MACHINE_LEASE_MS = 30_000;
 const ENCRYPTED_ARTIFACT_CONTENT_TYPE = 'application/vnd.gitspace.encrypted';
 const HOP_BY_HOP_HEADERS: Record<string, true> = {
   connection: true,
@@ -108,7 +108,6 @@ interface PendingTunnel {
 
 interface RelaySocketAttachment extends SocketAttachment {
   machineGrant?: SignedCredentialAuthorityGrant;
-  authorizedUntil?: number;
   heartbeatExpiresAt?: number;
   /** The machine understands `notice` messages. */
   notices?: boolean;
@@ -140,12 +139,18 @@ function closeOpenSocket(socket: WebSocket, code: number, reason: string): void 
   if (socket.readyState === 1) socket.close(code, reason);
 }
 
-/** A presence write that failed is retried this long after. */
+/** A presence report that failed is retried after this long, doubling with each failure. */
 const PRESENCE_RETRY_MS = 5_000;
+/** Retries after the first failure: 5 s to 5 min 20 s, about 10.6 minutes in all. One more failure gives up: each
+ * workspace that could not be told gets a QA item, and the machine's next connect, disconnect or presence read tries
+ * afresh. */
+const PRESENCE_RETRIES = 7;
 const PRESENCE_SEEDED = 'presence-seeded';
 
+/** When a machine grant stops authorizing: its own expiry or its earliest issuer's; Infinity when none expires.
+ * Revocation is not a deadline: the vault tells the relay (`machineCredentialsChanged`). */
 function machineAuthorizationDeadline(grant: SignedCredentialAuthorityGrant): number {
-  let deadline = Math.min(Date.now() + MACHINE_LEASE_MS, grant.grant.expiresAt ?? Infinity);
+  let deadline = grant.grant.expiresAt ?? Infinity;
   for (const issuer of grant.issuerChain ?? []) deadline = Math.min(deadline, deviceGrantExpiresAt(issuer) ?? Infinity);
   return deadline;
 }
@@ -321,28 +326,28 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
     return view.serviceDeviceAuthority(deviceId, Date.now());
   });
-  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity), browserShareAccount(this.env));
+  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity), browserShareAccount(this.env), () => this.scheduleAlarm());
   async serviceApprove(input: { hostname: string; deviceId: string; state: string; returnTo: string }) {
     const ticket = await this.serviceSessions.approve(input);
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
     return ticket;
   }
   async serviceRedeem(ticket: string, hostname: string, state: string | null) {
     const session = await this.serviceSessions.redeem(ticket, hostname, state);
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
     return session;
   }
   serviceValidate(token: string | null, hostname: string) { return this.serviceSessions.validate(token, hostname); }
   async serviceRevokeDevice(deviceId: string) {
     const sessions = await this.serviceSessions.revokeDevice(deviceId);
     await this.closeServiceSessions(sessions);
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
     return sessions;
   }
   async serviceLogout(token: string | null, hostname: string) {
     const sessionId = await this.serviceSessions.logout(token, hostname);
     if (sessionId) await this.closeServiceSessions([sessionId]);
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
     return sessionId !== null;
   }
   /** A workspace's cloud browser's session for one of that workspace's live hostnames (workspace or machine URL), for
@@ -350,13 +355,13 @@ export class UserRelayDO extends BudgetedDurableObject {
   async serviceCloudSession(hostname: string, workspace: ServiceWorkspace) {
     if (!await isWorkspaceServiceHostname(this.env, workspace, hostname, workspace)) throw new Error('Not a live service of this workspace');
     const session = await this.serviceSessions.cloud(hostname, workspace);
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
     return session;
   }
   /** Ends a workspace's cloud browser sessions and the requests and WebSockets open on them. */
   async serviceRevokeCloud(workspace: ServiceWorkspace) {
     await this.closeServiceSessions(await this.serviceSessions.revokeCloud(workspace));
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
   }
   private async closeServiceSessions(sessionIds: readonly string[]) {
     if (!sessionIds.length) return;
@@ -451,7 +456,8 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserShareJoin(shareId: string, secret: string) { return this.browserRelay.shareJoin(shareId, secret); }
 
   private presenceLine: Promise<void> = Promise.resolve();
-  /** When machine presence is next reconciled against the live sockets. */
+  private alarmLine: Promise<void> = Promise.resolve();
+  /** When machine presence is next reconciled against the live sockets, after a restart. */
   private presenceCheckAt: number | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -463,14 +469,42 @@ export class UserRelayDO extends BudgetedDurableObject {
       ctx.storage.sql.exec('DROP TABLE IF EXISTS auth_nonces');
       // The machines this relay last reported connected.
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS machine_presence(machine_id TEXT PRIMARY KEY)');
-      // Sockets may outlive a relay restart (hibernation). A reported machine that has not reconnected within one heartbeat
-      // lease is reported gone, and every machine still holding a socket is re-asserted to its workspaces. Until
-      // presence is first seeded, the fleet's online machines count as reported.
-      if (ctx.storage.sql.exec('SELECT 1 FROM machine_presence LIMIT 1').toArray().length || await ctx.storage.get(PRESENCE_SEEDED) !== true || ctx.getWebSockets().length) {
+      // Machines whose last presence report failed: how many times in a row, and when the next try is due.
+      ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS presence_retries(machine_id TEXT PRIMARY KEY, failures INTEGER NOT NULL, due_at INTEGER NOT NULL)');
+      // A restart (a deploy) drops sockets without close events. A reported machine with no socket that has not
+      // reconnected within one heartbeat lease is reported gone. Until presence is first seeded, the fleet's online
+      // machines count as reported. A wake from hibernation keeps every socket and schedules nothing.
+      const holders = new Set(ctx.getWebSockets(ENDPOINT_SOCKET_TAG).flatMap(socket => {
+        const attachment = this.socketAttachment(socket);
+        return attachment?.role === 'machine' ? [attachment.id] : [];
+      }));
+      const absent = ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM machine_presence').toArray().some(row => !holders.has(row.machine_id));
+      if (absent || await ctx.storage.get(PRESENCE_SEEDED) !== true) {
         this.presenceCheckAt = Date.now() + RELAY_HEARTBEAT_LEASE_MS;
-        await this.scheduleMachineCheck();
+        await this.scheduleAlarm();
       }
     });
+  }
+
+  /** Every read of a machine's presence (the fleet's machines, a workspace's attachments) asks this first. A machine
+   * whose last answered ping is older than its heartbeat lease is closed and reported offline now, with the notices a
+   * close sends, so a read never sees a silent machine online past the lease. No timer watches idle machines. */
+  async confirmMachinePresence(machineIds: readonly string[]): Promise<void> {
+    await Promise.all(machineIds.map(async machineId => {
+      for (const socket of this.ctx.getWebSockets(`endpoint:machine:${machineId}`)) this.heartbeatLive(socket);
+      await this.reconcilePresence(machineId);
+    }));
+  }
+
+  /** The vault changed a credential: machine sockets and service sessions are checked against a registry loaded after
+   * the change. Views other requests hold are left to converge as before. */
+  async machineCredentialsChanged(): Promise<void> {
+    const machines = this.ctx.getWebSockets(ENDPOINT_SOCKET_TAG).filter(socket => this.socketAttachment(socket)?.role === 'machine');
+    if (machines.length === 0 && await this.serviceSessions.nextExpiry() === null) return;
+    await deviceAuthority(this.env).refreshed();
+    await Promise.all(machines.map(socket => this.authorizeSocket(socket)));
+    await this.closeServiceSessions(await this.serviceSessions.sweep());
+    await this.scheduleAlarm();
   }
 
   /** One notice to each named machine's notice-capable sockets. It carries no state, so a machine that misses one
@@ -496,27 +530,46 @@ export class UserRelayDO extends BudgetedDurableObject {
   /** Presence is written only when it changes: to the fleet, then to each workspace attaching the machine. Passes are
   * serialized and each reads the live sockets, so interleaved opens and closes converge on the final state. An accepted
   * socket always tells the workspaces (they write only on change), so a workspace that missed a report catches up on
-  * the machine's next connection; a workspace that cannot be told keeps the state unreported and is retried. */
+  * the machine's next connection; a workspace that cannot be told keeps the state unreported and is retried with
+  * backoff (`PRESENCE_RETRIES`). */
   private reconcilePresence(machineId: string, accepted = false): Promise<void> {
     const run = this.presenceLine.then(async () => {
       const connected = this.machineConnected(machineId);
       const reported = this.ctx.storage.sql.exec('SELECT 1 FROM machine_presence WHERE machine_id=?', machineId).toArray().length > 0;
-      if (reported === connected && !(accepted && connected)) return;
+      if (reported === connected && !(accepted && connected)) {
+        this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
+        return;
+      }
+      let unreached: { projectId: string; workspaceId: string }[] = [];
       try {
         const workspaces = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).machinePresence(machineId, connected);
-        const failed = (await Promise.all(workspaces.map(workspace => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeMachinePresence(machineId, connected).then(() => false, (error: unknown) => {
+        const failed = await Promise.all(workspaces.map(workspace => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeMachinePresence(machineId, connected).then(() => false, (error: unknown) => {
           console.error(JSON.stringify({ event: 'relay_presence_workspace_failed', machineId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
           return true;
-        })))).some(Boolean);
-        if (failed) throw new Error('A workspace did not record the machine presence');
+        })));
+        unreached = workspaces.filter((_workspace, index) => failed[index]);
+        if (unreached.length) throw new Error('A workspace did not record the machine presence');
         if (connected) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_presence(machine_id) VALUES(?)', machineId);
         else this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
+        this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
       } catch (error) {
-        console.error(JSON.stringify({ event: 'relay_presence_failed', machineId, connected, message: error instanceof Error ? error.message : String(error) }));
-        // Unreported, a connected machine is pushed again by the retry sweep.
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(JSON.stringify({ event: 'relay_presence_failed', machineId, connected, message }));
+        // Unreported, a connected machine is pushed again by the retry.
         if (connected) this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
-        this.presenceCheckAt = Math.min(this.presenceCheckAt ?? Infinity, Date.now() + PRESENCE_RETRY_MS);
-        await this.scheduleMachineCheck();
+        const failures = (this.ctx.storage.sql.exec<{ failures: number }>('SELECT failures FROM presence_retries WHERE machine_id=?', machineId).toArray()[0]?.failures ?? 0) + 1;
+        if (failures <= PRESENCE_RETRIES) {
+          this.ctx.storage.sql.exec('INSERT INTO presence_retries(machine_id,failures,due_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET failures=excluded.failures, due_at=excluded.due_at', machineId, failures, Date.now() + PRESENCE_RETRY_MS * 2 ** (failures - 1));
+          await this.scheduleAlarm();
+          return;
+        }
+        this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
+        await this.scheduleAlarm();
+        console.error(JSON.stringify({ event: 'relay_presence_gave_up', machineId, connected, failures, message, workspaces: unreached.map(workspace => workspace.workspaceId) }));
+        const text = `GitSpace could not record that machine ${machineId} is ${connected ? 'online' : 'offline'} in this workspace after ${failures} tries over about 10 minutes (${message}). It shows the old state until the machine next connects or disconnects.`;
+        await Promise.all(unreached.map(workspace => appendRuntimeQa(this.env, RuntimeIdentitySchema.parse(workspace), crypto.randomUUID(), { message: text }).catch((qaError: unknown) => {
+          console.error(JSON.stringify({ event: 'relay_presence_report_failed', machineId, workspaceId: workspace.workspaceId, message: qaError instanceof Error ? qaError.message : String(qaError) }));
+        })));
       }
     });
     this.presenceLine = run.catch(() => {});
@@ -703,8 +756,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (parsed.data.role === 'machine' && !machineGrant) {
       return jsonError(401, 'MACHINE_GRANT_REQUIRED', 'Machine credential grant is missing');
     }
-    // Begin the lease before the authority check, never after a slow response.
-    const authorizedUntil = machineGrant ? machineAuthorizationDeadline(machineGrant) : Date.now() + MACHINE_LEASE_MS;
+    const authorizedUntil = machineGrant ? machineAuthorizationDeadline(machineGrant) : Infinity;
     if (machineGrant) {
       const rejected = await currentMachineAuthority(this.env, machineGrant, 'space.control');
       if (rejected || authorizedUntil <= Date.now()) return rejected ?? jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant has expired');
@@ -726,7 +778,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     const heartbeat = query.get('heartbeat');
     const attachment: RelaySocketAttachment = {
       ...parsed.data,
-      ...(machineGrant ? { machineGrant, authorizedUntil } : {}),
+      ...(machineGrant ? { machineGrant } : {}),
       ...(machineGrant && heartbeat === RELAY_HEARTBEAT_MODE
         ? { heartbeatExpiresAt: Date.now() + RELAY_HEARTBEAT_LEASE_MS }
         : {}),
@@ -736,7 +788,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server, [ENDPOINT_SOCKET_TAG, tag]);
     if (machineGrant) {
-      await this.scheduleMachineCheck();
+      if (Number.isFinite(authorizedUntil)) await this.armBy(authorizedUntil);
       this.ctx.waitUntil(this.reconcilePresence(parsed.data.id, true));
       // The machine's terminal observers may be gone: tabs showing its terminals read them again, which restarts them.
       this.ctx.waitUntil(notifyBrowsers(this.env, [{ project: null, workspace: null, resource: machineLiveResource(parsed.data.id), version: Date.now() }]));
@@ -791,6 +843,9 @@ export class UserRelayDO extends BudgetedDurableObject {
     };
     this.pendingTunnels.set(requestId, pending);
     request.signal.addEventListener('abort', abort, { once: true });
+    // A machine with work in flight is watched until the work ends: its silence fails the work by its heartbeat lease.
+    const machineAttachment = this.socketAttachment(machine);
+    await this.armBy(machineAttachment ? this.heartbeatExpiresAt(machine, machineAttachment) : undefined);
 
     try {
       const tunnelHeaders = new Headers(filteredHeaders(request.headers, true));
@@ -896,6 +951,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     return response;
   }
 
+  /** Each wake handles what is due and arms the next real deadline, or none. */
   async alarm(): Promise<void> {
     await Promise.all(this.ctx.getWebSockets(ENDPOINT_SOCKET_TAG).map((socket) => this.authorizeSocket(socket)));
     await this.closeServiceSessions(await this.serviceSessions.sweep());
@@ -908,26 +964,72 @@ export class UserRelayDO extends BudgetedDurableObject {
       this.presenceCheckAt = null;
       await this.sweepPresence();
     }
+    for (const { machine_id: machineId } of this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM presence_retries WHERE due_at<=?', Date.now()).toArray()) await this.reconcilePresence(machineId);
     await this.browserRelay.alarm().catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_alarm_failed', error: error instanceof Error ? error.message : String(error) })));
-    await this.scheduleMachineCheck();
+    await this.scheduleAlarm();
   }
 
-  private async scheduleMachineCheck(): Promise<void> {
+  /** The earliest deadline any work names: a service session's or ticket's expiry, a machine grant's expiry, the
+   * heartbeat lease of a machine carrying a tunnel or service WebSocket, the presence check after a restart, a failed
+   * presence report's next try, and the browser relay's share deadlines. Null when nothing is due. */
+  private async nextDeadline(): Promise<number | null> {
     let next = await this.serviceSessions.nextExpiry() ?? Infinity;
-    for (const socket of this.ctx.getWebSockets()) {
+    for (const socket of this.ctx.getWebSockets(ENDPOINT_SOCKET_TAG)) {
       const attachment = this.socketAttachment(socket);
-      if (socket.readyState === 1 && attachment?.role === 'machine') {
-        next = Math.min(next, attachment.authorizedUntil ?? Date.now());
-        next = Math.min(next, this.heartbeatExpiresAt(socket, attachment) ?? Infinity);
-      }
+      if (socket.readyState !== 1 || attachment?.role !== 'machine') continue;
+      if (attachment.machineGrant) next = Math.min(next, machineAuthorizationDeadline(attachment.machineGrant));
+      if (this.carriesWork(socket, attachment)) next = Math.min(next, this.heartbeatExpiresAt(socket, attachment) ?? Infinity);
     }
-    next = Math.min(next, this.presenceCheckAt ?? Infinity);
-    if (Number.isFinite(next)) {
+    const retry = this.ctx.storage.sql.exec<{ due_at: number | null }>('SELECT MIN(due_at) AS due_at FROM presence_retries').one().due_at;
+    next = Math.min(next, this.presenceCheckAt ?? Infinity, retry ?? Infinity, await this.browserRelay.nextDeadline() ?? Infinity);
+    return Number.isFinite(next) ? next : null;
+  }
+
+  /** Arms the alarm at the next deadline, or clears it; an unchanged alarm is not written again. */
+  private scheduleAlarm(): Promise<void> {
+    const run = this.alarmLine.then(async () => {
+      const next = await this.nextDeadline();
       const current = await this.ctx.storage.getAlarm();
-      if (current === null || current <= Date.now() || current > next) {
-        await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, next));
+      if (next === null) {
+        if (current !== null) await this.ctx.storage.deleteAlarm();
+        return;
       }
-    }
+      const at = Math.max(Date.now() + 1, next);
+      if (current !== at) await this.ctx.storage.setAlarm(at);
+    });
+    this.alarmLine = run.catch(() => {});
+    return run;
+  }
+
+  /** Brings the alarm forward to `deadline` when it is earlier. Work that ends leaves the alarm alone: that wake finds
+   * nothing due and arms the next deadline or none, so a short request costs no alarm writes beyond this one. */
+  private armBy(deadline: number | undefined): Promise<void> {
+    const run = this.alarmLine.then(async () => {
+      if (deadline === undefined) return;
+      const current = await this.ctx.storage.getAlarm();
+      if (current === null || current > deadline) await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, deadline));
+    });
+    this.alarmLine = run.catch(() => {});
+    return run;
+  }
+
+  /** A machine connection carries work while a tunnel request waits on it or a service WebSocket rides it. */
+  private carriesWork(socket: WebSocket, attachment: RelaySocketAttachment): boolean {
+    for (const pending of this.pendingTunnels.values()) if (pending.socket === socket) return true;
+    return attachment.connectionId !== undefined && this.ctx.getWebSockets(`tunnel-connection:${attachment.connectionId}`).length > 0;
+  }
+
+  /** False, after closing the socket and reporting its machine, once its last answered ping is older than the lease. */
+  private heartbeatLive(socket: WebSocket): boolean {
+    const attachment = this.socketAttachment(socket);
+    const heartbeatExpiresAt = attachment ? this.heartbeatExpiresAt(socket, attachment) : undefined;
+    if (heartbeatExpiresAt === undefined || heartbeatExpiresAt > Date.now()) return true;
+    if (socket.readyState !== 1) return false;
+    this.logMachineSocketClose(socket, 1011, { check: 'heartbeat-expired' });
+    this.failSocketTunnels(socket, new Error('Machine relay heartbeat expired; the host is reconnecting'));
+    socket.close(1011, 'Machine relay heartbeat expired');
+    this.ctx.waitUntil(this.socketGone(socket));
+    return false;
   }
 
   /** Frames, tunnel traffic and alarms all recheck the isolate's cached registry; none calls the vault. */
@@ -935,14 +1037,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (socket.readyState !== 1) return false;
     const attachment = this.socketAttachment(socket);
     if (attachment?.role === 'client') return true;
-    const heartbeatExpiresAt = attachment ? this.heartbeatExpiresAt(socket, attachment) : undefined;
-    if (heartbeatExpiresAt !== undefined && heartbeatExpiresAt <= Date.now()) {
-      this.logMachineSocketClose(socket, 1011, { check: 'heartbeat-expired' });
-      this.failSocketTunnels(socket, new Error('Machine relay heartbeat expired; the host is reconnecting'));
-      socket.close(1011, 'Machine relay heartbeat expired');
-      this.ctx.waitUntil(this.socketGone(socket));
-      return false;
-    }
+    if (!this.heartbeatLive(socket)) return false;
     if (!attachment?.machineGrant || attachment.machineGrant.grant.machineId !== attachment.id) {
       this.rejectMachineSocket(socket, { check: attachment?.machineGrant ? 'grant-machine-mismatch' : 'grant-missing' });
       return false;
@@ -955,8 +1050,6 @@ export class UserRelayDO extends BudgetedDurableObject {
         ?? (authorizedUntil <= Date.now() ? { check: 'authorization-expired', authorizedUntil } : { check: 'socket-closed' }));
       return false;
     }
-    // The lease only schedules the next alarm recheck; renew it without rewriting the attachment on every frame.
-    if ((attachment.authorizedUntil ?? 0) - Date.now() < MACHINE_LEASE_MS / 2) socket.serializeAttachment({ ...attachment, authorizedUntil });
     return true;
   }
 
@@ -989,7 +1082,7 @@ export class UserRelayDO extends BudgetedDurableObject {
       ...('authorizedUntil' in detail ? { authorizedUntil: isoTime(detail.authorizedUntil) } : {}),
       grantGeneration: grant?.grant.generation ?? null,
       grantExpiresAt: isoTime(grant?.grant.expiresAt), issuerExpiresAt: isoTime(issuerExpiresAt),
-      leaseUntil: isoTime(attachment?.authorizedUntil), heartbeatExpiresAt: isoTime(attachment?.heartbeatExpiresAt),
+      heartbeatExpiresAt: isoTime(attachment?.heartbeatExpiresAt),
       inFlightTunnels,
     }));
   }
@@ -1002,7 +1095,6 @@ export class UserRelayDO extends BudgetedDurableObject {
     return {
       ...parsed.data,
       ...(grant.success ? { machineGrant: grant.data } : {}),
-      ...(typeof raw?.authorizedUntil === 'number' ? { authorizedUntil: raw.authorizedUntil } : {}),
       ...(typeof raw?.heartbeatExpiresAt === 'number' ? { heartbeatExpiresAt: raw.heartbeatExpiresAt } : {}),
       ...(raw?.notices === true ? { notices: true } : {}),
       ...(typeof raw?.connectionId === 'string' ? { connectionId: raw.connectionId } : {}),

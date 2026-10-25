@@ -1,7 +1,7 @@
 import { Badge, Button, Card, CardContent, CardDescription, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DropdownContent, DropdownMenu, DropdownTrigger, InputField, InputGroup, MenuItem, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger } from '@gitspace/ui';
 import { DotsHorizontal, FileCode02, Key01, Play, Plus, RefreshCw01, Terminal, XClose } from '@untitledui/icons';
 import { useState, type ReactNode } from 'react';
-import { BrowserSiteLevelSchema } from '@gitspace/protocol-environment';
+import { BROWSER_SITE_LEVELS, BrowserSiteLevelSchema, type BrowserSiteLevel } from '@gitspace/protocol-environment';
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import { StatusDot } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
@@ -20,6 +20,8 @@ const RUN_DOT: Record<ScriptRun['status'], WorkspaceStatusColor> = { succeeded: 
 const RUN_TEXT: Record<Exclude<ScriptRun['status'], 'succeeded' | 'failed'>, string> = { running: 'running', interrupted: 'interrupted', 'not-started': 'waiting', never: 'not run' };
 const SETUP_TEXT = { pending: 'waiting', 'waiting-for-approval': 'needs approval', running: 'running', succeeded: 'succeeded', failed: 'failed' } as const;
 const SETUP_DOT = { pending: 'dim', 'waiting-for-approval': 'orange', running: 'blue', succeeded: 'green', failed: 'red' } as const;
+/** What each browser site level lets agents do on your Chrome. */
+const BROWSER_SITE_LEVEL_LABEL: Record<BrowserSiteLevel, string> = { read: 'Read: open, observe, screenshot', interact: 'Interact: single steps, no scripts', full: 'Full: scripts and single steps' };
 
 function Section({ title, label, action, children }: { title: ReactNode; label: string; action?: ReactNode; children: ReactNode }) {
   return <section aria-label={label} className="flex flex-col gap-2">
@@ -208,8 +210,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
               <StatusDot color={origin.level ? 'green' : 'orange'} /><code className="min-w-0 flex-1 break-all font-mono">{origin.pattern}</code>
               {origin.level ? <>
                 <select aria-label={`Level for ${origin.pattern}`} className="min-h-10 rounded-md bg-surface-3 px-3 text-caption" value={origin.level} disabled={busy} onChange={event => props.onBrowserLevel(origin.hash, BrowserSiteLevelSchema.parse(event.target.value))}>
-                  <option value="scripts">Scripts and single steps</option>
-                  <option value="steps">Single steps only</option>
+                  {BROWSER_SITE_LEVELS.map(level => <option key={level} value={level}>{BROWSER_SITE_LEVEL_LABEL[level]}</option>)}
                 </select>
                 <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(origin.hash)}>Revoke</Button>
               </> : <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(origin.hash)}>Review & approve</Button></>}

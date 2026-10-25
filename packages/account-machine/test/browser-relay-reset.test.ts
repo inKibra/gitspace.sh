@@ -45,7 +45,15 @@ it('resets the generated extension identity, detaches sessions, and preserves re
     downloads: { onCreated: { addListener() {} } },
     alarms: { create() {}, onAlarm: { addListener() {} } },
   };
-  const context = createContext({ chrome, indexedDB, WebSocket: Socket, crypto, TextEncoder, TextDecoder, URL, atob, btoa, setTimeout: () => 0, clearTimeout() {}, console });
+  // The account redeems a short pairing code for the pairing's details.
+  const redeemed: string[] = [];
+  const fetch = async (url: URL, init: { body: string }) => {
+    if (String(url) !== 'https://account.gitspace.test/api/browser-relay/pairing-code') throw new Error(`Unexpected fetch ${String(url)}`);
+    const { code } = z.object({ code: z.string() }).parse(JSON.parse(init.body));
+    redeemed.push(code);
+    return Response.json({ status: 'ok', value: { code: `${code}-secret`, pairingId: 'pairing', generation: 1, trust } });
+  };
+  const context = createContext({ chrome, indexedDB, WebSocket: Socket, fetch, Response, crypto, TextEncoder, TextDecoder, URL, atob, btoa, setTimeout: () => 0, clearTimeout() {}, console });
   runInContext(extensionFiles('https://account.gitspace.test')['background.js'], context);
   const invoke = async (message: object) => {
     const reply = Promise.withResolvers<Reply>();
@@ -85,7 +93,8 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   expect(runInContext('channels.size + authorizations.size', context)).toBe(0);
   expect(state.get('generation:attachment')).toBe(7);
   expect(state.get('replays')).toEqual([['consumed-attempt', expect.any(Number)]]);
-  expect(await invoke({ pair: { code: 'fresh-code', pairingId: 'pairing', generation: 1, trust } })).toEqual({ ok: true });
+  expect(await invoke({ pairCode: 'K7P-2QX' })).toEqual({ ok: true });
+  expect(redeemed).toEqual(['K7P-2QX']);
   const replacement = state.get('identity') as { privateKey: CryptoKey; publicKey: string; trust: unknown };
   expect(replacement.publicKey).not.toBe(publicKey);
   expect(replacement.privateKey.extractable).toBe(false);
@@ -93,7 +102,9 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   const replacementFingerprint = createHash('sha256').update(Buffer.from(replacement.publicKey, 'base64')).digest('hex');
   expect(await invoke({ popupState: true })).toMatchObject({ fingerprint: replacementFingerprint, compatibility: null });
   expect(replacementFingerprint).not.toBe(originalFingerprint);
-  expect(await invoke({ pair: { code: 'another-code', pairingId: 'pairing', generation: 1, trust } })).toEqual({ ok: true });
+  // A paired Chrome spends no code: it refuses before asking the account.
+  expect(await invoke({ pairCode: 'M4N-8RT' })).toMatchObject({ error: expect.stringContaining('paired already') });
+  expect(redeemed).toEqual(['K7P-2QX']);
   expect(await invoke({ popupState: true })).toMatchObject({ fingerprint: replacementFingerprint, compatibility: null });
   expect(state.get('generation:attachment')).toBe(7);
 });

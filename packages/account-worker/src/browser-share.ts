@@ -118,6 +118,8 @@ export type BrowserShareHost = {
   commented(workspace: { projectId: string; workspaceId: string }, comment: RuntimeBrowserPageComment): Promise<void>;
   /** The workspace's drive, for comment crops. */
   drive(workspace: { projectId: string; workspaceId: string }): Pick<WorkspaceDrive, 'write'>;
+  /** Re-arms the host's alarm at its earliest deadline, `nextDeadline` among them, or clears it. */
+  schedule(): Promise<void>;
 };
 /** What shares need from the account: its origin for links, its name, and the viewer tokens its joins sealed. */
 export type BrowserShareAccount = { url: string; name(): Promise<string>; viewer(token: string): Promise<ShareViewerToken | null> };
@@ -235,7 +237,7 @@ export class BrowserShares {
     await this.ctx.storage.put(`${SHARE}${record.shareId}`, record);
     await this.audit(record.shareId, 'created', 'you', false, `${input.comment ? 'View, point and comment' : 'View and point'} for ${minutes.data} minutes`);
     await this.publish(pairingId);
-    await this.schedule();
+    await this.host.schedule();
     return this.view(record);
   }
 
@@ -317,7 +319,7 @@ export class BrowserShares {
     const [client, socket] = Object.values(new WebSocketPair());
     socket.serializeAttachment({ socketId: crypto.randomUUID(), shareId: record.shareId, deadline: Date.now() + HELLO_MS, viewer: null, at: null, size: null } satisfies ViewerSocket);
     this.ctx.acceptWebSocket(socket, [VIEWER_TAG, `${VIEWER_TAG}:${record.shareId}`]);
-    await this.schedule();
+    await this.host.schedule();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -415,12 +417,11 @@ export class BrowserShares {
   }
 
   /** The relay's alarm: shares past their expiry end, ended shares older than a day are forgotten, and sockets that
-   * never said hello close. */
+   * never said hello close. The relay re-arms afterwards. */
   async alarm(): Promise<void> {
     const now = Date.now();
     for (const record of await this.records()) if (record.endedAt && Date.parse(record.endedAt) <= now - ENDED_KEPT_MS) await this.forget(record.shareId);
     for (const { socket, state } of this.sockets()) if (!state.viewer && state.deadline <= now) socket.close(1008, 'Share hello timed out');
-    await this.schedule();
   }
 
   private async hello(socket: WebSocket, state: ViewerSocket, message: RuntimeBrowserShareViewerMessage): Promise<void> {
@@ -447,6 +448,8 @@ export class BrowserShares {
     this.changed(record);
     await this.publish(record.pairingId);
     await this.watch(record);
+    // Its hello deadline no longer applies.
+    await this.host.schedule();
   }
 
   /** What is under a viewer's point; while one test runs, only the latest point asked is tested next and answered. */
@@ -581,7 +584,7 @@ export class BrowserShares {
       this.ctx.waitUntil(this.host.request(record.pairingId, { operation: 'shareUnwatch', shareId: record.shareId }).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_unwatch_failed', shareId: record.shareId, error: described(error) }))));
     }
     await this.publish(record.pairingId);
-    await this.schedule();
+    await this.host.schedule();
     return ended;
   }
 
@@ -629,17 +632,15 @@ export class BrowserShares {
     }
   }
 
-  /** The relay's alarm is due by the earliest live expiry and hello deadline. */
-  private async schedule(): Promise<void> {
+  /** The earliest live share's expiry, ended share's forgetting, or unanswered hello's deadline; null when none. */
+  async nextDeadline(): Promise<number | null> {
     let next = Infinity;
     for (const stored of (await this.ctx.storage.list({ prefix: SHARE })).values()) {
       const record = ShareRecord.parse(stored);
-      if (!record.endedAt) next = Math.min(next, Date.parse(record.expiresAt));
+      next = Math.min(next, record.endedAt ? Date.parse(record.endedAt) + ENDED_KEPT_MS : Date.parse(record.expiresAt));
     }
     for (const { state } of this.sockets()) if (!state.viewer) next = Math.min(next, state.deadline);
-    if (!Number.isFinite(next)) return;
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current <= Date.now() || current > next) await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, next));
+    return Number.isFinite(next) ? next : null;
   }
 
   private async audit(shareId: string, event: RuntimeBrowserShareAudit['event'], by: string, guest: boolean, detail: string | null): Promise<void> {

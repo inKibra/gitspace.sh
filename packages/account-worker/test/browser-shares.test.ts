@@ -387,6 +387,33 @@ test('a share ends for its viewers and its Chrome when it expires or its tab clo
   });
 });
 
+test('a share wakes the relay at its expiry, and once it ends, a day later to forget it', async () => {
+  const { projectId } = await workspace();
+  await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO, state) => {
+    // The relay's first-start presence check runs first, so the share's deadlines are its only ones.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 36_000);
+    await relay.alarm();
+    vi.useRealTimers();
+    expect(await state.storage.getAlarm()).toBeNull();
+    const root = await keys();
+    const browser = await chrome(relay, root, projectId, { protocol: 6, ip: '192.0.2.57' }, message => message.operation === 'shareTab' ? { ...page, groupId: null } : {});
+    try {
+      const { share: made, shareId } = await share(browser, { targetId: 'your-tab', comment: false, expiresInMinutes: 15 });
+      expect(await state.storage.getAlarm()).toBe(Date.parse(made.expiresAt));
+      const revoked = await signed(browser, { op: 'revoke', shareId });
+      const endedAt = Date.parse(RuntimeBrowserShareSchema.parse(revoked.value?.share).endedAt ?? '');
+      const forgetAt = endedAt + 24 * 60 * 60_000;
+      expect(await state.storage.getAlarm()).toBe(forgetAt);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(forgetAt);
+      await relay.alarm();
+      expect([...(await state.storage.list({ prefix: 'browser.relay.share:' })).keys()]).toEqual([]);
+      expect(await state.storage.getAlarm()).toBeNull();
+    } finally { vi.useRealTimers(); browser.socket.close(); }
+  });
+});
+
 test('one of the account’s own devices joins under the account’s name, not as a guest', async () => {
   const { projectId } = await workspace();
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID), deviceKey = crypto.getRandomValues(new Uint8Array(32));

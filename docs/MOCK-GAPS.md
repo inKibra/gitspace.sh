@@ -3,7 +3,7 @@
 Mock sources: `packages/account-web/src/BrowsersMock.tsx` (M), `src/BrowsersMockShare.tsx` (MS). All shipped paths below are relative to `packages/account-web/src` unless they name another package. Design doc: `docs/APERTURE-DESIGN.md` (D).
 Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, not in mock) · **[BACKEND]** needs server/extension/protocol data or operations that don't exist yet.
 
-**Phase 2 built (2026-10-25, extension 5.8.0):** the [BACKEND] rows for each Chrome's version, OS, last seen, paired date, agents using it now and one note (27, 28, 31, 59, 60), the cloud browser's open-tab count (46), the short pairing code, the group colour, activity, Stop, Close tab and Focus in Chrome (130, 131, 132, 148, 159), Recent runs with refusals (194, 195), the approved sites' bundle commit (106), and the share preview's Chrome name, favicon, live dot and the sharer's pointer (207, 233, 235, 282). Still open: site levels read / interact / full (105, needs a decision), previews of tabs you added (144, kept private), another account's user joining as themselves (249, needs a decision), and the later phases (take over, comments, captures).
+**Phase 2 built (2026-10-25, extension 5.8.0):** the [BACKEND] rows for each Chrome's version, OS, last seen, paired date, agents using it now and one note (27, 28, 31, 59, 60), the cloud browser's open-tab count (46), the short pairing code, the group colour, activity, Stop, Close tab and Focus in Chrome (130, 131, 132, 148, 159), Recent runs with refusals (194, 195), the approved sites' bundle commit (106), and the share preview's Chrome name, favicon, live dot and the sharer's pointer (207, 233, 235, 282). Still open: site levels read / interact / full (105, needs a decision), previews of tabs you added (144, kept private), another account's user joining as themselves (249, deferred 2026-10-25), and the later phases (take over, comments, captures).
 
 ---
 
@@ -104,7 +104,7 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 | Mock element | Status | Shipped |
 |---|---|---|
 | h3 "Approved sites" + ghost compact "Ask agent to add a site" (M:241) | DIFFERENT: h4 caption-size heading; button is "Change in Environment" (opens Environment) | RuntimeBrowserTab.tsx:166 |
-| Sites as inline chips `host · level` (mono host, sans level) with levels read / interact / full (M:242) | DIFFERENT: vertical list of full origins (mono) + gray badge "scripts"/"single steps". Mock's 3 levels don't exist: [BACKEND] only scripts / steps-only levels (D §4.1 l.75; browser.ts:189) | RuntimeBrowserTab.tsx:167 |
+| Sites as inline chips `host · level` (mono host, sans level) with levels read / interact / full (M:242) | MATCH (2026-10-25): chips `host · read|interact|full`; the three levels are the approval levels (D §4.1 l.75) | RuntimeBrowserTab.tsx:223 |
 | Caption "From .gitspace/bundle.json at dd0a157. Your Chrome only opens these; the cloud browser is unrestricted." (M:243) | MISSING (no source/commit caption). [BACKEND] overview has no bundle revision (browser.ts:189) | RuntimeBrowserTab.tsx:164-169 |
 | — | EXTRA: empty text "No sites approved yet…" | :168 |
 
@@ -312,7 +312,7 @@ No share route plays a capture; the only player is the owner's CapturePlayer in 
 | Take over / lease, "Agent acting" | V2 Watch dialog, tiles | D §7.2 l.183-189; §4.2 l.91; B1 l.321 | Not built (D §8 l.217) |
 | Focus in Chrome, Close tab, Stop run from UI | V2 Watch dialog, tiles, group strip | (no section; extension popup has Stop) | No management actions (browser.ts:60) |
 | Run activity (agent, tool, command count, elapsed) and Recent runs / refusals | V2 group strip, Recent runs | D §6.1 (scripts), §4.1 | Only `running` count; log is extension-local (runs.ts:45) |
-| Site levels read / interact / full; bundle source + commit caption | V2 Approved sites | D §4.1 l.75 (two levels only) | scripts / steps-only only |
+| Site levels read / interact / full; bundle source + commit caption | V2 Approved sites | D §4.1 l.75 | Built 2026-10-25 (extension 5.9.0) |
 | Chrome OS, last seen, paired date, "N agents using it now", cloud "N workspaces have open tabs" | V1 cards, Manage dialog | — | Not in relay status (browser.ts:129-134) |
 | Short grouped fingerprint | V1 Pair + Manage | §12a (extension boundary) | Full SHA-256 hex in web and popup (popup.js:93) |
 | Chrome name in the pasted-link chip; foreign-account chip | V2 composer | D §8 l.204, 215 | Preview lacks browser; other origins not parsed |

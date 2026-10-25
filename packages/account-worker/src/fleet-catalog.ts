@@ -1,5 +1,6 @@
 import { LiveChanges } from './live-changes.js';
 import { notifyBrowsers } from './live-notices.js';
+import { confirmMachinePresence } from './machine-notices.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { machineDiscardConfirmationSchema, machineDiscardScopeSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
@@ -112,7 +113,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       const retryAt = Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS;
       for (const row of this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM sandbox_enrollments').toArray()) {
         this.ctx.storage.sql.exec("INSERT INTO sandbox_provisioning(machine_id,attempts,deadline_at,phase) VALUES(?,1,?,'provisioning') ON CONFLICT(machine_id) DO UPDATE SET deadline_at=excluded.deadline_at WHERE excluded.deadline_at<deadline_at", row.machine_id, retryAt);
-        const machine = this.getMachine(row.machine_id);
+        const machine = this.storedMachine(row.machine_id);
         if (machine?.state === 'provisioning') this.saveMachine({
           ...machine, state: 'error', operationId: null, lifecycleRevision: machine.lifecycleRevision + 1,
           error: 'Sandbox provisioning was interrupted; retrying automatically.',
@@ -122,7 +123,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       await this.armProvisioning();
       await this.armImageDeadlines();
       await this.armOperations();
-      if (this.listMachines().some(machine => machine.provider === 'cloudflare-sandbox' && machine.state === 'online')) await this.scheduleAlarm('idle', Date.now() + CLOUD_MACHINE_IDLE_CHECK_MS);
+      if (this.storedMachines().some(machine => machine.provider === 'cloudflare-sandbox' && machine.state === 'online')) await this.scheduleAlarm('idle', Date.now() + CLOUD_MACHINE_IDLE_CHECK_MS);
     });
   }
 
@@ -142,8 +143,9 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     await this.ctx.storage.delete(`machine-discard:${machineId}`);
   }
 
-  directoryPublication(): Extract<DirectoryPublication, { source: 'fleet' }> {
-    return { source: 'fleet', cursor: this.directory.version(), machines: this.listMachines() };
+  async directoryPublication(): Promise<Extract<DirectoryPublication, { source: 'fleet' }>> {
+    await this.confirmPresence(null);
+    return { source: 'fleet', cursor: this.directory.version(), machines: this.storedMachines() };
   }
 
   private scheduleAlarm(owner: 'provisioning' | 'images' | 'idle' | 'operations', timestamp: number | null): Promise<void> {
@@ -179,7 +181,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
    * always the timeout recorded on the machine with the operation id cleared so the user can retry. */
   private async expireMachineOperations(now: number): Promise<void> {
     for (const lease of this.ctx.storage.sql.exec<{ machine_id: string; operation_id: string }>('SELECT machine_id,operation_id FROM machine_operations WHERE deadline_at<=?', now).toArray()) {
-      const current = this.getMachine(lease.machine_id);
+      const current = this.storedMachine(lease.machine_id);
       if (!current || current.operationId !== lease.operation_id || this.hasPendingSandbox(lease.machine_id)) {
         this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=? AND operation_id=?', lease.machine_id, lease.operation_id);
         continue;
@@ -187,7 +189,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       const observed = current.provider === 'cloudflare-sandbox'
         ? await controlCloudflareSandboxMachine({ env: this.env, userId: this.env.ACCOUNT_ID, machineId: current.id, action: 'status' }).catch(() => null)
         : null;
-      const latest = this.getMachine(lease.machine_id);
+      const latest = this.storedMachine(lease.machine_id);
       if (!latest || latest.operationId !== lease.operation_id) continue;
       const transition = latest.state === 'sleeping' ? 'stop' : latest.state === 'resuming' ? 'start' : latest.state === 'deleting' ? 'destroy' : 'lifecycle';
       this.saveMachine({
@@ -204,7 +206,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
    * open legacy workspace is intent the cloud cannot observe, so its machine is kept. */
   private async stopIdleSandboxes(now: number): Promise<void> {
     let watching = false;
-    for (const machine of this.listMachines()) {
+    for (const machine of this.storedMachines()) {
       if (machine.provider !== 'cloudflare-sandbox' || machine.state !== 'online' || machine.desiredState !== 'online' || machine.operationId !== null) {
         this.ctx.storage.sql.exec('DELETE FROM machine_idle WHERE machine_id=?', machine.id);
         continue;
@@ -300,7 +302,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Cloud image operation belongs to another account');
     const operationId = z.string().uuid().parse(input.operationId);
     const selection = cloudImageSelectionSchema.parse(input.selection);
-    const machine = this.getMachine(input.machineId);
+    const machine = this.storedMachine(input.machineId);
     if (!machine || machine.provider !== 'cloudflare-sandbox') throw new Error('Account cloud machine does not exist');
     if (this.hasPendingSandbox(machine.id)) throw new Error('Finish sandbox provisioning before changing its image');
     const existing = this.cloudImage(machine.id);
@@ -320,7 +322,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   retryCloudImage(input: { userId: string; machineId: string; operationId: string; cancel?: boolean }): CloudImageState {
     if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Cloud image operation belongs to another account');
     const state = this.cloudImage(input.machineId);
-    if (!this.getMachine(input.machineId) || !state?.operation || state.operation.id !== input.operationId) throw new Error('Cloud image operation identity does not match this account machine');
+    if (!this.storedMachine(input.machineId) || !state?.operation || state.operation.id !== input.operationId) throw new Error('Cloud image operation identity does not match this account machine');
     if (!cloudImageOperationActive(state)) return state;
     if (this.imageRuns.has(input.machineId)) {
       if (input.cancel) throw new Error('Image operation is running; wait for it to settle before cancelling');
@@ -346,7 +348,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     const selection = cloudImageSelectionSchema.parse(input.selection);
     const discardApproval = input.discardUncheckpointedCandidate ? { deviceId: z.string().min(1).parse(input.approvedBy), at: Date.now() } : undefined;
     const state = this.cloudImage(input.machineId);
-    if (!this.getMachine(input.machineId) || !state?.operation) throw new Error('Account cloud machine image operation does not exist');
+    if (!this.storedMachine(input.machineId) || !state?.operation) throw new Error('Account cloud machine image operation does not exist');
     if (state.operation.id === recoveryId) {
       if (state.operation.recoveryOf !== input.operationId || JSON.stringify(state.selection) !== JSON.stringify(selection) || !!state.operation.discardApproval !== !!discardApproval) throw new Error('Recovery id is already bound to another operation, image or consent');
       return state;
@@ -368,7 +370,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       saveCloudImage: (next) => { if (!entry.current) throw new Error('Image operation was superseded after missing its deadline'); return this.saveCloudImage(next); },
       putMachine: (machine) => { if (!entry.current) throw new Error('Image operation was superseded after missing its deadline'); return this.putMachine(machine); },
       listSpaces: () => this.listSpaces(),
-      getMachine: (machineId) => this.getMachine(machineId),
+      getMachine: (machineId) => this.storedMachine(machineId),
     };
     entry.run = runCloudImageOperation(this.env, store, state).finally(() => { if (this.imageRuns.get(state.machineId) === entry) this.imageRuns.delete(state.machineId); });
     this.imageRuns.set(state.machineId, entry);
@@ -394,7 +396,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       const error = cancelled ? 'Image operation stalled past its deadline and was cancelled.'
         : 'Image operation stalled past its deadline; its admission barrier was released. Workspaces resume from their last checkpoint; check this machine before relying on its image.';
       this.writeCloudImage({ ...state, desiredImage: state.currentImage, operation: { ...operation, phase: 'cancelled', barrier: false, updatedAt: now, error } });
-      const machine = this.getMachine(state.machineId);
+      const machine = this.storedMachine(state.machineId);
       if (machine && !cancelled) this.saveMachine({ ...machine, state: 'error', lifecycleRevision: machine.lifecycleRevision + 1, operationId: null, error });
     }
     await this.armImageDeadlines();
@@ -412,7 +414,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
 
   /** Atomic with the insert that follows it: both run in one synchronous Durable Object turn. */
   assertCloudMachineCapacity(): void {
-    if (this.listMachines().filter(machine => machine.provider === 'cloudflare-sandbox').length >= CLOUD_MACHINE_LIMIT) {
+    if (this.storedMachines().filter(machine => machine.provider === 'cloudflare-sandbox').length >= CLOUD_MACHINE_LIMIT) {
       throw new Error(`This account already has ${CLOUD_MACHINE_LIMIT} cloud machines, the maximum. Destroy one before creating another.`);
     }
   }
@@ -420,7 +422,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   beginSandboxProvisioning(input: SandboxEnrollment): FleetMachineDefinition {
     if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
     if (!/^sandbox-[a-z0-9-]{1,64}$/u.test(input.machineId) || input.environment.GITSPACE_MACHINE_ID !== input.machineId || input.environment.GITSPACE_USER_ID !== input.userId) throw new Error('Sandbox enrollment identity is invalid');
-    if (this.getMachine(input.machineId) || this.wasMachineDestroyed(input.machineId)) throw new Error('Sandbox identity has already been allocated');
+    if (this.storedMachine(input.machineId) || this.wasMachineDestroyed(input.machineId)) throw new Error('Sandbox identity has already been allocated');
     const choice = cloudImageChoiceSchema.parse(input.choice);
     const machine: FleetMachineDefinition = {
       id: input.machineId, label: `Cloudflare ${input.machineId.slice('sandbox-'.length)}`,
@@ -446,7 +448,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     if (userId !== this.env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
     if (this.abandonedSandbox(machineId)) throw new Error(SANDBOX_ABANDONED);
     if (!this.hasPendingSandbox(machineId)) return null;
-    const current = this.getMachine(machineId);
+    const current = this.storedMachine(machineId);
     if (!current || current.desiredState !== 'online') throw new Error('Sandbox provisioning is no longer active');
     if (this.provisioningRuns.has(machineId)) return current;
     // An explicit Start is a new decision with a fresh attempt budget.
@@ -470,7 +472,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
    * commit) and retried; an exhausted lease destroys the sandbox. */
   private async expireProvisioningLeases(now: number): Promise<void> {
     for (const lease of this.ctx.storage.sql.exec<{ machine_id: string; attempts: number; phase: string }>("SELECT machine_id,attempts,phase FROM sandbox_provisioning WHERE phase IN ('provisioning','releasing') AND deadline_at<=?", now).toArray()) {
-      const current = this.getMachine(lease.machine_id);
+      const current = this.storedMachine(lease.machine_id);
       if (lease.phase === 'releasing') {
         await this.releaseSandbox(lease.machine_id);
       } else if (!current || current.desiredState !== 'online' || !this.hasPendingSandbox(lease.machine_id)) {
@@ -492,7 +494,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   private async failSandboxAttempt(machineId: string): Promise<void> {
     const attempts = this.ctx.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM sandbox_provisioning WHERE machine_id=? AND phase='provisioning'", machineId).toArray()[0]?.attempts ?? SANDBOX_PROVISIONING_ATTEMPTS;
     if (attempts >= SANDBOX_PROVISIONING_ATTEMPTS) return this.releaseSandbox(machineId);
-    const current = this.getMachine(machineId)!;
+    const current = this.storedMachine(machineId)!;
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec('UPDATE sandbox_provisioning SET deadline_at=? WHERE machine_id=?', Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS, machineId);
       this.saveMachine({ ...current, state: 'error', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: `Sandbox provisioning attempt ${attempts} of ${SANDBOX_PROVISIONING_ATTEMPTS} failed; retrying automatically. Start retries now with its retained enrollment.` });
@@ -507,7 +509,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec('DELETE FROM sandbox_enrollments WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec("UPDATE sandbox_provisioning SET phase='releasing',deadline_at=? WHERE machine_id=?", Date.now() + SANDBOX_PROVISIONING_RETRY_DELAY_MS, machineId);
-      const current = this.getMachine(machineId);
+      const current = this.storedMachine(machineId);
       if (current) this.saveMachine({ ...current, state: 'error', desiredState: 'offline', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: `Sandbox provisioning failed after ${SANDBOX_PROVISIONING_ATTEMPTS} attempts; destroying its cloud machine so it cannot keep billing.` });
     });
     try {
@@ -515,7 +517,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       await controlCloudflareSandboxMachine({ env: this.env, userId: this.env.ACCOUNT_ID, machineId, action: 'destroy' });
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec("UPDATE sandbox_provisioning SET phase='released' WHERE machine_id=?", machineId);
-        const released = this.getMachine(machineId);
+        const released = this.storedMachine(machineId);
         if (released) this.saveMachine({ ...released, lifecycleRevision: released.lifecycleRevision + 1, error: SANDBOX_ABANDONED });
       });
     } catch (error) {
@@ -529,8 +531,8 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     const row = this.ctx.storage.sql.exec<{ enrollment_json: string }>('SELECT enrollment_json FROM sandbox_enrollments WHERE machine_id=?', machineId).toArray()[0];
     if (!row) return;
     const enrollment = JSON.parse(row.enrollment_json) as SandboxEnrollment;
-    const operationId = this.getMachine(machineId)?.operationId;
-    const active = () => this.hasPendingSandbox(machineId) && this.getMachine(machineId)?.operationId === operationId;
+    const operationId = this.storedMachine(machineId)?.operationId;
+    const active = () => this.hasPendingSandbox(machineId) && this.storedMachine(machineId)?.operationId === operationId;
     try {
       await prepareCloudImage(this.env, enrollment.choice.image);
       if (!active()) return;
@@ -552,7 +554,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(this.env, `/v1/sandboxes/${encodeURIComponent(machineId)}/image/status`));
       if (!active()) return;
       if (!machine || machine.state !== 'online' || provider.image !== enrollment.choice.image || provider.prepared) throw new Error('Sandbox is not ready');
-      const current = this.getMachine(machineId)!;
+      const current = this.storedMachine(machineId)!;
       const rpcEndpoint = new URL(`/__sandbox/${encodeURIComponent(enrollment.userId)}/${encodeURIComponent(machineId)}/rpc`, enrollment.environment.GITSPACE_CONTROL_URL).toString();
       const lifecycleRevision = Math.max(current.lifecycleRevision, machine.lifecycleRevision) + 1;
       this.ctx.storage.transactionSync(() => {
@@ -584,11 +586,12 @@ export class FleetCatalogDO extends BudgetedDurableObject {
 
   /** Records that a workspace attaches this machine, before the attachment is written; the machine's relay presence
    * seeds the new attachment's `online`. */
-  attachMachineWorkspace(machineId: string, workspace: MachineWorkspace): { connected: boolean } {
-    const machine = this.getMachine(machineId);
+  async attachMachineWorkspace(machineId: string, workspace: MachineWorkspace): Promise<{ connected: boolean }> {
+    await this.confirmPresence(machineId);
+    const machine = this.storedMachine(machineId);
     if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_workspaces(machine_id,workspace_id,project_id) VALUES(?,?,?)', machineId, workspace.workspaceId, workspace.projectId);
-    return { connected: this.machineConnected(machineId) };
+    return { connected: this.presenceConnected(machineId) };
   }
 
   detachMachineWorkspace(machineId: string, workspaceId: string): void {
@@ -608,16 +611,40 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   async machinePresence(machineId: string, connected: boolean): Promise<MachineWorkspace[]> {
     validateId(machineId);
     this.ctx.storage.sql.exec('INSERT INTO machine_presence(machine_id,connected) VALUES(?,?) ON CONFLICT(machine_id) DO UPDATE SET connected=excluded.connected WHERE connected<>excluded.connected', machineId, connected ? 1 : 0);
-    const machine = this.getMachine(machineId);
+    const machine = this.storedMachine(machineId);
     if (machine?.provider === 'physical' && machine.desiredState !== 'removed' && (machine.state === 'online' || machine.state === 'offline')) {
       this.saveMachine({ ...machine, state: connected ? 'online' : 'offline' });
     }
     return this.machineWorkspaces(machineId);
   }
 
-  /** Whether the machine's relay connection is up now. */
-  machineConnected(machineId: string): boolean {
+  /** Whether the machine's relay connection was last reported up. */
+  private presenceConnected(machineId: string): boolean {
     return this.ctx.storage.sql.exec<{ connected: number }>('SELECT connected FROM machine_presence WHERE machine_id=?', machineId).toArray()[0]?.connected === 1;
+  }
+
+  /** Before presence is read: the relay reports offline any machine reported connected (all, or `machineId`) whose
+   * heartbeat lapsed, which updates its state here before the read returns. */
+  private async confirmPresence(machineId: string | null): Promise<void> {
+    const connected = this.ctx.storage.sql.exec<{ machine_id: string }>('SELECT machine_id FROM machine_presence WHERE connected=1').toArray().map(row => row.machine_id);
+    await confirmMachinePresence(this.env, machineId === null ? connected : connected.filter(id => id === machineId));
+  }
+
+  /** Whether the machine's relay connection is up now. */
+  async machineConnected(machineId: string): Promise<boolean> {
+    await this.confirmPresence(machineId);
+    return this.presenceConnected(machineId);
+  }
+
+  async getMachine(machineId: string): Promise<FleetMachineDefinition | null> {
+    validateId(machineId);
+    await this.confirmPresence(machineId);
+    return this.storedMachine(machineId);
+  }
+
+  async listMachines(): Promise<FleetMachineDefinition[]> {
+    await this.confirmPresence(null);
+    return this.storedMachines();
   }
 
   /** One-time migration: attachments written before the index existed are indexed from every workspace once. A
@@ -643,7 +670,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   }
 
   putMachine(input: FleetMachineDefinition): FleetMachineDefinition {
-    const current = this.getMachine(input.id);
+    const current = this.storedMachine(input.id);
     if (this.wasMachineDestroyed(input.id)) throw new Error('Machine has been destroyed');
     if (current?.desiredState === 'removed' && input.desiredState !== 'removed') throw new Error('Machine is being destroyed');
     if (this.hasPendingSandbox(input.id)) {
@@ -666,10 +693,10 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   /** A previous-release machine's startup report. It describes what the machine observes; its state comes from relay
    * presence, and lifecycle intent, kind and provider stay account-owned. */
   reportMachine(input: FleetMachineDefinition): FleetMachineDefinition {
-    const current = this.getMachine(input.id);
+    const current = this.storedMachine(input.id);
     return this.putMachine(current
       ? { ...current, label: input.label, rpcEndpoint: input.rpcEndpoint, notes: input.notes }
-      : { ...input, state: this.machineConnected(input.id) ? 'online' : 'offline', kind: 'physical', provider: 'physical', desiredState: 'online', lifecycleRevision: 0, operationId: null, error: null });
+      : { ...input, state: this.presenceConnected(input.id) ? 'online' : 'offline', kind: 'physical', provider: 'physical', desiredState: 'online', lifecycleRevision: 0, operationId: null, error: null });
   }
 
   /** A cloud-issued destroy confirmation for a cloud machine whose runtime could not checkpoint. It is bound to the
@@ -695,7 +722,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     validateId(input.id);
     if (!input.label || !['provisioning', 'online', 'sleeping', 'offline', 'resuming', 'deleting', 'error'].includes(input.state) || !['online', 'offline', 'removed'].includes(input.desiredState) || !Number.isInteger(input.lifecycleRevision) || input.lifecycleRevision < 0 || !['physical', 'sandbox'].includes(input.kind) || !['physical', 'cloudflare-sandbox'].includes(input.provider) || input.notes.length > 4_000) throw new Error('Machine definition is invalid');
     if (input.rpcEndpoint !== null && !input.rpcEndpoint.startsWith('/')) new URL(input.rpcEndpoint);
-    const current = this.getMachine(input.id);
+    const current = this.storedMachine(input.id);
     if (cloudImageOperationActive(this.cloudImage(input.id)) && (input.operationId !== null || input.desiredState !== 'online')) throw new Error('Cloud image recovery has reserved this machine lifecycle');
     // Heartbeats with identical public state must not wake the account directory.
     if (current && current.label === input.label && current.state === input.state && current.rpcEndpoint === input.rpcEndpoint
@@ -714,7 +741,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       else this.ctx.storage.sql.exec('INSERT INTO machine_operations(machine_id,operation_id,deadline_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET operation_id=excluded.operation_id,deadline_at=excluded.deadline_at WHERE operation_id<>excluded.operation_id', input.id, input.operationId, Date.now() + MACHINE_OPERATION_LEASE_MS);
       this.changes.mark('machines');
     });
-    this.directory.publish({ source: 'fleet', machines: this.listMachines() });
+    this.directory.publish({ source: 'fleet', machines: this.storedMachines() });
     this.changes.wake();
     this.ctx.waitUntil(this.armOperations());
     if (input.provider === 'cloudflare-sandbox' && input.state === 'online' && input.desiredState === 'online'
@@ -724,7 +751,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     return input;
   }
 
-  getMachine(machineId: string): FleetMachineDefinition | null {
+  private storedMachine(machineId: string): FleetMachineDefinition | null {
     validateId(machineId);
     const row = this.ctx.storage.sql.exec<{ definition_json: string }>('SELECT definition_json FROM fleet_machines WHERE machine_id = ?', machineId).toArray()[0];
     if (!row) return null;
@@ -754,7 +781,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       return removed;
     });
     if (removed) {
-      this.directory.publish({ source: 'fleet', machines: this.listMachines() });
+      this.directory.publish({ source: 'fleet', machines: this.storedMachines() });
       this.changes.wake();
     }
     return removed;
@@ -765,7 +792,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
     return this.ctx.storage.sql.exec('SELECT machine_id FROM destroyed_machines WHERE machine_id=?', machineId).toArray().length > 0;
   }
 
-  listMachines(): FleetMachineDefinition[] {
+  private storedMachines(): FleetMachineDefinition[] {
     return this.ctx.storage.sql.exec<{ definition_json: string }>('SELECT definition_json FROM fleet_machines ORDER BY machine_id').toArray()
       .map((row) => {
         const value = JSON.parse(row.definition_json) as Partial<FleetMachineDefinition> & Pick<FleetMachineDefinition, 'id' | 'label' | 'state' | 'rpcEndpoint'>;

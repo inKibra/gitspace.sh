@@ -455,9 +455,13 @@ export class CredentialVaultDO extends BudgetedDurableObject {
   /** Refreshes in flight, one per credential; see `singleFlight`. */
   private readonly profileRefreshes = new Map<string, Promise<void>>();
   private readonly legacyRefreshes = new Map<string, Promise<StoredVaultOAuthCredential>>();
-  /** A device credential changed: this isolate's registry drops its view, and connected machines refetch their device list. */
+  /** A device credential changed: this isolate's registry drops its view, the relay rechecks its machine sockets and
+   * service sessions against it, and connected machines refetch their device list. */
   private deviceCredentialsChanged(): void {
     invalidateDeviceAuthority();
+    this.ctx.waitUntil(this.env.RELAY.getByName(this.env.RELAY_NAME).machineCredentialsChanged().catch((error: unknown) => {
+      console.error(JSON.stringify({ event: 'relay_credentials_recheck_failed', message: error instanceof Error ? error.message : String(error) }));
+    }));
     this.ctx.waitUntil(notifyMachines(this.env, 'all', ['devices']));
   }
   constructor(ctx: DurableObjectState, env: Env) {

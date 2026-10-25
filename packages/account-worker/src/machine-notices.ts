@@ -12,6 +12,18 @@ export async function notifyMachines(env: Env, machineIds: readonly string[] | '
   }
 }
 
+/** Called before a machine's presence is read: the relay reports offline any of these machines whose last answered
+ * ping is older than its heartbeat lease, so the read sees it offline. A relay that cannot be asked leaves the read to
+ * the last reported presence. */
+export async function confirmMachinePresence(env: Env, machineIds: readonly string[]): Promise<void> {
+  if (machineIds.length === 0) return;
+  try {
+    await env.RELAY.getByName(env.RELAY_NAME).confirmMachinePresence(machineIds);
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'relay_presence_confirm_failed', machineIds, message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
 /** A lifecycle change reaches the machines running this workspace's active runs, except the one that made it. */
 export function notifyLifecycleHolders(env: Env, workspaceId: string, state: LifecycleState, actorMachineId: string): Promise<void> {
   const holders = new Set(state.runs.filter(run => isLifecycleRunActive(run) && run.machineId !== actorMachineId).map(run => run.machineId));

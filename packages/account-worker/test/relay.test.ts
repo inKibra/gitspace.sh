@@ -119,6 +119,17 @@ async function ciphertextHash(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+const relayAlarm = () => runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), (_instance, state) => state.storage.getAlarm());
+
+/** The relay after its first start's presence check (one heartbeat lease after it starts) has run. */
+async function settledRelay(): Promise<void> {
+  const relay = env.RELAY.getByName(env.RELAY_NAME);
+  await runInDurableObject(relay, () => {});
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + RELAY_HEARTBEAT_LEASE_MS + 1);
+  try { await runDurableObjectAlarm(relay); } finally { clock.mockRestore(); }
+  expect(await relayAlarm()).toBeNull();
+}
+
 describe('portable RelayDO', () => {
   it('routes opaque frames between hibernatable endpoints', async () => {
     const machine = await openSocket('machine', 'darktop');
@@ -245,22 +256,37 @@ describe('portable RelayDO', () => {
     client.close(1000, 'done');
   });
 
-  it.each(['revoked', 'unreachable'] as const)('closes an idle socket on its alarm once its authority is %s', async (reason) => {
+  it('closes an idle machine socket as soon as the vault revokes its credential, with no alarm', async () => {
+    await settledRelay();
     const machine = await openSocket('machine', 'darktop');
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
-    if (reason === 'revoked') await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
-    else interruptAuthority();
-    // An unreachable vault is tolerated until the cached registry is two minutes old.
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + (reason === 'revoked' ? 30_001 : 120_001));
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
+    expect((await closed).code).toBe(1008);
+    expect(await relayAlarm()).toBeNull();
+  });
+
+  it('wakes exactly when a machine grant expires, and closes its socket then', async () => {
+    await settledRelay();
+    const expiresAt = Date.now() + 10 * 60_000;
+    const expiring = signCredentialAuthorityGrant({ ...machineGrant.grant, generation: 2, expiresAt }, privateKey);
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).registerDevice(expiring);
+    const response = await exports.default.fetch(machineAuthorizedRequest('https://relay.test/ws?role=machine&id=darktop', { headers: { upgrade: 'websocket' } }, machinePrivateKey, expiring));
+    expect(response.status).toBe(101);
+    const machine = response.webSocket;
+    if (!machine) throw new Error('Expected relay WebSocket');
+    machine.accept();
+    expect(await relayAlarm()).toBe(expiresAt);
+    const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
+    vi.spyOn(Date, 'now').mockReturnValue(expiresAt + 1);
     expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(true);
     expect((await closed).code).toBe(1008);
+    expect(await relayAlarm()).toBeNull();
   });
 
   it('keeps legacy machine recovery transport alive after inference cutover', async () => {
     const machine = await openSocket('machine', 'darktop');
     await env.CREDENTIALS.getByName(env.ACCOUNT_ID).ensureInference();
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_001);
-    expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(true);
+    await env.RELAY.getByName(env.RELAY_NAME).machineCredentialsChanged();
     const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: 'recover' };
     const echoed = nextMessage(machine);
     machine.send(JSON.stringify(frame));
@@ -268,26 +294,51 @@ describe('portable RelayDO', () => {
     machine.close(1000, 'done');
   });
 
-  it('echoes the v1 frame previous-release machines use for liveness and expires a silent one with a CORS error', async () => {
+  it('echoes the v1 frame previous-release machines use for liveness and fails a silent one\'s in-flight request by its heartbeat lease, with a CORS error', async () => {
+    await settledRelay();
     const machine = await openSocket('machine', 'darktop', true);
     const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: crypto.randomUUID() };
     const echoed = nextMessage(machine);
     machine.send(JSON.stringify(frame));
     expect(JSON.parse(await echoed)).toEqual(frame);
+    // Idle, it holds no wake.
+    expect(await relayAlarm()).toBeNull();
     const received = nextMessage(machine);
     const responsePromise = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
       method: 'POST',
       headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
     }));
     expect(parseTunnelRequest(await received).type).toBe('tunnel.request.start');
+    // With a request in flight the relay wakes when the machine's heartbeat lease ends.
+    const lease = await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), (_instance, state) => z.object({ heartbeatExpiresAt: z.number() }).parse(state.getWebSockets('endpoint:machine:darktop')[0]?.deserializeAttachment()).heartbeatExpiresAt);
+    expect(await relayAlarm()).toBe(lease);
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + RELAY_HEARTBEAT_LEASE_MS + 1);
+    vi.spyOn(Date, 'now').mockReturnValue(lease + 1);
     expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(true);
     expect((await closed).code).toBe(1011);
     const response = await responsePromise;
     expect(response.status).toBe(502);
     expect(response.headers.get('access-control-allow-origin')).toBe(`https://${env.RELAY_NAME}.gitspace.sh`);
     expect(await response.json()).toMatchObject({ error: { code: 'TUNNEL_TRANSPORT_FAILED' } });
+  });
+
+  it('a wake after in-flight work ended finds nothing due and leaves no alarm', async () => {
+    await settledRelay();
+    const machine = await openSocket('machine', 'darktop', true);
+    machine.addEventListener('message', (event) => {
+      const message = parseTunnelRequest(String(event.data));
+      if (message.type !== 'tunnel.request.start') return;
+      machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
+      machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
+    });
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', { method: 'POST' }));
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+    expect(await relayAlarm()).not.toBeNull();
+    expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(true);
+    expect(await relayAlarm()).toBeNull();
+    expect(machine.readyState).toBe(WebSocket.OPEN);
+    machine.close(1000, 'done');
   });
 
   it('leaves a machine that sends no pings connected past the heartbeat lease', async () => {
@@ -590,6 +641,23 @@ describe('portable RelayDO', () => {
     expect((await closed).code).toBe(1008);
     expect(await relay.serviceValidate(session.token, hostname)).toBeNull();
     machine.close();
+  });
+
+  it('wakes when a device service session expires, not before', async () => {
+    await settledRelay();
+    const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const { deviceId } = await enrollServiceBrowser();
+    const state = crypto.randomUUID();
+    const session = await relay.serviceRedeem(await relay.serviceApprove({ hostname, deviceId, state, returnTo: '/' }), hostname, state);
+    if (!session) throw new Error('Ticket failed');
+    const expiresAt = (await relay.serviceValidate(session.token, hostname))?.expiresAt;
+    expect(expiresAt).toBeGreaterThan(Date.now() + 60_000);
+    expect(await relayAlarm()).toBe(expiresAt);
+    vi.spyOn(Date, 'now').mockReturnValue((expiresAt ?? 0) + 1);
+    expect(await runDurableObjectAlarm(relay)).toBe(true);
+    expect(await relay.serviceValidate(session.token, hostname)).toBeNull();
+    expect(await relayAlarm()).toBeNull();
   });
 
   /** A machine serving `routes` (hostname, workspace): plain requests answer `private service`, WebSockets echo. */

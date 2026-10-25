@@ -158,7 +158,10 @@ export class ServiceSessions {
     for (const key of (await this.storage.list({ prefix: devicePrefix(deviceId) })).keys()) await this.storage.delete(key);
     return removed;
   }
+  /** Removes expired sessions and those whose device lost its authority, read afresh: the relay sweeps when the vault
+   * changes a credential and when a session's expiry is due. */
   async sweep(): Promise<string[]> {
+    this.authorityCache.clear();
     const removed: string[] = [];
     for (const prefix of ['service-ticket:', 'service-session:']) {
       for (const [key, raw] of await this.storage.list({ prefix })) {
@@ -175,8 +178,8 @@ export class ServiceSessions {
     for (const prefix of ['service-ticket:', 'service-session:']) {
       for (const raw of (await this.storage.list({ prefix })).values()) {
         const value = StoredSessionSchema.safeParse(raw);
-        // A device session's authority is checked again within seconds; a cloud session lasts until it expires or is revoked.
-        next = Math.min(next, !value.success ? Date.now() : 'cloud' in value.data ? value.data.expiresAt : Math.min(value.data.expiresAt, Date.now() + AUTHORITY_CACHE_MS));
+        // Each lasts until it expires; a device's revocation or credential change sweeps it when it happens.
+        next = Math.min(next, value.success ? value.data.expiresAt : Date.now());
       }
     }
     return next === Infinity ? null : next;

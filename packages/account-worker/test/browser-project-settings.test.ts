@@ -61,7 +61,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       listen(socket);
       return browser;
     }
-    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY, USER_PROJECTS: env.USER_PROJECTS }, identity => workspaceDrive(env, identity), browserShareAccount(env)); relay = drivenBrowserRelay(restarted); return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
+    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY, USER_PROJECTS: env.USER_PROJECTS }, identity => workspaceDrive(env, identity), browserShareAccount(env), async () => {}); relay = drivenBrowserRelay(restarted); return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
 async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>, args: RuntimeBrowserArguments = { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }) {

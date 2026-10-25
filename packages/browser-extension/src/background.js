@@ -2,7 +2,7 @@
 // `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { CAPTURE_MAX_MS, CAPTURE_SCREENCAST, jpegSize, ScreencastRecorder } from '@gitspace/runtime-machine/browser-screencast';
-import { permitted, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, siteOf, tabWithinGrant } from './commands.ts';
+import { permitted, readSiteStepRefusal, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, siteOf, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 import { clickedName, NAMED_KEYS, scriptActivity, stepActivity } from './activity.ts';
@@ -467,9 +467,11 @@ function overlay(targetId, extra = {}) {
     await overlayCall(debuggee, command);
   });
 }
-/** A tab as one script sees it: the script's sites, and the site you dragged the tab in on when the script named none. */
+/** A tab as one script sees it: the script's sites, the site you dragged the tab in on when the script named none, and
+ * the grant's sites at interact and read, where scripts never run. */
 function runTab(run, tab) {
-  return { grant: { origins: tab.dragged && !run.named ? [...run.sites, tab.dragged] : run.sites }, stepsOnly: run.body.command.grant.body.stepsOnly, urls: tab.urls };
+  const grant = run.body.command.grant.body;
+  return { grant: { origins: tab.dragged && !run.named ? [...run.sites, tab.dragged] : run.sites }, stepsOnly: grant.stepsOnly, read: grant.read ?? [], urls: tab.urls };
 }
 /** Events of a script's tab go out in order; one membership check covers the events that arrived before it began.
  * While the tab is off the script's sites, or on one that allows single steps only, its events stay in your Chrome. */
@@ -1405,7 +1407,7 @@ async function execute(message) {
     await groupRecord(grant, true);
     run.commands++;
     try {
-      const refusal = message.targetId ? runTabRefusal(runTab(run, await member(grant, message.targetId))) : runDestinationRefusal({ grant: { origins: run.sites }, stepsOnly: grant.stepsOnly }, message.url || 'about:blank');
+      const refusal = message.targetId ? runTabRefusal(runTab(run, await member(grant, message.targetId))) : runDestinationRefusal({ grant: { origins: run.sites }, stepsOnly: grant.stepsOnly, read: grant.read ?? [] }, message.url || 'about:blank');
       if (refusal) throw new Error(refusal);
     } catch (error) { run.refused++; throw error; }
     const targetId = message.targetId || await createAgentTab(grant, message.url || 'about:blank');
@@ -1478,6 +1480,9 @@ async function execute(message) {
   const { method, params = {}, sessionId } = message;
   if (!allowed(lease.scope, lease.targetId, lease.sessionId, method, params, sessionId)) throw new Error('Command outside browser grant');
   lastUsed.set(lease.grant.groupId, Date.now());
+  // A tab on a site at read takes only the commands that read it, whatever the step's action.
+  const readOnly = readSiteStepRefusal(lease.grant.read ?? [], lease.urls, method);
+  if (readOnly) throw new Error(readOnly);
   await constrainCommand(lease, message.targetId, method, params);
   // The step's authorization admitted it (`constrainCommand`): it counts as one of the step's commands.
   authorizations.get(lease.grant.groupId).commands++;
@@ -1706,8 +1711,8 @@ async function connect() {
           pairingCode = undefined; authenticated = true; clearTimeout(handshakeTimeout);
           // `platform`: this Chrome's OS, for Plugins → Browsers. `chromeInfo`: this extension takes the account's notices
           // about this Chrome; `controls`: it takes Stop, Close tab and Focus in Chrome from GitSpace (`stopGroup`,
-          // `closeTab`, `focusTab`).
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true }));
+          // `closeTab`, `focusTab`); `siteLevels`: it enforces a grant's sites at read.
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true }));
           return;
         } finally { authenticating = false; }
       }
@@ -1872,12 +1877,11 @@ if (sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('off
 if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
 const request = popupRequest(message);
 if (request) { void request.then(respond, error => respond({ error: error.message })); return true; }
-// A short pairing code (`pairCode`), or LEGACY pairing details pasted as JSON (`pair`: GitSpace before 5.8 showed
-// them; remove at 5.9 with the popup's JSON branch).
-if (!message.pair && typeof message.pairCode !== 'string' && message.resetIdentity !== true) return;
+// A short pairing code (`pairCode`), redeemed with GitSpace for the pairing's details.
+if (typeof message.pairCode !== 'string' && message.resetIdentity !== true) return;
 identityOperations = identityOperations.catch(() => {}).then(async () => {
   // A code that GitSpace refuses changes nothing here.
-  const details = typeof message.pairCode === 'string' ? await redeemPairingCode(message.pairCode) : message.pair;
+  const details = message.resetIdentity === true ? null : await redeemPairingCode(message.pairCode);
   // Captures are saved under this identity before it changes.
   await Promise.all([...captures.values()].map(capture => endCapture(capture, 'This Chrome’s GitSpace pairing changed', true)));
   managingIdentity = true;

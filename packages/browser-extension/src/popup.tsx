@@ -35,11 +35,9 @@ type PopupState = {
   shareTab: { tabId: number; host: string; grouped: boolean; unavailable: string | null } | null;
   shares: RuntimeBrowserShare[]; recordings: Recording[]; log: RunLogEntry[];
 };
-/** LEGACY: pairing details pasted as JSON, as GitSpace showed them before short pairing codes; remove at 5.9. */
-type Pairing = { code: string; pairingId: string; generation: number; expiresAt: string; trust: { algorithm: 'Ed25519'; accountId: string; publicKey: string } };
 type PopupRequest = { popupState: true } | { setEnabled: { enabled: boolean; minutes?: number } } | { stopGroup: string } | { focusGroup: string }
   | { ungroupTab: number } | { startCapture: number } | { stopCapture: string } | { shareCreate: { tabId: number; comment: boolean; expiresInMinutes: number } }
-  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { pair: Pairing } | { resetIdentity: true };
+  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { resetIdentity: true };
 /** The service worker answers the popup's next state, `ok` for pairing and reset, or why it refused. */
 type Reply = PopupState | { ok: true } | { error: string };
 declare const chrome: { runtime: { sendMessage(message: PopupRequest): Promise<Reply> } };
@@ -58,14 +56,6 @@ async function request(message: PopupRequest): Promise<PopupState | null> {
   if ('error' in reply) throw new Error(reply.error);
   return 'ok' in reply ? null : reply;
 }
-/** LEGACY (remove at 5.9): pairing details pasted as JSON, as GitSpace showed them before short codes, still valid. */
-function isPairing(value: unknown): value is Pairing {
-  if (typeof value !== 'object' || value === null || !('code' in value) || !('pairingId' in value) || !('generation' in value) || !('expiresAt' in value) || !('trust' in value)) return false;
-  const { code, pairingId, generation, expiresAt, trust } = value;
-  return typeof code === 'string' && code !== '' && typeof pairingId === 'string' && pairingId !== '' && Number.isSafeInteger(generation) && typeof expiresAt === 'string' && Date.parse(expiresAt) > Date.now()
-    && typeof trust === 'object' && trust !== null && 'algorithm' in trust && trust.algorithm === 'Ed25519' && 'accountId' in trust && typeof trust.accountId === 'string' && trust.accountId !== '' && 'publicKey' in trust && typeof trust.publicKey === 'string' && trust.publicKey !== '';
-}
-
 /** "A", "A and B", "A, B and C". */
 function listed(names: readonly string[]): string { return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`; }
 /** How long a capture has recorded, as m:ss. */
@@ -323,15 +313,7 @@ function Popup() {
     try { await request(message); setState(await request({ popupState: true })); setMessage(success); return true; }
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)); return false; }
   };
-  const pair = (text: string) => {
-    const confirm = 'Compare the fingerprint above with the one GitSpace shows, then confirm it there before agents can use this Chrome.';
-    if (!text.trim().startsWith('{')) return identity({ pairCode: text }, confirm);
-    // LEGACY (remove at 5.9): pairing details pasted as JSON.
-    let value: unknown = null;
-    try { value = JSON.parse(text); } catch {}
-    if (!isPairing(value)) { setMessage('Get a new pairing code from GitSpace: Plugins → Browsers → Pair a Chrome'); return Promise.resolve(false); }
-    return identity({ pair: value }, confirm);
-  };
+  const pair = (text: string) => identity({ pairCode: text }, 'Compare the fingerprint above with the one GitSpace shows, then confirm it there before agents can use this Chrome.');
   if (!state) return <div className="px-4 py-3 text-caption text-muted-foreground">{message}</div>;
   return <div className="flex flex-col bg-surface-1 text-left" inert={busy}>
     <header className="flex items-center gap-2.5 border-b border-border px-4 py-3">

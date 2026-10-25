@@ -9,6 +9,7 @@ import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowse
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
 import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
+import type { BrowserSiteLevel } from '@gitspace/protocol-environment';
 import { BROWSER_EXTENSION_PROTOCOL, RuntimeAccountBrowserGroupRowSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserConnectedTabSchema, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPageCommentViewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserShareSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPageComment, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import { UserProjectIndexDO } from '../src/project-authority.js';
 import type { UserRelayDO } from '../src/index.js';
@@ -35,7 +36,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   harnesses.push(harness);
   const root = await harness.root(BACKGROUND_CONTEXT);
   /** `revision`: the commit the approved sites were read at; `relayContent`: what the relay answers a step instead of `{ targetId }`. */
-  const state: { root: boolean; projectApproved: boolean; defaultMachineId: string | null; origins: string[]; stepsOnly: string[]; revision: string | null; relayContent: RuntimeToolResult['content'] | null; status: RuntimeBrowserStatus; unapproved: RuntimeProjectBrowserSettings['browsers']; machineFailure?: string } = { root: true, projectApproved: true, defaultMachineId: null, origins: ['example.com', 'other.test'], stepsOnly: [], revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8', relayContent: null, status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }), unapproved: [] };
+  const state: { root: boolean; projectApproved: boolean; defaultMachineId: string | null; origins: string[]; levels: Record<string, BrowserSiteLevel>; revision: string | null; relayContent: RuntimeToolResult['content'] | null; status: RuntimeBrowserStatus; unapproved: RuntimeProjectBrowserSettings['browsers']; machineFailure?: string } = { root: true, projectApproved: true, defaultMachineId: null, origins: ['example.com', 'other.test'], levels: {}, revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8', relayContent: null, status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }), unapproved: [] };
   const dispatches: Array<RuntimeToolDispatch | RuntimeAccountBrowserAuthorization> = [];
   const pairing = { kind: 'account-relay' as const, accountId: 'account', pairingId: crypto.randomUUID(), generation: 1, approvalId: crypto.randomUUID() };
   const forgottenPairings = new Set<string>();
@@ -119,7 +120,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
     if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
-  }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly, revision: state.revision }), groupName: async () => 'Workspace', drive: () => drive,
+  }, approvedSites: async () => ({ sites: state.origins.map(pattern => ({ pattern, level: state.levels[pattern] ?? 'full' })), revision: state.revision }), groupName: async () => 'Workspace', drive: () => drive,
   async fromMachine(move) { moved.push(move); await drive.write(move.path, move.mediaType, machineFiles.get(move.machinePath) ?? new Uint8Array()); } });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
   return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls, controlCalls, closedCloudTabs };
@@ -201,26 +202,54 @@ test('scripts on either browser run in the workspace’s browser session, with a
   const pinned = { ...cloud, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'headless', on: 'machine', script: 'return 1;' }), requestId: 'pinned-script', attemptId: 'pinned-script' };
   await expect(f.authority.prepare(pinned)).rejects.toThrow('remove "on"');
 });
-test('a steps-only site is signed into the group grant, and a script naming it or an unapproved site is refused before signing', async () => {
+test('a site at interact is signed into the grant’s stepsOnly, a script naming it or an unapproved site is refused before signing, and one at full takes scripts', async () => {
   const f = await fixture();
-  f.state.stepsOnly = ['other.test'];
+  f.state.levels = { 'other.test': 'interact' };
   await f.authority.prepare(f.input); await f.authority.execute(f.input);
   const step = f.dispatches[0];
-  expect(step && 'body' in step && step.body.command.type === 'execute' && step.body.command.grant.body.stepsOnly).toEqual(['other.test']);
+  expect(step && 'body' in step && step.body.command.type === 'execute' && [step.body.command.grant.body.stepsOnly, step.body.command.grant.body.read]).toEqual([['other.test'], undefined]);
   const script = (sites: string[], attemptId: string) => ({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'run', source: 'relay', script: 'return 1;', sites }), requestId: attemptId, attemptId });
   await expect(f.authority.prepare(script(['other.test'], 'steps-only'))).rejects.toThrow('other.test allows single steps only, not scripts');
   await expect(f.authority.prepare(script(['unknown.test'], 'unapproved'))).rejects.toThrow('unknown.test is not an approved site of this workspace');
   expect(f.sessions).toEqual([]);
-  // Set to single steps after preparing: the script is refused before its authority is signed.
-  f.state.stepsOnly = [];
+  // Set to interact after preparing: the script is refused before its authority is signed.
+  f.state.levels = {};
   await f.authority.prepare(script(['other.test'], 'narrowed'));
-  f.state.stepsOnly = ['other.test'];
+  f.state.levels = { 'other.test': 'interact' };
   await expect(f.authority.execute(script(['other.test'], 'narrowed'))).rejects.toThrow('allows single steps only');
   expect(f.sessions).toEqual([]);
   const allowed = script(['example.com'], 'allowed');
   await f.authority.prepare(allowed); await f.authority.execute(allowed);
   const command = f.sessions[0]?.authorization.body.command;
   expect(command?.type === 'execute' && [command.args, command.grant.body.stepsOnly]).toEqual([{ action: 'run', source: 'relay', script: 'return 1;', sites: ['example.com'] }, ['other.test']]);
+});
+test('a site at read takes open, navigate, observe and screenshot, and is refused clicks, typing, page JavaScript and scripts before anything is signed', async () => {
+  const f = await fixture();
+  f.state.origins = ['example.com', 'github.com']; f.state.levels = { 'github.com': 'read' };
+  const READ_ONLY = 'github.com is read-only for agents in this workspace: you may open, observe and screenshot it, not click or type';
+  const call = (args: Record<string, unknown>, attemptId: string) => ({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ source: 'relay', ...args }), requestId: attemptId, attemptId });
+  const run = async (args: Record<string, unknown>, attemptId: string) => { const input = call(args, attemptId); const card = await f.authority.prepare(input); await f.authority.execute(input); return card; };
+  const { groupId } = await run({ action: 'open', url: 'https://github.com/inkibra' }, 'open');
+  await run({ action: 'navigate', targetId: 'gh', url: 'https://github.com/inkibra/gitspace/pulls' }, 'navigate');
+  await run({ action: 'observe', targetId: 'gh' }, 'observe');
+  await run({ action: 'screenshot', targetId: 'gh' }, 'screenshot');
+  const grants = f.dispatches.flatMap(dispatch => 'body' in dispatch && dispatch.body.command.type === 'execute' ? [dispatch.body.command.grant.body] : []);
+  expect(grants.map(grant => [grant.stepsOnly, grant.read])).toEqual(Array(4).fill([[], ['github.com']]));
+  // The Chrome last reported the agent's tab on github.com, and another on example.com, at full.
+  const at = new Date().toISOString();
+  const report = (url: string) => f.storage.put(`runtime.browser.chrome:${groupId}`, { pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId, groupName: 'Workspace', origins: ['example.com', 'github.com'], expiresAt: at, reportedAt: at, tabs: [{ targetId: 'gh', url, title: 'GitHub', addedBy: 'agent', site: null, usable: true }, { targetId: 'ex', url: 'https://example.com/', title: 'Example', addedBy: 'agent', site: null, usable: true }] });
+  await report('https://github.com/inkibra/gitspace/pulls');
+  await expect(f.authority.prepare(call({ action: 'act', targetId: 'gh', ref: '0:12', operation: 'click' }, 'click'))).rejects.toThrow(READ_ONLY);
+  await expect(f.authority.prepare(call({ action: 'act', targetId: 'gh', ref: '0:12', operation: 'fill', value: 'LGTM' }, 'fill'))).rejects.toThrow(READ_ONLY);
+  await expect(f.authority.prepare(call({ action: 'evaluate', targetId: 'gh', expression: 'document.title' }, 'evaluate'))).rejects.toThrow(READ_ONLY);
+  await expect(f.authority.prepare(call({ action: 'run', script: 'return 1;', sites: ['github.com'] }, 'script'))).rejects.toThrow(READ_ONLY);
+  expect(f.dispatches).toHaveLength(4);
+  expect(f.sessions).toEqual([]);
+  // A tab at full takes clicks; the tab on github.com takes them once it goes to example.com.
+  await run({ action: 'act', targetId: 'ex', ref: '0:12', operation: 'click' }, 'click-full');
+  await report('https://example.com/next');
+  await run({ action: 'act', targetId: 'gh', ref: '0:12', operation: 'click' }, 'click-moved');
+  expect(f.dispatches).toHaveLength(6);
 });
 test('a script’s result on either browser reaches the model marked as page data', async () => {
   const f = await fixture();
@@ -342,7 +371,7 @@ test('the Browser tab sees the approved sites and their commit, the cloud browse
   await f.storage.put(`runtime.browser.chrome:${relay.groupId}`, { pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId: relay.groupId, groupName: 'Workspace', origins: ['example.com'], expiresAt: at, reportedAt: at, running: 2, color: 'blue', agents: [agent], tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', site: 'news.example', usable: true }] });
   const overview = async () => RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' }));
   expect(await overview()).toEqual({
-    sites: { origins: ['example.com', 'other.test'], stepsOnly: [], revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8' },
+    sites: { origins: [{ pattern: 'example.com', level: 'full' }, { pattern: 'other.test', level: 'full' }], revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8' },
     cloud: { groupId: cloud.groupId, running: 1, tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true }] },
     machines: [],
     chromes: [

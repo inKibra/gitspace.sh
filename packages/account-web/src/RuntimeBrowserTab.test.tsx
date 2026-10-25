@@ -79,7 +79,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   vi.clearAllMocks();
-  overview = { sites: { origins: ['https://app.example.com', 'https://bank.example.com'], stepsOnly: ['https://bank.example.com'], revision: null }, cloud: { groupId: null, running: 0, tabs: [] }, machines: [], chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }], runs: [] };
+  overview = { sites: { origins: [{ pattern: 'httpbin.org', level: 'interact' }, { pattern: 'github.com', level: 'read' }, { pattern: 'localhost', level: 'full' }], revision: null }, cloud: { groupId: null, running: 0, tabs: [] }, machines: [], chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }], runs: [] };
   previews = {};
   captures = [];
   shares = [];
@@ -118,11 +118,10 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-it('shows approved sites with their level', async () => {
+it('shows each approved site as host · level', async () => {
   await render();
-  const sites = container.querySelector('[aria-label="Approved sites"]')!;
-  expect(sites.textContent).toContain('https://app.example.com· scripts');
-  expect(sites.textContent).toContain('https://bank.example.com· single steps');
+  const sites = [...container.querySelectorAll('[aria-label="Approved sites"] li')].map(chip => chip.textContent);
+  expect(sites).toEqual(['httpbin.org· interact', 'github.com· read', 'localhost· full']);
 });
 
 it('offers to approve a confirmed Chrome when none is approved here, making it the default', async () => {

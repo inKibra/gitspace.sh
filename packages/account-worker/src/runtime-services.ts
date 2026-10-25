@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
-import { LifecycleMutationSchema, approvedBrowserOrigins, projectEnvironmentState, stepsOnlyBrowserOrigins, type LifecycleRun } from '@gitspace/protocol-environment';
+import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
 import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
@@ -9,6 +9,7 @@ import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEnt
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
+import { confirmMachinePresence } from './machine-notices.js';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { workspaceDrive } from './workspace-drive.js';
 import { createCloudRuntimeMcp } from './runtime-mcp.js';
@@ -242,7 +243,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedSites: async () => {
       const { state, commit } = await options.environment.refreshBrowserOrigins(identity);
-      return { origins: approvedBrowserOrigins(state), stepsOnly: stepsOnlyBrowserOrigins(state), revision: commit };
+      return { sites: approvedBrowserSites(state), revision: commit };
     },
     groupName: async () => {
       const project = await authority().getProject();
@@ -629,10 +630,14 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           options.runtime().publish();
           return completed(input, detached);
         }
-        // Offline attachments are not machines an agent can use.
+        // Offline attachments are not machines an agent can use; a machine whose heartbeat lapsed is reported offline first.
+        await confirmMachinePresence(env, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)).map(item => item.machineId));
         return completed(input, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)));
       }
-      if (input.tool === 'workspace_status') return completed(input, await options.runtime().status());
+      if (input.tool === 'workspace_status') {
+        await confirmMachinePresence(env, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)).map(item => item.machineId));
+        return completed(input, await options.runtime().status());
+      }
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
       if (input.tool === 'sync') return sync(input);

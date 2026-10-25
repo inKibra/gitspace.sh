@@ -192,7 +192,7 @@ it('exposes interrupted provisioning as retryable after reconstruction without l
       const before = state.storage.sql.exec<{ enrollment_json: string }>('SELECT enrollment_json FROM sandbox_enrollments WHERE machine_id=?', machine.id).one().enrollment_json;
       const restarted = new FleetCatalogDO(state, env);
       await state.blockConcurrencyWhile(async () => {});
-      expect(restarted.getMachine(machine.id)).toMatchObject({ state: 'error', operationId: null });
+      expect(await restarted.getMachine(machine.id)).toMatchObject({ state: 'error', operationId: null });
       expect(state.storage.sql.exec<{ enrollment_json: string }>('SELECT enrollment_json FROM sandbox_enrollments WHERE machine_id=?', machine.id).one().enrollment_json === before).toBe(true);
       f.hold.prepare = null;
       expect(restarted.resumeSandboxProvisioning(f.userId, machine.id)).toMatchObject({ state: 'provisioning' });

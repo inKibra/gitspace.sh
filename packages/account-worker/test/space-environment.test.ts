@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
-import { EnvironmentError, approvedBrowserOrigins, browserOriginHash, stepsOnlyBrowserOrigins, type LifecycleActor, type LifecycleMutation, type LifecycleState } from '@gitspace/protocol-environment';
+import { EnvironmentError, approvedBrowserOrigins, approvedBrowserSites, browserOriginHash, type LifecycleActor, type LifecycleMutation, type LifecycleState } from '@gitspace/protocol-environment';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { SpaceEnvironmentStore } from '../src/space-environment.js';
 import { LiveChanges } from '../src/live-changes.js';
@@ -121,14 +121,13 @@ describe('workspace environment', () => {
     const bank = { pattern: 'bank.example', hash: await browserOriginHash('bank.example') };
     await p.setOrigins('project', [bank]);
     await p.setOrigins('workspace', [bank]);
-    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: bank.hash, approved: true, level: 'steps' }, human);
-    expect(stepsOnlyBrowserOrigins(await p.get('workspace'))).toEqual(['bank.example']);
-    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: bank.hash, approved: true, level: 'scripts' }, human);
-    expect(approvedBrowserOrigins(await p.get('workspace'))).toEqual(['bank.example']);
-    expect(stepsOnlyBrowserOrigins(await p.get('workspace'))).toEqual([]);
-    await p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: bank.hash, approved: true, level: 'steps' }, human);
-    expect(stepsOnlyBrowserOrigins(await p.get('workspace'))).toEqual(['bank.example']);
-    expect(stepsOnlyBrowserOrigins(await p.get('project'))).toEqual([]);
+    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: bank.hash, approved: true, level: 'read' }, human);
+    expect(approvedBrowserSites(await p.get('workspace'))).toEqual([{ pattern: 'bank.example', level: 'read' }]);
+    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: bank.hash, approved: true, level: 'full' }, human);
+    expect(approvedBrowserSites(await p.get('workspace'))).toEqual([{ pattern: 'bank.example', level: 'full' }]);
+    await p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: bank.hash, approved: true, level: 'interact' }, human);
+    expect(approvedBrowserSites(await p.get('workspace'))).toEqual([{ pattern: 'bank.example', level: 'interact' }]);
+    expect(approvedBrowserSites(await p.get('project'))).toEqual([{ pattern: 'bank.example', level: 'full' }]);
   });
 
   it('requires new workspace approval after removing and re-adding an origin even with automatic policy', async () => {

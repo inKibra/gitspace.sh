@@ -872,7 +872,7 @@ export const deleteWorkspaceEnvironmentValueContract = gitspaceRpc
 
 export const approveWorkspaceEnvironmentExecutionContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, scope: wire.enum(['project', 'workspace']), executionHash: wire.string, level: wire.optional(wire.enum(['scripts', 'steps'])) }))
+  .input(wire.object({ spaceId: wire.string, scope: wire.enum(['project', 'workspace']), executionHash: wire.string, level: wire.optional(wire.enum(['read', 'interact', 'full'])) }))
   .output(WorkspaceEnvironmentViewCodec)
   .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();

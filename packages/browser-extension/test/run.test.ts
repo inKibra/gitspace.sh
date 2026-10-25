@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'bun:test';
-import { relayRunCommand, relayRunEvent, runSites, type RelayRunTab, type TabUrls } from '../src/commands.js';
+import { readSiteStepRefusal, relayRunCommand, relayRunEvent, runSites, type RelayRunTab, type TabUrls } from '../src/commands.js';
 
-const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you', account: 'https://account.gitspace.test' };
+const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], read: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you', account: 'https://account.gitspace.test' };
+const READ_ONLY = (site: string) => `${site} is read-only for agents in this workspace: you may open, observe and screenshot it, not click or type`;
 
 describe('script commands on your Chrome', () => {
   it.each([
@@ -83,9 +84,10 @@ describe('script commands on your Chrome', () => {
 });
 
 describe('the sites of one script', () => {
-  // admin.docs.example allows single steps only, though *.docs.example, which allows scripts, covers it too.
-  const grant = { origins: ['app.example', '*.docs.example', 'bank.example', 'admin.docs.example'], stepsOnly: ['bank.example', 'admin.docs.example'] };
-  const scripted = (urls: TabUrls, sites?: string[]): RelayRunTab => ({ ...tab, grant: { origins: runSites(grant, sites) }, stepsOnly: grant.stepsOnly, urls });
+  // admin.docs.example allows single steps only and wiki.docs.example only looking, though *.docs.example, which allows
+  // scripts, covers both.
+  const grant = { origins: ['app.example', '*.docs.example', 'bank.example', 'admin.docs.example', 'news.example', 'wiki.docs.example'], stepsOnly: ['bank.example', 'admin.docs.example'], read: ['news.example', 'wiki.docs.example'] };
+  const scripted = (urls: TabUrls, sites?: string[]): RelayRunTab => ({ ...tab, grant: { origins: runSites(grant, sites) }, stepsOnly: grant.stepsOnly, read: grant.read, urls });
 
   it('are every site of the grant that allows scripts, or exactly those the script names', () => {
     expect(runSites(grant, undefined)).toEqual(['app.example', '*.docs.example']);
@@ -95,6 +97,18 @@ describe('the sites of one script', () => {
   it('never include a site the grant lacks or one that allows single steps only', () => {
     expect(() => runSites(grant, ['app.example', 'mail.example'])).toThrow('mail.example is not a site of this workspace group');
     expect(() => runSites(grant, ['admin.docs.example'])).toThrow('admin.docs.example allows single steps only, not scripts');
+    expect(() => runSites(grant, ['news.example'])).toThrow(READ_ONLY('news.example'));
+  });
+
+  it('never drive a tab on a site at read, even under a pattern the script may use', () => {
+    // The tab went from app.example to the read site while the script ran on app.example and *.docs.example.
+    for (const urls of [{ tabUrl: 'https://news.example/' }, { tabUrl: 'https://wiki.docs.example/page' }, { tabUrl: 'https://app.example/', pendingUrl: 'https://news.example/' }]) {
+      const site = new URL(urls.pendingUrl ?? urls.tabUrl).hostname;
+      for (const method of ['Input.dispatchMouseEvent', 'Input.insertText', 'Runtime.evaluate', 'DOM.setAttributeValue']) expect(relayRunCommand(method, { targetId: 'target' }, scripted(urls))).toEqual({ refused: READ_ONLY(site) });
+    }
+    expect(relayRunCommand('Page.navigate', { url: 'https://wiki.docs.example/' }, scripted({ tabUrl: 'https://app.example/' }))).toEqual({ refused: READ_ONLY('wiki.docs.example') });
+    // Back on a site at full, the same tab takes the script's commands again.
+    expect(relayRunCommand('Input.dispatchMouseEvent', { type: 'mousePressed' }, scripted({ tabUrl: 'https://help.docs.example/' }))).toEqual({ send: { type: 'mousePressed' } });
   });
 
   it.each([
@@ -119,6 +133,19 @@ describe('the sites of one script', () => {
     expect(relayRunCommand('Runtime.evaluate', { expression: '1' }, onApp)).toEqual({ send: { expression: '1' } });
     expect(relayRunCommand('Page.navigate', { url: 'https://help.docs.example/' }, onApp)).toEqual({ refused: 'https://help.docs.example/ is outside the sites of this script' });
     expect(relayRunCommand('Page.navigate', { url: 'https://app.example/next' }, onApp)).toHaveProperty('send');
+  });
+});
+
+describe('a single step on a site at read', () => {
+  it.each(['Accessibility.getFullAXTree', 'Page.captureScreenshot', 'GitSpace.screenshotPrepare', 'Page.navigate', 'DOM.describeNode', 'Target.closeTarget'])('may send %s, which only reads the page', method => {
+    expect(readSiteStepRefusal(['news.example'], { tabUrl: 'https://news.example/' }, method)).toBeNull();
+  });
+
+  it.each(['Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'DOM.focus', 'Runtime.evaluate'])('may not send %s, which can change the page', method => {
+    expect(readSiteStepRefusal(['news.example'], { tabUrl: 'https://news.example/' }, method)).toBe(READ_ONLY('news.example'));
+    expect(readSiteStepRefusal(['news.example'], { tabUrl: 'https://app.example/', pendingUrl: 'https://news.example/' }, method)).toBe(READ_ONLY('news.example'));
+    // A tab that left the read site takes the level of the site it is on.
+    expect(readSiteStepRefusal(['news.example'], { tabUrl: 'https://app.example/' }, method)).toBeNull();
   });
 });
 

@@ -14,7 +14,7 @@ function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socke
 async function connect(relay: HostedBrowserRelay, ip?: string) { const response = await relay.fetch(request(ip)); expect(response.status).toBe(101); if (!response.webSocket) throw new Error('Missing Worker WebSocket'); const socket = response.webSocket; const challenge = frame(socket); socket.accept(); sockets.push(socket); return { socket, challenge: z.object({ serverNonce: z.string() }).parse(await challenge) }; }
 type Connection = { socket: WebSocket; challenge: { serverNonce: string } };
 type Identity = { key: CryptoKeyPair; publicKey: string };
-async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Chrome/141.0.7390.54', platform: 'Linux', protocol: BROWSER_EXTENSION_PROTOCOL })); await ready; }
+async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code, hello: object = {}) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Chrome/141.0.7390.54', platform: 'Linux', protocol: BROWSER_EXTENSION_PROTOCOL, ...hello })); await ready; }
 async function fixture(run: (relay: HostedBrowserRelay, state: DurableObjectState) => Promise<void>) { await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => { try { await run(hostedBrowserRelay(instance), state); } finally { for (const socket of sockets.splice(0)) socket.close(); } }); }
 const trust = { algorithm: 'Ed25519' as const, accountId: env.ACCOUNT_ID, publicKey: 'AA==' };
 
@@ -78,6 +78,39 @@ test('confirmed Chromes execute independently and rejecting candidates or forget
   expect(JSON.stringify(await second.execute())).toContain('Chrome B');
   expect(first.operations.filter(operation => operation === 'tabs')).toHaveLength(1);
   expect(second.operations.filter(operation => operation === 'tabs')).toHaveLength(3);
+}));
+test('a grant with a site at read reaches only an extension whose hello says it enforces read; an older one is told to update and gets nothing', () => fixture(async relay => {
+  const root = await keys(), workspace = await keys();
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId: 'project', workspaceId: 'workspace', publicKey: workspace.publicKey, issuedAt: new Date().toISOString(), expiresAt }, root.key.privateKey);
+  const chrome = async (ip: string, hello: object) => {
+    const pairing = await relay.pair({ ...trust, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+    const connection = await connect(relay, ip);
+    await prove(connection, await keys(), pairing, pairing.code, hello);
+    const identity = (await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId);
+    if (!identity || identity.state !== 'pending-confirmation') throw new Error('Expected unconfirmed identity');
+    await relay.confirm(pairing.pairingId, identity.pairedKeyFingerprint);
+    const settings = await relay.projectSettings('project');
+    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId }) => ({ pairingId })), { pairingId: pairing.pairingId }] });
+    const placement = await relay.placement('project', pairing.pairingId);
+    const authorized: unknown[] = [];
+    connection.socket.addEventListener('message', event => { const message = z.object({ id: z.number(), operation: z.string(), authorization: z.unknown().optional() }).parse(JSON.parse(String(event.data))); if (message.operation === 'authorize') authorized.push(message.authorization); connection.socket.send(JSON.stringify({ id: message.id, result: message.operation === 'tabs' ? [] : {} })); });
+    const execute = async (read?: string[]) => {
+      const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', stepsOnly: [], ...(read ? { read } : {}), origins: ['example.com', 'github.com'], expiresAt }, workspace.key.privateKey, authority);
+      const attemptId = crypto.randomUUID();
+      return relay.execute(await signRuntimeAccountBrowserAuthorization({ scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt: new Date().toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority));
+    };
+    return { authorized, execute };
+  };
+  // An extension before 5.9 says no `siteLevels` in its hello.
+  const old = await chrome('192.0.2.30', {}), current = await chrome('192.0.2.31', { siteLevels: true });
+  await expect(old.execute(['github.com'])).rejects.toThrow('Update the GitSpace extension in this Chrome to 5.9 or later: this version cannot keep agents from clicking or typing on the sites this workspace approved read-only: github.com');
+  expect(old.authorized).toEqual([]);
+  // Without a site at read it gets the grant shape it knows.
+  await old.execute();
+  expect(JSON.stringify(old.authorized)).not.toContain('"read"');
+  await current.execute(['github.com']);
+  expect(current.authorized).toEqual([expect.objectContaining({ body: expect.objectContaining({ command: expect.objectContaining({ grant: expect.objectContaining({ body: expect.objectContaining({ read: ['github.com'] }) }) }) }) })]);
 }));
 test('a candidate past its pairing deadline is closed and frees its budget on the next admission', () => fixture(async relay => {
   await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');

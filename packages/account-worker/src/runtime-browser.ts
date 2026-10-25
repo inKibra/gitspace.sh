@@ -1,7 +1,7 @@
 import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
 import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
-import { browserOriginMatches } from '@gitspace/protocol-environment';
+import { READ_SITE_ACTIONS, browserOriginMatches, readSiteRefusal, type BrowserSiteLevel } from '@gitspace/protocol-environment';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant, RuntimeBrowserCapture, RuntimeBrowserCaptureView, RuntimeBrowserPageComment, RuntimeBrowserPageCommentView } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareSchema } from '@gitspace/protocol-runtime';
@@ -91,9 +91,9 @@ export async function retireWorkspaceBrowsers(storage: { list(options: { prefix:
   for (const key of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).keys()) await storage.delete(key);
   await relay.browserRelayRetireWorkspace(identity.projectId, identity.workspaceId);
 }
-/** `approvedSites`: the approved sites, and the commit their `.gitspace/bundle.json` was read at (null with none). */
+/** `approvedSites`: the approved sites at their levels, and the commit their `.gitspace/bundle.json` was read at (null with none). */
 export type RuntimeBrowserAuthorityOptions = {
-  storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ origins: string[]; stepsOnly: string[]; revision: string | null }>; groupName(): Promise<string>;
+  storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ sites: { pattern: string; level: BrowserSiteLevel }[]; revision: string | null }>; groupName(): Promise<string>;
   /** The workspace's drive, where captures are kept. */
   drive(): CaptureDrive;
   /** Moves a file on an attached machine (`machinePath`, inside its /tmp) to the workspace's drive at `path`. */
@@ -174,8 +174,9 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const conversation = await options.runtime().browserConversation(input.conversationId);
     const args = RuntimeBrowserArgumentsSchema.parse(input.args);
     if (args.source === 'relay' && !conversation.root) throw new Error('Logged-in Chrome relay is main-agent-only. Subagents must use source:"headless".');
-    const approved = args.source === 'relay' ? await options.approvedSites() : { origins: [], stepsOnly: [] };
-    const sites = { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() };
+    const approved = args.source === 'relay' ? (await options.approvedSites()).sites : [];
+    // As a grant carries them: `stepsOnly` the sites at interact, `read` those at read.
+    const sites = { origins: [...new Set(approved.map(site => site.pattern))].sort(), stepsOnly: approved.filter(site => site.level === 'interact').map(site => site.pattern).sort(), read: approved.filter(site => site.level === 'read').map(site => site.pattern).sort() };
     if (args.source === 'relay') {
       const url = args.action === 'navigate' || args.action === 'open' ? args.url : undefined;
       // Before any site is approved the workspace still gets its group: an empty agent tab, and tabs to list it, so the
@@ -185,7 +186,15 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       // A script's sites are checked before anything is signed; your Chrome checks them again.
       for (const site of args.action === 'run' ? args.sites ?? [] : []) {
         if (!sites.origins.includes(site)) throw new Error(`${site} is not an approved site of this workspace. Name sites exactly as approved: ${sites.origins.join(', ')}.`);
+        if (sites.read.includes(site)) throw new Error(readSiteRefusal(site));
         if (sites.stepsOnly.includes(site)) throw new Error(`${site} allows single steps only, not scripts. Use single browser steps on it.`);
+      }
+      // A step that may change the page (`READ_SITE_ACTIONS`) is refused on a tab its Chrome last reported on a read
+      // site; the extension checks the tab again when the step runs. A script's tabs are the extension's to check.
+      if (!READ_SITE_ACTIONS[args.action] && 'targetId' in args && sites.read.length) {
+        const tab = (await workspaceBrowsersDocument(storage)).chrome.flatMap(group => group.tabs).find(item => item.targetId === args.targetId);
+        const host = tab ? URL.parse(tab.url)?.hostname : undefined;
+        if (host && sites.read.some(pattern => browserOriginMatches(pattern, host))) throw new Error(readSiteRefusal(host));
       }
     }
     return { conversation, args, sites };
@@ -368,7 +377,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       }
     }
     const runs = (await recentBrowserRuns(storage)).map(({ where, ...run }) => ({ ...run, where: where.kind === 'chrome' ? { kind: where.kind, name: settings?.browsers.find(browser => browser.pairingId === where.pairingId)?.name ?? null } : where }));
-    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort(), revision: approved.revision }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, machines, chromes, runs });
+    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: approved.sites.toSorted((a, b) => a.pattern < b.pattern ? -1 : a.pattern > b.pattern ? 1 : 0), revision: approved.revision }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, machines, chromes, runs });
   }
   /** One tab's preview on a machine's headless browser, captured there. A machine that is gone or cannot answer gets
    * no image and the reason, so the tile says why. */

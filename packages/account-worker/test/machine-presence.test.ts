@@ -13,19 +13,23 @@ import {
   credentialProtocolBase64,
   signCredentialAuthorityGrant,
 } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachInputSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import worker, { SpaceAuthorityDO, UserRelayDO } from '../src/index.js';
+import { createRuntimeQaServices } from '../src/runtime-services.js';
 
 const rootKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
 const machineId = 'darktop';
 const projectId = 'presence-project';
-const grant = signCredentialAuthorityGrant({
-  version: 1, userId: env.ACCOUNT_ID, machineId, generation: 1, capabilities: ['storage.access', 'space.control'],
-  signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey)),
-  exchangePublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey)),
-}, rootKey);
+function grantFor(id: string) {
+  return signCredentialAuthorityGrant({
+    version: 1, userId: env.ACCOUNT_ID, machineId: id, generation: 1, capabilities: ['storage.access', 'space.control'],
+    signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey)),
+    exchangePublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey)),
+  }, rootKey);
+}
+const grant = grantFor(machineId);
 const repository = { id: 'presence-repo', name: 'presence-repo', description: null, defaultBranch: 'main', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', lastPushAt: null, source: null, readOnly: false, remote: 'https://artifacts.test/presence.git' };
 const fleet = () => env.FLEET_CATALOG.getByName(env.ACCOUNT_ID);
 const space = (workspaceId: string) => env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`);
@@ -67,12 +71,12 @@ async function attachedWorkspace(workspaceId: string, indexed = true) {
   return identity;
 }
 
-async function connect(query: Record<string, string> = { heartbeat: RELAY_HEARTBEAT_MODE, notices: RELAY_NOTICE_MODE }): Promise<WebSocket> {
-  const url = new URL(`https://relay.test/ws?${new URLSearchParams({ role: 'machine', id: machineId, ...query })}`);
+async function connect(query: Record<string, string> = { heartbeat: RELAY_HEARTBEAT_MODE, notices: RELAY_NOTICE_MODE }, id = machineId): Promise<WebSocket> {
+  const url = new URL(`https://relay.test/ws?${new URLSearchParams({ role: 'machine', id, ...query })}`);
   const response = await exports.default.fetch(new Request(url, { headers: {
     upgrade: 'websocket',
     authorization: createRelayAuthorization(machineKey, `${url.pathname}${url.search}`),
-    'x-gitspace-machine-grant': btoa(JSON.stringify(grant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''),
+    'x-gitspace-machine-grant': btoa(JSON.stringify(id === machineId ? grant : grantFor(id))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''),
   } }));
   expect(response.status).toBe(101);
   if (!response.webSocket) throw new Error('Expected relay WebSocket');
@@ -87,6 +91,17 @@ async function eventually(check: () => Promise<boolean>): Promise<void> {
     await new Promise<void>(resolve => setTimeout(resolve, 20));
   }
   throw new Error('Condition was not reached');
+}
+
+const relayAlarm = () => runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), (_instance, state) => state.storage.getAlarm());
+
+/** The relay after its first start's presence check (one heartbeat lease after it starts) has run. */
+async function settledRelay(): Promise<void> {
+  const relay = env.RELAY.getByName(env.RELAY_NAME);
+  await runInDurableObject(relay, () => {});
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + RELAY_HEARTBEAT_LEASE_MS + 1);
+  try { await runDurableObjectAlarm(relay); } finally { clock.mockRestore(); }
+  expect(await relayAlarm()).toBeNull();
 }
 
 const attachmentOnline = async (workspaceId: string) => (await space(workspaceId).runtimeAttachmentRecords({ projectId, workspaceId })).find(item => item.machineId === machineId)?.online;
@@ -135,7 +150,7 @@ describe('relay presence', () => {
     expect(await attachmentOnline(workspace.workspaceId)).toBe(true);
   });
 
-  it('answers the fixed ping without waking the relay, and the answer extends the heartbeat lease', async () => {
+  it('a machine whose pings stop reads offline once its heartbeat lease has passed, with no timer watching it', async () => {
     const workspace = await attachedWorkspace('presence-ping');
     const socket = await connect();
     await eventually(async () => await attachmentOnline(workspace.workspaceId) === true);
@@ -147,16 +162,77 @@ describe('relay presence', () => {
     socket.send(RELAY_PING_MESSAGE);
     expect(await pong).toBe(RELAY_PONG_MESSAGE);
     const clock = vi.spyOn(Date, 'now');
-    // Past the lease granted at connection, inside the one the answered ping renewed.
-    clock.mockReturnValue(pingedAt + RELAY_HEARTBEAT_LEASE_MS - 100);
-    await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME));
-    expect(socket.readyState).toBe(WebSocket.OPEN);
-    const closed = new Promise<CloseEvent>(resolve => socket.addEventListener('close', resolve, { once: true }));
-    clock.mockReturnValue(pingedAt + RELAY_HEARTBEAT_LEASE_MS + 1_000);
-    await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME));
-    expect((await closed).code).toBe(1011);
-    clock.mockRestore();
+    try {
+      // Past the lease granted at connection, inside the one the answered ping renewed.
+      clock.mockReturnValue(pingedAt + RELAY_HEARTBEAT_LEASE_MS - 100);
+      expect(await machineState()).toBe('online');
+      expect(socket.readyState).toBe(WebSocket.OPEN);
+      const closed = new Promise<CloseEvent>(resolve => socket.addEventListener('close', resolve, { once: true }));
+      clock.mockReturnValue(pingedAt + RELAY_HEARTBEAT_LEASE_MS + 1_000);
+      // The read itself finds the lapsed lease: no alarm runs.
+      expect(await machineState()).toBe('offline');
+      expect(await attachmentOnline(workspace.workspaceId)).toBe(false);
+      expect((await closed).code).toBe(1011);
+    } finally { clock.mockRestore(); }
+  });
+
+  it('idle machines that keep pinging hold no relay wake', async () => {
+    const ids = ['idle-a', 'idle-b', 'idle-c'];
+    for (const id of ids) await env.CREDENTIALS.getByName(env.ACCOUNT_ID).registerDevice(grantFor(id));
+    await settledRelay();
+    const sockets = await Promise.all(ids.map(id => connect(undefined, id)));
+    for (const socket of sockets) {
+      const pong = new Promise<string>(resolve => socket.addEventListener('message', event => resolve(String(event.data)), { once: true }));
+      socket.send(RELAY_PING_MESSAGE);
+      expect(await pong).toBe(RELAY_PONG_MESSAGE);
+    }
+    await eventually(async () => await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), (_instance, state) => state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM machine_presence').one().count) === ids.length);
+    // No alarm is armed, so none fires however long they stay connected.
+    expect(await relayAlarm()).toBeNull();
+    expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(false);
+  });
+
+  it('a closed socket reads offline at once and leaves no wake behind', async () => {
+    await settledRelay();
+    const workspace = await attachedWorkspace('presence-close');
+    const socket = await connect();
+    await eventually(async () => await attachmentOnline(workspace.workspaceId) === true);
+    socket.close(1000, 'host stopped');
     await eventually(async () => await attachmentOnline(workspace.workspaceId) === false);
+    expect(await machineState()).toBe('offline');
+    expect(await relayAlarm()).toBeNull();
+  });
+
+  it('retries a presence report no workspace took with doubling backoff, then gives up into its QA inbox, and tries afresh on the next connection', async () => {
+    await settledRelay();
+    const workspace = await attachedWorkspace('presence-retry');
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    const retries = () => runInDurableObject(relay, (_instance, state) => state.storage.sql.exec<{ failures: number; due_at: number }>('SELECT failures, due_at FROM presence_retries').toArray());
+    const refused = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeMachinePresence').mockRejectedValue(new Error('Workspace unavailable'));
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      // Without pings the socket has no heartbeat lease, so moving the clock leaves it connected.
+      await connect({ notices: RELAY_NOTICE_MODE });
+      await eventually(async () => (await retries()).length === 1);
+      const delays: number[] = [];
+      for (let failures = 1; failures <= 7; failures++) {
+        const [retry] = await retries();
+        expect(retry?.failures).toBe(failures);
+        expect(await relayAlarm()).toBe(retry?.due_at);
+        delays.push((retry?.due_at ?? 0) - now);
+        now = retry?.due_at ?? now;
+        expect(await runDurableObjectAlarm(relay)).toBe(true);
+      }
+      expect(delays).toEqual([5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000]);
+      // The eighth failure gives up: no wake is left, and the workspace's QA inbox says so.
+      expect(await retries()).toEqual([]);
+      expect(await relayAlarm()).toBeNull();
+      expect((await createRuntimeQaServices(env, RuntimeIdentitySchema.parse(workspace)).list()).map(item => item.description)).toEqual([`GitSpace could not record that machine ${machineId} is online in this workspace after 8 tries over about 10 minutes (A workspace did not record the machine presence). It shows the old state until the machine next connects or disconnects.`]);
+    } finally { clock.mockRestore(); }
+    refused.mockRestore();
+    await connect({ notices: RELAY_NOTICE_MODE });
+    await eventually(async () => await attachmentOnline(workspace.workspaceId) === true);
   });
 });
 

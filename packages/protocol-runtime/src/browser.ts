@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { BrowserOriginPatternSchema, browserOriginMatches } from '@gitspace/protocol-environment';
+import { BrowserOriginPatternSchema, BrowserSiteLevelSchema, browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 
 const id = z.string().min(1).max(256);
@@ -40,12 +40,15 @@ export const RuntimeAccountBrowserPlacementSchema = z.discriminatedUnion('kind',
   z.strictObject({ kind: z.literal('account-relay'), accountId: id, pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), approvalId: z.string().uuid().optional() }),
 ]);
 export type RuntimeAccountBrowserPlacement = z.infer<typeof RuntimeAccountBrowserPlacementSchema>;
-/** A group grant. `stepsOnly`: the patterns of `origins` whose sites allow single steps only, never scripts; empty for
- * the cloud browser. */
-export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema, stepsOnly: z.array(BrowserOriginPatternSchema) });
+/** A group grant: each of `origins` at its site level (`browser-site-level.ts` in protocol-environment). `stepsOnly`:
+ * the patterns at `interact` (single steps, no scripts); `read`: those at `read` (looking only, no scripts), omitted
+ * when there are none, so an extension before 5.9, which verifies `stepsOnly` and knows no `read`, gets the grant shape
+ * it knows; any other pattern is at `full`. Both are empty for the cloud browser, which has no levels. The relay sends
+ * a grant with `read` only to an extension whose hello says `siteLevels`. */
+export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema, stepsOnly: z.array(BrowserOriginPatternSchema), read: z.array(BrowserOriginPatternSchema).min(1).optional() });
 export type RuntimeAccountBrowserGrant = z.infer<typeof RuntimeAccountBrowserGrantSchema>;
 /** A group grant as the relay, the browser session and the workspace store it: rows stored before site levels have no
- * `stepsOnly`, because none of their sites was steps-only. */
+ * `stepsOnly`, because none of their sites was at `interact`. */
 export const RuntimeAccountBrowserGroupRowSchema = RuntimeAccountBrowserGrantSchema.extend({ stepsOnly: RuntimeAccountBrowserGrantSchema.shape.stepsOnly.default([]) });
 export const RuntimeAccountBrowserPreparationSchema = RuntimeAccountBrowserGrantSchema.extend({ id, action: RuntimeBrowserPreparationSchema.shape.action });
 export const RuntimeBrowserApprovalCardSchema = z.union([RuntimeBrowserPreparationSchema, RuntimeAccountBrowserPreparationSchema]);
@@ -104,8 +107,7 @@ export const RuntimeBrowserPublicKeySchema = z.strictObject({ algorithm: z.liter
 export const RuntimeBrowserTrustSchema = RuntimeBrowserPublicKeySchema.extend({ accountId: id });
 export type RuntimeBrowserTrust = z.infer<typeof RuntimeBrowserTrustSchema>;
 /** The pairing details a short pairing code stands for: the extension redeems the code (`/api/browser-relay/pairing-code`)
- * for them, then proves its new key to `endpoint` with `code`. LEGACY: extensions before 5.8 take these details pasted
- * as JSON, and 5.8 still does; remove that path from the extension at 5.9. */
+ * for them, then proves its new key to `endpoint` with `code`. */
 export const RuntimeAccountBrowserPairingSchema = z.strictObject({ code: z.string().min(1), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, endpoint: z.url(), expiresAt: z.iso.datetime() });
 export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserPairingSchema>;
 /** A short pairing code's characters: digits and capitals without 0, 1, I, L, O and U, which read alike. */
@@ -130,7 +132,8 @@ export type RuntimeAccountBrowserPairingCode = z.infer<typeof RuntimeAccountBrow
  * the begin request is signed with the pairing key, and its parts, completion and abandonment go to the link it answers.
  * Protocol 6 adds share links: `shareTab`/`shareWatch`/`shareUnwatch`/`shareHit`/`shareAnchor`/`adoptTab`,
  * `sharePointers`/`shares`/`shareEnded` notifications, `shareFrame` and share `page`/`closed` messages, and signed
- * `/api/browser-relay/shares` requests.
+ * `/api/browser-relay/shares` requests. Within protocol 6, an extension from 5.9 says `siteLevels` in its hello: it
+ * enforces a grant's `read` sites (`RuntimeAccountBrowserGrantSchema`).
  */
 export const BROWSER_EXTENSION_PROTOCOL = 6;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
@@ -261,7 +264,7 @@ export const BROWSER_RUNS_DAYS = 7;
  * `groupColor` is its colour in Chrome's tab strip (null until its extension reports it) and `agents` who acts there
  * now (empty while it is offline). */
 export const RuntimeBrowserOverviewSchema = z.strictObject({
-  sites: z.strictObject({ origins: z.array(BrowserOriginPatternSchema), stepsOnly: z.array(BrowserOriginPatternSchema), revision: z.string().max(64).nullable() }),
+  sites: z.strictObject({ origins: z.array(z.strictObject({ pattern: BrowserOriginPatternSchema, level: BrowserSiteLevelSchema })), revision: z.string().max(64).nullable() }),
   cloud: z.strictObject({ groupId: z.string().uuid().nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200) }),
   chromes: z.array(z.strictObject({
     pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema, note: z.string().max(2048), connected: z.boolean(), approved: z.boolean(), isDefault: z.boolean(),
