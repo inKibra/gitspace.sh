@@ -1,7 +1,71 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createModels, type Api, type Model } from '@earendil-works/pi-ai';
-import { claudeCode, xxHash64 } from './claude-code-request.js';
+import { claudeCode, ENCODE_UNITS, XxHash64 } from './claude-code-request.js';
+
+const MASK = 0xffffffffffffffffn;
+const PRIME1 = 0x9e3779b185ebca87n;
+const PRIME2 = 0xc2b2ae3d27d4eb4fn;
+const PRIME3 = 0x165667b19e3779f9n;
+const PRIME4 = 0x85ebca77c2b2ae63n;
+const PRIME5 = 0x27d4eb2f165667c5n;
+const CCH_SEED = 0x4d659218e32a3268n;
+const BILLING_BLOCK = '"system":[{"type":"text","text":"x-anthropic-billing-header:';
+const rotl = (value: bigint, bits: bigint) => ((value << bits) | (value >> (64n - bits))) & MASK;
+const round = (accumulator: bigint, lane: bigint) => (rotl((accumulator + lane * PRIME2) & MASK, 31n) * PRIME1) & MASK;
+
+/** XXH64 over the whole input at once: the reference the streaming hash must equal. */
+function xxHash64(bytes: Uint8Array, seed: bigint): bigint {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const length = bytes.byteLength;
+  let offset = 0;
+  let hash: bigint;
+  if (length >= 32) {
+    let v1 = (seed + PRIME1 + PRIME2) & MASK, v2 = (seed + PRIME2) & MASK, v3 = seed & MASK, v4 = (seed - PRIME1) & MASK;
+    for (; offset + 32 <= length; offset += 32) {
+      v1 = round(v1, view.getBigUint64(offset, true));
+      v2 = round(v2, view.getBigUint64(offset + 8, true));
+      v3 = round(v3, view.getBigUint64(offset + 16, true));
+      v4 = round(v4, view.getBigUint64(offset + 24, true));
+    }
+    hash = (rotl(v1, 1n) + rotl(v2, 7n) + rotl(v3, 12n) + rotl(v4, 18n)) & MASK;
+    for (const lane of [v1, v2, v3, v4]) hash = (((hash ^ round(0n, lane)) * PRIME1) + PRIME4) & MASK;
+  } else hash = (seed + PRIME5) & MASK;
+  hash = (hash + BigInt(length)) & MASK;
+  for (; offset + 8 <= length; offset += 8) hash = ((rotl(hash ^ round(0n, view.getBigUint64(offset, true)), 27n) * PRIME1) + PRIME4) & MASK;
+  if (offset + 4 <= length) { hash = ((rotl(hash ^ ((BigInt(view.getUint32(offset, true)) * PRIME1) & MASK), 23n) * PRIME2) + PRIME3) & MASK; offset += 4; }
+  for (; offset < length; offset++) hash = (rotl(hash ^ ((BigInt(bytes[offset]!) * PRIME5) & MASK), 11n) * PRIME1) & MASK;
+  hash ^= hash >> 33n; hash = (hash * PRIME2) & MASK;
+  hash ^= hash >> 29n; hash = (hash * PRIME3) & MASK;
+  return hash ^ (hash >> 32n);
+}
+
+/** A serialized subscription body attested as one encoded array: the reference the streamed body must equal. */
+function attestedWhole(json: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(json);
+  const digits = encoder.encode(json.slice(0, json.indexOf('cch=00000', json.indexOf(BILLING_BLOCK)))).byteLength + 'cch='.length;
+  bytes.set(encoder.encode((xxHash64(bytes, CCH_SEED) & 0xfffffn).toString(16).padStart(5, '0')), digits);
+  return bytes;
+}
+
+/** Deterministic bytes for hash comparisons. */
+function noise(length: number, seed: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  let state = seed;
+  for (let index = 0; index < length; index++) {
+    state = (Math.imul(state ^ (state >>> 15), 0x2c1b3c6d) + 0x6d2b79f5) | 0;
+    bytes[index] = state >>> 24;
+  }
+  return bytes;
+}
+
+function streamed(seed: bigint, bytes: Uint8Array, splits: number[]): bigint {
+  const hash = new XxHash64(seed);
+  let from = 0;
+  for (const split of [...splits, bytes.byteLength]) { hash.update(bytes.subarray(from, split)); from = split; }
+  return hash.digest();
+}
 
 const user = 'why do we need per feed locking. alarms are interesting';
 type Payload = { messages: Array<{ role: string; content: Array<Record<string, unknown>> }>; [key: string]: unknown };
@@ -24,36 +88,123 @@ const anthropic: Model<Api> = { id: 'claude-opus-5-5', name: 'Opus', provider: '
 const attested = (sent: string) => {
   const cch = /cc_entrypoint=cli; cch=([0-9a-f]{5});/.exec(sent)![1]!;
   const hashed = sent.replace(`cc_entrypoint=cli; cch=${cch};`, 'cc_entrypoint=cli; cch=00000;');
-  return { cch, hashed, valid: (xxHash64(new TextEncoder().encode(hashed), 0x4d659218e32a3268n) & 0xfffffn).toString(16).padStart(5, '0') === cch };
+  return { cch, hashed, valid: (xxHash64(new TextEncoder().encode(hashed), CCH_SEED) & 0xfffffn).toString(16).padStart(5, '0') === cch };
 };
 
 const realFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = realFetch; });
+afterEach(() => { globalThis.fetch = realFetch; Reflect.deleteProperty(globalThis, 'FixedLengthStream'); });
 
-/** What reaches the network: bodies as text, headers as sent. */
+/** What reaches the network: bodies as bytes, the chunks they came in, and text; headers as sent. */
 function network(reply: () => Response = () => new Response('{}')) {
-  const sent: Array<{ body: string; headers: Headers }> = [];
+  const sent: Array<{ body: string; bytes: Uint8Array; chunks: Uint8Array[]; streamed: boolean; headers: Headers }> = [];
   globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-    sent.push({ body: typeof init?.body === 'string' ? init.body : new TextDecoder().decode(init?.body instanceof Uint8Array ? init.body : new Uint8Array()), headers: new Headers(init?.headers) });
+    const body = init?.body;
+    const chunks: Uint8Array[] = [];
+    if (body instanceof ReadableStream) {
+      const reader = body.getReader();
+      for (let read = await reader.read(); !read.done; read = await reader.read()) chunks.push(read.value);
+    } else if (typeof body === 'string') chunks.push(new TextEncoder().encode(body));
+    const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    sent.push({ body: new TextDecoder().decode(bytes), bytes, chunks, streamed: body instanceof ReadableStream, headers: new Headers(init?.headers) });
     return reply();
   });
   return sent;
 }
 
+const MESSAGES = 'https://api.anthropic.com/v1/messages?beta=true';
 /** A request as the Anthropic SDK makes it: the payload pi-ai built, shaped by `onPayload`, serialized once, with its
  * `betas` moved to the anthropic-beta header. */
-async function send(body: Record<string, unknown>, headers: Record<string, string> = oauth) {
-  const transport = await claudeCode('profile');
+async function serialize(transport: { onPayload(payload: unknown, model: Model<Api>): Promise<unknown> }, body: Record<string, unknown>, headers: Record<string, string> = oauth) {
   const shaped = await transport.onPayload(body, anthropic) ?? body;
   if (typeof shaped !== 'object' || shaped === null) throw new Error('Unexpected payload');
   const { betas, ...rest } = Object.fromEntries(Object.entries(shaped));
   const header = [headers['anthropic-beta'], ...(Array.isArray(betas) ? betas : [])].filter(Boolean).join(',');
-  return transport.fetch('https://api.anthropic.com/v1/messages?beta=true', { method: 'POST', body: JSON.stringify(rest), headers: { ...headers, 'anthropic-beta': header } });
+  return { method: 'POST', body: JSON.stringify(rest), headers: { ...headers, 'anthropic-beta': header } };
 }
 
-it('matches the reference XXH64', () => {
-  expect(xxHash64(new Uint8Array(), 0n)).toBe(0xef46db3751d8e999n);
-  expect(xxHash64(new TextEncoder().encode('abc'), 0n)).toBe(0x44bc2cf5ad770999n);
+async function send(body: Record<string, unknown>, headers: Record<string, string> = oauth) {
+  const transport = await claudeCode('profile');
+  return transport.fetch(MESSAGES, await serialize(transport, body, headers));
+}
+
+it('hashes input fed in pieces as XXH64 of the whole, wherever it is split', () => {
+  expect(streamed(0n, new Uint8Array(), [])).toBe(0xef46db3751d8e999n);
+  expect(streamed(0n, new TextEncoder().encode('abc'), [1])).toBe(0x44bc2cf5ad770999n);
+  for (let length = 0; length <= 100; length++) {
+    const bytes = noise(length, length + 1);
+    const whole = xxHash64(bytes, CCH_SEED);
+    for (let split = 0; split <= length; split++) expect(streamed(CCH_SEED, bytes, [split])).toBe(whole);
+    for (let split = 0; split + 31 <= length; split++) expect(streamed(CCH_SEED, bytes, [split, split + 1, split + 31])).toBe(whole);
+  }
+  for (let trial = 0; trial < 40; trial++) {
+    const bytes = noise(1 + trial * 97, trial);
+    const splits = [...noise(8, trial + 1000)].map(byte => Math.floor(byte / 256 * bytes.byteLength)).sort((left, right) => left - right);
+    expect(streamed(CCH_SEED, bytes, splits)).toBe(xxHash64(bytes, CCH_SEED));
+  }
+});
+
+it('streams a subscription body in bounded chunks with its Content-Length, byte for byte as attesting it whole, on every attempt', async () => {
+  const transport = await claudeCode('profile');
+  const sent = network();
+  // Emoji and multi-byte characters lie across the chunk edges, each shift putting a different one on them.
+  for (let shift = 0; shift < 5; shift++) {
+    const body = payload();
+    body.messages[0]!.content[0]!.text = `${'a'.repeat(shift)}${'😀'.repeat(ENCODE_UNITS / 2 + 8)}${'é中😀a'.repeat(ENCODE_UNITS / 4)}`;
+    const init = await serialize(transport, body);
+    const whole = attestedWhole(init.body);
+    await transport.fetch(MESSAGES, init);
+    await transport.fetch(MESSAGES, init);
+    expect(sent).toHaveLength(2);
+    for (const request of sent.splice(0)) {
+      expect(request.streamed).toBe(true);
+      expect(request.bytes).toEqual(whole);
+      expect(request.headers.get('content-length')).toBe(String(whole.byteLength));
+      expect(request.chunks.length).toBeGreaterThan(2);
+      expect(Math.max(...request.chunks.map(chunk => chunk.byteLength))).toBeLessThanOrEqual(ENCODE_UNITS * 3);
+    }
+  }
+});
+
+it('attests in the billing block when a chunk edge cuts through it or through a quoted placeholder', async () => {
+  const transport = await claudeCode('profile');
+  const sent = network();
+  const marked = payload();
+  marked.messages[0]!.content[0]!.text = 'MARK';
+  const probe = (await serialize(transport, marked)).body;
+  const textAt = probe.indexOf('MARK');
+  const billingAt = probe.indexOf('cch=00000', probe.indexOf(BILLING_BLOCK)) - 'MARK'.length;
+  for (let cut = 0; cut <= 'cch=00000'.length; cut++) {
+    const quoted = `${'x'.repeat(ENCODE_UNITS - cut - textAt)}cch=00000`;
+    const body = payload();
+    body.messages[0]!.content[0]!.text = `${quoted}${'y'.repeat(2 * ENCODE_UNITS - cut - billingAt - quoted.length)}`;
+    const init = await serialize(transport, body);
+    expect(init.body.indexOf('cch=00000')).toBe(ENCODE_UNITS - cut);
+    expect(init.body.indexOf('cch=00000', init.body.indexOf(BILLING_BLOCK))).toBe(2 * ENCODE_UNITS - cut);
+    await transport.fetch(MESSAGES, init);
+    expect(sent.at(-1)!.bytes).toEqual(attestedWhole(init.body));
+  }
+});
+
+it('sends the body through a FixedLengthStream of its byte length where Workers provide one, since Workers send other streams chunked', async () => {
+  const lengths: number[] = [];
+  Reflect.set(globalThis, 'FixedLengthStream', class extends TransformStream<Uint8Array, Uint8Array> {
+    constructor(expected: number) {
+      let seen = 0;
+      super({ transform(chunk, controller) { seen += chunk.byteLength; controller.enqueue(chunk); }, flush() { if (seen !== expected) throw new Error(`${seen} bytes sent, ${expected} declared`); } });
+      lengths.push(expected);
+    }
+  });
+  const transport = await claudeCode('profile');
+  const sent = network();
+  const body = payload();
+  body.messages[0]!.content[0]!.text = '😀é中'.repeat(ENCODE_UNITS);
+  const init = await serialize(transport, body);
+  await transport.fetch(MESSAGES, init);
+  const whole = attestedWhole(init.body);
+  expect(lengths).toEqual([whole.byteLength]);
+  expect(sent[0]!.bytes).toEqual(whole);
 });
 
 it('sends a pi-ai Claude subscription request as the SDK serialized the shaped payload, with only the attestation written in', async () => {

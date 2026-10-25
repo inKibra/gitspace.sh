@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { InMemoryModelsStore, type Context } from '@earendil-works/pi-ai';
-import { createVaultModels } from './index';
+import { createVaultModels, createRequestGate } from './index';
 import type { CredentialAccount, ResolvedCredential } from './selection';
 
 const realFetch = globalThis.fetch;
@@ -22,12 +22,13 @@ async function sent(credential: ResolvedCredential['credential']): Promise<{ too
   const account: CredentialAccount = { id: 'account', provider: 'anthropic', type: credential.type, revision: 1, expiresAt: 4_102_444_800_000, identity: 'account' };
   const bodies: string[] = [];
   globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-    bodies.push(typeof init?.body === 'string' ? init.body : new TextDecoder().decode(init?.body instanceof Uint8Array ? init.body : new Uint8Array()));
+    // A subscription body is streamed; Response reads a string, bytes or a stream alike.
+    bodies.push(await new Response(init?.body).text());
     return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'test stops here' } }, { status: 400 });
   });
   const models = await createVaultModels({
     profileId: 'profile', workspaceId: 'workspace', modelsStore: new InMemoryModelsStore(), providers: [provider],
-    pins: { async read() { return null; }, async write() {} },
+    pins: { async read() { return null; }, async write() {} }, gate: createRequestGate(),
     vault: { async list() { return [account]; }, async resolve() { return { id: 'account', provider: 'anthropic', revision: 1, credential }; }, async recordFailure() { return { label: 'account', until: 0 }; } },
   });
   const model = models.getModel('anthropic', 'claude-opus-5-5');

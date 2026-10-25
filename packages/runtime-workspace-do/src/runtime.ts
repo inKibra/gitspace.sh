@@ -5,7 +5,7 @@ import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRec
 import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, PlanDoc, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, recordProcessExit, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, PlanDoc, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, recordProcessExit, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
@@ -275,7 +275,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   const conversationIds = new Map<string, ConversationId>();
   // Derived snapshot state is cached per conversation/task and refreshed only for records a commit touched, so a
   // rebuild reads O(changed) rows instead of every conversation's 256-entry window and every task on each commit.
-  type ConversationView = Omit<RuntimeSnapshot['conversations'][number], 'status' | 'error'> & { failure: string | null; subagent: JsonValue | null };
+  type ConversationView = Omit<RuntimeSnapshot['conversations'][number], 'status' | 'error'> & { failure: string | null; subagent: (SubagentMetadata & { conversationId: string }) | null };
   type TaskView = RuntimeSnapshot['tasks'][number];
   const conversationViews = new Map<string, ConversationView>();
   const dirtyConversations = new Set<ConversationId>();
@@ -422,10 +422,12 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     agents = agentCounts(views, activity);
     const conversations: RuntimeSnapshot['conversations'] = [];
     const subagents: JsonValue[] = [];
+    // A subagent waiting for a run slot is idle; the agents document says it is queued.
+    const queued = new Set((await harness.snapshot(SubagentRunQueueDoc, BACKGROUND_CONTEXT))?.queue.map(item => item.conversationId));
     for (const { failure, subagent, ...view } of views) {
       const state = conversationStatus(activity.get(view.id) ?? 'idle');
       conversations.push({ ...view, status: state, ...(state === 'failed' && failure ? { error: failure } : {}) });
-      if (subagent) subagents.push(subagent);
+      if (subagent) subagents.push(queued.has(view.id) ? { ...subagent, queued: true } : subagent);
     }
     const tasks = [...taskViews].sort(([leftId, left], [rightId, right]) => TASK_ORDER[left.status] - TASK_ORDER[right.status] || leftId - rightId).map(([, task]) => task.view);
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);

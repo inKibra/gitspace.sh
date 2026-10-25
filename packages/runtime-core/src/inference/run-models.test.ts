@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { createAssistantMessageEventStream, InMemoryModelsStore, type Api, type Model, type AssistantMessage, type Provider } from '@earendil-works/pi-ai';
 import { createRunModelsRouter } from './run-models.js';
-import { createVaultModels } from './index.js';
+import { createVaultModels, createRequestGate } from './index.js';
 
 it('dispatches the signal-bound admission even when the picker changes the model and API', async () => {
   const original: Model<Api> = { provider: 'test', id: 'original', name: 'Original', api: 'openai-responses', baseUrl: 'https://example.invalid', reasoning: false, input: ['text'], contextWindow: 8192, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
@@ -15,7 +15,7 @@ it('dispatches the signal-bound admission even when the picker changes the model
   const provider: Provider = { id: 'test', name: 'Test', getModels: () => [original, next], auth: { apiKey: { name: 'Local fake', resolve: async () => ({ auth: { apiKey: 'unused' }, source: 'test' }) } }, stream: dispatch, streamSimple: dispatch };
   const models = await createVaultModels({
     profileId: 'profile', workspaceId: 'workspace', providers: [provider], modelsStore: new InMemoryModelsStore(),
-    pins: { read: async () => null, write: async () => {} },
+    pins: { read: async () => null, write: async () => {} }, gate: createRequestGate(),
     vault: {
       list: async () => [{ id: 'key', provider: 'test', type: 'api_key', revision: 1, expiresAt: null, identity: 'test' }],
       resolve: async () => ({ id: 'key', provider: 'test', revision: 1, credential: { type: 'api_key', key: 'local-fake' } }),

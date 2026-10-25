@@ -1,8 +1,8 @@
-import { defineDoc, InboxDoc, LiveDoc, type Harness, type Storage, type Cursor, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
+import { defineDoc, InboxDoc, LiveDoc, type Harness, type Storage, type Cursor, type Conversation, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { RuntimeHarnessOptions } from './harness.js';
 import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
-import { AgentDefinitionContextDoc } from './subagent-state.js';
+import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS, SubagentRunQueueDoc, type QueuedSubagentRun } from './subagent-state.js';
 import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc } from './documents.js';
@@ -61,6 +61,11 @@ export type ConversationLifecycle = {
   resume(conversationId: string): Promise<void>;
   recover(): Promise<void>;
   runWhileActive<T>(conversationId: string, operation: () => Promise<T>): Promise<T>;
+  /**
+   * Runs `prepare` while the subagent is not stopped, then submits `input` as its first run, or queues it while
+   * MAX_RUNNING_SUBAGENTS subagents run or others wait; a retry of the same request finds what the first attempt did.
+   */
+  startSubagent(conversationId: string, input: NonNullable<QueuedSubagentRun['input']>, prepare: () => Promise<void>): Promise<{ kind: 'submitted'; submissionId: string } | { kind: 'queued' }>;
   userInput<T>(conversationId: string, operation: () => Promise<T>): Promise<T>;
 };
 export type ConversationLifecycleOptions = {
@@ -93,24 +98,94 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     if (!conversation) throw new Error('Conversation not found');
     return conversation;
   }
+  async function busy(id: ConversationId) { return (await harness.snapshot(LiveDoc, id, context))?.run !== undefined; }
+  /** Subagents running now: pi's `pi.live` holds `run` exactly while a conversation is busy. */
+  async function runningSubagents() {
+    const running: ConversationId[] = [];
+    for (const record of await conversations()) if ((await harness.snapshot(AgentDefinitionContextDoc, record.id, context))?.child && await busy(record.id)) running.push(record.id);
+    return running;
+  }
+  /** Admits inference for a run the lifecycle starts and applies its model and effort. */
+  async function admit(conversation: Conversation, requestId: string) {
+    const child = (await harness.snapshot(AgentDefinitionContextDoc, conversation.id, context))?.child;
+    const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, conversation.id, context))?.selection ?? { kind: 'default' as const };
+    const model = await options.admitInference({ conversationId: String(conversation.id), requestId, selection });
+    await options.configureModel(conversation.id, model);
+    await applyInferenceThinking(conversation, model);
+  }
+  // The queue is drained when a running subagent's run ends, watched here in memory; after a reset, recovery drains it
+  // and watches the runs again.
+  const watched = new Set<string>();
+  let closing = false;
+  harness.subscribeClose(() => { closing = true; });
+  function watch(id: ConversationId) {
+    if (watched.has(String(id))) return;
+    watched.add(String(id));
+    void (async () => {
+      try {
+        await (await harness.conversation(id, context))?.waitForIdle(context);
+        watched.delete(String(id));
+        await serialized(drain);
+      } catch (error) {
+        watched.delete(String(id));
+        if (!closing) options.report(error);
+      }
+    })();
+  }
+  /**
+   * Starts waiting subagents, oldest first, while fewer than MAX_RUNNING_SUBAGENTS run, and watches the running ones while
+   * any still wait. One that cannot start (its admission fails) is reported and leaves the queue, so it holds no other
+   * back. Runs on the line.
+   */
+  async function drain() {
+    const queue = (await harness.snapshot(SubagentRunQueueDoc, context))?.queue ?? [];
+    if (queue.length === 0) return;
+    const running = await runningSubagents();
+    let started = 0;
+    for (const item of queue) {
+      if (running.length >= MAX_RUNNING_SUBAGENTS) break;
+      started++;
+      try {
+        const conversation = await resolve(item.conversationId);
+        // Pi admits a request id once, so a start a reset cut off before the item left the queue submits nothing twice.
+        if (item.input) {
+          await admit(conversation, item.input.requestId);
+          await conversation.submit({ type: 'input', ...item.input }, context);
+        }
+        await flush(item.conversationId, true);
+        if (await busy(conversation.id)) running.push(conversation.id);
+      } catch (error) {
+        options.report(new Error(`Subagent ${item.conversationId} could not start: ${error instanceof Error ? error.message : String(error)}`, { cause: error }));
+      } finally {
+        await harness.commit(async tx => { const state = await tx.doc(SubagentRunQueueDoc); state.queue = state.queue.filter(value => value.conversationId !== item.conversationId); }, context);
+      }
+    }
+    if (started < queue.length) for (const id of running) watch(id);
+  }
+  /** Queues a subagent's run unless a slot is free and none waits; true when queued. Runs on the line. */
+  async function held(id: ConversationId, input?: QueuedSubagentRun['input']) {
+    if (((await harness.snapshot(SubagentRunQueueDoc, context))?.queue.length ?? 0) === 0 && (await runningSubagents()).length < MAX_RUNNING_SUBAGENTS) return false;
+    await harness.commit(async tx => {
+      const state = await tx.doc(SubagentRunQueueDoc);
+      if (!state.queue.some(item => item.conversationId === String(id))) state.queue.push({ conversationId: String(id), ...(input ? { input } : {}) });
+    }, context);
+    await drain();
+    return true;
+  }
   // Events wait here, not in the harness follow-up queue: a run that ends without a final boundary (abort, model
   // error, deploy) leaves that queue unread. The alarm drive flushes the next event once the conversation is idle, and
   // resumes input such a run left queued: a queued write places the items queued before it, which starts the next run.
-  async function flush(id: string) {
+  // A subagent's run waits for a slot unless the queue starts it (`slotted`).
+  async function flush(id: string, slotted = false) {
     const conversation = await resolve(id);
     const state = await harness.snapshot(ConversationLifecycleDoc, conversation.id, context);
     if (state?.events.some(isHandled)) await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set()), context);
     if (state?.stopped) return;
-    const admit = async (requestId: string) => {
-      const child = (await harness.snapshot(AgentDefinitionContextDoc, conversation.id, context))?.child;
-      const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, conversation.id, context))?.selection ?? { kind: 'default' as const };
-      const model = await options.admitInference({ conversationId: id, requestId, selection });
-      await options.configureModel(conversation.id, model);
-      await applyInferenceThinking(conversation, model);
-    };
+    const subagent = !slotted && (await harness.snapshot(AgentDefinitionContextDoc, conversation.id, context))?.child;
     const queued = (await harness.snapshot(InboxDoc, conversation.id, context))?.items.find(item => item.mode !== 'write');
-    if (queued && (await harness.snapshot(LiveDoc, conversation.id, context))?.run === undefined) {
-      await admit(`queue-resume:${queued.id}`);
+    if (queued && !(await busy(conversation.id))) {
+      if (subagent && await held(conversation.id)) return;
+      await admit(conversation, `queue-resume:${queued.id}`);
       // `edits` (even empty) makes this a queued write; a write of only kind and data is display-only and places nothing.
       await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) }, edits: [] } }, context);
       await options.wake();
@@ -120,10 +195,11 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     // Whatever is pending when the conversation is idle goes in as one message, so events that piled up cost one turn.
     const pending = (state?.events ?? []).filter(item => !isHandled(item)).map(item => item.event);
     if (pending.length === 0) return;
-    if ((await harness.snapshot(LiveDoc, conversation.id, context))?.run !== undefined) { await options.wake(); return; }
+    if (await busy(conversation.id)) { await options.wake(); return; }
+    if (subagent && await held(conversation.id)) return;
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pending.map(event => event.requestId).join('\n'))));
     const requestId = pending.length === 1 ? pending[0]!.requestId : `events:${[...digest.slice(0, 16)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
-    await admit(requestId);
+    await admit(conversation, requestId);
     const content = formatConversationEvents(pending.map(event => ({ kind: event.kind, source: EVENT_SOURCE[event.kind](event), text: event.text })));
     await conversation.submit({ type: 'input', requestId, content, whenBusy: 'followUp' }, context);
     await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set(pending.map(event => event.requestId))), context);
@@ -140,6 +216,11 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       const targets = all.filter(record => ids.has(String(record.id)));
       if (!targets.some(record => String(record.id) === id)) throw new Error('Conversation not found');
       for (const target of targets) (await tx.doc(ConversationLifecycleDoc, target.id)).stopped = stopped;
+      // A stopped subagent leaves the run queue; resuming it queues it again when it would start a run.
+      if (stopped) {
+        const runs = await tx.doc(SubagentRunQueueDoc);
+        if (runs.queue.some(item => ids.has(item.conversationId))) runs.queue = runs.queue.filter(item => !ids.has(item.conversationId));
+      }
       return targets;
     }, context);
   }
@@ -164,6 +245,19 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
         return operation();
       });
     },
+    async startSubagent(id, input, prepare) {
+      return serialized(async () => {
+        const conversation = await resolve(id);
+        if ((await harness.snapshot(ConversationLifecycleDoc, conversation.id, context))?.stopped) throw new Error('Conversation is stopped; only an explicit user message may resume it');
+        await prepare();
+        const earlier = await storage.submissionByRequest(conversation.id, input.requestId, context);
+        if (earlier) return { kind: 'submitted', submissionId: String(earlier.id) };
+        if (!(await held(conversation.id, input))) return { kind: 'submitted', submissionId: String((await conversation.submit({ type: 'input', ...input }, context)).id) };
+        // Draining may have started it at once.
+        const started = await storage.submissionByRequest(conversation.id, input.requestId, context);
+        return started ? { kind: 'submitted', submissionId: String(started.id) } : { kind: 'queued' };
+      });
+    },
     // One conversation that cannot resume (its admission fails) must not keep the others, and the runs after recovery,
     // from resuming: its failure is reported and recovery moves on.
     async recover() {
@@ -172,6 +266,8 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
           try { await flush(String(record.id)); }
           catch (error) { options.report(new Error(`Conversation ${String(record.id)} could not resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
         }
+        try { await drain(); }
+        catch (error) { options.report(new Error(`Waiting subagents could not start: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
       });
     },
     async deliver(event) {

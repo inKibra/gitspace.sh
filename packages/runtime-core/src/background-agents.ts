@@ -1,5 +1,5 @@
 import { defineDoc, defineExtension, defineTask, hook, GenerationTask, type ConversationId, type TaskId, type Task } from '@earendil-works/pi-durable';
-import { AgentDefinitionContextDoc } from './subagent-state.js';
+import { AgentDefinitionContextDoc, SubagentRunQueueDoc } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
 export const BackgroundAgentsDoc = defineDoc<{ children: Record<string, { conversationId: ConversationId; owner: TaskId }> }>({ kind: 'gitspace.background-agents', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ children: {} }) });
 export type BackgroundAgentTask = Task<{ spawningTask: TaskId; attemptId: string }, { phase: 'wait' }, { conversationId: string }, object>;
@@ -17,6 +17,18 @@ export function createBackgroundAgentTask(deliver: ConversationLifecycle['delive
       if (!anchor || anchor.owner !== task.id) throw new Error('Background agent ownership anchor missing');
       const child = await runtime.conversation(anchor.conversationId, context);
       if (!child) throw new Error('Background conversation missing');
+      // A queued child is idle before it starts; the queue submits its task before it lets go of it.
+      const queue = await runtime.watchDoc(SubagentRunQueueDoc, context);
+      const id = String(anchor.conversationId);
+      if (queue?.value?.queue.some(item => item.conversationId === id)) {
+        const started = Promise.withResolvers<void>();
+        const abort = () => started.reject(context.abortSignal?.reason);
+        context.abortSignal?.addEventListener('abort', abort, { once: true });
+        queue.start(async value => { if (!value?.queue.some(item => item.conversationId === id)) started.resolve(); });
+        void queue.closed.then(value => { if (value.reason !== 'stopped') started.reject(new Error(`Background agent queue wait ended: ${value.reason}`)); });
+        try { await started.promise; }
+        finally { context.abortSignal?.removeEventListener('abort', abort); await queue.stop(); }
+      } else await queue?.stop();
       await child.waitForIdle(context);
       const metadata = (await runtime.snapshot(AgentDefinitionContextDoc, anchor.conversationId, context))?.child;
       if (!metadata) throw new Error('Background child metadata missing');

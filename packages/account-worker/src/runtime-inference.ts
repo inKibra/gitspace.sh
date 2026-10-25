@@ -4,7 +4,7 @@ import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, mode
 import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
-  createVaultModels, createRunModelsRouter, createDurableModelsStore,
+  createVaultModels, createRunModelsRouter, createDurableModelsStore, createRequestGate,
   resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
   type CredentialPins, type VaultModels,
 } from '@gitspace/runtime-core/inference';
@@ -26,6 +26,8 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   const refusals = new WeakMap<AbortSignal, string>();
   /** One catalog per profile revision; every admission on that revision shares it through a scoped view. */
   const catalogs = new Map<string, Promise<VaultModels>>();
+  /** This object's model requests, every catalog's, wait here to build and upload their bodies. */
+  const gate = createRequestGate();
   const pinsFor = (profileId: string, conversationId: string): CredentialPins => ({
     async read(provider) { const stored = await ctx.storage.get<unknown>(key('pin', profileId, conversationId, provider)); return stored === undefined ? null : pinSchema.parse(stored); },
     async write(provider, pin) { await ctx.storage.put(key('pin', profileId, conversationId, provider), pinSchema.parse(pin)); },
@@ -39,7 +41,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         write: (name, value) => ctx.storage.put(key('catalog', name), value),
         delete: async name => { await ctx.storage.delete(key('catalog', name)); },
       });
-      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: store, pins: pinsFor(profile.id, 'catalog'), vault: {
+      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: store, pins: pinsFor(profile.id, 'catalog'), gate, vault: {
         list: (profileId, provider) => vault().cloudCredentialAccounts(profileId, provider),
         resolve: input => { input.signal?.throwIfAborted(); return vault().cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
         recordFailure: input => vault().cloudCredentialFailure(input),
@@ -193,7 +195,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const currentAssignment = resolved.assignmentRevision;
         const readonly = async (): Promise<never> => { throw new Error('Passive inference catalogs cannot mutate state or resolve credentials'); };
         const currentModels = await createVaultModels({
-          profileId: currentProfile.id, workspaceId: identity.workspaceId, settings: currentProfile.settings,
+          profileId: currentProfile.id, workspaceId: identity.workspaceId, settings: currentProfile.settings, gate,
           modelsStore: createDurableModelsStore({
             read: name => ctx.storage.get<unknown>(key('catalog', name)), write: readonly, delete: readonly,
           }),

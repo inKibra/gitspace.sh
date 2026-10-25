@@ -8,10 +8,10 @@ import type { Api, Model } from '@earendil-works/pi-ai';
  * `metadata.user_id`, `_`-prefixed tool names, and the billing system block with its `cch` attestation. Tool names in
  * the streamed response are restored. Every other request passes through unchanged.
  *
- * The shape is applied to pi-ai's payload object (`onPayload`), before the SDK serializes it once; `fetch` then encodes
- * that one string to bytes, hashes them and writes the attestation into them. Parsing, copying and re-serializing the
- * serialized body held several copies of a large conversation at once (two bytes per character), enough to exhaust a
- * workspace object's memory beside its neighbours'.
+ * The shape is applied to pi-ai's payload object (`onPayload`), before the SDK serializes it once; `fetch` then hashes
+ * that one string chunk by chunk as UTF-8 and streams it out encoded again, the attestation written into its chunk, with
+ * an exact Content-Length. No copy of the whole body is made beside the SDK's string: a large conversation is two bytes
+ * per character, and copies of it exhausted a workspace object's memory beside its neighbours'.
  */
 /** The Claude Code release the requests present, in the billing header and the user agent; pi-ai's must match. */
 const CLAUDE_CODE_VERSION = '2.1.280';
@@ -61,30 +61,66 @@ const PRIME5 = 0x27d4eb2f165667c5n;
 const rotl = (value: bigint, bits: bigint) => ((value << bits) | (value >> (64n - bits))) & MASK;
 const round = (accumulator: bigint, lane: bigint) => (rotl((accumulator + lane * PRIME2) & MASK, 31n) * PRIME1) & MASK;
 
-/** XXH64; Workers have no native xxHash. */
-export function xxHash64(bytes: Uint8Array, seed: bigint): bigint {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const length = bytes.byteLength;
-  let offset = 0;
-  let hash: bigint;
-  if (length >= 32) {
-    let v1 = (seed + PRIME1 + PRIME2) & MASK, v2 = (seed + PRIME2) & MASK, v3 = seed & MASK, v4 = (seed - PRIME1) & MASK;
-    for (; offset + 32 <= length; offset += 32) {
-      v1 = round(v1, view.getBigUint64(offset, true));
-      v2 = round(v2, view.getBigUint64(offset + 8, true));
-      v3 = round(v3, view.getBigUint64(offset + 16, true));
-      v4 = round(v4, view.getBigUint64(offset + 24, true));
+/** Streaming XXH64; Workers have no native xxHash. */
+export class XxHash64 {
+  readonly #seed: bigint;
+  #v1: bigint;
+  #v2: bigint;
+  #v3: bigint;
+  #v4: bigint;
+  readonly #stripe = new Uint8Array(32);
+  readonly #stripeView = new DataView(this.#stripe.buffer);
+  #buffered = 0;
+  #length = 0;
+
+  constructor(seed: bigint) {
+    this.#seed = seed;
+    this.#v1 = (seed + PRIME1 + PRIME2) & MASK;
+    this.#v2 = (seed + PRIME2) & MASK;
+    this.#v3 = seed & MASK;
+    this.#v4 = (seed - PRIME1) & MASK;
+  }
+
+  #consume(view: DataView, offset: number): void {
+    this.#v1 = round(this.#v1, view.getBigUint64(offset, true));
+    this.#v2 = round(this.#v2, view.getBigUint64(offset + 8, true));
+    this.#v3 = round(this.#v3, view.getBigUint64(offset + 16, true));
+    this.#v4 = round(this.#v4, view.getBigUint64(offset + 24, true));
+  }
+
+  update(bytes: Uint8Array): void {
+    this.#length += bytes.byteLength;
+    let offset = 0;
+    if (this.#buffered) {
+      offset = Math.min(32 - this.#buffered, bytes.byteLength);
+      this.#stripe.set(bytes.subarray(0, offset), this.#buffered);
+      this.#buffered += offset;
+      if (this.#buffered < 32) return;
+      this.#consume(this.#stripeView, 0);
+      this.#buffered = 0;
     }
-    hash = (rotl(v1, 1n) + rotl(v2, 7n) + rotl(v3, 12n) + rotl(v4, 18n)) & MASK;
-    for (const lane of [v1, v2, v3, v4]) hash = (((hash ^ round(0n, lane)) * PRIME1) + PRIME4) & MASK;
-  } else hash = (seed + PRIME5) & MASK;
-  hash = (hash + BigInt(length)) & MASK;
-  for (; offset + 8 <= length; offset += 8) hash = ((rotl(hash ^ round(0n, view.getBigUint64(offset, true)), 27n) * PRIME1) + PRIME4) & MASK;
-  if (offset + 4 <= length) { hash = ((rotl(hash ^ ((BigInt(view.getUint32(offset, true)) * PRIME1) & MASK), 23n) * PRIME2) + PRIME3) & MASK; offset += 4; }
-  for (; offset < length; offset++) hash = (rotl(hash ^ ((BigInt(bytes[offset]!) * PRIME5) & MASK), 11n) * PRIME1) & MASK;
-  hash ^= hash >> 33n; hash = (hash * PRIME2) & MASK;
-  hash ^= hash >> 29n; hash = (hash * PRIME3) & MASK;
-  return hash ^ (hash >> 32n);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (; offset + 32 <= bytes.byteLength; offset += 32) this.#consume(view, offset);
+    this.#stripe.set(bytes.subarray(offset), 0);
+    this.#buffered = bytes.byteLength - offset;
+  }
+
+  digest(): bigint {
+    let hash: bigint;
+    if (this.#length >= 32) {
+      hash = (rotl(this.#v1, 1n) + rotl(this.#v2, 7n) + rotl(this.#v3, 12n) + rotl(this.#v4, 18n)) & MASK;
+      for (const lane of [this.#v1, this.#v2, this.#v3, this.#v4]) hash = (((hash ^ round(0n, lane)) * PRIME1) + PRIME4) & MASK;
+    } else hash = (this.#seed + PRIME5) & MASK;
+    hash = (hash + BigInt(this.#length)) & MASK;
+    const view = this.#stripeView;
+    let offset = 0;
+    for (; offset + 8 <= this.#buffered; offset += 8) hash = ((rotl(hash ^ round(0n, view.getBigUint64(offset, true)), 27n) * PRIME1) + PRIME4) & MASK;
+    if (offset + 4 <= this.#buffered) { hash = ((rotl(hash ^ ((BigInt(view.getUint32(offset, true)) * PRIME1) & MASK), 23n) * PRIME2) + PRIME3) & MASK; offset += 4; }
+    for (; offset < this.#buffered; offset++) hash = (rotl(hash ^ ((BigInt(this.#stripe[offset]!) * PRIME5) & MASK), 11n) * PRIME1) & MASK;
+    hash ^= hash >> 33n; hash = (hash * PRIME2) & MASK;
+    hash ^= hash >> 29n; hash = (hash * PRIME3) & MASK;
+    return hash ^ (hash >> 32n);
+  }
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -151,41 +187,68 @@ async function shapePayload(payload: unknown, model: Model<Api>, identity: { dev
 }
 
 const encoder = new TextEncoder();
-const BILLING_BLOCK = encoder.encode('"system":[{"type":"text","text":"x-anthropic-billing-header:');
-const PLACEHOLDER_BYTES = encoder.encode(CCH_PLACEHOLDER);
-function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): number {
-  const first = needle[0];
-  if (first === undefined) return from;
-  for (let index = haystack.indexOf(first, from); index !== -1 && index + needle.length <= haystack.length; index = haystack.indexOf(first, index + 1)) {
-    let offset = 1;
-    while (offset < needle.length && haystack[index + offset] === needle[offset]) offset++;
-    if (offset === needle.length) return index;
+const BILLING_BLOCK = '"system":[{"type":"text","text":"x-anthropic-billing-header:';
+/** UTF-16 code units encoded at a time: at most three UTF-8 bytes each. */
+export const ENCODE_UNITS = 0x4000;
+const scratch = new Uint8Array(ENCODE_UNITS * 3);
+/** Node and Bun send a stream body only half duplex; Workers accept the option. */
+const HALF_DUPLEX = { duplex: 'half' };
+/** Workers' stream that sends its readable side as a body of exactly `expectedLength` bytes, with that Content-Length;
+ * Workers send any other stream body chunked whatever its Content-Length header. Absent in Node and Bun, which send
+ * the Content-Length header given. */
+declare const FixedLengthStream: (new (expectedLength: number) => TransformStream<Uint8Array, Uint8Array>) | undefined;
+
+/** The ranges of `body`'s code units encoded one at a time: at most ENCODE_UNITS, never splitting a surrogate pair, and
+ * one starting at `digits`. */
+function* ranges(body: string, digits: number): Generator<{ start: number; end: number }> {
+  for (let start = 0; start < body.length;) {
+    const stop = start < digits ? digits : body.length;
+    let end = Math.min(start + ENCODE_UNITS, stop);
+    if (end < stop && (body.charCodeAt(end - 1) & 0xfc00) === 0xd800) end--;
+    yield { start, end };
+    start = end;
   }
-  return -1;
 }
 
-/** The bytes and headers a shaped subscription request goes out with: the attestation hashes the serialized body with
- * the placeholder in place, then is written over that placeholder in the billing block (message text serializes first
- * and may contain the same placeholder). */
-function attest(body: unknown, incoming: Headers, identity: { sessionId: string }): { headers: Headers; body: Uint8Array<ArrayBuffer> } {
+/** The headers and body a shaped subscription request goes out with: the attestation hashes the body's UTF-8 with the
+ * placeholder in place, then is written over that placeholder in the billing block (message text serializes first and
+ * may contain the same placeholder). The body is encoded as it is sent, chunk by chunk, never as a whole. */
+function attest(body: unknown, incoming: Headers, identity: { sessionId: string }): { headers: Headers; body: ReadableStream<Uint8Array>; json: string } {
   const version = /^claude-cli\/([^\s(]+)/.exec(incoming.get('user-agent') ?? '')?.[1];
   if (!version) throw new Error('Claude subscription request has no claude-cli user agent; not sent as a third-party request');
   if (version !== CLAUDE_CODE_VERSION) throw new Error(`pi-ai presents Claude Code ${version} but requests are shaped as ${CLAUDE_CODE_VERSION}; update CLAUDE_CODE_VERSION. Not sent as a third-party request`);
   if (typeof body !== 'string') throw new Error('Claude subscription request body is not serialized JSON; not sent as a third-party request');
-  const bytes = encoder.encode(body);
-  const block = indexOfBytes(bytes, BILLING_BLOCK);
+  const block = body.indexOf(BILLING_BLOCK);
   if (block === -1) throw new Error("Claude subscription request does not start with Claude Code's system block; not sent as a third-party request");
-  const at = indexOfBytes(bytes, PLACEHOLDER_BYTES, block);
+  const at = body.indexOf(CCH_PLACEHOLDER, block);
   if (at === -1) throw new Error('Claude subscription billing block has no attestation placeholder; not sent as a third-party request');
-  const cch = (xxHash64(bytes, CCH_SEED) & 0xfffffn).toString(16).padStart(5, '0');
-  for (let index = 0; index < cch.length; index++) bytes[at + 'cch='.length + index] = cch.charCodeAt(index);
+  const digits = at + 'cch='.length;
+  const hash = new XxHash64(CCH_SEED);
+  let length = 0;
+  for (const { start, end } of ranges(body, digits)) {
+    const { written } = encoder.encodeInto(body.slice(start, end), scratch);
+    hash.update(scratch.subarray(0, written));
+    length += written;
+  }
+  const cch = encoder.encode((hash.digest() & 0xfffffn).toString(16).padStart(5, '0'));
+  const chunks = ranges(body, digits);
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = chunks.next();
+      if (next.done) return controller.close();
+      const bytes = encoder.encode(body.slice(next.value.start, next.value.end));
+      if (next.value.start === digits) bytes.set(cch);
+      controller.enqueue(bytes);
+    },
+  });
   const headers = new Headers(incoming);
   const betas = (incoming.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
   headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(betas.includes(EFFORT_BETA) ? [EFFORT_BETA] : []), ...betas])].join(','));
   headers.set('user-agent', `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`);
   headers.set('x-claude-code-session-id', identity.sessionId);
   for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS)) headers.set(name, value);
-  return { headers, body: bytes };
+  headers.set('content-length', String(length));
+  return { headers, body: typeof FixedLengthStream === 'function' ? stream.pipeThrough(new FixedLengthStream(length)) : stream, json: body };
 }
 
 const CLAUDE_CODE_BLOCKS: Record<string, true> = { text: true, image: true, document: true, tool_use: true, tool_result: true, thinking: true, redacted_thinking: true, tool_addition: true, tool_removal: true };
@@ -217,15 +280,15 @@ export async function claudeCode(profileId: string): Promise<{ fetch: typeof fet
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const headers = new Headers(init?.headers);
       if (!url.startsWith('https://api.anthropic.com/v1/messages') || !headers.get('authorization')?.startsWith('Bearer sk-ant-oat')) return fetch(input, { ...init, redirect: 'manual' });
-      let sent: { headers: Headers; body: Uint8Array<ArrayBuffer> };
+      let sent: { headers: Headers; body: ReadableStream<Uint8Array>; json: string };
       // A refused request answers as Anthropic's own 400 would: the SDK reports a throw from fetch as a retried
       // "Connection error." and drops the reason.
       try { sent = attest(init?.body, headers, identity); }
       catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
-      const response = await fetch(input, { ...init, headers: sent.headers, body: sent.body, redirect: 'manual' });
+      const response = await fetch(input, { ...init, ...HALF_DUPLEX, headers: sent.headers, body: sent.body, redirect: 'manual' });
       if (response.status >= 400) {
         const text = await response.clone().text();
-        if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: sent.headers.get('anthropic-beta'), shape: requestShape(new TextDecoder().decode(sent.body)) }));
+        if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: sent.headers.get('anthropic-beta'), shape: requestShape(sent.json) }));
       }
       return unprefixToolUse(response);
     },

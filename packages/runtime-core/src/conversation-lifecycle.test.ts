@@ -84,7 +84,8 @@ test('handled events leave the lifecycle document bounded while a recent repeat 
     await f.lifecycle.deliver(event(999));
     await f.root.waitForIdle(context);
     expect(f.seen).toHaveLength(runs);
-    const entries = await f.root.entries({}, 2000, undefined, context);
+    // Every delivery's entry and each run's input and answer: one page holds them all.
+    const entries = await f.root.entries({}, 4000, undefined, context);
     expect(entries.items.filter(entry => entry.kind === 'gitspace.command-completed')).toHaveLength(1000);
   } finally { await f.harness.close(context); }
 }, 20000);

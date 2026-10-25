@@ -12,6 +12,7 @@ import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import { claudeCode } from './claude-code-request.js';
+import type { RequestGate, RequestPermit } from './request-gate.js';
 export * from './selection.js';
 export * from './catalog.js';
 export * from './admission.js';
@@ -20,6 +21,7 @@ export * from './run-models.js';
 export * from './helpers.js';
 export * from './published-catalog.js';
 export * from './vision.js';
+export * from './request-gate.js';
 
 export type VaultModelsOptions = {
   profileId: string;
@@ -30,6 +32,9 @@ export type VaultModelsOptions = {
   modelsStore: ModelsStore;
   providers?: readonly Provider[];
   settings?: InferenceProfile['settings'];
+  /** The workspace object's gate, shared by all of its catalogs: every attempt holds a permit while it builds and
+   * uploads its body. */
+  gate: RequestGate;
 };
 /** What one admitted request adds to its profile's catalog. A pinned model resolves as it was admitted even after the
  * catalog changes or drops it. */
@@ -41,8 +46,9 @@ export type VaultModels = Models & {
   scope(request: VaultModelsScope): Promise<Models>;
 };
 /** One request on one account. Its transport reports the provider's answer, error statuses included (pi's
- * `onResponse` misses a rejected Anthropic request), so a failure knows the provider's reset. */
-type Attempt = { fetch: typeof fetch; observe(response: ProviderResponse): void; status?: number; headers: Readonly<Record<string, string>> };
+ * `onResponse` misses a rejected Anthropic request), so a failure knows the provider's reset. It holds a gate permit
+ * from before the provider builds its body until `fetch` settles; `release` frees it if the attempt ends sooner. */
+type Attempt = { fetch: typeof fetch; observe(response: ProviderResponse): void; release(): void; status?: number; headers: Readonly<Record<string, string>> };
 const noAmbient = { env: async () => undefined, fileExists: async () => false };
 const credentialHeader = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie|host|chatgpt-account-id)$/iu;
 
@@ -168,14 +174,21 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       models.setProvider({ ...(fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal }) => { signal.throwIfAborted(); return { ...resolvedAuth, source: 'Profile vault' }; } } } });
       return models;
     }
-    function startAttempt(): Attempt {
+    async function startAttempt(signal?: AbortSignal): Promise<Attempt> {
+      let permit: RequestPermit | undefined = await options.gate.acquire(signal);
       const attempt: Attempt = {
         headers: {},
         observe(response) { attempt.status = response.status; attempt.headers = response.headers; },
+        release() { permit?.release(); permit = undefined; },
         async fetch(input, init) {
-          const response = await cloudFetch(input, init);
-          attempt.observe({ status: response.status, headers: Object.fromEntries(response.headers.entries()) });
-          return response;
+          // A later fetch of the attempt (the SDK retrying) encodes its body again: it waits for a permit too.
+          const held = permit ?? await options.gate.acquire(init?.signal ?? signal);
+          permit = undefined;
+          try {
+            const response = await cloudFetch(input, init);
+            attempt.observe({ status: response.status, headers: Object.fromEntries(response.headers.entries()) });
+            return response;
+          } finally { held.release(); }
         },
       };
       return attempt;
@@ -198,16 +211,18 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
             throw error;
           }
           await pins.write(model.provider, { credentialId: candidate.id });
-          const attempt = startAttempt();
+          const attempt = await startAttempt(signal);
           let published = false;
           let failure: Extract<AssistantMessageEvent, { type: 'error' }> | undefined;
           const deferred: AssistantMessageEvent[] = [];
-          for await (const event of invoke(models, attempt, candidate.type === 'oauth')) {
-            if (event.type === 'error') { failure = event; break; }
-            if (event.type === 'start') { deferred.push(event); continue; }
-            if (!published) { for (const start of deferred) yield start; deferred.length = 0; published = true; }
-            yield event;
-          }
+          try {
+            for await (const event of invoke(models, attempt, candidate.type === 'oauth')) {
+              if (event.type === 'error') { failure = event; break; }
+              if (event.type === 'start') { deferred.push(event); continue; }
+              if (!published) { for (const start of deferred) yield start; deferred.length = 0; published = true; }
+              yield event;
+            }
+          } finally { attempt.release(); }
           if (!failure) return;
           const message = failure.error.errorMessage ?? '';
           const policy = classifyAuthFailure(message, attempt.status);
@@ -238,8 +253,10 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
             throw error;
           }
           await pins.write(model.provider, { credentialId: candidate.id });
-          const attempt = startAttempt();
-          const result = await invoke(models, attempt);
+          const attempt = await startAttempt(signal);
+          let result: T;
+          try { result = await invoke(models, attempt); }
+          finally { attempt.release(); }
           if (result.stopReason !== 'error') return result;
           const policy = classifyAuthFailure(result.errorMessage ?? '', attempt.status);
           if (signal?.aborted || policy === 'none') return result;

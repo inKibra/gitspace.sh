@@ -34,7 +34,8 @@ export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<Inspect
   return { baseSpace, workspaces, relationsReady, workspace: inspection.workspace.kind === 'base' ? baseSpace : workspaces.find(item => item.id === inspection.workspace.id)! };
 }
 
-const runtimeAgentsDocumentSchema = RuntimeSubagentRecordSchema.extend({ conversationId: z.string() }).array();
+/** `queued`: the subagent waits for a run slot. */
+const runtimeAgentsDocumentSchema = RuntimeSubagentRecordSchema.extend({ conversationId: z.string(), queued: z.boolean().optional() }).array();
 export type RuntimeSideAgentBlock = SideAgentBlock & { runtime?: RuntimeSubagentRecord; messages?: MessageBlock[] };
 
 export function runtimeSubagentRecords(snapshot: RuntimeSnapshot) {
@@ -63,7 +64,7 @@ export function runtimeSubagents(snapshot: RuntimeSnapshot): RuntimeSideAgentBlo
     const messages = runtimeMessages(item);
     return {
       id: `agent:${item.id}`, type: 'side-agent', agentId: item.id, label: requestedName?.trim() || runtime?.definition?.name.trim() || runtime?.role || item.title || item.id,
-      status: item.status === 'idle' ? 'done' : item.status === 'waiting' ? 'blocked' : item.status,
+      status: runtime?.queued ? 'queued' : item.status === 'idle' ? 'done' : item.status === 'waiting' ? 'blocked' : item.status,
       summary: messages.findLast(message => message.text.length > 0)?.text,
       messages,
       ...(runtime ? { runtime, agent: runtime.role ?? runtime.definition?.name, model: runtime.model ? `${runtime.model.provider} / ${runtime.model.modelId}` : undefined } : {}),

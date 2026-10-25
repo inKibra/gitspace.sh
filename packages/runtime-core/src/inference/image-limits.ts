@@ -16,6 +16,10 @@ export interface ImageLimits { maxWidth: number; maxHeight: number; maxBytes: nu
  */
 const REQUEST_IMAGES = 16;
 const REQUEST_IMAGE_BYTES = 10 * 1024 * 1024;
+/** A subagent's ceiling: up to 4 of them run at once in the same object, each doing one task, so each sends at most 4
+ * images or 4 MB of them (dropped in blocks of 2). */
+export const SUBAGENT_REQUEST_IMAGES = 4;
+export const SUBAGENT_REQUEST_IMAGE_BYTES = 4 * 1024 * 1024;
 
 export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined): ImageLimits {
   const images = model?.inputLimits?.images;

@@ -111,4 +111,14 @@ describe('runtime to existing shell adapter', () => {
     snapshot.documents['gitspace.agents'] = [{ ...metadata, name: 'scout-spawn', requestedName: null, definition: null }];
     expect(runtimeSubagents(snapshot)[0]?.label).toBe('scout');
   });
+
+  it('shows an idle child waiting for a run slot as queued, and as done once it no longer waits', () => {
+    const snapshot = fixture();
+    snapshot.conversations.push({ id: 'child', parentId: 'root', title: 'child', status: 'idle', messages: [] });
+    const metadata = { conversationId: 'child', parentId: 'root', name: 'Waiting worker', attemptId: 'spawn', definition: null, selection: { kind: 'role', role: 'fast' }, role: 'fast', thinking: null, tools: ['read'], model: null };
+    snapshot.documents['gitspace.agents'] = [{ ...metadata, queued: true }];
+    expect(runtimeSubagents(snapshot)[0]?.status).toBe('queued');
+    snapshot.documents['gitspace.agents'] = [metadata];
+    expect(runtimeSubagents(snapshot)[0]?.status).toBe('done');
+  });
 });

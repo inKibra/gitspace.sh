@@ -14,6 +14,7 @@ import {
   type TranscriptContext,
 } from '@earendil-works/pi-ai';
 import { createVaultModels, type VaultModelsOptions } from './index';
+import { createRequestGate, type RequestGate } from './request-gate';
 import type { AccountFailure, CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
 import { describeCloudProviders, listCloudModels } from './admission';
 
@@ -57,6 +58,7 @@ async function fixture(options: {
   workspaceId?: string;
   settings?: VaultModelsOptions['settings'];
   chats?: readonly Model<Api>[];
+  gate?: RequestGate;
 } = {}) {
   const effects: RequestEffect[] = [];
   const resolutions: { accountId: string; refresh: boolean }[] = [];
@@ -106,7 +108,7 @@ async function fixture(options: {
         effects.push(effect);
         const reply: ProviderReply = options.reply ? await options.reply(effect) : { status: 200 };
         if (reply.transport === 'fetch') {
-          const response = await request.fetch?.('https://vault-provider.invalid/v1/messages', { method: 'POST' });
+          const response = await request.fetch?.('https://vault-provider.invalid/v1/messages', { method: 'POST', body: effect.prompt });
           if (!response?.ok) throw new Error(`${response?.status} ${await response?.text()}`);
         } else await request.onResponse?.({ status: reply.status, headers: reply.headers ?? {} }, model);
         stream.push({ type: 'start', partial: output });
@@ -158,7 +160,7 @@ async function fixture(options: {
   };
   const models = await createVaultModels({
     profileId: 'profile', workspaceId: options.workspaceId ?? 'workspace-b', vault, pins,
-    modelsStore: new InMemoryModelsStore(), providers: [provider],
+    modelsStore: new InMemoryModelsStore(), providers: [provider], gate: options.gate ?? createRequestGate(),
     ...(options.settings ? { settings: options.settings } : {}),
   });
   const chatModel = models.getModel(providerId, chat.id);
@@ -329,5 +331,91 @@ describe('vault-bound provider dispatch', () => {
     expect(test.classifierEffects).toEqual([]);
     expect(test.resolutions).toEqual([]);
     expect(transformed).toBe(false);
+  });
+});
+
+const ask = (prompt: string) => ({ messages: [{ role: 'user' as const, content: prompt, timestamp: 0 }] });
+
+/** A provider whose uploads are answered only when the test says, and a gate that counts the requests asking it. */
+function heldUploads() {
+  const uploads: { prompt: string; respond(): void }[] = [];
+  let asked = 0;
+  const watchers: { ready(): boolean; resolve(): void }[] = [];
+  const changed = () => {
+    for (const watcher of [...watchers]) if (watcher.ready()) { watchers.splice(watchers.indexOf(watcher), 1); watcher.resolve(); }
+  };
+  /** Settles once `ready` holds. */
+  const until = (ready: () => boolean) => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    watchers.push({ ready, resolve });
+    changed();
+    return promise;
+  };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+    const { promise, resolve } = Promise.withResolvers<Response>();
+    uploads.push({ prompt: typeof init?.body === 'string' ? init.body : '', respond: () => resolve(Response.json({})) });
+    changed();
+    return promise;
+  });
+  const inner = createRequestGate();
+  const gate: RequestGate = { acquire(signal) { asked++; changed(); return inner.acquire(signal); } };
+  return { uploads, gate, asked: () => asked, until };
+}
+
+describe('workspace request gate', () => {
+  it('lets two of the object\'s requests upload at once, across its views, and starts the next when one is answered', async () => {
+    const held = heldUploads();
+    const test = await fixture({ gate: held.gate, async reply() { return { status: 200, transport: 'fetch' }; } });
+    const views = [test.models, test.models, await test.models.scope({ pins: served() }), await test.models.scope({ pins: served() })];
+    const answers = views.map((view, index) => view.completeSimple(test.chatModel, ask(`request ${index}`)));
+    await held.until(() => (held.asked() === 4 && held.uploads.length === 2) || held.uploads.length > 2);
+    expect(held.uploads).toHaveLength(2);
+    expect(test.effects).toHaveLength(2);
+    held.uploads[0]!.respond();
+    await held.until(() => held.uploads.length === 3);
+    held.uploads[1]!.respond();
+    held.uploads[2]!.respond();
+    await held.until(() => held.uploads.length === 4);
+    held.uploads[3]!.respond();
+    expect((await Promise.all(answers)).map(answer => answer.stopReason)).toEqual(['stop', 'stop', 'stop', 'stop']);
+    expect(held.uploads.map(upload => upload.prompt).sort()).toEqual(['request 0', 'request 1', 'request 2', 'request 3']);
+  });
+
+  it('frees the place of a request that fails before it uploads', async () => {
+    const held = heldUploads();
+    const test = await fixture({ gate: held.gate, async reply(request) {
+      return request.prompt === 'unbuildable' ? { status: 400, error: 'Request could not be built' } : { status: 200, transport: 'fetch' };
+    } });
+    expect(await test.models.completeSimple(test.chatModel, ask('unbuildable'))).toMatchObject({ stopReason: 'error', errorMessage: 'Request could not be built' });
+    const answers = ['first', 'second', 'third'].map(prompt => test.models.completeSimple(test.chatModel, ask(prompt)));
+    await held.until(() => (held.asked() === 4 && held.uploads.length === 2) || held.uploads.length > 2);
+    expect(held.uploads).toHaveLength(2);
+    held.uploads[0]!.respond();
+    held.uploads[1]!.respond();
+    await held.until(() => held.uploads.length === 3);
+    held.uploads[2]!.respond();
+    expect((await Promise.all(answers)).map(answer => answer.stopReason)).toEqual(['stop', 'stop', 'stop']);
+  });
+
+  it('drops a waiting request whose signal aborts, with its reason, without taking a place', async () => {
+    const held = heldUploads();
+    const test = await fixture({ gate: held.gate, async reply() { return { status: 200, transport: 'fetch' }; } });
+    const running = ['first', 'second'].map(prompt => test.models.completeSimple(test.chatModel, ask(prompt)));
+    await held.until(() => held.uploads.length === 2);
+    const stop = new AbortController();
+    const stopped = test.models.completeSimple(test.chatModel, ask('stopped'), { signal: stop.signal });
+    await held.until(() => held.asked() === 3 || held.uploads.length > 2);
+    expect(held.uploads).toHaveLength(2);
+    stop.abort(new Error('Conversation stopped'));
+    expect(await stopped).toMatchObject({ stopReason: 'error', errorMessage: 'Conversation stopped' });
+    const next = test.models.completeSimple(test.chatModel, ask('next'));
+    await held.until(() => held.asked() === 4);
+    held.uploads[0]!.respond();
+    await held.until(() => held.uploads.length === 3);
+    expect(held.uploads[2]!.prompt).toBe('next');
+    held.uploads[1]!.respond();
+    held.uploads[2]!.respond();
+    expect((await Promise.all([...running, next])).map(answer => answer.stopReason)).toEqual(['stop', 'stop', 'stop']);
+    expect(test.effects.map(effect => effect.prompt)).not.toContain('stopped');
   });
 });

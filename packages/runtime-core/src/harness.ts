@@ -18,6 +18,7 @@ import { ConversationLifecycleDoc, createConversationLifecycle, type Conversatio
 import { bindCronGeneration } from './cron.js';
 import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
 import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/inference';
+import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_REQUEST_IMAGES } from './inference/image-limits.js';
 /** `role` is the profile role the model came from, when it came from one. */
 export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string };
 export type RuntimeHarnessOptions = {
@@ -141,7 +142,16 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     // Resets cut off earlier attempts of this request: the lean form sends older tool output cut down (the transcript keeps it).
     const lean = form === 'lean' ? summarySource(repaired ?? input.messages) : undefined;
     const described = await options.describeImages?.(signal, lean ?? repaired ?? input.messages);
-    return described || lean || repaired ? { messages: described ?? lean ?? repaired! } : undefined;
+    const outgoing = described ?? lean ?? repaired ?? input.messages;
+    // A subagent does one task and rarely needs old screenshots: it sends fewer images than a main conversation.
+    if ((await runtime.snapshot(AgentDefinitionContextDoc, runtime.conversationId, context))?.child) {
+      const agent = await runtime.snapshot(AgentDoc, runtime.conversationId, context);
+      const limits = imageLimits(agent?.model ? options.models.getModel(agent.model.provider, agent.model.modelId) : undefined);
+      const request = { messages: [...outgoing] };
+      const fitted = fitRequestImages(request, { ...limits, maxPerRequest: Math.min(limits.maxPerRequest, SUBAGENT_REQUEST_IMAGES), maxImageBytes: Math.min(limits.maxImageBytes, SUBAGENT_REQUEST_IMAGE_BYTES) });
+      if (fitted !== request) return { messages: fitted.messages };
+    }
+    return described || lean || repaired ? { messages: outgoing } : undefined;
   }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');
