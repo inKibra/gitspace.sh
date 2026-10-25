@@ -366,6 +366,10 @@ Every item is verified the way the user works, in the browser, before it is repo
 
 **Later.** Resize images instead of refusing them (entry 66): browser screenshots at a capped scale, and image reads downscaled with the Images binding through pi-durable's `ImageProcessor.prepare(bytes, mimeType, limits)` interface, telling the model the scale ("Resized from 4000x6000 to 1333x2000; multiply coordinates by 3.00").
 
+**Later.** pi-durable 1.4 (we are on 1.3.0): its crash-loop guard parks a task a reset cut off 5 times without progress (`settings.restartLimit`, reported `task_parked`), which replaces our `RESET_ATTEMPTS` (reset by every reply, so it never stopped inkibra's loop); its fix for idle-eviction timers that kept Durable Objects from hibernating under `nodejs_compat`; `onWake` instead of our 1 s `wakeAt`; backoffs and polls that sleep durably instead of holding an invocation; `afterFailedRun`; per-model compaction thresholds. Breaking: `TaskRuntime.sleep()` removed, every `defineDoc` needs `checkpointWhen`, and SQLite storage migrates to schema 2 with no way back to 1.3.
+
+**Later, if objects still come close to 128 MB.** An isolate id logged by every workspace object, to measure how often objects share an isolate (Cloudflare: objects of one class "may run in the same isolate … and share the 128 MB"). An inference Worker in a separate script that builds, serializes and sends model requests from a streamed context, so the request's copies never sit in the workspace object and an out-of-memory failure loses one request, not the object.
+
 **Batch 17 — tenant storage on R2 SSE-C (built; the release ships with the migration, run by hand).** Machines held the tenant's storage key and sealed every drive file, LFS object and checkpoint themselves; R2 held only ciphertext named by its hash.
 1. **Worker tenant store, scope keys, plain data protocol:** built (item 83).
 2. **Machines hold no key:** built (item 81).
