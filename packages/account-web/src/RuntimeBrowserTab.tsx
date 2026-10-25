@@ -7,6 +7,7 @@ import { Cloud01, Eye, Monitor01, Plus, Server01, StopCircle, VideoRecorder, XCl
 import { approveChrome } from './browser-approvals.js';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { glyph } from './glyph.js';
+import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { BrowserCaptures, Elapsed } from './RuntimeBrowserCaptures.js';
 import { BrowserPageComments, BrowserShares, ShareTab, type BrowserShareOptions } from './RuntimeBrowserShares.js';
 import { useLiveChanges } from './live-notices.js';
@@ -212,7 +213,7 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
   const machineLabel = (machineId: string) => machines.find(machine => machine.id === machineId)?.label ?? machineId;
   const recovery = records.filter(row => row.records.length > 0 || row.error !== null);
   const approved = overview?.chromes.filter(chrome => chrome.approved) ?? [];
-  const tiles = { request, pending, captures: captureControls };
+  const tiles = { identity, request, pending, captures: captureControls };
   return <section aria-label="Workspace browsers" className="flex flex-col gap-4 px-4 pb-8 pt-2">
     {browsers.error ? <p role="alert" className="text-caption text-destructive">{browsers.error}{overview ? ' Showing the last state read.' : ''}</p> : null}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
@@ -239,6 +240,10 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
       {approved.map(chrome => {
         const active = chrome.agents.length > 0 || chrome.running > 0;
         const groupId = chrome.groupId;
+        // LEGACY: extensions before 5.10 name no tab an agent acts on; a lone tab of an active group is then the one.
+        // Remove the fallback once every paired extension reports `targetId`.
+        const targeted = chrome.agents.some(agent => agent.targetId !== undefined);
+        const acting = (targetId: string) => targeted ? chrome.agents.some(agent => agent.targetId === targetId) : active && chrome.tabs.length === 1;
         return <BrowserCard key={chrome.pairingId} label={chrome.name} icon={<Monitor01 width={18} height={18} />} title={chrome.name} meta={`Your Chrome · ${chrome.connected ? 'online' : 'offline'}`} badges={chrome.isDefault ? <Badge size="compact" color="gray">Project default</Badge> : null}>
           {chrome.note ? <p className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{chrome.note}</p> : null}
           {groupId === null ? <p className="text-caption text-muted-foreground">No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them.</p> : <>
@@ -256,17 +261,17 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
                 <RevokeButton groupId={groupId} pending={pending} onRevoke={revoke} />
               </span>
             </div>
-            <TabTiles {...tiles} groupId={groupId} tabs={chrome.tabs} watchLabel={`${chrome.name} · ${chrome.groupName ?? 'this workspace’s'} group`} onShare={shareTab} onCloseTab={chrome.connected ? closeTab : null} focusInChrome={chrome.connected} />
+            <TabTiles {...tiles} groupId={groupId} tabs={chrome.tabs} watchLabel={`${chrome.name} · ${chrome.groupName ?? 'this workspace’s'} group`} live={{ source: 'chrome', takeover: chrome.takeover }} acting={acting} onShare={shareTab} onCloseTab={chrome.connected ? closeTab : null} focusInChrome={chrome.connected} />
             {chrome.tabs.length && chrome.connected ? <p className="text-caption text-muted-foreground">{CHROME_CAPTURE_HINT}</p> : null}
           </>}
         </BrowserCard>;
       })}
       <BrowserCard label="Cloud browser" icon={<Cloud01 width={18} height={18} />} title="Cloud browser" meta={`Headless · this workspace’s profile${overview.cloud.running ? ` · ${overview.cloud.running} running` : ''}`} badges={null} action={overview.cloud.groupId ? <RevokeButton groupId={overview.cloud.groupId} pending={pending} onRevoke={revoke} /> : null}>
-        {overview.cloud.groupId ? <TabTiles {...tiles} groupId={overview.cloud.groupId} tabs={overview.cloud.tabs} watchLabel="Cloud browser" onShare={null} onCloseTab={closeTab} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
+        {overview.cloud.groupId ? <TabTiles {...tiles} groupId={overview.cloud.groupId} tabs={overview.cloud.tabs} watchLabel="Cloud browser" live={{ source: 'cloud', takeover: true }} acting={() => overview.cloud.running > 0 && overview.cloud.tabs.length === 1} onShare={null} onCloseTab={closeTab} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
       </BrowserCard>
       {overview.machines.map(machine => <BrowserCard key={machine.machineId} label={`Headless browser on ${machineLabel(machine.machineId)}`} icon={<Server01 width={18} height={18} />} title={`Headless browser on ${machineLabel(machine.machineId)}`} meta="Headless · on this machine" badges={null} action={machine.groupId ? <RevokeButton groupId={machine.groupId} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} /> : null}>
         {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
-        {machine.groupId ? <TabTiles {...tiles} groupId={machine.groupId} tabs={machine.tabs} watchLabel={`Headless browser on ${machineLabel(machine.machineId)}`} onShare={null} onCloseTab={null} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
+        {machine.groupId ? <TabTiles {...tiles} groupId={machine.groupId} tabs={machine.tabs} watchLabel={`Headless browser on ${machineLabel(machine.machineId)}`} live={null} acting={() => false} onShare={null} onCloseTab={null} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
       </BrowserCard>)}
     </> : null}
     <BrowserCaptures captures={captures} error={capturesError} onMention={onCompose} />
@@ -318,18 +323,24 @@ function RevokeButton({ groupId, pending, onRevoke }: { groupId: string; pending
 }
 
 /** A group's tabs as tiles. `pending` is the Browser tab's action in progress, if any: one action runs at a time.
- * `watchLabel` names the browser and group in the Watch dialog. `onShare` is set for a Chrome's group: its tiles get Share.
- * `onCloseTab` is set where tabs can be closed from here: their tiles get Close tab. `focusInChrome` gives the Watch
- * dialog Focus in Chrome (a connected Chrome's group). */
-function TabTiles({ groupId, tabs, watchLabel, request, pending, captures, onShare, onCloseTab, focusInChrome }: { groupId: string; tabs: readonly Tab[]; watchLabel: string; request: Request; pending: string | null; captures: CaptureControls; onShare: ShareCreate | null; onCloseTab: ((groupId: string, targetId: string) => void) | null; focusInChrome: boolean }) {
+ * `watchLabel` names the browser and group in the Watch dialog; `live` opens it live, with Take over where `takeover`
+ * (your Chrome's group and the cloud browser's; a machine's headless browser shows screenshots). `acting` says whether
+ * an agent acts on a tab now. `onShare` is set for a Chrome's group: its tiles get Share. `onCloseTab` is set where tabs
+ * can be closed from here: their tiles get Close tab. `focusInChrome` gives the Watch dialog Focus in Chrome (a
+ * connected Chrome's group). */
+function TabTiles({ identity, groupId, tabs, watchLabel, live, acting, request, pending, captures, onShare, onCloseTab, focusInChrome }: { identity: { projectId: string; workspaceId: string }; groupId: string; tabs: readonly Tab[]; watchLabel: string; live: { source: 'chrome' | 'cloud'; takeover: boolean } | null; acting(targetId: string): boolean; request: Request; pending: string | null; captures: CaptureControls; onShare: ShareCreate | null; onCloseTab: ((groupId: string, targetId: string) => void) | null; focusInChrome: boolean }) {
   const [watching, setWatching] = useState<Tab | null>(null);
   if (!tabs.length) return <p className="text-caption text-muted-foreground">No open tabs.</p>;
   return <>
     <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">{tabs.map(tab => {
       const label = tab.title || tab.url;
       const recording = captures.recordings.find(view => view.capture.target?.groupId === groupId && view.capture.target.targetId === tab.targetId);
+      const badges = [
+        recording ? <Badge key="recording" size="compact" color="red"><span className="tabular-nums">REC <Elapsed since={recording.capture.startedAt} /></span></Badge> : null,
+        tab.holder === 'you' ? <Badge key="holder" size="compact" color="gray">You’re in control</Badge> : acting(tab.targetId) ? <Badge key="holder" size="compact" color="blue">Agent acting</Badge> : null,
+      ].filter(badge => badge !== null);
       return <li key={tab.targetId} aria-label={`Tab ${label}`} className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-surface-1">
-        <TabPreview groupId={groupId} tab={tab} request={request} recording={recording ? <Badge size="compact" color="red"><span className="tabular-nums">REC <Elapsed since={recording.capture.startedAt} /></span></Badge> : null} onWatch={() => setWatching(tab)} />
+        <TabPreview groupId={groupId} tab={tab} request={request} badges={badges} onWatch={() => setWatching(tab)} />
         <div className="flex min-w-0 flex-col gap-0.5 px-2.5 py-2">
           <span className="truncate text-caption font-medium" title={tab.title}>{label}</span>
           <span className="truncate font-mono text-[11px] text-muted-foreground" title={tab.url}>{tab.url.replace(/^https?:\/\//u, '')}</span>
@@ -346,7 +357,8 @@ function TabTiles({ groupId, tabs, watchLabel, request, pending, captures, onSha
         </div>
       </li>;
     })}</ul>
-    {watching ? <WatchDialog key={watching.targetId} groupId={groupId} tab={watching} watchLabel={watchLabel} request={request} focusInChrome={focusInChrome} onClose={() => setWatching(null)} /> : null}
+    {watching ? live ? <BrowserWatchDialog key={watching.targetId} identity={identity} request={request} target={{ source: live.source, groupId, targetId: watching.targetId, title: watching.title, url: watching.url, label: watchLabel }} focusInChrome={focusInChrome} takeover={live.takeover} onClose={() => setWatching(null)} />
+      : <WatchDialog key={watching.targetId} groupId={groupId} tab={watching} watchLabel={watchLabel} request={request} onClose={() => setWatching(null)} /> : null}
   </>;
 }
 
@@ -375,30 +387,25 @@ function PreviewAge({ capturedAt }: { capturedAt: string }) {
   return <span className="absolute bottom-1 right-1.5 rounded bg-black/60 px-1 text-[10px] tabular-nums text-white">{age(now - Date.parse(capturedAt))}</span>;
 }
 
-/** A tile's preview, flush at its top; the reason replaces it when there is no image. Opens the Watch dialog. */
-function TabPreview({ groupId, tab, request, recording, onWatch }: { groupId: string; tab: Tab; request: Request; recording: ReactNode; onWatch(): void }) {
+/** A tile's preview, flush at its top; the reason replaces it when there is no image. `badges` (recording, who holds
+ * the tab) sit at its bottom left. Opens the Watch dialog. */
+function TabPreview({ groupId, tab, request, badges, onWatch }: { groupId: string; tab: Tab; request: Request; badges: readonly ReactNode[]; onWatch(): void }) {
   const { preview, error } = useTabPreview(groupId, tab.targetId, request, BROWSER_REFRESH_MS);
   const image = preview?.image;
   return <button type="button" aria-label={`Preview of ${tab.title || tab.url}`} onClick={onWatch} className="relative flex aspect-[16/10] items-center justify-center overflow-hidden border-b border-border bg-surface-2">
     {image ? <img className="h-full w-full object-cover object-top" src={`data:${image.mediaType};base64,${image.data}`} alt={`Preview of ${tab.title || tab.url}`} />
       : <p className="p-2 text-center text-caption text-muted-foreground">{error ?? preview?.reason ?? 'Loading preview…'}</p>}
-    {recording ? <span className="absolute bottom-1 left-1.5">{recording}</span> : null}
+    {badges.length ? <span className="absolute bottom-1 left-1.5 flex flex-wrap gap-1">{badges}</span> : null}
     {image && preview ? <PreviewAge capturedAt={preview.capturedAt} /> : null}
   </button>;
 }
 
-/** Watching one tab: its preview large, read every few seconds while the dialog is open. With `focusInChrome`, Focus in
- * Chrome brings the tab to the front in that Chrome; its failure shows here. */
-function WatchDialog({ groupId, tab, watchLabel, request, focusInChrome, onClose }: { groupId: string; tab: Tab; watchLabel: string; request: Request; focusInChrome: boolean; onClose(): void }) {
+/** Watching a tab of a machine's headless browser: its preview large, read every few seconds while the dialog is open
+ * (your Chrome's and the cloud browser's tabs are watched live, `BrowserWatchDialog`). */
+function WatchDialog({ groupId, tab, watchLabel, request, onClose }: { groupId: string; tab: Tab; watchLabel: string; request: Request; onClose(): void }) {
   const { preview, error } = useTabPreview(groupId, tab.targetId, request, WATCH_REFRESH_MS);
-  const [focusing, setFocusing] = useState(false);
-  const [focusError, setFocusError] = useState<string | null>(null);
   const image = preview?.image;
   const title = tab.title || tab.url;
-  const focus = async () => {
-    setFocusing(true); setFocusError(null);
-    try { await request({ type: 'browserFocusTab', groupId, targetId: tab.targetId }); } catch (cause) { setFocusError(rpcErrorMessage(cause, 'Focus the tab in Chrome')); } finally { setFocusing(false); }
-  };
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}><DialogContent size="lg">
     <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{watchLabel} · a new screenshot every few seconds</DialogDescription></DialogHeader>
     <div className="relative flex aspect-[16/10] items-center justify-center overflow-hidden rounded-lg border border-border bg-surface-2">
@@ -406,9 +413,7 @@ function WatchDialog({ groupId, tab, watchLabel, request, focusInChrome, onClose
         : <p className="p-4 text-center text-caption text-muted-foreground">{error ?? preview?.reason ?? 'Loading preview…'}</p>}
       {image && preview ? <PreviewAge capturedAt={preview.capturedAt} /> : null}
     </div>
-    {focusError ? <p role="alert" className="text-caption text-destructive">{focusError}</p> : null}
     <DialogFooter>
-      {focusInChrome ? <Button variant="ghost" loading={focusing} onClick={() => void focus()}>Focus in Chrome</Button> : null}
       <Button variant="primary" onClick={onClose}>Done</Button>
     </DialogFooter>
   </DialogContent></Dialog>;

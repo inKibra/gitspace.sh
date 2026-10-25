@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { RuntimeBrowserAuthorizationSchema } from './browser.js';
 import { GitLfsRestoredSchema } from '@gitspace/protocol-workspace';
 import { RuntimeGitCheckpointSchema } from './git-checkpoint.js';
+import { RuntimeTakeoverQuestionSchema } from './browser-takeover.js';
 
 export const RuntimeProjectIdSchema = z.string().min(1).brand<'ProjectId'>();
 export const RuntimeWorkspaceIdSchema = z.string().min(1).brand<'WorkspaceId'>();
@@ -34,10 +35,11 @@ export const RuntimeAttachmentSchema = z.object({ ...identity, attachmentId: z.s
 export const RuntimeMessageSchema = z.object({ id: z.string(), role: z.enum(['user', 'assistant', 'tool', 'system']), content: z.array(RuntimeContentSchema), createdAt: z.iso.datetime() });
 export const RuntimeConversationSchema = z.object({ id: z.string(), parentId: z.string().nullable(), title: z.string(), status: z.enum(['idle', 'running', 'waiting', 'failed']), error: z.string().optional(), messages: z.array(RuntimeMessageSchema) });
 export const RuntimeTaskSchema = z.object({ id: z.string(), kind: z.string(), conversationId: z.string().nullable(), parentId: z.string().nullable(), background: z.boolean(), state: z.enum(['pending', 'running', 'waiting', 'completed', 'failed', 'interrupted']), machineId: RuntimeMachineIdSchema.nullable(), result: RuntimeJsonSchema.nullable() });
-/** A machine-attach approval names the machine it attaches. */
+/** A machine-attach approval names the machine it attaches; a `takeover` question is an ask_takeover card. */
 export const RuntimeQuestionToolSchema = z.object({ name: z.string(), args: RuntimeJsonSchema });
 export type RuntimeQuestionTool = z.infer<typeof RuntimeQuestionToolSchema>;
-export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), tool: RuntimeQuestionToolSchema.optional() });
+export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval', 'takeover']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), tool: RuntimeQuestionToolSchema.optional(), takeover: RuntimeTakeoverQuestionSchema.optional() });
+export type RuntimeQuestion = z.infer<typeof RuntimeQuestionSchema>;
 export const RuntimeSnapshotSchema = z.object({ version: z.literal(1), ...identity, cursor: z.number().int().nonnegative(), conversations: z.array(RuntimeConversationSchema), tasks: z.array(RuntimeTaskSchema), attachments: z.array(RuntimeAttachmentSchema), questions: z.array(RuntimeQuestionSchema), documents: z.record(z.string(), RuntimeJsonSchema) });
 export const RuntimeSnapshotInputSchema = RuntimeIdentitySchema;
 export const RuntimeSubmitInputSchema = z.object({ ...identity, conversationId: z.string().optional(), requestId: z.string().min(1), text: z.string().min(1), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional() });

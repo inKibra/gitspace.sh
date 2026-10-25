@@ -57,6 +57,30 @@ describe('CdpBrowserShim', () => {
     await expect(b.send('Runtime.evaluate', { expression: '1' }, 'session-1')).rejects.toThrow('does not belong');
   });
 
+  it('while you hold a tab, a client’s commands to it are refused and what happens there, in its frames too, stays out of the client', async () => {
+    const browser = fakeBrowser();
+    const shim = await CdpBrowserShim.open(browser.channel);
+    const events: CdpEvent[] = [], held = new Set<string>();
+    const client = shim.client(event => events.push(event), { hold: { holds: targetId => held.has(targetId), refuse: targetId => `You hold ${targetId}` } });
+    await client.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    browser.emit({ method: 'Target.attachedToTarget', params: { sessionId: 'frame-1', targetInfo: { targetId: 'frame', type: 'iframe' } }, sessionId: 'session-1' });
+    held.add('existing');
+    const seen = events.length;
+    browser.emit({ method: 'Input.dragIntercepted', params: {}, sessionId: 'session-1' });
+    browser.emit({ method: 'Runtime.consoleAPICalled', params: { args: [{ value: 'typed' }] }, sessionId: 'frame-1' });
+    expect(events.slice(seen)).toEqual([]);
+    const before = browser.calls.length;
+    await expect(client.send('Runtime.evaluate', { expression: 'document.title' }, 'session-1')).rejects.toThrow('You hold existing');
+    await expect(client.send('Runtime.evaluate', { expression: 'document.title' }, 'frame-1')).rejects.toThrow('You hold existing');
+    await expect(client.send('Target.closeTarget', { targetId: 'existing' })).rejects.toThrow('You hold existing');
+    expect(browser.calls.slice(before)).toEqual([]);
+    // Handed back, the tab is the client's again.
+    held.delete('existing');
+    await client.send('Runtime.evaluate', { expression: 'document.title' }, 'session-1');
+    browser.emit({ method: 'Page.loadEventFired', params: {}, sessionId: 'session-1' });
+    expect(events.at(-1)).toEqual({ method: 'Page.loadEventFired', params: {}, sessionId: 'session-1' });
+  });
+
   it('a second CDP session on a page a client already drives is its own, through the page session (newCDPSession)', async () => {
     const browser = fakeBrowser();
     const shim = await CdpBrowserShim.open(browser.channel);

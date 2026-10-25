@@ -1,31 +1,34 @@
 /**
- * The in-page overlay on a tab of your Chrome while an agent uses it, a capture records it or people watch its share
- * (docs/APERTURE-DESIGN.md §6.4, §8, §11; the agreed look is account-web's BrowsersMockExtension `Bar` and `Pointer`):
- * a white toolbar at the bottom of the tab (the GitSpace mark, who acts and on which workspace, what it is doing,
- * Capture, and Stop for the agent; while a capture records, REC with its time and Stop capture), a frame round the
- * tab (blue while the agent acts, red while a capture records), the agent's cursor at each point it clicks or moves to,
- * and the named pointers of the people watching the tab's shares. It draws nothing for your own pointer: while a share
- * shows it to its viewers, it says where it is instead (`report`), and each viewer draws it.
+ * The in-page overlay on a tab of your Chrome while an agent uses it, you hold it, a capture records it or people watch
+ * its share (docs/APERTURE-DESIGN.md §6.4, §7.2, §8, §11; the agreed look is account-web's BrowsersMockExtension `Bar`
+ * and `Pointer`): a white toolbar at the bottom of the tab (the GitSpace mark, who acts and on which workspace, what it
+ * is doing, Capture, Take over and Stop for the agent; while you hold the tab, "You're in control", the paused agent
+ * and Resume agent; while a capture records, REC with its time and Stop capture), a frame round the tab (blue while
+ * the agent acts, grey while you hold it, red while a capture records), the agent's cursor at each point it clicks or
+ * moves to, and the named pointers of the people watching the tab's shares. It draws nothing for your own pointer:
+ * while a share shows it to its viewers, it says where it is instead (`report`), and each viewer draws it.
  *
  * A fixed function the extension calls in its own isolated world (`Runtime.callFunctionOn`), never in the page's. The
  * overlay leaves the page and what the agent reads alone: a closed shadow root under an `aria-hidden` host marked
  * `data-gitspace-overlay` (which the screenshot mask hides), styled inline only (no stylesheet a page's CSP could
  * refuse), nothing focusable, and pointer-transparent except the toolbar while your own pointer is over it, so an
  * agent's clicks and hit tests reach the page. Its buttons call the binding named in `show` (added to this world
- * only) with `stop`, `capture` or `captureStop`; with `report`, your pointer calls the binding it names with
+ * only) with `stop`, `capture`, `captureStop`, `takeover` or `resume`; while the agent acts (`run`, `step`), each
+ * trusted pointer or key press on the page (not on the toolbar) calls it with `take`: the agent's own input is trusted
+ * too, which the extension tells apart. With `report`, your pointer calls the binding it names with
  * `pointer {"x":…,"y":…}` (fractions of the viewport) at most ten times a second, and `pointer null` once it leaves the
  * tab. Mouse events at the agent's cursor are the agent's, and are not reported.
  *
- * One argument: `{ show?: { mode: 'run' | 'step' | 'capture', workspace, agent, doing, binding, capture: 'none' |
- * 'ready' | 'recording', recording: { startedAt, sound } | null } | null, cursor?: { x, y, type }, pointers?: [{ id,
- * name, color, x, y }], report?: string | null, conceal?: boolean, remove?: true }`. `agent` and `doing` (what it is
- * doing) may be null. `show` installs the overlay where the document lacks it (after a navigation) and refreshes it;
- * `show: null` hides the toolbar, frame and cursor, leaving the pointers. `pointers` (x and y are fractions of the
- * viewport) is everyone pointing now: each glides to its new place, eased, and one left out leaves; they install the
- * overlay too, as `report` does. An overlay not refreshed for 75 s removes itself, so one whose debugger channel Chrome
- * dropped does not stay. The cursor travels to each point along a curved path, eased, overshooting slightly and
- * settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms); it presses on `mousePressed` (with a
- * ripple) and fades after 5 s idle.
+ * One argument: `{ show?: { mode: 'run' | 'step' | 'capture' | 'you', workspace, agent, doing, binding, capture:
+ * 'none' | 'ready' | 'recording', recording: { startedAt, sound } | null } | null, cursor?: { x, y, type }, pointers?:
+ * [{ id, name, color, x, y }], report?: string | null, conceal?: boolean, remove?: true }`. `agent` and `doing` (what it
+ * is doing) may be null; in `you`, `agent` is the paused agent. `show` installs the overlay where the document lacks it
+ * (after a navigation) and refreshes it; `show: null` hides the toolbar, frame and cursor, leaving the pointers.
+ * `pointers` (x and y are fractions of the viewport) is everyone pointing now: each glides to its new place, eased,
+ * and one left out leaves; they install the overlay too, as `report` does. An overlay not refreshed for 75 s removes
+ * itself, so one whose debugger channel Chrome dropped does not stay. The cursor travels to each point along a curved
+ * path, eased, overshooting slightly and settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms);
+ * it presses on `mousePressed` (with a ripple) and fades after 5 s idle.
  */
 export const browserOverlayFunction = `function(command) {
   const key = '__gitspaceOverlay';
@@ -81,9 +84,17 @@ export const browserOverlayFunction = `function(command) {
     const captureDot = make('span', 'flex:none;width:8px;height:8px;border-radius:50%;display:none;background:' + RED, capture);
     const captureLabel = capture.appendChild(document.createTextNode('Capture'));
     const secondDivider = divider();
+    const takeOver = button();
+    takeOver.textContent = 'Take over';
+    paint(takeOver, false);
     const stop = button();
     stop.textContent = 'Stop';
     paint(stop, true);
+    // Resume agent: blue, as the mock draws it.
+    const resume = button();
+    resume.textContent = 'Resume agent';
+    paint(resume, true);
+    resume.style.background = BLUE; resume.style.border = '1px solid ' + BLUE;
     const cursor = make('div', 'position:fixed;left:0;top:0;pointer-events:none;opacity:0;transition:opacity .4s ease;will-change:transform', root);
     const labelCss = font + 'position:absolute;left:16px;top:20px;padding:2px 6px;border-radius:6px;color:#fff;font-size:11px;line-height:16px;font-weight:500;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.1),0 1px 2px -1px rgba(0,0,0,.1)';
     // An arrow with a white outline: the agent's cursor, and each person's pointer.
@@ -95,7 +106,7 @@ export const browserOverlayFunction = `function(command) {
     arrowPath.setAttribute('fill', BLUE);
     const label = make('span', labelCss + ';background:' + BLUE, cursor);
     const people = make('div', 'position:fixed;inset:0;pointer-events:none', root);
-    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', capture: 'none', clock: 0, report: null, at: null, reported: 'null', reportedAt: 0, reportTimer: 0 };
+    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', mode: null, capture: 'none', clock: 0, report: null, at: null, reported: 'null', reportedAt: 0, reportTimer: 0 };
     const place = (x, y) => { state.x = x; state.y = y; cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)'; };
     const pressAt = () => {
       arrow.animate([{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }], { duration: 240, easing: 'ease-out' });
@@ -187,22 +198,31 @@ export const browserOverlayFunction = `function(command) {
     for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) bar.addEventListener(type, event => { event.stopPropagation(); if (type !== 'click') event.preventDefault(); });
     const press = command => { const call = globalThis[state.binding]; if (typeof call === 'function') call(command); return typeof call === 'function'; };
     stop.addEventListener('click', () => { if (press('stop')) what.textContent = 'Stopping…'; });
+    takeOver.addEventListener('click', () => { if (press('takeover')) what.textContent = 'Taking over…'; });
+    resume.addEventListener('click', () => { if (press('resume')) what.textContent = 'Resuming…'; });
+    // Your pointer or key press on the page while the agent acts there takes the tab; one on the toolbar does not, and
+    // a page's own events (not trusted) never do.
+    const take = event => { if (event.isTrusted && (state.mode === 'run' || state.mode === 'step') && !event.composedPath().includes(host)) press('take'); };
+    addEventListener('pointerdown', take, { capture: true, passive: true });
+    addEventListener('keydown', take, { capture: true, passive: true });
     capture.addEventListener('click', () => { if (press(state.capture === 'recording' ? 'captureStop' : 'capture')) captureLabel.data = state.capture === 'recording' ? 'Saving…' : 'Starting…'; });
     // A recording's time, counted here between refreshes.
     const elapsed = startedAt => { const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000)); return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0'); };
     const expiry = setInterval(() => { if (Date.now() - state.seen > 75000) overlay.dispose(); }, 15000);
     const show = next => {
-      state.binding = next.binding; state.capture = next.capture;
-      const capturing = next.mode === 'capture', recording = next.capture === 'recording' && next.recording ? next.recording : null;
+      state.binding = next.binding; state.mode = next.mode; state.capture = next.capture;
+      const capturing = next.mode === 'capture', yours = next.mode === 'you', recording = next.capture === 'recording' && next.recording ? next.recording : null;
       const tone = recording ? RED : BLUE;
       bar.style.display = 'flex';
-      bar.style.boxShadow = '0 10px 30px rgba(0,0,0,.18), 0 0 0 1px ' + tone + '55';
-      frame.style.boxShadow = 'inset 0 0 0 3px ' + tone + ', inset 0 0 ' + (recording ? '22px ' + tone + '40' : '26px ' + tone + '55');
-      frame.style.opacity = next.mode === 'run' || next.mode === 'step' || recording ? '1' : '0';
+      bar.style.boxShadow = '0 10px 30px rgba(0,0,0,.18)' + (yours && !recording ? '' : ', 0 0 0 1px ' + tone + '55');
+      frame.style.boxShadow = yours && !recording ? 'inset 0 0 0 2px #a3a3a3' : 'inset 0 0 0 3px ' + tone + ', inset 0 0 ' + (recording ? '22px ' + tone + '40' : '26px ' + tone + '55');
+      frame.style.opacity = next.mode === 'run' || next.mode === 'step' || yours || recording ? '1' : '0';
       logo.style.display = capturing ? 'none' : '';
+      logoDot.style.display = yours ? 'none' : '';
       recDot.style.display = capturing ? '' : 'none';
       // While capturing, the second part is the recording's time, in the title's weight with even digits.
       where.style.cssText = capturing ? 'font-variant-numeric:tabular-nums' : 'font-weight:400;color:#737373';
+      what.style.color = yours ? '#737373' : '#525252';
       clearInterval(state.clock);
       if (capturing) {
         who.textContent = 'Capturing · ' + next.workspace;
@@ -210,6 +230,11 @@ export const browserOverlayFunction = `function(command) {
         what.textContent = 'REC · ' + (recording?.sound ? 'tabCapture · with sound' : 'frames · no sound');
         const tick = () => { where.textContent = ' · ' + elapsed(recording.startedAt); };
         if (recording) { tick(); state.clock = setInterval(tick, 1000); }
+      } else if (yours) {
+        who.textContent = "You're in control";
+        where.textContent = '';
+        what.textContent = (next.agent ?? 'main') + ' is paused · it sees your changes when it resumes';
+        cursor.style.opacity = '0';
       } else {
         who.textContent = next.agent ?? next.workspace;
         where.textContent = next.agent ? ' · ' + next.workspace : '';
@@ -223,14 +248,17 @@ export const browserOverlayFunction = `function(command) {
       captureIcon.style.display = next.capture === 'recording' ? 'none' : '';
       captureDot.style.display = next.capture === 'recording' && !capturing ? '' : 'none';
       paint(capture, capturing);
-      stop.style.display = capturing ? 'none' : 'inline-flex';
+      // Take over and Stop while the agent acts; Resume agent while you hold the tab.
+      takeOver.style.display = capturing || yours ? 'none' : 'inline-flex';
+      stop.style.display = capturing || yours ? 'none' : 'inline-flex';
+      resume.style.display = yours ? 'inline-flex' : 'none';
       secondDivider.style.display = capturing || next.capture === 'none' ? 'none' : '';
     };
     overlay = {
       apply(next) {
         if (next.show !== undefined || next.pointers || next.report) { state.seen = Date.now(); if (!host.isConnected) document.documentElement.appendChild(host); }
         if (next.show) show(next.show);
-        if (next.show === null) { state.binding = ''; clearInterval(state.clock); bar.style.display = 'none'; frame.style.opacity = '0'; cursor.style.opacity = '0'; }
+        if (next.show === null) { state.binding = ''; state.mode = null; clearInterval(state.clock); bar.style.display = 'none'; frame.style.opacity = '0'; cursor.style.opacity = '0'; }
         if (next.pointers) point(next.pointers);
         if (next.report !== undefined && next.report !== state.report) { clearTimeout(state.reportTimer); state.reportTimer = 0; state.report = next.report; state.reported = 'null'; }
         if (next.conceal !== undefined) host.style.visibility = next.conceal ? 'hidden' : 'visible';
@@ -242,6 +270,8 @@ export const browserOverlayFunction = `function(command) {
         document.removeEventListener('mousemove', hover, { capture: true });
         document.removeEventListener('mouseout', leave, { capture: true });
         document.removeEventListener('visibilitychange', leave);
+        removeEventListener('pointerdown', take, { capture: true });
+        removeEventListener('keydown', take, { capture: true });
         host.remove(); delete globalThis[key];
       },
     };

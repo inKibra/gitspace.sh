@@ -66,6 +66,28 @@ test('idle event delivery wakes inference with visible durable sender labels and
   } finally { await f.harness.close(context); }
 });
 
+test('you taking a tab the agent used and handing it back reach the agent as events from that browser', async () => {
+  const f = await fixture();
+  try {
+    const payload = { groupId: 'group', targetId: 'tab', source: 'chrome', pairingId: 'pairing', at: '2026-10-25T00:00:00.000Z', by: 'chrome' };
+    const sender = { id: 'group', name: 'Chrome "Work"' };
+    await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId: 'browser-taken:group:tab:1', kind: 'browser-taken', sender, text: 'The user took over tab tab in Chrome "Work".', payload });
+    await f.root.waitForIdle(context);
+    await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId: 'browser-handback:group:tab:2', kind: 'browser-handback', sender, text: 'The user handed tab tab in Chrome "Work" back to you.', payload });
+    await f.root.waitForIdle(context);
+    expect(f.seen).toHaveLength(2);
+    expect(f.seen[0]).toContain('kind=\\"browser-taken\\" source=\\"Chrome \'Work\'\\"');
+    expect(f.seen[1]).toContain('kind=\\"browser-handback\\" source=\\"Chrome \'Work\'\\"');
+    const entries = await f.root.entries({}, 100, undefined, context);
+    const browserEntries = entries.items.filter(entry => entry.kind.startsWith('gitspace.browser-')).map(entry => [entry.kind, entry.data]);
+    expect(browserEntries).toHaveLength(2);
+    expect(browserEntries).toEqual(expect.arrayContaining([
+      ['gitspace.browser-taken', { requestId: 'browser-taken:group:tab:1', text: 'The user took over tab tab in Chrome "Work".', sender, payload }],
+      ['gitspace.browser-handback', { requestId: 'browser-handback:group:tab:2', text: 'The user handed tab tab in Chrome "Work" back to you.', sender, payload }],
+    ]));
+  } finally { await f.harness.close(context); }
+});
+
 test('handled events leave the lifecycle document bounded while a recent repeat is still dropped', async () => {
   const f = await fixture();
   try {

@@ -846,7 +846,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   return {
     browser: browser.manage,
-    tools: { invoke, prepareBrowser: browser.prepare, authorizeCronTool,
+    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, authorizeCronTool,
       // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.

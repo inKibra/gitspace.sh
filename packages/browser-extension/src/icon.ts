@@ -4,12 +4,13 @@
  * badge. */
 
 /** Off (grey, struck through); on and connected with nothing running (a green dot); working, while an agent acts or a
- * capture records (a blue ring); needs you: on but not connected, not paired, or refused as incompatible (an amber
- * ring). */
-export type ToolbarState = 'off' | 'on' | 'working' | 'attention';
+ * capture records (a blue ring); you, while you hold a tab the agent was using (a grey ring, as the tab's grey frame);
+ * needs you: on but not connected, not paired, or refused as incompatible (an amber ring). */
+export type ToolbarState = 'off' | 'on' | 'working' | 'you' | 'attention';
 
-/** The ring of a working or attention icon, and the badge behind its count or `!`. */
-export const TOOLBAR_TONE: Record<'working' | 'attention', string> = { working: '#1a73e8', attention: '#f59e0b' };
+/** The ring of a working, you or attention icon; the working and attention tones are also the badge behind its count
+ * or `!`. */
+export const TOOLBAR_TONE: Record<'working' | 'you' | 'attention', string> = { working: '#1a73e8', you: '#737373', attention: '#f59e0b' };
 const GREEN = '#22c55e';
 
 /** The favicon's `>_` (on a 512 grid) in a `size` square at `x`, `y`: a chevron and a line, each a green gradient, or
@@ -40,7 +41,7 @@ export function drawToolbarIcon(context: OffscreenCanvasRenderingContext2D, size
   context.clearRect(0, 0, size, size);
   context.save();
   context.scale(size / 32, size / 32);
-  if (state === 'working' || state === 'attention') {
+  if (state === 'working' || state === 'you' || state === 'attention') {
     context.strokeStyle = TOOLBAR_TONE[state];
     context.lineWidth = 2.5;
     context.beginPath(); context.arc(16, 16, 14.5, 0, Math.PI * 2); context.stroke();

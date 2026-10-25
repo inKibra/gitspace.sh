@@ -17,6 +17,7 @@ import { joinShare, openShareLive, ShareRequestError } from './share-client.js';
 import type { ShareJoined, ShareLive } from './share-client.js';
 import { shareTargetLabel, shareTimeLeft } from './share-format.js';
 import type { ShareEnd } from './share-format.js';
+import { Throttle } from '../throttle.js';
 
 type Point = { x: number; y: number };
 type Size = { width: number; height: number };
@@ -45,35 +46,6 @@ const DRAFT_WIDTH_PX = 288;
 const DRAFT_GAP_PX = 12;
 const DRAFT_HEIGHT_PX = 150;
 
-/** Sends at most once per interval; the latest value waiting is sent when the interval ends. */
-class Throttle<T> {
-  private last = Number.NEGATIVE_INFINITY;
-  private timer: number | undefined;
-  private waiting: { value: T } | null = null;
-  constructor(private readonly interval: number, private readonly emit: (value: T) => void) {}
-  push(value: T): void {
-    const wait = this.last + this.interval - Date.now();
-    if (wait <= 0 && this.timer === undefined) {
-      this.last = Date.now();
-      this.emit(value);
-      return;
-    }
-    this.waiting = { value };
-    this.timer ??= window.setTimeout(() => {
-      this.timer = undefined;
-      const waiting = this.waiting;
-      this.waiting = null;
-      if (!waiting) return;
-      this.last = Date.now();
-      this.emit(waiting.value);
-    }, Math.max(0, wait));
-  }
-  cancel(): void {
-    window.clearTimeout(this.timer);
-    this.timer = undefined;
-    this.waiting = null;
-  }
-}
 
 const fraction = (value: number) => Math.round(Math.min(1, Math.max(0, value)) * 10_000) / 10_000;
 const viewerSize = (value: number) => Math.round(Math.min(4096, Math.max(64, value)));

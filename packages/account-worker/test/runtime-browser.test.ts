@@ -7,7 +7,8 @@ import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durab
 import { createModels } from '@earendil-works/pi-ai';
 import { createRuntimeBrowserAuthority, retireWorkspaceBrowsers, workspaceBrowsersDocument, workspacePageComments, type RuntimeBrowserAuthorityOptions } from '../src/runtime-browser.js';
 import { AccountBrowserRuntime } from '../src/browser-runtime.js';
-import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
+import { BROWSER_TAB_HELD, holdersChanged } from '../src/browser-takeover.js';
+import { BROWSER_RUN_LIMIT_MS, RuntimeAttachmentSchema, RuntimeBrowserArgumentsSchema, RuntimeBrowserAuthorizationSchema, RuntimeBrowserGrantSchema, RuntimeBrowserStatusSchema, signRuntimeBrowserAuthorityCertificate, type RuntimeBrowserAuthorityCertificateBody, type RuntimeBrowserHolder, type RuntimeBrowserStatus, type RuntimeToolDispatch, type RuntimeToolResult, type RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserAuthorizationSchema } from '@gitspace/protocol-runtime';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { BrowserSiteLevel } from '@gitspace/protocol-environment';
 import { BROWSER_EXTENSION_PROTOCOL, RuntimeAccountBrowserGroupRowSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserConnectedTabSchema, RuntimeBrowserManagementSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPageCommentViewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserShareSchema, RuntimeBrowserToolArgumentsSchema, browserBase64, type RuntimeBrowserManagement, type RuntimeBrowserPageComment, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
@@ -88,7 +89,9 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   };
   /** How a machine answers management commands, by machine id; a throw is the machine's failure. */
   const machineAnswers = new Map<string, (command: RuntimeBrowserManagement) => unknown>();
-  const runtime = { harness, defaultExecutionMachine: () => state.defaultMachineId, browserConversation: async (_id: string) => ({ id: root.id, root: state.root, tools: null }), attachments: { list: () => attachments, execute: async (dispatch: RuntimeToolDispatch): Promise<RuntimeToolResult> => {
+  /** Events the main conversation heard (`browser-taken`, `browser-handback`). */
+  const browserEvents: unknown[] = [];
+  const runtime = { harness, defaultExecutionMachine: () => state.defaultMachineId, browserConversation: async (_id: string) => ({ id: root.id, root: state.root, tools: null }), browserEvent: async (event: unknown) => { browserEvents.push(event); }, attachments: { list: () => attachments, execute: async (dispatch: RuntimeToolDispatch): Promise<RuntimeToolResult> => {
     const { command } = RuntimeBrowserAuthorizationSchema.parse(dispatch.browserAuthorization).body;
     dispatches.push(dispatch);
     const answer = command.type === 'manage' ? machineAnswers.get(dispatch.machineId) : undefined;
@@ -100,7 +103,13 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
   const sessions: Array<{ name: string; authorization: RuntimeAccountBrowserAuthorization }> = [];
-  const BROWSER_SESSION = { getByName: (name: string) => ({ async overview() { return { tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example' }], running: 1 }; }, async preview(targetId: string): Promise<RuntimeBrowserPreview> { return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: 'cloud-jpeg' }, reason: null }; }, async closeTab(targetId: string) { closedCloudTabs.push(targetId); }, async execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> {
+  /** The cloud tabs you hold in the fixture's browser session, and the devices its take overs named. */
+  const cloudHeld = new Map<string, { targetId: string; holder: 'you'; since: string; by: 'gitspace'; device: string | null }>();
+  const cloudTab = { targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example' };
+  const BROWSER_SESSION = { getByName: (name: string) => ({ async overview() { return { tabs: [cloudTab], running: 1, held: [...cloudHeld.values()] }; }, async holders() { return [...cloudHeld.values()]; },
+    async takeOver(input: { targetId: string; device: string | null }) { const before = [...cloudHeld.values()]; cloudHeld.set(input.targetId, { targetId: input.targetId, holder: 'you', since: cloudHeld.get(input.targetId)?.since ?? new Date().toISOString(), by: 'gitspace', device: input.device }); return { before, after: [...cloudHeld.values()], acting: true, page: cloudTab }; },
+    async resume(input: { targetId: string }) { const before = [...cloudHeld.values()]; cloudHeld.delete(input.targetId); return { before, after: [...cloudHeld.values()], acting: false, page: cloudTab }; },
+    async preview(targetId: string): Promise<RuntimeBrowserPreview> { return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: 'cloud-jpeg' }, reason: null }; }, async closeTab(targetId: string) { closedCloudTabs.push(targetId); }, async execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> {
     sessions.push({ name, authorization });
     const text = authorization.body.command.type === 'manage' ? JSON.stringify(RuntimeBrowserStatusSchema.parse({ groups: [], records: [] })) : '{"ok":true,"value":1}';
     return { status: 'completed', requestId: authorization.body.scope.requestId, attemptId: authorization.body.scope.attemptId, content: [{ type: 'text', text }] };
@@ -123,7 +132,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   }, approvedSites: async () => ({ sites: state.origins.map(pattern => ({ pattern, level: state.levels[pattern] ?? 'full' })), revision: state.revision }), groupName: async () => 'Workspace', drive: () => drive,
   async fromMachine(move) { moved.push(move); await drive.write(move.path, move.mediaType, machineFiles.get(move.machinePath) ?? new Uint8Array()); } });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls, controlCalls, closedCloudTabs };
+  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls, controlCalls, closedCloudTabs, cloudHeld, browserEvents, runtime };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -316,7 +325,7 @@ test('forgetting a Chrome leaves remaining browser groups discoverable', async (
 test('browser_control lists approved offline Chrome names and notes without dispatching to them', async () => {
   const f = await fixture(); await f.authority.prepare(f.input); f.offlinePairings.add(f.pairing.pairingId);
   const status = RuntimeBrowserStatusSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'status' }));
-  expect(status.browsers).toEqual([{ pairingId: f.pairing.pairingId, generation: 1, approved: true, connected: false, name: 'Work Chrome', note: 'Production account' }]);
+  expect(status.browsers).toEqual([{ pairingId: f.pairing.pairingId, generation: 1, approved: true, connected: false, name: 'Work Chrome', note: 'Production account', takeover: false }]);
   expect(f.dispatches).toEqual([]);
 });
 test('reapproving the same Chrome rotates the workspace group and rejects the old prepared grant', async () => {
@@ -372,11 +381,11 @@ test('the Browser tab sees the approved sites and their commit, the cloud browse
   const overview = async () => RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' }));
   expect(await overview()).toEqual({
     sites: { origins: [{ pattern: 'example.com', level: 'full' }, { pattern: 'other.test', level: 'full' }], revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8' },
-    cloud: { groupId: cloud.groupId, running: 1, tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true }] },
+    cloud: { groupId: cloud.groupId, running: 1, tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true, holder: 'agent' }], held: [] },
     machines: [],
     chromes: [
-      { pairingId: f.pairing.pairingId, name: 'Work Chrome', note: 'Production account', connected: true, approved: true, isDefault: true, groupId: relay.groupId, groupName: 'Workspace', groupColor: 'blue', running: 2, agents: [agent], tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', usable: true }] },
-      { pairingId: home, name: 'Home', note: '', connected: false, approved: false, isDefault: false, groupId: null, groupName: null, groupColor: null, running: 0, agents: [], tabs: [] },
+      { pairingId: f.pairing.pairingId, name: 'Work Chrome', note: 'Production account', connected: true, approved: true, isDefault: true, groupId: relay.groupId, groupName: 'Workspace', groupColor: 'blue', running: 2, agents: [agent], tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', usable: true, holder: 'agent' }], held: [], takeover: false },
+      { pairingId: home, name: 'Home', note: '', connected: false, approved: false, isDefault: false, groupId: null, groupName: null, groupColor: null, running: 0, agents: [], tabs: [], held: [], takeover: false },
     ],
     runs: [],
   });
@@ -399,7 +408,7 @@ test('the Browser tab lists each attached machine’s headless tabs; a machine t
   f.machineAnswers.set('old', () => { throw new Error('Browser recovery record outside workspace'); });
   f.machineAnswers.set('plain', () => { throw new Error('a machine without a headless browser is never asked'); });
   expect(RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' })).machines).toEqual([
-    { machineId: 'machine', groupId, tabs: [{ targetId: 'machine-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true }], error: null },
+    { machineId: 'machine', groupId, tabs: [{ targetId: 'machine-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true, holder: 'agent' }], error: null },
     { machineId: 'laptop', groupId: null, tabs: [], error: 'Browser connection is stale' },
     { machineId: 'old', groupId: null, tabs: [], error: 'Update GitSpace on this machine to see its browser' },
   ]);
@@ -687,4 +696,79 @@ test('a Chrome group report tells tabs showing the Browser tab to read it again'
     });
     await vi.waitFor(() => expect(notices.mock.calls.some(([batch]) => batch.some(notice => notice.workspace === projectId && notice.resource === 'browsers'))).toBe(true));
   } finally { vi.restoreAllMocks(); }
+});
+
+test('a single step on a tab you hold waits until you hand it back, then runs; one still held at its own deadline says the tab is the user’s', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const f = await fixture(); f.attachments.splice(0);
+  const step = (attemptId: string) => ({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'observe', source: 'relay', targetId: 'target' }), requestId: attemptId, attemptId });
+  const first = step('first'), second = step('second'), other = { ...step('other'), args: RuntimeBrowserArgumentsSchema.parse({ action: 'observe', source: 'relay', targetId: 'other-tab' }) };
+  const card = await f.authority.prepare(first);
+  for (const input of [second, other]) await f.authority.prepare(input);
+  const at = new Date().toISOString();
+  const tab = (targetId: string) => ({ targetId, url: 'https://example.com/', title: 'Example', addedBy: 'agent', site: null, usable: true });
+  const row = { pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId: card.groupId, groupName: 'Workspace', origins: card.origins, expiresAt: card.expiresAt, reportedAt: at, tabs: [tab('target'), tab('other-tab')] };
+  const held: RuntimeBrowserHolder[] = [{ targetId: 'target', holder: 'you', since: at, by: 'chrome', device: null }];
+  const report = async (holders: RuntimeBrowserHolder[]) => {
+    const before = (await workspaceBrowsersDocument(f.storage)).chrome[0]?.held ?? [];
+    await f.storage.put(`runtime.browser.chrome:${card.groupId}`, { ...row, held: holders });
+    await holdersChanged({ storage: f.storage, workspaceId: 'workspace', runtime: async () => f.runtime, browser: { source: 'chrome', pairingId: f.pairing.pairingId, groupId: card.groupId, name: 'Chrome "Work Chrome"' }, before, after: holders, acting: () => false, page: () => undefined });
+  };
+  await report(held);
+  const waiting = f.authority.execute(first);
+  await vi.advanceTimersByTimeAsync(30_000);
+  // Nothing reaches the tab while it is yours; another tab of the group is unaffected.
+  expect(f.dispatches).toEqual([]);
+  expect((await f.authority.execute(other)).status).toBe('completed');
+  expect(f.dispatches).toHaveLength(1);
+  await report([]);
+  expect((await waiting).status).toBe('completed');
+  expect(f.dispatches).toHaveLength(2);
+  await report(held);
+  const late = f.authority.execute(second);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(await late).toMatchObject({ status: 'failed', error: { message: BROWSER_TAB_HELD } });
+  expect(f.dispatches).toHaveLength(2);
+});
+
+test('Take over and Resume agent from GitSpace: your Chrome’s extension does them for the device that asked; the cloud browser’s session holds the tab, and the agent hears both while it acts', async () => {
+  const f = await fixture('physical', true); f.attachments.splice(0);
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
+  const group = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  const manage = (command: RuntimeBrowserManagement) => f.authority.manage(f.input.conversationId, undefined, command);
+  expect(await manage({ action: 'takeOver', groupId: group.groupId, targetId: 'tab-2', device: 'phone' })).toBeNull();
+  await manage({ action: 'resume', groupId: group.groupId, targetId: 'tab-2' });
+  expect(f.controlCalls).toEqual([{ type: 'manage', action: 'takeOver', groupId: group.groupId, targetId: 'tab-2', device: 'phone' }, { type: 'manage', action: 'resume', groupId: group.groupId, targetId: 'tab-2' }]);
+  // The cloud browser has no extension: its session holds the tab, and the workspace tells the agent.
+  const cloud = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless' }), requestId: 'cloud', attemptId: 'cloud' };
+  const cloudGroup = await f.authority.prepare(cloud); await f.authority.execute(cloud);
+  await manage({ action: 'takeOver', groupId: cloudGroup.groupId, targetId: 'cloud-tab', device: 'laptop' });
+  const overview = async () => RuntimeBrowserOverviewSchema.parse(await manage({ action: 'overview' })).cloud;
+  expect(await overview()).toMatchObject({ tabs: [{ targetId: 'cloud-tab', holder: 'you' }], held: [{ targetId: 'cloud-tab', holder: 'you', by: 'gitspace', device: 'laptop' }] });
+  const step = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'observe', source: 'headless', targetId: 'cloud-tab' }), requestId: 'cloud-step', attemptId: 'cloud-step' };
+  await f.authority.prepare(step);
+  const waiting = f.authority.execute(step);
+  await manage({ action: 'resume', groupId: cloudGroup.groupId, targetId: 'cloud-tab' });
+  expect((await waiting).status).toBe('completed');
+  expect(await overview()).toMatchObject({ tabs: [{ targetId: 'cloud-tab', holder: 'agent' }], held: [] });
+  expect(f.browserEvents).toEqual([
+    expect.objectContaining({ kind: 'browser-taken', sender: { id: cloudGroup.groupId, name: 'Cloud browser' }, payload: expect.objectContaining({ groupId: cloudGroup.groupId, targetId: 'cloud-tab', source: 'cloud', pairingId: null, by: 'gitspace' }), text: expect.stringContaining('The user took over tab cloud-tab (Example) in Cloud browser') }),
+    expect.objectContaining({ kind: 'browser-handback', payload: expect.objectContaining({ targetId: 'cloud-tab', source: 'cloud' }), text: expect.stringContaining('observe it again before acting') }),
+  ]);
+});
+
+test('the agent hears that you took a tab only when it was acting on it, and hears the handback only after hearing the take', async () => {
+  const f = await fixture();
+  const holder: RuntimeBrowserHolder = { targetId: 'tab', holder: 'you', since: new Date().toISOString(), by: 'chrome', device: null };
+  const change = (before: RuntimeBrowserHolder[], after: RuntimeBrowserHolder[], acting: boolean) => holdersChanged({ storage: f.storage, workspaceId: 'workspace', runtime: async () => f.runtime, browser: { source: 'chrome', pairingId: f.pairing.pairingId, groupId: 'group', name: 'Chrome "Work Chrome"' }, before, after, acting: () => acting, page: () => ({ url: 'https://example.com/', title: 'Example' }) });
+  // You used a tab the agent was not acting on: it never hears of it.
+  await change([], [holder], false);
+  await change([holder], [], false);
+  expect(f.browserEvents).toEqual([]);
+  await change([], [holder], true);
+  await change([holder], [], false);
+  expect(f.browserEvents).toEqual([
+    expect.objectContaining({ kind: 'browser-taken', requestId: `browser-taken:group:tab:${holder.since}`, sender: { id: 'group', name: 'Chrome "Work Chrome"' }, text: expect.stringContaining('The user took over tab tab (Example) in Chrome "Work Chrome"') }),
+    expect.objectContaining({ kind: 'browser-handback', payload: expect.objectContaining({ groupId: 'group', targetId: 'tab', source: 'chrome', pairingId: f.pairing.pairingId, by: 'chrome' }) }),
+  ]);
 });

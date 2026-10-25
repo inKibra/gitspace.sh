@@ -59,10 +59,11 @@ const DEFAULT_FAVICON = png(0);
  * news.example at read (looking only). Timers are fake (`advance`).
  * `local` seeds `chrome.storage.local`; `live` keeps the extension's own relay connection (`relay` completes it)
  * instead of a connected stand-in, which speaks `protocol` (an account that saves captures and downloads from 5) and,
- * with `activity`, takes each group's colour and agents in its reports.
+ * with `activity`, takes each group's colour and agents in its reports, and with `takeover`, take over.
  * The account answers uploads (`requests`, `uploads`) and serves sealed drive files (`files`); `hold` delays an
- * upload request until the test lets it go. Capture's offscreen document runs as Chrome would load it (`recorders`). */
-export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number; activity?: boolean } = {}) {
+ * upload request until the test lets it go. Capture's offscreen document runs as Chrome would load it (`recorders`).
+ * `restart` stops the service worker and starts it again on the same Chrome and IndexedDB. */
+export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number; activity?: boolean; takeover?: boolean } = {}) {
   const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const workspace = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const identity = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
@@ -349,17 +350,24 @@ export async function installed(options: { local?: Record<string, unknown>; live
       closeDocument: async () => { offscreenOpen = false; offscreenListeners.length = 0; },
     },
   };
-  const context = createContext({
-    chrome, crypto, TextEncoder, URL, atob, btoa, console, Uint8Array, WebSocket, OffscreenCanvas, fetch,
-    navigator: { userAgent: 'Chrome/140.0.0.0' },
-    setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run }); return timerId; },
-    clearTimeout: (id: number) => { const index = timers.findIndex(timer => timer.id === id); if (index >= 0) timers.splice(index, 1); },
-    indexedDB: { open() { const request = { result: database, onsuccess: () => {}, onerror: () => {} }; queueMicrotask(() => request.onsuccess()); return request; } },
-    sent, notify,
-  });
-  runInContext(extensionFiles('https://account.gitspace.test')['background.js'] ?? '', context);
-  if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4}; accountActivity = ${options.activity === true};`, context);
-  await settle();
+  /** Starts the service worker: a worker that stopped leaves no listener and no timer behind. */
+  const start = async () => {
+    for (const registered of [listeners, tabUpdated, tabRemoved, debuggerDetached, timers]) registered.length = 0;
+    const started = createContext({
+      chrome, crypto, TextEncoder, URL, atob, btoa, console, Uint8Array, WebSocket, OffscreenCanvas, fetch,
+      navigator: { userAgent: 'Chrome/140.0.0.0' },
+      setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run }); return timerId; },
+      clearTimeout: (id: number) => { const index = timers.findIndex(timer => timer.id === id); if (index >= 0) timers.splice(index, 1); },
+      indexedDB: { open() { const request = { result: database, onsuccess: () => {}, onerror: () => {} }; queueMicrotask(() => request.onsuccess()); return request; } },
+      sent, notify,
+    });
+    runInContext(extensionFiles('https://account.gitspace.test')['background.js'] ?? '', started);
+    if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4}; accountActivity = ${options.activity === true}; accountTakeover = ${options.takeover === true};`, started);
+    await settle();
+    return started;
+  };
+  let context = await start();
+  const restart = async () => { context = await start(); };
   /** Runs the timers due within `ms` of fake time, in order. */
   const advance = async (ms: number) => {
     clock += ms;
@@ -478,7 +486,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   return {
     grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, stored: state,
     requests, uploads, uploaded, files, shares, pairingCodes, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
-    execute, authorize, begin, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor,
+    execute, authorize, begin, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor, restart,
     activate: (tabId: number) => { activeTabId = tabId; },
     answer: (respond: (command: DebuggerCommand) => unknown) => { answer = respond; },
   };

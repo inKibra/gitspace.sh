@@ -9,7 +9,7 @@ import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.j
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentViewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab, type RuntimeBrowserPageCommentView } from '@gitspace/protocol-runtime';
-import { isSubagentTool } from '@gitspace/protocol-runtime';
+import { isSubagentTool, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -175,7 +175,8 @@ export function createSessionControls(services: SessionControlServices) {
     const goal = state.goal ? { ...state.goal, tokensUsed: Math.max(0, buckets.reduce((sum, value) => sum + value.totalTokens, 0) - (clock?.tokensAtStart ?? 0)), timeUsedSeconds: (clock?.elapsedSeconds ?? 0) + (clock?.startedAt === null || clock?.startedAt === undefined ? 0 : Math.max(0, (Date.now() - clock.startedAt) / 1000)) } : null;
     return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role ?? intended?.id ?? null, roleLabel: child ? child.role : catalog.roles.find(role => role.id === (state.role ?? intended?.id))?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? intended?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? intended?.model ?? null, thinking: child ? child.thinking : intended ? (state.thinkingSelection?.source === 'conversation' ? state.thinkingSelection.thinking : intended.thinking) ?? null : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null }] } : null };
   }
-  async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false): Promise<RuntimeSessionResult> {
+  /** `deviceId`: the signed-in device that sent the command, when a person sent it; Take over records it as the tab's holder. */
+  async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false, deviceId?: string): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
     const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child;
     if (child && !['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'stop'].includes(command.type)) {
@@ -225,6 +226,13 @@ export function createSessionControls(services: SessionControlServices) {
         if (!canApprove) throw new Error('Browser management requires human capability');
         if (!services.browser) throw new Error('Browser management unavailable');
         await services.browser(String(target.id), undefined, command.type === 'browserStop' ? { action: 'stop', groupId: command.groupId } : { action: command.type === 'browserCloseTab' ? 'closeTab' : 'focusTab', groupId: command.groupId, targetId: command.targetId });
+        return { control: await control(target) };
+      }
+      // Take over (docs/APERTURE-DESIGN.md §7.2) on your Chrome's or the cloud browser's tab, from this device; Resume agent hands it back.
+      case 'browserTakeOver': case 'browserResume': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        await services.browser(String(target.id), undefined, command.type === 'browserTakeOver' ? { action: 'takeOver', groupId: command.groupId, targetId: command.targetId, device: deviceId ?? null } : { action: 'resume', groupId: command.groupId, targetId: command.targetId });
         return { control: await control(target) };
       }
       case 'prompt': {
@@ -300,6 +308,13 @@ export function createSessionControls(services: SessionControlServices) {
         const questions = await tx.doc(QuestionsDoc);
         const question = questions.items.find(item => item.id === command.id && item.conversationId === String(target.id));
         if (!question || question.answer !== null) throw new Error('Pending question not found');
+        // An ask_takeover card is answered only by Not now: Take over is browserTakeOver, and a held tab's card ends at its handback.
+        if (question.kind === 'takeover') {
+          if (command.answers[0]?.selectedOptions[0] !== TAKEOVER_CHOICES.notNow) throw new Error('A take-over request is answered only by Not now');
+          if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
+          question.answer = TAKEOVER_ANSWERS.declined;
+          return;
+        }
         if (question.kind !== 'ask') throw new Error('Approval requests require an explicit runtime approval answer');
         if (!command.answers.length) throw new Error('Question answer is required');
         question.answer = command.answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput }));

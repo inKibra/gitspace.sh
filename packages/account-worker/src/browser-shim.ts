@@ -8,6 +8,9 @@ export interface CdpEvent { method: string; params?: Params; sessionId?: string 
 export type CdpPolicy = (method: string, params: Params, sessionId: string | undefined) => string | null;
 export interface CdpShimOptions {
   policy?: CdpPolicy;
+  /** Take over (docs/APERTURE-DESIGN.md §7.2): while `holds` says you hold a tab, every command of this client that
+   * reaches it is refused with what `refuse` answers, and that tab's events are held back from the client. */
+  hold?: { holds(targetId: string): boolean; refuse(targetId: string): string };
   /** Draws the ghost cursor on this client's pages, labeled with who acts (docs/APERTURE-DESIGN.md §6.4). */
   cursor?: { label: string };
   /** Runs before a client's navigation (`Page.navigate`, `Target.createTarget`) reaches the browser. */
@@ -67,6 +70,8 @@ export class CdpShimClient {
   private autoAttach = false;
   private discover = false;
   private closed = false;
+  /** The page each of this client's sessions works on, its frames' and workers' sessions included, for `held`. */
+  private readonly pages = new Map<string, string>();
   private readonly unsubscribe: () => void;
 
   constructor(private readonly upstream: BrowserChannel, private readonly emit: (event: CdpEvent) => void, private readonly options: CdpShimOptions) {
@@ -79,9 +84,12 @@ export class CdpShimClient {
     if (method === 'disconnected') { this.emit({ method }); return; }
     if (sessionId) {
       if (!this.sessions.has(sessionId)) return;
+      const page = this.pages.get(sessionId);
       // A page's frames and workers attach under its session; they belong to the same client.
-      if (method === 'Target.attachedToTarget' && typeof params.sessionId === 'string') this.sessions.set(params.sessionId, null);
+      if (method === 'Target.attachedToTarget' && typeof params.sessionId === 'string') { this.sessions.set(params.sessionId, null); if (page !== undefined) this.pages.set(params.sessionId, page); }
       if (method === 'Target.detachedFromTarget' && typeof params.sessionId === 'string') this.forget(params.sessionId);
+      // What happens on a tab you hold is yours: only detaches reach the client.
+      else if (page !== undefined && this.options.hold?.holds(page)) return;
       this.emit({ method, params, sessionId });
       return;
     }
@@ -116,6 +124,7 @@ export class CdpShimClient {
     const { sessionId } = sessionOf(await this.upstream.send('Target.attachToTarget', { targetId: info.targetId, flatten: true }));
     if (this.closed) { void this.upstream.send('Target.detachFromTarget', { sessionId }).catch(() => {}); return sessionId; }
     this.sessions.set(sessionId, info.targetId);
+    this.pages.set(sessionId, info.targetId);
     this.emit({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo: { ...info, attached: true }, waitingForDebugger: false } });
     if (this.options.cursor) {
       // Installed for every later document and drawn on the current one; a page that refuses it just shows no cursor.
@@ -128,6 +137,7 @@ export class CdpShimClient {
   /** A session's detach: it and the aliases of it go, and each alias's browser session hears so. */
   private forget(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.pages.delete(sessionId);
     for (const [alias, { session, browser }] of this.aliases) if (session === sessionId) {
       this.aliases.delete(alias);
       this.emit({ method: 'Target.detachedFromTarget', params: { sessionId: alias }, sessionId: browser });
@@ -158,8 +168,11 @@ export class CdpShimClient {
 
   async send(method: string, params: Params = {}, sessionId?: string): Promise<unknown> {
     if (this.closed) throw new Error('Browser client closed');
-    if (sessionId && this.browserSessions.has(sessionId)) return this.onBrowserSession(method, params, sessionId);
     const session = sessionId === undefined ? undefined : this.aliases.get(sessionId)?.session ?? sessionId;
+    // The tab a command reaches: its session's page, or the target a browser-level command names.
+    const page = session !== undefined && !this.browserSessions.has(session) ? this.pages.get(session) : typeof params.targetId === 'string' ? params.targetId : undefined;
+    if (page !== undefined && this.options.hold?.holds(page)) throw new Error(this.options.hold.refuse(page));
+    if (sessionId && this.browserSessions.has(sessionId)) return this.onBrowserSession(method, params, sessionId);
     const refused = REFUSED_COMMANDS[method];
     const refusal = refused ? `${method} ${refused} and is not allowed` : this.options.policy?.(method, params, session) ?? null;
     if (refusal) throw new Error(refusal);
@@ -181,7 +194,7 @@ export class CdpShimClient {
         this.autoAttach = params.autoAttach === true;
         // Attached by this client, not by anyone: other clients' attachments share the connection.
         const attached = new Set(this.sessions.values());
-        if (this.autoAttach) for (const info of targetsOf(await this.upstream.send('Target.getTargets', {}))) if (isPage(info) && !attached.has(info.targetId)) await this.attachOnce(info);
+        if (this.autoAttach) for (const info of targetsOf(await this.upstream.send('Target.getTargets', {}))) if (isPage(info) && !attached.has(info.targetId) && !this.options.hold?.holds(info.targetId)) await this.attachOnce(info);
         return {};
       }
       case 'Target.attachToTarget': return { sessionId: await this.attachOnce(await this.target(params.targetId)) };

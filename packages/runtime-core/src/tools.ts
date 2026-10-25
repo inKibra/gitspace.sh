@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { JsonValue, Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
-import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, receiptDigest, type RuntimeBrowserApprovalCard, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
 import { cronToolScopes } from './cron.js';
@@ -12,6 +12,8 @@ import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS } from './subagent-state.js';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { admitToolImages, imageLimits } from './inference/image-limits.js';
+import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
+import { isTakeoverEvent } from './takeover.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
 export type CodemodeToolOutcome =
   | { status: 'completed'; value: JsonValue }
@@ -26,6 +28,9 @@ export type ToolServices = {
   authorizeCronTool(input: { tool: string; args: JsonValue; readScopes: readonly string[]; writeScopes: readonly string[] }): Promise<void>;
   /** Throws before any approval question when an effect cannot run (e.g. a machine tool with no machine attached). */
   preflight(input: Parameters<ToolServices['invoke']>[0]): Promise<void>;
+  /** The tab an ask_takeover call names, on your Chrome or the cloud browser, as its card shows it; throws why it
+   * cannot be taken over (a machine's headless browser, an extension too old, no such tab in the workspace's group). */
+  takeoverTab(input: { conversationId: string; args: RuntimeAskTakeoverArguments }): Promise<RuntimeTakeoverTab>;
 };
 const workspaceId = z.string().min(1).optional();
 const get = z.object({ method: z.literal('get'), workspaceId });
@@ -167,6 +172,42 @@ function askResults(answer: JsonValue): { selectedOptions: string[]; customInput
   });
 }
 
+const ASK_TAKEOVER = 'Ask the user to take over one tab for a step only a person should do: a sign-in, a CAPTCHA, a two-factor code, a payment, or anything that needs their identity or judgment. source "relay" names a tab of the workspace\'s group on the user\'s Chrome (pairingId as for web_browser), source "headless" a tab of the cloud browser; targetId is the tab, as web_browser tabs lists it. reason tells the user, in a sentence or two, what to do there. It shows a card in the chat with your reason, the browser and the tab, and the buttons Take over and Not now; it changes nothing by itself. While the user holds the tab none of your browser commands reach it. The call waits, without polling, until the user hands the tab back (observe it again before acting: the page has changed and earlier refs are gone), chooses Not now, or timeoutMinutes pass (default 30, at most 120; the card stays open, and if the user takes the tab later you are told when they hand it back). You never get the tab back by yourself: only the user hands it back. Main agent only; a machine\'s headless browser cannot be taken over.';
+/** How an ask_takeover call ends: its card's answer (`TAKEOVER_ANSWERS`), or its wait ran out. */
+const TakeoverOutcomeSchema = z.enum([TAKEOVER_ANSWERS.handedBack, TAKEOVER_ANSWERS.declined, 'timeout']);
+/** What an ask_takeover call returns to the model for each way it ends. */
+const TAKEOVER_OUTCOME: Record<z.infer<typeof TakeoverOutcomeSchema>, string> = {
+  'handed-back': 'The user handed the tab back; observe it again before acting.',
+  declined: 'The user declined (Not now). Continue without that tab, or tell the user what still needs them.',
+  timeout: 'No answer yet; the request stays open in the chat. If the user takes the tab later, you are told when they hand it back.',
+};
+/** Waits for an ask_takeover card's answer (`TAKEOVER_ANSWERS`), or until `until`: the card's question changes only by
+ * commits (Not now, a delivered handback), so this watches it and never polls. The deadline is armed first: its timer
+ * ends the wait while the object stays up, and the wake asked for at the deadline (`wakeAt`) ends it after it slept. */
+async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wakeAt'], api: ToolExecutionApi, context: Context): Promise<JsonValue | 'timeout'> {
+  const result = Promise.withResolvers<JsonValue | 'timeout'>();
+  // An abort while the wake or the watch is still being set up rejects a wait that a failure of either then abandons.
+  result.promise.catch(() => {});
+  const timer = setTimeout(() => result.resolve('timeout'), Math.max(0, until - Date.now()));
+  const abort = () => { result.reject(context.abortSignal?.reason); };
+  context.abortSignal?.addEventListener('abort', abort, { once: true });
+  try {
+    context.abortSignal?.throwIfAborted();
+    await wakeAt(until);
+    const watch = await api.watchDoc(QuestionsDoc, context);
+    if (!watch) throw new Error('Question document missing');
+    const settle = (value: typeof watch.value) => {
+      const question = value?.items.find(item => item.id === id);
+      if (!question) result.reject(new Error('The take-over request was withdrawn: the conversation was stopped'));
+      else if (question.answer !== null) result.resolve(question.answer);
+    };
+    settle(watch.value);
+    watch.start(async value => { settle(value); });
+    void watch.closed.then(end => { if (end.reason !== 'stopped') result.reject(new Error(`Take-over wait ended: ${end.reason}`)); });
+    try { return await result.promise; } finally { await watch.stop(); }
+  } finally { clearTimeout(timer); context.abortSignal?.removeEventListener('abort', abort); }
+}
+
 export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask'], admitCodemodeTool: (call: { id: string; name: string; arguments: Record<string, unknown> }, api: ToolExecutionApi, context: Context) => Promise<void>): ToolRegistration[] {
   const jobs = createJobTool(operations);
   // One queue per conversation, shared by every registered mutator and every tool round.
@@ -273,6 +314,39 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     }, context);
     const answer = await services.question(id, api, context);
     return { output: [{ type: 'text', text: JSON.stringify(answer) }], ...(kind === 'ask' ? { details: { results: askResults(answer) } } : {}) };
+  } }));
+  tools.push(defineTool({ name: 'ask_takeover', description: ASK_TAKEOVER, parameters: runtimeToolParameters(RuntimeAskTakeoverArgumentsSchema), prepareArguments: input => parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
+    const args = parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input);
+    const child = (await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child;
+    if (child) throw new Error(`Subagent ${child.name} cannot use ask_takeover: only the main agent asks the user to take over a tab. Tell your parent what needs a person.`);
+    const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
+    // A rerun after a reset finds its card and keeps its deadline; only the first run asks the account for the tab.
+    let card = (await api.snapshot(QuestionsDoc, context))?.items.find(item => item.id === id)?.takeover;
+    if (!card) {
+      const tab = await services.takeoverTab({ conversationId: String(api.conversationId), args });
+      const askedAt = Date.now();
+      const candidate = { ...tab, callId: api.callId, askedAt: new Date(askedAt).toISOString(), until: new Date(askedAt + args.timeoutMinutes * 60_000).toISOString(), waiting: true };
+      await api.commit(async tx => {
+        const doc = await tx.doc(QuestionsDoc);
+        if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind: 'takeover', prompt: args.reason, choices: [TAKEOVER_CHOICES.takeOver, TAKEOVER_CHOICES.notNow], answer: null, takeover: candidate });
+      }, context);
+      card = candidate;
+    }
+    const target = { groupId: card.groupId, targetId: card.targetId }, until = Date.parse(card.until);
+    const waited = await awaitTakeover(id, until, operations.wakeAt, api, context);
+    // A wait that ran out leaves the card open; an answer committed meanwhile still wins.
+    const outcome = TakeoverOutcomeSchema.parse(waited !== 'timeout' ? waited : await api.commit(async tx => {
+      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);
+      if (question?.answer !== null && question?.answer !== undefined) return question.answer;
+      if (question?.takeover) question.takeover.waiting = false;
+      return 'timeout';
+    }, context));
+    // This call tells the agent of the take and handback: they never reach it again as messages.
+    if (outcome === TAKEOVER_ANSWERS.handedBack) await api.commit(async tx => {
+      const state = await tx.doc(ConversationLifecycleDoc, api.conversationId);
+      handleEvents(state, new Set(state.events.flatMap(item => isTakeoverEvent(item.event, target) ? [item.event.requestId] : [])));
+    }, context);
+    return { output: [{ type: 'text', text: TAKEOVER_OUTCOME[outcome] }], details: { takeover: outcome } };
   } }));
   return tools;
 }

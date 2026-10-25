@@ -7,8 +7,10 @@ import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 import { QuestionsDoc } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
+import { noteTakeoverEvent } from './takeover.js';
 
-export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
+/** `browser-taken` and `browser-handback`: you took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2). */
+export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
 /** How the transcript labels each delivered event. */
 const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent) => string> = {
@@ -17,6 +19,8 @@ const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent)
   'process-exited': () => 'Process',
   'machine-ready': () => 'Machine',
   workspace: event => event.sender?.name ?? 'Workspace',
+  'browser-taken': event => event.sender?.name ?? 'Browser',
+  'browser-handback': event => event.sender?.name ?? 'Browser',
 };
 /** An event the conversation has not had yet: neither placed as its input nor returned by a wait. */
 type StoredEvent = {
@@ -279,6 +283,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
           handleEvents(state, new Set());
           if (state.events.some(item => item.event.requestId === event.requestId) || state.handled?.includes(event.requestId)) return;
           state.events.push({ event });
+          await noteTakeoverEvent(tx, event);
           await tx.appendEntry(conversation.id, { kind: `gitspace.${event.kind}`, data: { requestId: event.requestId, text: event.text, ...(event.sender ? { sender: event.sender } : {}), ...(event.payload === undefined ? {} : { payload: event.payload }) } });
         }, context);
         await flush(event.conversationId);

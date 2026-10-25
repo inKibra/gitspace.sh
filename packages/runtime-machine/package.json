@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./browser-semantic": "./src/browser-semantic.ts", "./browser-view": "./src/browser-view.ts", "./browser-output": "./src/browser-output.ts", "./browser-screenshot": "./src/browser-screenshot.ts", "./browser-service-policy": "./src/browser-service-policy.ts", "./browser-screencast": "./src/browser-screencast.ts" },
+  "exports": { ".": "./src/index.ts", "./browser-semantic": "./src/browser-semantic.ts", "./browser-view": "./src/browser-view.ts", "./browser-output": "./src/browser-output.ts", "./browser-screenshot": "./src/browser-screenshot.ts", "./browser-service-policy": "./src/browser-service-policy.ts", "./browser-screencast": "./src/browser-screencast.ts", "./browser-remote-input": "./src/browser-remote-input.ts" },
   "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun ../../scripts/test-isolated.ts src", "test:browser:headless": "bun src/browser-smoke.ts" },
   "dependencies": {
     "@puppeteer/browsers": "3.0.6",

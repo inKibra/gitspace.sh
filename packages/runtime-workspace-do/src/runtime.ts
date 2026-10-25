@@ -81,6 +81,9 @@ export type WorkspaceRuntime = {
   /** Project base workspace: a workspace's report of a turn the project agent started. Quiet, a line the agent reads on
    * its next turn; wake, an event that starts one (after the current one when it is busy). */
   workspaceReport(report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void>;
+  /** You took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2): an event for the main
+   * conversation, which starts a turn when it is idle (after the current one when it is busy). */
+  browserEvent(event: { kind: 'browser-taken' | 'browser-handback'; requestId: string; sender: { id: string; name: string }; text: string; payload: JsonValue }): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
    * or an environment run dispatched to the cache machine its arguments name. */
@@ -476,11 +479,12 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const rootId = String(runtime.root.id);
     const root = conversationViews.get(rootId);
     const [agent, controls] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT)]);
-    const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && item.answer === null);
+    // An ask_takeover card left open after its call stopped waiting no longer holds the agent.
+    const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && item.answer === null && (item.kind !== 'takeover' || item.takeover?.waiting === true));
     const reply = root?.messages.findLast(message => message.role === 'assistant' && message.content.length > 0)?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') ?? null;
     options.published?.(next, {
       summary: status.summary, phase: workspace?.phase ?? null,
-      waitingOn: waiting ? { kind: waiting.kind, prompt: waiting.prompt.slice(0, 200) } : null,
+      waitingOn: waiting ? { kind: waiting.kind === 'approval' ? 'approval' : 'ask', prompt: waiting.prompt.slice(0, 200) } : null,
       failure: root?.failure ?? null,
       lastReply: reply ? reply.slice(0, 280) : null,
       lastActivityAt: views.flatMap(view => view.messages.map(message => message.createdAt)).sort().at(-1) ?? null,
@@ -599,7 +603,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       if (deviceId !== undefined && command.type === 'prompt') options.personPrompted?.();
       const clearsDraft = deviceId !== undefined && command.type === 'prompt' && command.draftRevision !== undefined && (conversationId === undefined || conversationId === String(runtime.root.id));
       const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume'].includes(command.type);
-      const result = await controls.execute(conversationId, command, canApprove);
+      const result = await controls.execute(conversationId, command, canApprove, deviceId);
       if (clearsDraft && command.type === 'prompt' && command.draftRevision !== undefined) { await drafts.clear(command.draftRevision, deviceId, command.draftText); publish(); await line; }
       if (wakesTasks) harness.resume();
       return result;
@@ -626,6 +630,10 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     },
     noticeWhenReady(input) {
       options.storage.sql.exec('INSERT OR IGNORE INTO runtime_attach_notices(attachment_id,generation,conversation_id,label) VALUES(?,?,?,?)', input.attachmentId, input.generation, input.conversationId, input.label);
+    },
+    async browserEvent(event) {
+      await runtime.lifecycle.deliver({ ...event, conversationId: String(runtime.root.id) });
+      publish(); await line;
     },
     async cacheReady(attachmentId, generation) {
       const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
@@ -689,6 +697,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const question = questions.items.find(item => item.id === input.questionId);
         if (!question) throw new Error('Question not found');
         if (question.answer !== null) { if (JSON.stringify(question.answer) !== JSON.stringify(input.answer)) throw new Error('Question already answered'); return; }
+        if (question.kind === 'takeover') throw new Error('A take-over request is answered on its card: Not now, or Take over and then Resume agent');
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
         if (question.kind === 'approval' && typeof input.answer !== 'boolean') throw new Error('Approval answer must be a boolean');
         question.answer = input.answer;

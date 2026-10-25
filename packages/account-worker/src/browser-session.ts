@@ -1,11 +1,12 @@
 /// <reference path="./global-props.d.ts" />
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
-import { BROWSER_RUN_LIMIT_MS, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserCapture, type RuntimeBrowserPreview, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { BROWSER_RUN_LIMIT_MS, RuntimeBrowserHolderSchema, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserCapture, type RuntimeBrowserHolder, type RuntimeBrowserPreview, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { launchCloudBrowser, type BrowserChannel } from './browser-cdp.js';
 import { AccountBrowserRuntime } from './browser-runtime.js';
 import { BROWSER_CLOUD_RENEW_MS, BROWSER_SCRIPT_PATH } from './browser-relay.js';
-import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
+import { CdpBrowserShim, serveCdpSocket, type CdpShimOptions } from './browser-shim.js';
+import { BROWSER_TAB_HELD } from './browser-takeover.js';
 import { BROWSER_RUNNER_SOURCE } from './generated/browser-runner.js';
 import { hostedServiceUrlPattern, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
 import { SERVICE_COOKIE, type ServiceWorkspace } from './service-sessions.js';
@@ -14,9 +15,19 @@ import { CloudCaptures } from './browser-capture.js';
 import { CloudDownloads } from './browser-downloads.js';
 import { ScriptRunFiles, type ScriptUploadFiles } from './browser-script-files.js';
 import { workspaceDrive } from './workspace-drive.js';
+import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, CloudWatch } from './browser-watch.js';
 
 /** A cloud browser nobody has used for this long closes; Browser Run would end it after ten idle minutes anyway. */
 const IDLE_CLOSE_MS = 5 * 60_000;
+/** What a cloud script's command to a tab you hold answers, and every later command of that script. */
+const SCRIPT_TAKEN = 'The user took over this tab; the script stopped at its next command';
+/** Where the tabs you hold are kept (docs/APERTURE-DESIGN.md §7.2), with their workspace, so a restart of this object
+ * (which ends its browser) still hands them back. */
+const HOLDERS_KEY = 'browser.holders';
+const StoredHolders = z.object({ projectId: z.string(), workspaceId: z.string(), holders: z.array(RuntimeBrowserHolderSchema) });
+/** A take over or Resume agent on a cloud tab: the tabs you held before and after, whether the agent was acting in the
+ * cloud browser then (a script ran or a single step was in flight), and the tab's page (null once it is gone). */
+export type BrowserHoldChange = { before: RuntimeBrowserHolder[]; after: RuntimeBrowserHolder[]; acting: boolean; page: { url: string; title: string } | null };
 /** A service session lasts 15 minutes from each mint; a request that finds it older than this mints again. */
 const SERVICE_RENEW_MS = 10 * 60_000;
 const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), view: z.string().optional(), viewError: z.string().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
@@ -45,9 +56,9 @@ export async function browserPreview(shim: CdpBrowserShim, targetId: string): Pr
 }
 
 /** A client of the shared browser as the agent tools use it: the browser channel shape over a shim client. */
-function shimChannel(shim: CdpBrowserShim, label: string): BrowserChannel {
+function shimChannel(shim: CdpBrowserShim, label: string, hold: CdpShimOptions['hold']): BrowserChannel {
   const listeners = new Set<Parameters<BrowserChannel['subscribe']>[0]>();
-  const client = shim.client(event => { for (const listener of listeners) listener(event); }, { cursor: { label } });
+  const client = shim.client(event => { for (const listener of listeners) listener(event); }, { cursor: { label }, hold });
   return {
     send: (method, params, sessionId) => client.send(method, params ?? {}, sessionId),
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -104,6 +115,31 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   private readonly runFiles = new Map<string, ScriptRunFiles>();
   /** When this object last told the account its cloud browser is open (`tellAccount`); 0 once it said it closed. */
   private toldOpen = 0;
+  /** The tabs you hold now, by target (docs/APERTURE-DESIGN.md §7.2): none of the agent's commands reach them, a
+   * single step's and a script's alike. Kept in `HOLDERS_KEY`. */
+  private readonly held = new Map<string, RuntimeBrowserHolder>();
+  /** Scripts that reached a tab you hold: each later command of theirs is refused too. */
+  private readonly stopped = new Set<string>();
+  /** The agent's single steps in flight. */
+  private stepping = 0;
+  /** The Watch dialog's sockets on cloud tabs (`browser-watch.ts`): your input there counts as use; watching alone does not. */
+  private readonly watch = new CloudWatch(this.ctx, {
+    browser: () => this.browser,
+    holder: targetId => this.held.get(targetId),
+    used: () => { if (this.browser) this.ctx.waitUntil(this.used()); },
+    deviceActive: deviceId => browserWatchDeviceActive(this.env, deviceId),
+  });
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // This object restarting ended the browser it held, so the tabs you held there are gone: they go back to the agent.
+    void ctx.blockConcurrencyWhile(async () => {
+      const stored = StoredHolders.safeParse(await ctx.storage.get(HOLDERS_KEY));
+      if (!stored.success) return;
+      for (const holder of stored.data.holders) this.held.set(holder.targetId, holder);
+      ctx.waitUntil(this.returnHolders('the cloud browser restarted, so the tab is gone; open a new one if you still need it.'));
+    });
+  }
 
   private shim(): Promise<CdpBrowserShim> {
     if (this.browser) return this.browser;
@@ -115,7 +151,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       this.upstream = upstream;
       this.cookies = cookies;
       // A dropped connection ends this browser; the next use opens another.
-      upstream.subscribe(event => { if (event.method === 'disconnected' && this.browser === opening) this.release(); });
+      upstream.subscribe(event => { if (event.method === 'disconnected' && this.browser === opening) this.release('the cloud browser’s connection ended, so the tab is gone; open a new one if you still need it.'); });
       const shim = await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) });
       // Downloads go to the workspace drive; each running cloud script lists those started while it ran.
       await CloudDownloads.open(shim, workspaceDrive(this.env, workspace), download => {
@@ -129,7 +165,8 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     return opening;
   }
 
-  private release(): void {
+  /** Ends the browser; the tabs you held there go back to the agent, `note` saying why. */
+  private release(note: string): void {
     // Also after this object restarted: the account may still count the browser it held before.
     this.tellAccount(false);
     const upstream = this.upstream;
@@ -140,6 +177,21 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     this.runtime = undefined;
     for (const run of this.scripts.keys()) this.endRun(run, 'Browser closed');
     if (upstream) void upstream.send('Browser.close').catch(() => {}).finally(() => upstream.close());
+    if (this.held.size) this.ctx.waitUntil(this.returnHolders(note));
+    this.watch.browserClosed('ended');
+  }
+
+  /** The tabs you held go back to the agent (their browser closed): the workspace hears it with `note`. */
+  private async returnHolders(note: string): Promise<void> {
+    const stored = StoredHolders.safeParse(await this.ctx.storage.get(HOLDERS_KEY));
+    const holders = [...this.held.values()];
+    this.held.clear();
+    for (const holder of holders) this.holderChanged(holder.targetId);
+    await this.ctx.storage.delete(HOLDERS_KEY);
+    if (!stored.success || !holders.length) return;
+    const { projectId, workspaceId } = stored.data;
+    await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).browserCloudReturned({ projectId, workspaceId }, holders, note)
+      .catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_cloud_return_failed', workspaceId, error: String(error) })));
   }
 
   /** Cuts a run's connections, so a stopped script cannot keep driving the browser. */
@@ -162,15 +214,68 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     this.ctx.waitUntil(this.env.RELAY.getByName(this.env.RELAY_NAME).browserRelayCloudOpen(session, open).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_cloud_open_notice_failed', session, open, error: String(error) }))));
   }
 
+  /** Real use pushes this deadline (`used`): the agent's commands and your input in the Watch dialog. A dialog left open
+   * with nothing happening does not, so the browser closes at the idle time and its viewers say why. */
   async alarm(): Promise<void> {
     if (this.scripts.size || this.captures.recording) { await this.used(); return; }
-    this.release();
+    this.watch.browserClosed('idle');
+    this.release(`the cloud browser closed after ${IDLE_CLOSE_MS / 60_000} minutes without use while the user held the tab, so it is gone; open a new one if you still need it.`);
   }
 
-  /** The cloud browser's pages and running scripts, for the Inspector's Browser tab. With no browser open there is
-   * nothing to show, and none is opened to show it. */
-  async overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }> {
-    return { tabs: this.browser ? await browserPages(await this.browser) : [], running: this.scripts.size };
+  /** The cloud browser's pages, running scripts and the tabs you hold, for the Inspector's Browser tab. With no browser
+   * open there is nothing to show, and none is opened to show it. */
+  async overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number; held: RuntimeBrowserHolder[] }> {
+    return { tabs: this.browser ? await browserPages(await this.browser) : [], running: this.scripts.size, held: [...this.held.values()] };
+  }
+
+  /** Who holds a cloud tab you took over; undefined while the agent does. */
+  holderOf(targetId: string): RuntimeBrowserHolder | undefined {
+    return this.held.get(targetId);
+  }
+
+  /** The cloud tabs you hold, for the workspace (a single step on one waits for you to hand it back). */
+  holders(): RuntimeBrowserHolder[] {
+    return [...this.held.values()];
+  }
+
+  /** A tab's holder changed: the agent's refs on it no longer apply. */
+  private holderChanged(targetId: string): void {
+    this.runtime?.invalidate(targetId);
+    this.watch.holderChanged(targetId);
+  }
+
+  /** Keeps the tabs you hold with their workspace, or forgets them when none is left. */
+  private async keepHolders(workspace: { projectId: string; workspaceId: string }): Promise<void> {
+    if (this.held.size) await this.ctx.storage.put(HOLDERS_KEY, { projectId: workspace.projectId, workspaceId: workspace.workspaceId, holders: [...this.held.values()] });
+    else await this.ctx.storage.delete(HOLDERS_KEY);
+  }
+
+  /** You take a cloud tab over from GitSpace (docs/APERTURE-DESIGN.md §7.2) from `device`: none of the agent's commands
+   * reach it until `resume`. Taking it again from another device moves `device`; it stays yours since the first take. */
+  async takeOver(input: { projectId: string; workspaceId: string; targetId: string; device: string | null }): Promise<BrowserHoldChange> {
+    if (this.ctx.id.name !== `${this.env.ACCOUNT_ID}:${input.projectId}:${input.workspaceId}`) throw new Error('Browser session belongs to another workspace');
+    if (!this.browser) throw new Error('The cloud browser is not running');
+    const page = (await browserPages(await this.browser)).find(tab => tab.targetId === input.targetId);
+    if (!page) throw new Error('That tab is not open in the cloud browser');
+    const before = [...this.held.values()];
+    this.held.set(input.targetId, { targetId: input.targetId, holder: 'you', since: this.held.get(input.targetId)?.since ?? new Date().toISOString(), by: 'gitspace', device: input.device });
+    await this.keepHolders(input);
+    await this.used();
+    this.holderChanged(input.targetId);
+    return { before, after: [...this.held.values()], acting: this.scripts.size > 0 || this.stepping > 0, page: { url: page.url, title: page.title } };
+  }
+
+  /** Resume agent on a cloud tab you hold: the agent's commands reach it again, and its earlier refs on it are stale. */
+  async resume(input: { projectId: string; workspaceId: string; targetId: string }): Promise<BrowserHoldChange> {
+    if (this.ctx.id.name !== `${this.env.ACCOUNT_ID}:${input.projectId}:${input.workspaceId}`) throw new Error('Browser session belongs to another workspace');
+    const before = [...this.held.values()];
+    if (this.held.delete(input.targetId)) {
+      await this.keepHolders(input);
+      this.holderChanged(input.targetId);
+      if (this.browser) await this.used();
+    }
+    const page = this.browser ? (await browserPages(await this.browser)).find(tab => tab.targetId === input.targetId) : undefined;
+    return { before, after: [...this.held.values()], acting: false, page: page ? { url: page.url, title: page.title } : null };
   }
 
   /** One cloud tab's preview; none while no browser is open. */
@@ -209,11 +314,13 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     this.workspace = { projectId: scope.projectId, workspaceId: scope.workspaceId };
     await this.used();
     if (command.type === 'execute' && command.args.action === 'run') return this.run(authorization, command.args.script);
+    // The workspace waits for you to hand a tab back before its step; one that reaches here meanwhile is refused.
+    if (command.type === 'execute' && 'targetId' in command.args && command.args.targetId !== undefined && this.held.has(command.args.targetId)) return { status: 'failed', requestId: scope.requestId, attemptId: scope.attemptId, content: [], error: { code: 'BROWSER_TAB_HELD', message: BROWSER_TAB_HELD } };
     const workspace = this.workspace;
     this.runtime ??= new AccountBrowserRuntime({
       storage: this.ctx.storage,
       // One channel serves every caller's single steps, so its cursor cannot say which agent acts.
-      cloud: async () => shimChannel(await this.shim(), 'Agent'),
+      cloud: async () => shimChannel(await this.shim(), 'Agent', { holds: targetId => this.held.has(targetId), refuse: () => BROWSER_TAB_HELD }),
       services: {
         urlPattern: hostedServiceUrlPattern(this.env),
         hostname: hostname => isHostedServiceHostname(this.env, hostname),
@@ -224,7 +331,9 @@ export class BrowserSessionDO extends BudgetedDurableObject {
         },
       },
     });
-    return this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(authorization.body.expiresAt) - Date.now())));
+    this.stepping++;
+    try { return await this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(authorization.body.expiresAt) - Date.now()))); }
+    finally { this.stepping--; }
   }
 
   /** Runs one agent-written Playwright script in a sandbox whose only way out is a CDP connection to the cloud browser
@@ -270,6 +379,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     finally {
       clearTimeout(timer);
       this.runFiles.delete(run);
+      this.stopped.delete(run);
       // Cuts the script off your Chrome; a lost end still lapses at the run's deadline.
       if (relay && relayToken) chromeDownloads = (await relay.browserRelayScriptEnd(relayToken).catch((error: unknown) => { console.warn(JSON.stringify({ event: 'browser_relay_script_end_failed', error: String(error) })); return { downloads: [] }; })).downloads;
     }
@@ -296,20 +406,39 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     return files.uploadFiles(urls);
   }
 
-  /** A cloud script's CDP connection, from the sandbox through `BrowserSessionCdp`: `/script/<run>/<cursor label>`. */
+  /** A cloud script's CDP connection, from the sandbox through `BrowserSessionCdp`: `/script/<run>/<cursor label>`; or
+   * the Watch dialog's socket on a cloud tab, checked by its route (`serveBrowserWatch`). */
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected a CDP WebSocket', { status: 426 });
-    const [, kind, run, label] = new URL(request.url).pathname.split('/');
+    const url = new URL(request.url);
+    if (url.pathname === BROWSER_WATCH_INTERNAL_PATH) return this.watch.accept(request);
+    const [, kind, run, label] = url.pathname.split('/');
     if (kind !== 'script' || !run) return new Response('Unknown browser session path', { status: 404 });
     const shim = await this.shim();
     const sockets = this.scripts.get(run) ?? new Set<WebSocket>();
-    const { socket, response } = serveCdpSocket(shim, { cursor: { label: decodeURIComponent(label ?? '').slice(0, 64) || 'Agent' } }, () => {
+    // The script's first command to a tab you hold stops it: that command and every later one is refused.
+    const hold = { holds: (targetId: string) => this.held.has(targetId), refuse: () => { this.stopped.add(run); return SCRIPT_TAKEN; } };
+    const { socket, response } = serveCdpSocket(shim, { cursor: { label: decodeURIComponent(label ?? '').slice(0, 64) || 'Agent' }, hold, policy: () => this.stopped.has(run) ? SCRIPT_TAKEN : null }, () => {
       sockets.delete(socket);
       if (!sockets.size && this.scripts.get(run) === sockets) this.scripts.delete(run);
       void this.used();
     });
     this.scripts.set(run, sockets.add(socket));
     return response;
+  }
+
+  async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer): Promise<void> {
+    if (this.watch.owns(socket)) await this.watch.message(socket, data).catch(() => { if (socket.readyState === 1) socket.close(1011, 'Watch message failed'); });
+  }
+  async webSocketClose(socket: WebSocket): Promise<void> {
+    const left = this.watch.owns(socket) ? this.watch.closed(socket) : undefined;
+    socket.close();
+    await left;
+  }
+  async webSocketError(socket: WebSocket): Promise<void> {
+    const left = this.watch.owns(socket) ? this.watch.closed(socket) : undefined;
+    if (socket.readyState === 1) socket.close(1011, 'Watch socket failed');
+    await left;
   }
 }
 

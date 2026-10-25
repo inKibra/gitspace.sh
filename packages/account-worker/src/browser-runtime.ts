@@ -6,8 +6,9 @@ import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServic
 import type { BrowserChannel } from './browser-cdp.js';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 
-/** Management actions from the Browser tab on your Chrome's workspace group: Stop, Close tab, Focus in Chrome. */
-const CONTROLS: Record<string, true | undefined> = { stop: true, closeTab: true, focusTab: true };
+/** Management actions from the Browser tab on your Chrome's workspace group: Stop, Close tab, Focus in Chrome, Take over
+ * and Resume agent. */
+const CONTROLS: Record<string, true | undefined> = { stop: true, closeTab: true, focusTab: true, takeOver: true, resume: true };
 type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: BrowserChannel; sessionId: string; stale: boolean; servicePolicy?: BrowserServicePolicy; unsubscribeServices?: () => void; unsubscribe(): void };
 export type AccountBrowserTransport = {
   open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ channel: BrowserChannel; targetId: string }>;
@@ -16,7 +17,8 @@ export type AccountBrowserTransport = {
   /** `captureStart` / `captureStop` on your Chrome (docs/APERTURE-DESIGN.md §11). */
   capture(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeBrowserCapture>;
   revoke(groupId: string, pairingId: string): Promise<void>;
-  /** Stop, Close tab and Focus in Chrome from the Browser tab (`stop`, `closeTab`, `focusTab`) on your Chrome. */
+  /** Stop, Close tab, Focus in Chrome, Take over and Resume agent from the Browser tab (`stop`, `closeTab`, `focusTab`,
+   * `takeOver`, `resume`) on your Chrome. */
   control(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<Record<string, never>>;
   /** Share links (docs/APERTURE-DESIGN.md §8), kept by the relay for the workspace that signed: its shares, live and
    * recently ended; a share of a tab in its group on this Chrome; ending one of its shares; connecting a pasted share's
@@ -64,6 +66,14 @@ export class AccountBrowserRuntime {
     const indexKey = `browser.account.groups:${scope.projectId}:${scope.workspaceId}`;
     const ids = z.array(z.string().uuid()).parse(await this.options.storage.get(indexKey) ?? []);
     if (!ids.includes(grant.groupId)) await this.options.storage.put(indexKey, [...ids, grant.groupId]);
+  }
+  /** You took a tab over or handed it back (docs/APERTURE-DESIGN.md §7.2): its earlier refs no longer apply, so an `act`
+   * on one of them asks the agent to observe again. */
+  invalidate(targetId: string): void {
+    const tab = this.tabs.get(targetId);
+    if (!tab) return;
+    tab.document++;
+    tab.refs.clear();
   }
   private async perform(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization, { command, scope } = body;

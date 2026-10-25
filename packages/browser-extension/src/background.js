@@ -2,7 +2,8 @@
 // `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { CAPTURE_MAX_MS, CAPTURE_SCREENCAST, jpegSize, ScreencastRecorder } from '@gitspace/runtime-machine/browser-screencast';
-import { permitted, readSiteStepRefusal, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, siteOf, tabWithinGrant } from './commands.ts';
+import { remoteInputCommand } from '@gitspace/runtime-machine/browser-remote-input';
+import { permitted, readSiteStepRefusal, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, SCRIPT_TAKEN_REFUSAL, siteOf, TAB_HELD_REFUSAL, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 import { clickedName, NAMED_KEYS, scriptActivity, stepActivity } from './activity.ts';
@@ -40,6 +41,24 @@ const activity = new Map();
 const runs = new Map();
 /** How recent scripts ended, so a stopped script's later commands say why they are refused. */
 const ended = new Map();
+/** Why a script that ended is refused its later commands, by how it ended. */
+const ENDED_REFUSALS = { stopped: 'You stopped this script', taken: SCRIPT_TAKEN_REFUSAL };
+/** The tabs you hold (docs/APERTURE-DESIGN.md §7.2), by target id: `{ targetId, holder: 'you', since, by, device,
+ * groupId }` (`RuntimeBrowserHolder` and its workspace group). None of the agent's commands reach them and none of
+ * their events reach the agent. Kept in IndexedDB (`holders`), so a service-worker restart keeps them. */
+const holders = new Map();
+const holdersRestored = stored('holders').then(saved => { for (const held of saved ?? []) holders.set(held.targetId, held); }).catch(() => {});
+/** Who holds a tab: its record while you hold it, else none (the agent holds it). */
+function heldBy(targetId) { return holders.get(targetId); }
+/** The agent's own input (`Input.*`) is trusted in the page as yours is, so the overlay reports it as yours: a tab's
+ * count of the agent's inputs in flight or ended less than `AGENT_INPUT_GRACE_MS` ago, during which a `take` from the
+ * tab is the agent's. */
+const agentInputs = new Map();
+const AGENT_INPUT_GRACE_MS = 300;
+function agentInput(targetId, sending) {
+  agentInputs.set(targetId, (agentInputs.get(targetId) ?? 0) + 1);
+  return sending.finally(() => setTimeout(() => { const count = agentInputs.get(targetId) - 1; if (count > 0) agentInputs.set(targetId, count); else agentInputs.delete(targetId); }, AGENT_INPUT_GRACE_MS));
+}
 const encode64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 async function authorize(authorization) {
   const identity = await stored('identity'); if (!identity) throw new Error('Human pairing required');
@@ -98,6 +117,9 @@ let accountProtocol = 0;
 /** Whether the connected account takes each group's colour and its agents in group reports (its `ready` says
  * `groupActivity`); an older account refuses a report with fields it does not know. */
 let accountActivity = false;
+/** Whether the connected account takes take over (its `ready` says `takeover`): `takeOver`/`resume`, the tabs you hold
+ * (`held`) and each agent's tab (`targetId`) in group reports, which an older account refuses. */
+let accountTakeover = false;
 const MEDIA_PROTOCOL = 5;
 const SHARE_PROTOCOL = 6;
 /** Set when the account refuses this extension, or this extension refuses the account, as incompatible. */
@@ -262,8 +284,9 @@ async function report(groupId) {
     const now = Date.now(), step = authorizations.get(groupId);
     const acting = [...[...runs.values()].filter(run => run.body.command.grant.body.groupId === groupId && live(run)).map(run => [run.body, 'run', run]),
       ...(step?.body.command.type === 'execute' && Date.parse(step.body.expiresAt) > now && Date.parse(step.body.dispatch.deadlineAt) > now ? [[step.body, step.body.command.args.action, step]] : [])];
-    Object.assign(group, Object.hasOwn(GROUP_HEX, color ?? '') ? { color } : {}, { agents: acting.slice(0, 32).map(([body, tool, entry]) => ({ agent: body.scope.conversationKind, tool, commands: entry.commands, startedAt: entry.startedAt, doing: entry.doing?.slice(0, 120) ?? null })) });
+    Object.assign(group, Object.hasOwn(GROUP_HEX, color ?? '') ? { color } : {}, { agents: acting.slice(0, 32).map(([body, tool, entry]) => ({ agent: body.scope.conversationKind, tool, commands: entry.commands, startedAt: entry.startedAt, doing: entry.doing?.slice(0, 120) ?? null, ...(accountTakeover ? { targetId: entry.targetId ?? null } : {}) })) });
   }
+  if (accountTakeover) group.held = [...holders.values()].filter(held => held.groupId === groupId).slice(0, 200).map(({ targetId, holder, since, by, device }) => ({ targetId, holder, since, by, device }));
   send({ group });
 }
 /** When the agent last used each group. A group idle this long collapses once. */
@@ -272,6 +295,8 @@ const IDLE_COLLAPSE_MS = 2 * 60_000;
 async function collapseIdle() {
   for (const [groupId, at] of lastUsed) {
     if (Date.now() - at < IDLE_COLLAPSE_MS) continue;
+    // A group with a tab you hold stays open while you use it.
+    if ([...holders.values()].some(held => held.groupId === groupId)) { lastUsed.set(groupId, Date.now()); continue; }
     lastUsed.delete(groupId);
     const found = (await groupRecords()).find(({ record }) => record.groupId === groupId);
     // Collapsing the group holding the tab you are looking at would switch tabs under you.
@@ -308,14 +333,15 @@ async function detachTab(targetId, source) {
   try { await release; } finally { if (releases.get(targetId) === release) releases.delete(targetId); }
 }
 /** Lets a tab's debugger channel go, and the debugger with it unless a share still watches the tab, which keeps it
- * without the script's painting. A capture recording the tab's screencast ends with what it recorded. */
+ * without the script's painting, or you hold it, whose toolbar keeps Resume agent. A capture recording the tab's
+ * screencast ends with what it recorded. */
 async function revoke(id) {
   const channel = channels.get(id); channels.delete(id);
   if (!channel) return releases.get(id);
   channel.cancelNavigation?.();
   for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: GitSpace no longer uses this tab', true);
   const debuggee = debuggees.get(id);
-  if (debuggee && watchesOn(debuggee).length) {
+  if (debuggee && (watchesOn(debuggee).length || heldBy(id))) {
     if (channel.painting) void channel.screencast.remove(channel.painting).catch(() => {});
     void overlay(id);
     return;
@@ -334,7 +360,7 @@ async function check(id, expected = channels.get(id)) {
 function live(run) { const now = Date.now(); return Date.parse(run.body.expiresAt) > now && Date.parse(run.body.dispatch.deadlineAt) > now; }
 async function activeRun(attemptId) {
   const run = runs.get(attemptId);
-  if (!run) throw new Error(ended.get(attemptId) === 'stopped' ? 'You stopped this script' : 'Signed browser script required');
+  if (!run) throw new Error(ENDED_REFUSALS[ended.get(attemptId)] ?? 'Signed browser script required');
   if (!live(run)) { await endRun(attemptId, 'deadline'); throw new Error('Browser script deadline passed'); }
   return run;
 }
@@ -408,7 +434,8 @@ const OVERLAY_WORLD = 'gitspace-overlay';
 const OVERLAY_BINDING = '__gitspaceStop';
 /** The longest one overlay step may take: a page held by a dialog never answers, and the agent never waits on it. */
 const OVERLAY_STEP_MS = 1000;
-/** What a tab's overlay shows: a script running on it, a single step using it now, a capture recording it, or nothing. */
+/** What a tab's overlay shows for the agent's channel: a script running on it, a single step using it now, a capture
+ * recording it, or nothing. A tab you hold shows `you` instead (`overlay`). */
 function overlayMode(channel) {
   if ([...runs.values()].some(run => run.targets.has(channel.targetId) && live(run))) return 'run';
   const step = authorizations.get(channel.grant.groupId);
@@ -441,24 +468,27 @@ async function overlayCall(debuggee, command) {
   try { return await call(); } catch { debuggee.overlay.contextId = null; return call(); }
 }
 /** Brings the overlay of a tab with a debugger session up to date (`extra`: the agent's pointer, or hiding it for a
- * screenshot): the toolbar while the agent uses the tab (who acts and what it is doing) or a capture records it, the
- * pointers of the people watching its shares, and your own pointer reported while a share watched there shows it to
- * its viewers (`report`); removed when none of these. Its Capture button shows only when the account saves captures. */
+ * screenshot): the toolbar while the agent uses the tab (who acts and what it is doing), while you hold it (`you`,
+ * whatever the agent does) or a capture records it, the pointers of the people watching its shares, and your own
+ * pointer reported while a share watched there shows it to its viewers (`report`); removed when none of these. Its
+ * Capture button shows only when the account saves captures. */
 function overlay(targetId, extra = {}) {
   const debuggee = debuggees.get(targetId);
   if (!debuggee) return Promise.resolve();
   return overlayStep(debuggee, async () => {
     if (debuggees.get(targetId) !== debuggee) return;
     const channel = channels.get(targetId);
-    const mode = channel ? overlayMode(channel) : null;
+    const held = heldBy(targetId);
+    const mode = held ? 'you' : channel ? overlayMode(channel) : null;
     const watches = watchesOn(debuggee);
     const pointers = watches.flatMap(watch => watch.pointers);
     const reporting = watches.some(watch => watch.reportPointer);
     if (!mode && !pointers.length && !reporting) { if (debuggee.overlay) { try { await overlayCall(debuggee, { remove: true }); } finally { delete debuggee.overlay; debuggee.pointed = false; debuggee.reporting = false; } } return; }
     debuggee.overlay ??= { contextId: null };
-    const recording = channel ? captureOn(channel.tabId) : undefined;
-    const acting = mode === 'run' || mode === 'step' ? activity.get(channel.grant.groupId) : undefined;
-    const show = mode ? { mode, workspace: channel.grant.groupName, agent: acting?.agent ?? null, doing: acting?.doing ?? null, binding: OVERLAY_BINDING,
+    const recording = mode ? captureOn(debuggee.tabId) : undefined;
+    // While you hold the tab, the agent that acted on its group is the one paused (the main agent when none did).
+    const acting = mode === 'run' || mode === 'step' ? activity.get(channel.grant.groupId) : held ? activity.get(held.groupId) ?? { agent: 'main', doing: null } : undefined;
+    const show = mode ? { mode, workspace: channel?.grant.groupName ?? '', agent: acting?.agent ?? null, doing: held ? null : acting?.doing ?? null, binding: OVERLAY_BINDING,
       capture: recording ? 'recording' : accountProtocol >= MEDIA_PROTOCOL ? 'ready' : 'none', recording: recording ? { startedAt: recording.startedAt, sound: recording.track === 'video' } : null } : null;
     // Pointers go along while any are drawn, and once more, empty, to take the last ones away; reporting likewise.
     const command = { show, ...(pointers.length || debuggee.pointed ? { pointers } : {}), ...(reporting || debuggee.reporting ? { report: reporting ? OVERLAY_BINDING : null } : {}), ...extra };
@@ -680,7 +710,10 @@ async function runCommand(message) {
   try {
     await previous;
     const run = await activeRun(attemptId);
+    // You took the tab over: the script ends at this command, and its later commands say why.
+    if (heldBy(targetId)) { await endRun(attemptId, 'taken'); throw new Error(SCRIPT_TAKEN_REFUSAL); }
     run.commands++;
+    run.targetId = targetId;
     reportActivity(run.body.command.grant.body.groupId);
     let verdict;
     try {
@@ -703,7 +736,7 @@ async function runCommand(message) {
     // The cursor reaches each point before the event does; a script's own screenshot never shows the overlay.
     if (method === 'Input.dispatchMouseEvent') await overlay(targetId, { cursor: { x: verdict.send.x, y: verdict.send.y, type: verdict.send.type } });
     if (method === 'Page.captureScreenshot') await overlay(targetId, { conceal: true });
-    effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : method === 'GitSpace.setInputFilesFromUrls' ? setInputFiles(lease, verdict.send) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
+    effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : method === 'GitSpace.setInputFilesFromUrls' ? setInputFiles(lease, verdict.send) : method.startsWith('Input.') ? agentInput(targetId, chrome.debugger.sendCommand(lease.source, method, verdict.send)) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
   } finally {
     admitted.resolve();
     if (admissions.get(targetId) === admitted.promise) admissions.delete(targetId);
@@ -744,35 +777,40 @@ function management(action, fields) {
   authorization.used.add(action);
   return authorization;
 }
-/** Stop, Close tab and Focus in Chrome from GitSpace's Browser tab, each signed for its group (and tab) of the
- * request's workspace. Stop ends the group's scripts and step as Stop in Chrome does; Close tab closes a tab of the
- * group as this browser session records it; Focus in Chrome brings one to the front of its window. */
+/** Stop, Close tab, Focus in Chrome, Take over and Resume agent from GitSpace's Browser tab, each signed for its group
+ * (and tab) of the request's workspace. Stop ends the group's scripts and step as Stop in Chrome does; Close tab closes
+ * a tab of the group as this browser session records it; Focus in Chrome brings one to the front of its window; Take
+ * over makes you its holder from the signed-in `device` (attaching the debugger for its toolbar), and Resume agent
+ * hands it back. */
 async function control(message) {
   if (message.operation === 'stopGroup') {
     const authorization = management('stop', { groupId: message.groupId });
-    if (!authorization) throw new Error('Signed stop required');
+    if (!authorization) throw new Error(CONTROL_OPERATIONS.stopGroup);
     const { scope } = authorization.body, step = authorizations.get(message.groupId);
     const bodies = [...[...runs.values()].filter(run => run.body.command.grant.body.groupId === message.groupId).map(run => run.body), ...(step ? [step.body] : [])];
     if (bodies.some(body => body.scope.projectId !== scope.projectId || body.scope.workspaceId !== scope.workspaceId)) throw new Error('This tab group belongs to another workspace');
     await stopGroup(message.groupId);
     return {};
   }
-  const authorization = management(message.operation, { groupId: message.groupId, targetId: message.targetId });
-  if (!authorization) throw new Error(message.operation === 'closeTab' ? 'Signed tab close required' : 'Signed tab focus required');
+  const authorization = management(message.operation, { groupId: message.groupId, targetId: message.targetId, ...(message.operation === 'takeOver' ? { device: message.device } : {}) });
+  if (!authorization) throw new Error(CONTROL_OPERATIONS[message.operation]);
   const { scope } = authorization.body, identity = await stored('identity');
   const key = 'group:' + JSON.stringify([identity.trust.accountId, identity.pairingId, scope.projectId, scope.workspaceId]);
   const found = (await workspaceGroups()).find(entry => entry.key === key && entry.record.groupId === message.groupId);
   if (!found) throw new Error('This workspace has no tab group in this Chrome');
-  const tab = await chrome.tabs.get((await targetInfo(message.targetId)).tabId);
+  const target = await targetInfo(message.targetId);
+  const tab = await chrome.tabs.get(target.tabId);
   if (tab.groupId !== found.group.id) throw new Error('This tab is not in the workspace’s group');
   if (message.operation === 'closeTab') { await chrome.tabs.remove(tab.id); return {}; }
+  if (message.operation === 'takeOver') { await debuggeeOf(target).catch(() => {}); await take(target.id, message.groupId, 'gitspace', message.device ?? null); return {}; }
+  if (message.operation === 'resume') { await handBack(target.id); return {}; }
   if (found.group.collapsed) await chrome.tabGroups.update(found.group.id, { collapsed: false });
   await chrome.tabs.update(tab.id, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });
   return {};
 }
-/** The relay operations `control` answers. */
-const CONTROL_OPERATIONS = { stopGroup: true, closeTab: true, focusTab: true };
+/** The relay operations `control` answers, and why each is refused without its signed request. */
+const CONTROL_OPERATIONS = { stopGroup: 'Signed stop required', closeTab: 'Signed tab close required', focusTab: 'Signed tab focus required', takeOver: 'Signed take over required', resume: 'Signed resume required' };
 /** Signs the begin request of one upload to the account (`upload.ts`) with this Chrome's pairing key. */
 async function signUpload(method, pathname, bodySha256) {
   const identity = await stored('identity');
@@ -904,12 +942,55 @@ function endCapture(capture, reason, announce, recorded) {
   })();
   return capture.ending;
 }
-/** A button of a tab's in-page control: Stop (the agent's work on the group), Capture, or Stop capture. */
-function overlayButton(lease, payload) {
-  if (payload === 'stop') return stopGroup(lease.grant.groupId);
-  if (payload === 'capture') return startCapture(lease.tabId, lease);
-  const capture = captureOn(lease.tabId);
-  return payload === 'captureStop' && capture ? endCapture(capture, null, true) : Promise.resolve();
+/** A button of a tab's in-page control, or your own input there: Stop (the agent's work on the group), Capture, Stop
+ * capture, Take over and Resume agent; `take` is your first trusted pointer or key press on a tab the agent is using
+ * (a script runs on it or a single step uses it), which takes it unless it is the agent's own input. */
+function overlayButton(debuggee, payload) {
+  const channel = channels.get(debuggee.targetId);
+  if (payload === 'resume') return handBack(debuggee.targetId);
+  if (payload === 'capture') return startCapture(debuggee.tabId, channel ?? null);
+  if (payload === 'captureStop') { const capture = captureOn(debuggee.tabId); return capture ? endCapture(capture, null, true) : Promise.resolve(); }
+  if (!channel || heldBy(channel.targetId)) return Promise.resolve();
+  if (payload === 'stop') return stopGroup(channel.grant.groupId);
+  if (payload === 'takeover' || (payload === 'take' && ['run', 'step'].includes(overlayMode(channel)) && !agentInputs.has(channel.targetId))) return take(channel.targetId, channel.grant.groupId, 'chrome', null);
+  return Promise.resolve();
+}
+/** Makes you the holder of a tab of workspace group `groupId`: taken in Chrome (`chrome`, no device) or from GitSpace
+ * (`gitspace`, the signed-in device that took it). Taking a tab you hold already moves it to `by` and `device` and
+ * keeps since when you hold it. */
+async function take(targetId, groupId, by, device) {
+  holders.set(targetId, { targetId, holder: 'you', since: heldBy(targetId)?.since ?? new Date().toISOString(), by, device, groupId });
+  await holdersChanged(targetId, groupId);
+}
+/** Hands a tab you hold back to the agent. What the agent observed there is gone (it reads the page again, with your
+ * changes), and a debugger kept only for your toolbar leaves the tab. */
+async function handBack(targetId) {
+  const held = heldBy(targetId);
+  if (!held) return;
+  holders.delete(targetId);
+  const channel = channels.get(targetId);
+  if (channel) { channel.refs.clear(); channel.names.clear(); }
+  await holdersChanged(targetId, held.groupId);
+  const debuggee = debuggees.get(targetId);
+  if (debuggee && !channel && !watchesOn(debuggee).length) await detachTab(targetId, debuggee.source);
+}
+/** A tab's holder changed: kept for a restart, and the account (at once, not coalesced), the tab's toolbar, the
+ * toolbar icon and the popup show it. */
+async function holdersChanged(targetId, groupId) {
+  await persist('holders', [...holders.values()]);
+  updateToolbar();
+  void overlay(targetId);
+  await report(groupId).catch(() => {});
+}
+/** Hands back the tabs you hold that closed or left their workspace group. */
+async function reconcileHolders() {
+  if (!holders.size) return;
+  const tabIds = new Map((await targets()).map(target => [target.id, target.tabId]));
+  const records = await groupRecords();
+  for (const held of [...holders.values()]) {
+    const tabId = tabIds.get(held.targetId);
+    if (tabId === undefined || !records.some(({ record }) => record.groupId === held.groupId && record.members?.[tabId])) await handBack(held.targetId);
+  }
 }
 /**
  * Downloads an agent tab starts (docs/SIMPLIFICATION.md Batch 16 item 2): the tab's debugger reports each
@@ -1223,7 +1304,7 @@ async function endWatch(watch) {
   const { debuggee } = watch;
   await debuggee.screencast.remove(watch.consumer).catch(() => {});
   if (debuggees.get(debuggee.targetId) !== debuggee) return;
-  if (channels.has(debuggee.targetId) || watchesOn(debuggee).length) await overlay(debuggee.targetId);
+  if (channels.has(debuggee.targetId) || watchesOn(debuggee).length || heldBy(debuggee.targetId)) await overlay(debuggee.targetId);
   else await detachTab(debuggee.targetId, debuggee.source);
 }
 /** The relay's share notices: this Chrome's live shares, the pointers of a watched share's viewers, a share ended. */
@@ -1239,6 +1320,27 @@ async function shareNotice(message) {
   }
   if (watch) await endWatch(watch);
   await setShares(liveShares.filter(share => share.shareId !== message.shareId));
+}
+/** The inputs GitSpace's Watch dialog sends (`RuntimeBrowserRemoteInput`). */
+const REMOTE_INPUTS = { mouse: true, wheel: true, key: true, touch: true, text: true };
+/**
+ * `remoteInput`: one input of yours from GitSpace's Watch dialog (docs/APERTURE-DESIGN.md §7.1) on a tab of the group
+ * you hold, from the device that took it there; the account checked the same before sending it. Its positions,
+ * fractions of the viewport, become CSS pixels of the viewport Chrome lays the tab out in, read again whenever the
+ * tab's screencast shows another size. Nothing typed is kept or logged.
+ */
+async function remoteInput({ groupId, targetId, device, input }) {
+  const held = typeof targetId === 'string' ? heldBy(targetId) : undefined;
+  if (!held || held.groupId !== groupId || typeof device !== 'string' || held.device !== device) throw new Error('You do not hold this tab from this device');
+  if (!REMOTE_INPUTS[input?.type]) throw new Error('Invalid input');
+  const debuggee = await debuggeeOf(await targetInfo(targetId));
+  if (debuggee.inputViewport?.key !== debuggee.viewport) {
+    const key = debuggee.viewport, { clientWidth, clientHeight } = await layoutViewport(debuggee);
+    debuggee.inputViewport = { key, width: clientWidth, height: clientHeight };
+  }
+  const { method, params } = remoteInputCommand(input, debuggee.inputViewport);
+  await chrome.debugger.sendCommand(debuggee.source, method, params);
+  return {};
 }
 /** How the overlay's binding call starts when it reports your own pointer over the tab (`report`), followed by the
  * point as JSON (fractions of the viewport), or `null` once it left the tab. */
@@ -1403,6 +1505,8 @@ async function execute(message) {
     const run = await activeRun(message.attemptId);
     if (JSON.stringify(run.body.command.grant) !== JSON.stringify(message.grant)) throw new Error('Signed target binding required');
     if (message.targetId && message.url) throw new Error('Open an existing tab or a destination, not both');
+    // A tab you took over ends the script that opens it.
+    if (message.targetId && heldBy(message.targetId)) { await endRun(message.attemptId, 'taken'); throw new Error(SCRIPT_TAKEN_REFUSAL); }
     const grant = message.grant.body;
     await groupRecord(grant, true);
     run.commands++;
@@ -1418,6 +1522,7 @@ async function execute(message) {
     // drives the tab or the debugger leaves it.
     if (!channel.painting) { channel.painting = { maxWidth: 1, maxHeight: 1, quality: 1 }; await channel.screencast.add(channel.painting); }
     run.targets.add(targetId);
+    run.targetId = targetId;
     lastUsed.set(grant.groupId, Date.now());
     void overlay(targetId);
     return { targetId, sessionId: channel.sessionId };
@@ -1433,6 +1538,7 @@ async function execute(message) {
     let targetId = args.targetId;
     if (args.action === 'open' && !targetId) targetId = await createAgentTab(grant, args.url || 'about:blank');
     if (!targetId) throw new Error('An exact workspace target is required');
+    if (heldBy(targetId)) throw new Error(TAB_HELD_REFUSAL);
     const channel = await attach(grant, targetId);
     authorization.targetId = targetId;
     lastUsed.set(grant.groupId, Date.now());
@@ -1469,6 +1575,7 @@ async function execute(message) {
   if (message.operation === 'release') { await downloadsSaved(message.attemptId); await endRun(message.attemptId, 'released'); return {}; }
   if (message.operation === 'shareTab') return shareTab(message.targetId);
   if (message.operation === 'shareWatch') return watchShare(message);
+  if (message.operation === 'remoteInput') return remoteInput(message);
   if (message.operation === 'shareUnwatch') { const watch = watching.get(message.shareId); if (watch) await endWatch(watch); return {}; }
   if (message.operation === 'shareHit') return shareHit(message);
   if (message.operation === 'shareAnchor') return shareAnchor(message);
@@ -1476,6 +1583,8 @@ async function execute(message) {
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
   // Before any await: the script's commands reach its tab in the order they arrived.
   if (message.attemptId !== undefined) return runCommand(message);
+  // None of a single step's commands reach a tab you hold.
+  if (heldBy(message.targetId)) throw new Error(TAB_HELD_REFUSAL);
   const lease = await check(message.targetId);
   const { method, params = {}, sessionId } = message;
   if (!allowed(lease.scope, lease.targetId, lease.sessionId, method, params, sessionId)) throw new Error('Command outside browser grant');
@@ -1512,7 +1621,8 @@ async function execute(message) {
     if (method === 'Accessibility.getFullAXTree') { const document = lease.document; result = await chrome.debugger.sendCommand(lease.source, method, { depth: 32 }); if (document !== lease.document) throw new Error('Document changed during observation'); result.gitspaceDocument = document; for (const node of result.nodes || []) if (Number.isSafeInteger(node.backendDOMNodeId)) { lease.refs.add(node.backendDOMNodeId); if (typeof node.name?.value === 'string') lease.names.set(node.backendDOMNodeId, node.name.value); } }
     else {
       if (method === 'Input.dispatchMouseEvent') await overlay(lease.targetId, { cursor: { x: params.x, y: params.y, type: params.type } });
-      result = await chrome.debugger.sendCommand(lease.source, method, params);
+      const sending = chrome.debugger.sendCommand(lease.source, method, params);
+      result = await (method.startsWith('Input.') ? agentInput(lease.targetId, sending) : sending);
     }
   }
   await check(message.targetId, lease);
@@ -1530,15 +1640,22 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === 'Page.frameNavigated' && !params.frame.parentId) { if (debuggee.overlay) debuggee.overlay.contextId = null; debuggee.world = null; }
   // A new document lacks the overlay until it is drawn again.
   if (method === 'Page.loadEventFired' && debuggee.overlay) void overlay(debuggee.targetId);
-  // Your own pointer over a watched tab, from the overlay's own world only, which no page script reaches.
-  if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING && typeof params.payload === 'string' && params.payload.startsWith(SHARER_POINTER)) { if (debuggee.overlay && params.executionContextId === debuggee.overlay.contextId) sharerPointer(debuggee, params.payload); return; }
+  // The overlay's buttons, your own input there and your own pointer over a watched tab, from the overlay's own world
+  // only, which no page script reaches. Neither they nor that world reach a session.
+  if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) {
+    if (typeof params.payload === 'string' && debuggee.overlay && params.executionContextId === debuggee.overlay.contextId) {
+      if (params.payload.startsWith(SHARER_POINTER)) sharerPointer(debuggee, params.payload);
+      else void overlayButton(debuggee, params.payload).catch(() => {});
+    }
+    return;
+  }
   // Everything else is the agent's, on a tab it has a channel to; a tab only shares watch tells no one.
   const lease = channels.get(source.targetId);
   if (!lease) return;
   const id = lease.targetId;
-  // The overlay's buttons, from the overlay's own world only. Neither they nor that world reach the session.
-  if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) { if (debuggee.overlay && params.executionContextId === debuggee.overlay.contextId) void overlayButton(lease, params.payload).catch(() => {}); return; }
   if (method === 'DOM.documentUpdated' || (method === 'Page.frameNavigated' && !params.frame.parentId)) { lease.document++; lease.refs.clear(); lease.names.clear(); }
+  // Nothing of a tab you hold reaches the agent: not what you type, where you go or what you download.
+  if (heldBy(id)) return;
   if (method === 'Page.downloadWillBegin') downloadBegan(lease, params);
   // A script's tab reports every event of its own session, without network credentials.
   if ([...runs.values()].some(run => run.targets.has(lease.targetId) && live(run))) { const forwarded = relayRunEvent(method, params); if (forwarded) forward(id, lease, { targetId: id, sessionId: lease.sessionId, method, params: forwarded }); return; }
@@ -1563,16 +1680,16 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   if (change.status === 'complete') for (const debuggee of debuggees.values()) if (debuggee.tabId === tabId && debuggee.overlay) void overlay(debuggee.targetId);
   // A page's icon arrives after its URL (`favIconUrl`), and is in Chrome's favicon store once the page loaded.
   if (change.url || change.title || change.favIconUrl || change.status === 'complete') for (const [targetId, sharedTabId] of sharedTabs) if (sharedTabId === tabId) void reportPages(targetId).catch(() => {});
-  if ('groupId' in change) void join(tab, true).catch(() => {});
+  if ('groupId' in change) void join(tab, true).then(reconcileHolders).catch(() => {});
   else if ((change.url || change.title || change.status === 'complete') && tab.groupId >= 0) void groupRecords().then(records => { const found = records.find(({ record }) => record.chromeGroupId === tab.groupId); if (found) scheduleReport(found.record.groupId); }).catch(() => {});
 });
 chrome.tabs.onCreated.addListener(tab => { void serially(async () => {
   if (Number.isInteger(tab.openerTabId) && (await groupRecords()).some(({ record }) => record.members?.[tab.openerTabId])) pageTabs.add(tab.id);
 }).then(() => { if (tab.groupId >= 0) return join(tab, false); }).catch(() => {}); });
-chrome.tabs.onRemoved.addListener(tabId => { void leave(tabId).catch(() => {}); sharedTabClosed(tabId); });
+chrome.tabs.onRemoved.addListener(tabId => { void leave(tabId).then(reconcileHolders).catch(() => {}); sharedTabClosed(tabId); });
 chrome.tabGroups.onRemoved.addListener(group => { void serially(async () => {
   for (const { key, record } of await groupRecords()) if (record.chromeGroupId === group.id) { await persist(key, null); scheduleReport(record.groupId); }
-}).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } }).catch(() => { socket?.close(); }); });
+}).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } await reconcileHolders(); }).catch(() => { socket?.close(); }); });
 /** After the connection ends: no step or script holds a tab, no share is watched, and the account tells the shares
  * again once connected. */
 async function reset() {
@@ -1604,8 +1721,8 @@ const switched = chrome.storage.local.get(['enabled', 'reenableAt']).then(async 
 }).catch(() => {});
 void switched.then(updateToolbar);
 /** Turns GitSpace on or off in this Chrome; off for `minutes` turns it back on after them. Turning it off ends every
- * script as Stop does, stops and saves every capture, lets every tab's debugger go, and closes the connection to the
- * account until it is on again. */
+ * script as Stop does, stops and saves every capture, lets every tab's debugger go (the tabs you hold stay yours, and
+ * show their toolbar again once it is on), and closes the connection to the account until it is on again. */
 function setEnabled(on, minutes) {
   identityOperations = identityOperations.catch(() => {}).then(async () => {
     await switched;
@@ -1614,6 +1731,7 @@ function setEnabled(on, minutes) {
       enabled = true; reenableAt = null;
       await chrome.storage.local.remove(['enabled', 'reenableAt']);
       updateToolbar();
+      void showHeld();
       await connect();
       return;
     }
@@ -1627,7 +1745,7 @@ function setEnabled(on, minutes) {
     const previous = socket; socket = undefined; connected = false;
     previous?.close();
     for (const channel of channels.values()) channel.cancelNavigation?.();
-    try { await Promise.allSettled([...queues.values()]); await reset(); } finally { managingIdentity = false; updateToolbar(); }
+    try { await Promise.allSettled([...queues.values()]); await reset(); await Promise.all([...debuggees.values()].map(debuggee => detachTab(debuggee.targetId, debuggee.source))); } finally { managingIdentity = false; updateToolbar(); }
   });
   return identityOperations;
 }
@@ -1648,12 +1766,15 @@ function updateToolbar() {
   const recording = captures.size;
   const working = actingGroups().size + recording;
   const host = new URL(GITSPACE_ACCOUNT_URL).host;
-  const state = !enabled ? 'off' : recording ? 'working' : incompatible || !paired || !connected ? 'attention' : working ? 'working' : 'on';
+  const holding = holders.size;
+  const state = !enabled ? 'off' : recording ? 'working' : incompatible || !paired || !connected ? 'attention' : holding ? 'you' : working ? 'working' : 'on';
   const title = !enabled ? 'GitSpace is off in this Chrome' + (reenableAt === null ? '' : ' until ' + new Date(reenableAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))
     : recording ? `GitSpace is recording ${recording === 1 ? 'a tab' : `${recording} tabs`} in this Chrome`
     : incompatible ? 'GitSpace needs an update in this Chrome' : !paired ? 'GitSpace: pair this Chrome in GitSpace, Plugins → Browsers' : !connected ? 'GitSpace is connecting to ' + host
+    : holding ? `You're in control of ${holding === 1 ? 'a tab' : `${holding} tabs`}`
     : running ? `GitSpace is running ${running} ${running === 1 ? 'script' : 'scripts'} in this Chrome` : working ? 'GitSpace: an agent is using this Chrome' : 'GitSpace is on · ' + host;
-  const badge = state === 'working' ? String(working) : state === 'attention' ? '!' : '';
+  // While you hold a tab, the badge still counts the workspaces agents act on.
+  const badge = state === 'working' || (state === 'you' && working) ? String(working) : state === 'attention' ? '!' : '';
   const shown = JSON.stringify([state, title, badge]);
   if (shown === toolbar) return;
   toolbar = shown;
@@ -1669,6 +1790,8 @@ function updateToolbar() {
 }
 async function connect() {
   await switched;
+  // A tab you held before this worker started stays yours from its first command on.
+  await holdersRestored;
   if (managingIdentity || !enabled) return;
   const generation = identityGeneration;
   if (socket && socket.readyState <= WebSocket.OPEN) return;
@@ -1711,8 +1834,9 @@ async function connect() {
           pairingCode = undefined; authenticated = true; clearTimeout(handshakeTimeout);
           // `platform`: this Chrome's OS, for Plugins → Browsers. `chromeInfo`: this extension takes the account's notices
           // about this Chrome; `controls`: it takes Stop, Close tab and Focus in Chrome from GitSpace (`stopGroup`,
-          // `closeTab`, `focusTab`); `siteLevels`: it enforces a grant's sites at read.
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true }));
+          // `closeTab`, `focusTab`); `siteLevels`: it enforces a grant's sites at read; `takeover`: it takes `takeOver`
+          // and `resume`, and refuses the agent's commands on a tab you hold.
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true }));
           return;
         } finally { authenticating = false; }
       }
@@ -1732,7 +1856,7 @@ async function connect() {
           updateToolbar();
           connection.close();
         } else {
-          connected = true; accountProtocol = account; accountActivity = message.groupActivity === true; updateToolbar(); await chrome.storage.local.remove('compatibility');
+          connected = true; accountProtocol = account; accountActivity = message.groupActivity === true; accountTakeover = message.takeover === true; updateToolbar(); await chrome.storage.local.remove('compatibility');
           void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {});
           // The in-page controls show Capture once the account saves captures.
           for (const targetId of debuggees.keys()) void overlay(targetId);
@@ -1752,11 +1876,11 @@ async function connect() {
       };
       return;
     }
-    const key = SHARE_OPERATIONS[message.operation] ? 'share:' + message.shareId : 'commands';
+    const key = SHARE_OPERATIONS[message.operation] ? 'share:' + message.shareId : message.operation === 'remoteInput' ? 'input:' + message.targetId : 'commands';
     const start = () => { if (socket !== connection || connection.readyState !== WebSocket.OPEN) throw new Error('Disconnected command'); return execute(message); };
     // A script's commands do not wait for one another (it may await one while sending the next), nor does `shareTab`
-    // (asked while this Chrome's own share request waits on it); the operations on one share run one at a time, apart
-    // from everything else, which runs one at a time.
+    // (asked while this Chrome's own share request waits on it); the operations on one share run one at a time, and so
+    // does your input on one tab (in the order you made it), apart from everything else, which runs one at a time.
     const concurrent = (message.operation === 'command' && message.attemptId !== undefined) || message.operation === 'shareTab';
     const operation = concurrent ? Promise.resolve().then(start) : (queues.get(key) || Promise.resolve()).catch(() => {}).then(start);
     if (!concurrent) queues.set(key, operation);
@@ -1766,7 +1890,7 @@ async function connect() {
     clearTimeout(handshakeTimeout);
     if (socket !== connection) return;
     for (const channel of channels.values()) channel.cancelNavigation?.();
-    socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; identityGeneration++; managingIdentity = true;
+    socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; accountTakeover = false; identityGeneration++; managingIdentity = true;
     updateToolbar();
     identityOperations = identityOperations.catch(() => {}).then(async () => {
       try { await Promise.allSettled([...queues.values()]); await reset(); }
@@ -1794,7 +1918,8 @@ async function popupState() {
   const acting = actingGroups();
   const groups = [];
   for (const { record, group } of await workspaceGroups()) groups.push({ groupId: record.groupId, chromeGroupId: group.id, name: groupTitle(group.title ?? '', false), color: GROUP_HEX[group.color] ?? GROUP_HEX.grey,
-    project: chromeInfo?.groups.get(record.groupId) ?? null, tabs: (await chrome.tabs.query({ groupId: group.id })).length, acting: acting.has(record.groupId) ? activity.get(record.groupId) ?? null : null });
+    project: chromeInfo?.groups.get(record.groupId) ?? null, tabs: (await chrome.tabs.query({ groupId: group.id })).length, acting: acting.has(record.groupId) ? activity.get(record.groupId) ?? null : null,
+    held: [...holders.values()].some(held => held.groupId === record.groupId) });
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const tabGroup = active ? groups.find(group => group.chromeGroupId === active.groupId) : undefined;
   const recording = tabGroup ? captureOn(active.id) : undefined;
@@ -1886,7 +2011,7 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
   await Promise.all([...captures.values()].map(capture => endCapture(capture, 'This Chrome’s GitSpace pairing changed', true)));
   managingIdentity = true;
   identityGeneration++;
-  const previous = socket; socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; pairingCode = undefined; chromeInfo = null;
+  const previous = socket; socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; accountTakeover = false; pairingCode = undefined; chromeInfo = null;
   previous?.close();
   for (const channel of channels.values()) channel.cancelNavigation?.();
   try {
@@ -1920,4 +2045,13 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 // A group marked while scripts ran before this worker started has none running now.
 void groupRecords().then(records => { for (const { record } of records) void markRunning(record.groupId); }).catch(() => {});
+/** The tabs you hold show their toolbar (the debugger attached for it), after this worker starts or GitSpace is on
+ * again; off, no tab has the debugger. */
+async function showHeld() {
+  await switched;
+  if (!enabled) return;
+  for (const targetId of holders.keys()) { try { await debuggeeOf(await targetInfo(targetId)); await overlay(targetId); } catch {} }
+}
+// Tabs you held before this worker started stay yours while they are in their group.
+void holdersRestored.then(reconcileHolders).then(showHeld).catch(() => {});
 connect();

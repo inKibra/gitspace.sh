@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { Window, type ShadowRoot } from 'happy-dom';
+import { Window, type Element, type ShadowRoot } from 'happy-dom';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { browserOverlayFunction } from '../src/overlay.js';
 
@@ -28,7 +28,7 @@ describe('the in-page overlay', () => {
     const element = host();
     if (!element) throw new Error('No overlay');
     expect(element.getAttribute('aria-hidden')).toBe('true');
-    expect([...roots[0]?.querySelectorAll('button, a, input, [tabindex]') ?? []].map(node => node.getAttribute('tabindex'))).toEqual(['-1', '-1']);
+    expect([...roots[0]?.querySelectorAll('button, a, input, [tabindex]') ?? []].map(node => node.getAttribute('tabindex'))).toEqual(['-1', '-1', '-1', '-1']);
     call(browserScreenshotPrepareFunction, []);
     expect(window.getComputedStyle(element).visibility).toBe('hidden');
     call(browserScreenshotRestoreFunction);
@@ -58,9 +58,9 @@ describe('the in-page overlay', () => {
     const buttons = () => [...roots[0]?.querySelectorAll('button') ?? []];
     const shown = () => buttons().filter(button => button.style.display !== 'none').map(button => button.textContent);
     call(browserOverlayFunction, { show: { ...show.show, capture: 'none' } });
-    expect(shown()).toEqual(['Stop']);
+    expect(shown()).toEqual(['Take over', 'Stop']);
     call(browserOverlayFunction, show);
-    expect(shown()).toEqual(['Capture', 'Stop']);
+    expect(shown()).toEqual(['Capture', 'Take over', 'Stop']);
     buttons().find(button => button.textContent === 'Capture')?.click();
     call(browserOverlayFunction, { show: { ...show.show, mode: 'capture', agent: null, doing: null, capture: 'recording', recording: { startedAt: Date.now(), sound: true } } });
     expect(roots[0]?.textContent).toContain('REC');
@@ -68,6 +68,53 @@ describe('the in-page overlay', () => {
     expect(shown()).toEqual(['Stop capture']);
     buttons().find(button => button.textContent === 'Stop capture')?.click();
     expect(presses).toEqual(['capture', 'captureStop']);
+  });
+
+  it('while the agent acts, Take over and your own pointer or key press on the page take the tab; the page’s own events and presses on the toolbar do not', () => {
+    const { window, roots, call, host } = page();
+    const presses: string[] = [];
+    Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
+    // Chrome marks your input (and the agent's, which the extension tells apart) trusted; a page's own events are not.
+    const input = (target: Element, type: string, trusted: boolean) => {
+      const event = type === 'keydown' ? new window.KeyboardEvent(type, { bubbles: true, composed: true, key: 'a' }) : new window.PointerEvent(type, { bubbles: true, composed: true });
+      if (trusted) Object.defineProperty(event, 'isTrusted', { value: true });
+      target.dispatchEvent(event);
+    };
+    call(browserOverlayFunction, show);
+    input(window.document.body, 'pointerdown', false);
+    input(window.document.body, 'keydown', false);
+    expect(presses).toEqual([]);
+    const toolbar = host();
+    if (!toolbar) throw new Error('No overlay');
+    input(toolbar, 'pointerdown', true);
+    expect(presses).toEqual([]);
+    input(window.document.body, 'pointerdown', true);
+    input(window.document.body, 'keydown', true);
+    expect(presses).toEqual(['take', 'take']);
+    [...roots[0]?.querySelectorAll('button') ?? []].find(button => button.textContent === 'Take over')?.click();
+    expect(presses).toEqual(['take', 'take', 'takeover']);
+    // Once you hold the tab, or only a capture uses it, your input there takes nothing.
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'you', doing: null } });
+    input(window.document.body, 'pointerdown', true);
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'capture', agent: null, doing: null } });
+    input(window.document.body, 'keydown', true);
+    expect(presses).toEqual(['take', 'take', 'takeover']);
+  });
+
+  it('while you hold the tab, says you are in control and the agent is paused, in a grey frame; Resume agent hands it back', () => {
+    const { window, roots, call } = page();
+    const presses: string[] = [];
+    Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'you', doing: null } });
+    expect(roots[0]?.textContent).toContain("You're in control");
+    expect(roots[0]?.textContent).toContain('main is paused · it sees your changes when it resumes');
+    expect(roots[0]?.textContent).not.toContain('Clicking');
+    const shown = [...roots[0]?.querySelectorAll('button') ?? []].filter(button => button.style.display !== 'none');
+    expect(shown.map(button => button.textContent)).toEqual(['Capture', 'Resume agent']);
+    expect(shown.at(-1)?.style.background).toBe('#1a73e8');
+    expect([...roots[0]?.children ?? []].some(element => element instanceof window.HTMLElement && element.style.boxShadow === 'inset 0 0 0 2px #a3a3a3' && element.style.opacity === '1')).toBe(true);
+    shown.at(-1)?.click();
+    expect(presses).toEqual(['resume']);
   });
 
   it('replaces one a previous debugger session left and leaves when removed', () => {

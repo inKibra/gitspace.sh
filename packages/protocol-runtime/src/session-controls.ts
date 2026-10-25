@@ -59,6 +59,11 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStop'), groupId: z.string().uuid() }),
   z.object({ type: z.literal('browserCloseTab'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserFocusTab'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
+  /** Take over (docs/APERTURE-DESIGN.md §7.2) one tab of the workspace's group on your Chrome or the cloud browser
+   * (`groupId` names the browser): you hold it from the device that asked, and none of the agent's commands reach it
+   * until Resume agent (`browserResume`) hands it back. */
+  z.object({ type: z.literal('browserTakeOver'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
+  z.object({ type: z.literal('browserResume'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),

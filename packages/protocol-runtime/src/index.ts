@@ -10,6 +10,8 @@ export * from './rule-interruptions.js';
 export * from './canonical-json.js';
 export * from './browser.js';
 export * from './browser-share.js';
+export * from './browser-watch.js';
+export * from './browser-takeover.js';
 export * from './tool-arguments.js';
 export * from './apply-patch.js';
 export * from './subagent-policy.js';

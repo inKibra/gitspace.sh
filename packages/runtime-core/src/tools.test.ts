@@ -21,6 +21,7 @@ const services: ToolServices = {
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
   question: async () => 'answered', instructions: async () => '', authorizeCronTool: unused, preflight: async () => {},
+  async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
 };
 const samples: Record<string, ToolCall['arguments']> = {
   read: { path: 'src/main.ts', offset: 1, limit: 10 }, write: { path: 'src/main.ts', content: 'new content' },
@@ -35,6 +36,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, delegate_export: { commit: 'a'.repeat(40) },
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'] },
+  ask_takeover: { source: 'headless', targetId: 'tab', reason: 'Solve the CAPTCHA' },
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
   const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
@@ -56,11 +58,20 @@ const call = (name: string, args: ToolCall['arguments'], id = name): ToolCall =>
 
 test('every registered tool advertises its real object contract and executes through the Harness registration path', async () => {
   const routed: string[] = [];
-  const fixture = await registered([Object.entries(samples).map(([name, args]) => call(name, args))], async input => { routed.push(input.tool); return completed(input); });
+  const fixture = await registered([Object.entries(samples).map(([name, args]) => call(name, args))], async input => { routed.push(input.tool); return completed(input); }, { ...operations, wakeAt: async () => {} });
   const { harness, root, tools } = fixture;
   try {
     expect(tools.map(tool => tool.name).sort()).toEqual(Object.keys(samples).sort());
+    // ask_takeover waits for its card: Not now ends it.
+    await harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
+    const watch = await harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
+    if (!watch) throw new Error('Question document missing');
+    const opened = Promise.withResolvers<void>();
+    watch.start(async value => { if (value?.items.some(item => item.kind === 'takeover')) opened.resolve(); });
     await root.submit({ type: 'input', content: 'Exercise all registered contracts.' }, BACKGROUND_CONTEXT);
+    await opened.promise;
+    await watch.stop();
+    await harness.commit(async tx => { for (const item of (await tx.doc(QuestionsDoc)).items) if (item.kind === 'takeover') item.answer = 'declined'; }, BACKGROUND_CONTEXT);
     await root.waitForIdle(BACKGROUND_CONTEXT);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(Object.keys(samples).sort());
@@ -68,9 +79,9 @@ test('every registered tool advertises its real object contract and executes thr
     // The transcript shows the answer from the result's details, not from its text.
     expect(results.find(result => result.toolCallId === 'ask')?.details).toEqual({ results: [{ selectedOptions: [], customInput: 'answered' }] });
     // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
-    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
+    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan', 'ask_takeover'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);
-    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'ask']);
+    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'ask', 'takeover']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });

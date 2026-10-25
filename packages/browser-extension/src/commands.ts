@@ -90,6 +90,11 @@ export function readSiteStepRefusal(read: string[], urls: TabUrls, method: strin
   return null;
 }
 
+/** Why the agent's single step is refused on a tab you hold (docs/APERTURE-DESIGN.md §7.2); the account matches it. */
+export const TAB_HELD_REFUSAL = 'The user is using this tab; ask them with ask_takeover or wait';
+/** Why a script's command on a tab you took over fails, and every later one of that script: the script ended there. */
+export const SCRIPT_TAKEN_REFUSAL = 'You took over this tab in Chrome; the script stopped at its next command';
+
 /** A workspace group grant as scripts see it: its sites, those at interact (`stepsOnly`) and those at read (`read`,
  * none from an account that sends no levels). Scripts run on neither. */
 export type RelayRunGrant = { origins: string[]; stepsOnly: string[]; read?: string[] };

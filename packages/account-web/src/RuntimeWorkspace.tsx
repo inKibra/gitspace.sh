@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { ResourceFile } from './resource-files.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
@@ -23,6 +23,9 @@ import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet, LaunchedBanner
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
+import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
+import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
+import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -106,7 +109,8 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     },
   } : null, [identity, conversationId, snapshot.cursor]);
   const transcript = useTranscriptHistory(transcriptSource);
-  const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null);
+  // ask_takeover cards answer in the transcript, never above the composer.
+  const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null && item.kind !== 'takeover');
   const controls: SessionControlsProps | undefined = value ? {
     value: value.pendingAsk || !question ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
     onCycleRole: async direction => { await run({ type: 'cycleRole', direction }); },
@@ -170,6 +174,13 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     if (result.status === 'error') throw new Error(rpcErrorMessage(result.error, 'Open file'));
     return result.value;
   }, [spaceId, snapshot.projectId, generation]);
+  const sessionCommand = useCallback(async (command: RuntimeSessionCommand) => {
+    const response = await rpcClient.runtime.session({ ...identity, ...(conversationId ? { conversationId } : {}), command });
+    if (response.status === 'error') throw response.error;
+    return response.value;
+  }, [identity, conversationId]);
+  const takeoverCards = useMemo<TakeoverCards>(() => ({ questions: snapshot.questions, request: sessionCommand,
+    watch: (card, onClose) => <BrowserWatchDialog identity={identity} request={sessionCommand} target={{ source: card.source, groupId: card.groupId, targetId: card.targetId, title: card.title, url: card.url, label: card.browser }} focusInChrome={card.source === 'chrome'} takeover onClose={onClose} /> }), [snapshot.questions, sessionCommand, identity]);
   return <>
     {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
@@ -178,6 +189,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     {launch.launch && !launch.open ? <Button variant="ghost" size="compact" onClick={() => launch.setOpen(true)}>Show launch progress</Button> : null}
     {relationQuery.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(relationQuery.error, "Load this project's workspaces")}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
     {relationValue?.statusError ? <div role="status" className="flex items-center gap-2 px-4 py-2 text-caption text-muted-foreground">Workspace statuses are unavailable: {relationValue.statusError}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
+    <TakeoverCardsContext.Provider value={takeoverCards}>
     <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={skillValues} providers={providerValues?.providers} draft={draft} sendPending={session.pending || !draft} onSend={value ? async (text, streamingBehavior, images, draft) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, images: images?.map(image => ({ type: 'image', ...image })) }); } : undefined}
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
       controlsError={session.error ?? (providers.state === 'failure' ? rpcErrorMessage(providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
@@ -198,11 +210,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
-      sessionCommand={async command => {
-        const response = await rpcClient.runtime.session({ ...identity, ...(conversationId ? { conversationId } : {}), command });
-        if (response.status === 'error') throw response.error;
-        return response.value;
-      }}
+      sessionCommand={sessionCommand}
       resolveResourceFile={resolveResourceFile}
       terminals={{
         spaceId, machines: terminalMachines, machineId: terminalChoice?.spaceId === spaceId ? terminalChoice.machineId : null,
@@ -215,6 +223,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       }}
       renderInspector={(onClose, initialView, resourceRequest, openTerminal) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
+    </TakeoverCardsContext.Provider>
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog commit={launchRequest.source.commit} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} onDiscard={() => launch.discard(launch.launch!.launchId)} /> : null}

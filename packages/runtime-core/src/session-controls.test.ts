@@ -91,3 +91,17 @@ test('Stop, Close tab and Focus in Chrome are a person’s: each asks the worksp
     expect(asked).toEqual([{ action: 'stop', groupId }, { action: 'closeTab', groupId, targetId: 'tab' }, { action: 'focusTab', groupId, targetId: 'tab' }]);
   } finally { await harness.close(context); }
 });
+
+test('Take over and Resume agent are a person’s: Take over names the device that asked, so only its input reaches the tab', async () => {
+  const groupId = '00000000-0000-4000-8000-00000000000b';
+  const asked: RuntimeBrowserManagement[] = [];
+  const { harness, root, controls } = await open(async (_conversationId, _machineId, command) => { asked.push(command); return null; });
+  try {
+    const id = String(root.id);
+    await expect(controls.execute(id, { type: 'browserTakeOver', groupId, targetId: 'tab' }, false, 'phone')).rejects.toThrow('Browser management requires human capability');
+    expect(asked).toEqual([]);
+    await controls.execute(id, { type: 'browserTakeOver', groupId, targetId: 'tab' }, true, 'phone');
+    await controls.execute(id, { type: 'browserResume', groupId, targetId: 'tab' }, true, 'laptop');
+    expect(asked).toEqual([{ action: 'takeOver', groupId, targetId: 'tab', device: 'phone' }, { action: 'resume', groupId, targetId: 'tab' }]);
+  } finally { await harness.close(context); }
+});

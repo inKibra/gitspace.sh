@@ -62,9 +62,11 @@ export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCa
  * `pageComments`: the workspace's page comments, newest first. Your Chrome's workspace group from the Browser tab:
  * `stop` (`groupId`) ends its scripts and its single step, as Stop in Chrome does; `closeTab` (`groupId`, `targetId`)
  * closes a tab of the group (on the cloud browser, one of its tabs); `focusTab` (`groupId`, `targetId`) brings a tab of
- * the group to the front of its window. */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'pageComments', 'stop', 'closeTab', 'focusTab']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
-  shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(1440).optional() });
+ * the group to the front of its window. Take over (docs/APERTURE-DESIGN.md §7.2), on your Chrome's group or the cloud
+ * browser's (`groupId` names the browser, as for `closeTab`): `takeOver` (`groupId`, `targetId`, `device`: the signed-in
+ * device taking it) makes you the tab's holder, so none of the agent's commands reach it; `resume` hands it back. */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'pageComments', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
+  shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(1440).optional(), device: z.string().min(1).max(256).nullable().optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
   accountId: id, projectId: id, workspaceId: id,
@@ -133,7 +135,9 @@ export type RuntimeAccountBrowserPairingCode = z.infer<typeof RuntimeAccountBrow
  * Protocol 6 adds share links: `shareTab`/`shareWatch`/`shareUnwatch`/`shareHit`/`shareAnchor`/`adoptTab`,
  * `sharePointers`/`shares`/`shareEnded` notifications, `shareFrame` and share `page`/`closed` messages, and signed
  * `/api/browser-relay/shares` requests. Within protocol 6, an extension from 5.9 says `siteLevels` in its hello: it
- * enforces a grant's `read` sites (`RuntimeAccountBrowserGrantSchema`).
+ * enforces a grant's `read` sites (`RuntimeAccountBrowserGrantSchema`). Within protocol 6, an extension from 5.10 says
+ * `takeover` in its hello: it takes `takeOver`/`resume`, reports `held`, and refuses the agent's commands on a tab you
+ * hold.
  */
 export const BROWSER_EXTENSION_PROTOCOL = 6;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
@@ -181,7 +185,9 @@ export const RuntimeProjectBrowserPreferencesSchema = z.strictObject({ defaultPa
   if (value.defaultPairingId && !value.approvals.some(item => item.pairingId === value.defaultPairingId)) ctx.addIssue({ code: 'custom', message: 'Default Chrome must be approved for this project', path: ['defaultPairingId'] });
 });
 export type RuntimeProjectBrowserPreferences = z.infer<typeof RuntimeProjectBrowserPreferencesSchema>;
-export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean() })).max(32) });
+/** A project's Chromes. `takeover`: the Chrome is online with an extension whose hello said it can be taken over
+ * (`takeover`, from 5.10). */
+export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean(), takeover: z.boolean().default(false) })).max(32) });
 export type RuntimeProjectBrowserSettings = z.infer<typeof RuntimeProjectBrowserSettingsSchema>;
 export const RuntimeBrowserArtifactSchema = z.strictObject({ id, url: z.string().max(8192), mediaType: z.string().max(128), bytes: z.number().int().nonnegative(), expiresAt: z.iso.datetime() });
 export const RuntimeBrowserArtifactPageSchema = z.strictObject({ artifact: RuntimeBrowserArtifactSchema, offset: z.number().int().nonnegative(), data: z.string().max(90000), nextOffset: z.number().int().nonnegative().nullable() });
@@ -202,28 +208,39 @@ export const RuntimeBrowserTabOriginSchema = z.enum(['agent', 'page', 'you']);
 /** A tab in a workspace's Chrome group as the extension reports it. `site` is the host a tab you dragged in showed
  * at that moment: dragging it in consents to that site for that tab. */
 export const RuntimeBrowserGroupTabSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema, site: z.string().max(253).nullable() });
+/** Who holds one tab (docs/APERTURE-DESIGN.md §7.2): the agent, or you. While you hold it none of the agent's commands
+ * reach it. `by`: where you took it (`chrome`: its in-page toolbar, or your first click or key on a tab the agent was
+ * using; `gitspace`: the Watch dialog or the agent's ask_takeover card); `device`: the signed-in device that took it from
+ * GitSpace, the only one whose input reaches the tab (null when taken in Chrome). Reports and documents list only tabs
+ * you hold; every other tab is the agent's. */
+export const RuntimeBrowserHolderSchema = z.strictObject({ targetId: id, holder: z.enum(['agent', 'you']), since: z.iso.datetime(), by: z.enum(['chrome', 'gitspace']), device: z.string().max(256).nullable() });
+export type RuntimeBrowserHolder = z.infer<typeof RuntimeBrowserHolderSchema>;
 /** Chrome's tab-group colours, by the names Chrome gives them (`chrome.tabGroups.Color`). */
 export const RuntimeBrowserGroupColorSchema = z.enum(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
 export type RuntimeBrowserGroupColor = z.infer<typeof RuntimeBrowserGroupColorSchema>;
 /** One agent acting on a workspace group now, as the extension reports it: a script (`tool` `run`) or a single step
  * (`tool` its action) whose signed authority lasts; who acts (`main`: only the main agent uses your Chrome); the
- * commands it sent so far; when it began; and what it is doing in a few words (`browser-extension/src/activity.ts`,
- * never what is typed). */
-export const RuntimeBrowserGroupAgentSchema = z.strictObject({ agent: z.enum(['main', 'subagent']), tool: RuntimeBrowserPreparationSchema.shape.action, commands: z.number().int().nonnegative(), startedAt: z.iso.datetime(), doing: z.string().max(120).nullable() });
+ * commands it sent so far; when it began; what it is doing in a few words (`browser-extension/src/activity.ts`,
+ * never what is typed); and the tab of its latest command (`targetId`: from 5.10, to a relay whose `ready` said
+ * `takeover`; null before its first). */
+export const RuntimeBrowserGroupAgentSchema = z.strictObject({ agent: z.enum(['main', 'subagent']), tool: RuntimeBrowserPreparationSchema.shape.action, commands: z.number().int().nonnegative(), startedAt: z.iso.datetime(), doing: z.string().max(120).nullable(), targetId: id.nullable().optional() });
 export type RuntimeBrowserGroupAgent = z.infer<typeof RuntimeBrowserGroupAgentSchema>;
 /** The extension's report of one workspace group's tabs, sent whenever membership, a URL or a title changes, and
  * while agents act there at most every few seconds. `color` and `agents` come from extensions from 5.8, and only to a
- * relay whose `ready` said it takes them (`groupActivity`). */
+ * relay whose `ready` said it takes them (`groupActivity`); `held` from extensions from 5.10, at once whenever a tab's
+ * holder changes, and only to a relay whose `ready` said `takeover`. */
 export const RuntimeBrowserGroupReportSchema = z.strictObject({ groupId: z.string().uuid(), tabs: z.array(RuntimeBrowserGroupTabSchema).max(200),
   /** Scripts running on the group. */
   running: z.number().int().nonnegative(),
   /** The group's colour in Chrome's tab strip. */
   color: RuntimeBrowserGroupColorSchema.optional(),
-  agents: z.array(RuntimeBrowserGroupAgentSchema).max(32).optional() });
+  agents: z.array(RuntimeBrowserGroupAgentSchema).max(32).optional(),
+  /** The group's tabs you hold. */
+  held: z.array(RuntimeBrowserHolderSchema).max(200).optional() });
 export type RuntimeBrowserGroupReport = z.infer<typeof RuntimeBrowserGroupReportSchema>;
 /** The `gitspace.browsers` workspace document (docs/APERTURE-DESIGN.md §4.2): each Chrome group with the tabs the
  * workspace may use (`usable`: on the grant's origins or the site you consented to). `color` is null and `agents`
- * empty from an extension that does not report them. */
+ * empty from an extension that does not report them; `held` lists the tabs you hold. */
 export const RuntimeBrowsersDocumentSchema = z.strictObject({
   chrome: z.array(z.strictObject({
     pairingId: z.string().uuid(), browser: z.string().max(128), groupId: z.string().uuid(), groupName: id,
@@ -233,12 +250,15 @@ export const RuntimeBrowsersDocumentSchema = z.strictObject({
     running: z.number().int().nonnegative().default(0),
     color: RuntimeBrowserGroupColorSchema.nullable().default(null),
     agents: z.array(RuntimeBrowserGroupAgentSchema).max(32).default([]),
+    /** LEGACY: rows stored before take over have none; remove the default once they have been rewritten. */
+    held: z.array(RuntimeBrowserHolderSchema).max(200).default([]),
   })).max(32),
 });
 export type RuntimeBrowsersDocument = z.infer<typeof RuntimeBrowsersDocumentSchema>;
 export type RuntimeBrowsersDocumentGroup = RuntimeBrowsersDocument['chrome'][number];
-/** A tab as the Inspector's Browser tab shows it. `addedBy` is null on the cloud browser, where only agents open tabs. */
-export const RuntimeBrowserTabViewSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema.nullable(), usable: z.boolean() });
+/** A tab as the Inspector's Browser tab shows it. `addedBy` is null on the cloud browser, where only agents open tabs.
+ * `holder`: `you` while you hold it (its group's `held` says since when and from where), else `agent`. */
+export const RuntimeBrowserTabViewSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema.nullable(), usable: z.boolean(), holder: RuntimeBrowserHolderSchema.shape.holder.default('agent') });
 /** One browser call of the workspace in its recent runs: when it began, where it ran (a Chrome by name, null when
  * it was refused before one was chosen; the cloud browser; or a machine's headless browser), the call, a short summary
  * of what it did (an action, an element's name, a host and path: never what was typed, a value, a query or a script's
@@ -262,13 +282,15 @@ export const BROWSER_RUNS_DAYS = 7;
  * machines' headless browsers, every Chrome confirmed on the account with whether this project approved it, and the
  * workspace's recent runs. `groupId` is the workspace's group on that browser, null until one exists; on a Chrome,
  * `groupColor` is its colour in Chrome's tab strip (null until its extension reports it) and `agents` who acts there
- * now (empty while it is offline). */
+ * now (empty while it is offline). `held`: the tabs you hold (§7.2); `takeover`: the Chrome's extension can be taken over
+ * from GitSpace (from 5.10; offer "Update the extension" instead where it cannot). The cloud browser always can. */
 export const RuntimeBrowserOverviewSchema = z.strictObject({
   sites: z.strictObject({ origins: z.array(z.strictObject({ pattern: BrowserOriginPatternSchema, level: BrowserSiteLevelSchema })), revision: z.string().max(64).nullable() }),
-  cloud: z.strictObject({ groupId: z.string().uuid().nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200) }),
+  cloud: z.strictObject({ groupId: z.string().uuid().nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200), held: z.array(RuntimeBrowserHolderSchema).max(200).default([]) }),
   chromes: z.array(z.strictObject({
     pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema, note: z.string().max(2048), connected: z.boolean(), approved: z.boolean(), isDefault: z.boolean(),
     groupId: z.string().uuid().nullable(), groupName: id.nullable(), groupColor: RuntimeBrowserGroupColorSchema.nullable(), running: z.number().int().nonnegative(), agents: z.array(RuntimeBrowserGroupAgentSchema).max(32), tabs: z.array(RuntimeBrowserTabViewSchema).max(200),
+    held: z.array(RuntimeBrowserHolderSchema).max(200).default([]), takeover: z.boolean().default(false),
   })).max(32),
   /** Headless browsers on the workspace's attached machines (agents' headless steps run there when one is ready);
    * `error` when that machine could not answer. */

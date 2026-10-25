@@ -54,8 +54,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   relay = { cloudWorkspaces: 0, pairings: [confirmed(work, 'Work Chrome')] };
   settings = {
-    alpha: { projectId: 'alpha', revision: 3, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false }] },
-    beta: { projectId: 'beta', revision: 5, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false }] },
+    alpha: { projectId: 'alpha', revision: 3, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false, takeover: false }] },
+    beta: { projectId: 'beta', revision: 5, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false, takeover: false }] },
   };
   vi.mocked(accountBrowserStatus).mockImplementation(async () => relay);
   vi.mocked(projectBrowserSettings).mockImplementation(async projectId => settings[projectId]!);
@@ -122,7 +122,7 @@ it('forgets a Chrome from its card only after you confirm', async () => {
 
 it('makes a Chrome approved in a project without a default that project’s default, and keeps an existing default', async () => {
   const other = '00000000-0000-4000-8000-000000000003';
-  settings.beta = { ...settings.beta!, defaultPairingId: other, browsers: [...settings.beta!.browsers, { pairingId: other, name: 'Home Chrome', note: 'personal', generation: 1, connected: false, approved: true }] };
+  settings.beta = { ...settings.beta!, defaultPairingId: other, browsers: [...settings.beta!.browsers, { pairingId: other, name: 'Home Chrome', note: 'personal', generation: 1, connected: false, approved: true, takeover: false }] };
   await render();
   await act(() => button('Approve for projects').click());
   await act(async () => byLabel('Approved in Alpha').click());
@@ -155,7 +155,7 @@ it('pairs a Chrome in one stepper: a short code with its countdown, the fingerpr
   });
   vi.mocked(confirmAccountBrowser).mockImplementation(async () => {
     relay = { cloudWorkspaces: 0, pairings: [confirmed(work, 'Work Chrome'), confirmed(fresh, 'Chrome 00000000')] };
-    for (const value of Object.values(settings)) value.browsers.push({ pairingId: fresh, name: 'Chrome 00000000', note: '', generation: 1, connected: true, approved: false });
+    for (const value of Object.values(settings)) value.browsers.push({ pairingId: fresh, name: 'Chrome 00000000', note: '', generation: 1, connected: true, approved: false, takeover: false });
     return relay;
   });
   vi.mocked(updateAccountBrowser).mockImplementation(async () => relay);

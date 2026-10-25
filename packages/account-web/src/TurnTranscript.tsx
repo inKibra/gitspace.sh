@@ -11,7 +11,8 @@ import { TranscriptImage } from './resource-media.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { glyph } from './glyph.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
-import { useState, type ReactNode } from 'react';
+import { useContext, useState, type ReactNode } from 'react';
+import { TakeoverCard, TakeoverCardsContext } from './TakeoverCard.js';
 
 function RichContent({ block }: { block: RichContentBlock }) {
   switch (block.type) {
@@ -283,6 +284,14 @@ export function userMessageMarkdown(text: string): string {
     });
 }
 
+/** An ask_takeover call shows as its card while the workspace has the card's question; otherwise (a refusal, another
+ * surface) as the tool call it is. */
+function AskTakeoverCall({ block, state, onStateChange }: { block: ToolCallBlock } & ItemInteractionProps) {
+  const cards = useContext(TakeoverCardsContext);
+  const question = cards?.questions.find(item => item.kind === 'takeover' && item.takeover?.callId === block.toolCallId);
+  return cards && question?.takeover ? <TakeoverCard question={question} card={question.takeover} cards={cards} /> : <ToolCall block={block} state={state} onStateChange={onStateChange} />;
+}
+
 export function TranscriptItemView({ item, active, onAnswer, state, onStateChange, renderExecutionHistory }: { item: TranscriptItem; active: boolean; onAnswer?: TurnTranscriptProps['onAnswer']; renderExecutionHistory?: ExecutionHistoryRenderer } & ItemInteractionProps) {
   switch (item.type) {
     case 'message': {
@@ -300,7 +309,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
     case 'tool-call':
-      return <ToolCall block={item} state={state} onStateChange={onStateChange} />;
+      return item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} /> : <ToolCall block={item} state={state} onStateChange={onStateChange} />;
     case 'execution':
       return <Execution block={item} state={state} onStateChange={onStateChange} renderHistory={renderExecutionHistory} />;
     case 'ask':

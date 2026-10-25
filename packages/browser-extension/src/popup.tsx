@@ -23,7 +23,8 @@ import { SHARE_EXPIRIES_MINUTES } from './share.js';
 type Connection = 'connected' | 'connecting' | 'off' | 'update' | 'unpaired';
 /** What an agent is doing on a group now: who (`main`) and, in a few words, what. */
 type Acting = { agent: string; doing: string };
-type Group = { groupId: string; name: string; color: string; project: string | null; tabs: number; acting: Acting | null };
+/** A workspace group using this Chrome; `held`: you hold one of its tabs (take over), whatever its agent does. */
+type Group = { groupId: string; name: string; color: string; project: string | null; tabs: number; acting: Acting | null; held: boolean };
 type Recording = { captureId: string; title: string; track: 'video' | 'frames'; startedAt: number; saving: boolean };
 /** What the service worker's `popupState` answers. `chrome` (this Chrome's name), `pairedAt` (when you paired it) and
  * `projects` (those that approved it) are null until the account said; `pairedAt` stays null for a Chrome paired before
@@ -114,7 +115,7 @@ function GroupRow({ group, act }: { group: Group; act: Act }) {
     <span className="size-2.5 shrink-0 rounded-full" style={{ background: group.color }} />
     <div className="min-w-0 flex-1">
       <p className="truncate text-caption font-medium">{group.name}{group.project ? <> <span className="font-normal text-muted-foreground">· {group.project}</span></> : null}</p>
-      <p className={`truncate text-[11px] ${acting ? 'text-foreground' : 'text-muted-foreground'}`}>{acting ? `▶ ${acting.agent} · ${acting.doing.charAt(0).toLowerCase()}${acting.doing.slice(1)}` : `idle · ${group.tabs} ${group.tabs === 1 ? 'tab' : 'tabs'}`}</p>
+      <p className={`truncate text-[11px] ${acting || group.held ? 'text-foreground' : 'text-muted-foreground'}`}>{group.held ? "You're in control" : acting ? `▶ ${acting.agent} · ${acting.doing.charAt(0).toLowerCase()}${acting.doing.slice(1)}` : `idle · ${group.tabs} ${group.tabs === 1 ? 'tab' : 'tabs'}`}</p>
     </div>
     {acting ? <Button variant="secondary" size="compact" onClick={() => { void act({ stopGroup: group.groupId }, 'Stopped.'); }}>Stop</Button>
       : <Button variant="ghost" size="compact" onClick={() => { void act({ focusGroup: group.groupId }, ''); }}>Show</Button>}

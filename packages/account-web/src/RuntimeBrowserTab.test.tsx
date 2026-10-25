@@ -3,7 +3,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
-import { RuntimeSnapshotSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserGroupAgent, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserRun, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import type { z } from 'zod';
+import { RuntimeBrowserOverviewSchema, RuntimeSnapshotSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserGroupAgent, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserRun, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { liveNotices } from './live-notices.js';
@@ -13,6 +14,8 @@ import { BROWSER_REFRESH_MS, browserActivity, RuntimeBrowserTab, useWorkspaceBro
 const rpc = vi.hoisted(() => ({ session: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: rpc } }));
 vi.mock('./browser-relay-client.js', () => ({ projectBrowserSettings: vi.fn(), updateProjectBrowserSettings: vi.fn() }));
+// The live Watch dialog signs its socket with this browser's device; these tests have none, so it never connects.
+vi.mock('./device-session.js', () => ({ currentDevice: vi.fn(async () => null), deviceRejected: vi.fn() }));
 
 const work = '00000000-0000-4000-8000-000000000001';
 const group = '00000000-0000-4000-8000-0000000000aa';
@@ -25,7 +28,8 @@ const empty = { groupId: null, groupName: null, groupColor: null, running: 0, ag
 const started = '2026-10-24T12:00:00.000Z';
 /** The main agent's script on a Chrome, begun 12 s before `started`. */
 const acting: RuntimeBrowserGroupAgent = { agent: 'main', tool: 'run', commands: 4, startedAt: '2026-10-24T11:59:48.000Z', doing: 'Clicking “Medium”' };
-let overview: RuntimeBrowserOverview;
+/** The overview as the workspace answers it, before defaults. */
+let overview: z.input<typeof RuntimeBrowserOverviewSchema>;
 let previews: Record<string, RuntimeBrowserPreview>;
 let captures: RuntimeBrowserCaptureView[];
 let shares: RuntimeBrowserShare[];
@@ -62,7 +66,7 @@ function share(id: number, fields: Partial<RuntimeBrowserShare> = {}): RuntimeBr
 function comment(id: number, text: string, guest: boolean, cropUrl: string | null): RuntimeBrowserPageCommentView {
   return { cropUrl, comment: { version: 1, commentId: `00000000-0000-4000-8000-0000000000f${id}`, shareId: null, by: { name: guest ? 'Ana' : 'Brad', guest }, text, page: { url: 'https://app.example.com/login', title: 'Login' }, target: { box: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, role: 'button', name: 'Sign in', text: 'Sign in', selectors: ['#sign-in'] }, region: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, viewport: { width: 1280, height: 720 }, scroll: { x: 0, y: 0 }, crop: null, createdAt: started } };
 }
-const chromeWithTab = (): RuntimeBrowserOverview['chromes'] => [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', groupColor: null, running: 0, agents: [], tabs: [{ targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'you', usable: true }] }];
+const chromeWithTab = (): z.input<typeof RuntimeBrowserOverviewSchema>['chromes'] => [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', groupColor: null, running: 0, agents: [], tabs: [{ targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'you', usable: true }] }];
 function run(id: number, fields: Partial<RuntimeBrowserRun> = {}): RuntimeBrowserRun {
   return { attemptId: `attempt-${id}`, at: started, where: { kind: 'cloud' }, tool: 'run', summary: `Run ${id}`, outcome: 'ok', durationMs: 1200, details: [], ...fields };
 }
@@ -125,7 +129,7 @@ it('shows each approved site as host · level', async () => {
 });
 
 it('offers to approve a confirmed Chrome when none is approved here, making it the default', async () => {
-  const settings: RuntimeProjectBrowserSettings = { projectId: 'project', revision: 4, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: 'staging admin', generation: 1, connected: true, approved: false }] };
+  const settings: RuntimeProjectBrowserSettings = { projectId: 'project', revision: 4, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: 'staging admin', generation: 1, connected: true, approved: false, takeover: false }] };
   vi.mocked(projectBrowserSettings).mockResolvedValue(settings);
   vi.mocked(updateProjectBrowserSettings).mockImplementation(async () => { overview = { ...overview, chromes: overview.chromes.map(chrome => ({ ...chrome, approved: true, isDefault: true })) }; return settings; });
   await render();
@@ -170,19 +174,31 @@ it('shows each tab with who opened it and its preview, or why there is none, and
   expect(container.textContent).not.toContain('No browser groups');
 });
 
-it('opens a tab in the Watch dialog from its preview, reading its preview every few seconds and showing how old it is', async () => {
+it('marks the tab an agent acts on as Agent acting and a tab you hold as You’re in control', async () => {
+  overview = { ...overview, chromes: [{ ...chromeWithTab()[0]!, agents: [{ ...acting, targetId: 'tab-b' }], tabs: [
+    { targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'agent', usable: true, holder: 'you' },
+    { targetId: 'tab-b', url: 'https://app.example.com/settings', title: 'Settings', addedBy: 'agent', usable: true },
+    { targetId: 'tab-c', url: 'https://app.example.com/help', title: 'Help', addedBy: 'you', usable: true },
+  ] }] };
+  await render();
+  expect(labelled('Preview of Login').textContent).toContain('You’re in control');
+  expect(labelled('Preview of Settings').textContent).toContain('Agent acting');
+  expect(labelled('Preview of Help').textContent).not.toMatch(/Agent acting|in control/u);
+});
+
+it('opens a machine’s headless tab in the Watch dialog from its preview, reading its preview every few seconds and showing how old it is', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(started));
-  overview = { ...overview, chromes: chromeWithTab() };
-  previews = { 'tab-a': { targetId: 'tab-a', capturedAt: new Date(Date.parse(started) - 3000).toISOString(), image: { mediaType: 'image/jpeg', data: 'aW1hZ2U=' }, reason: null } };
-  await render();
+  overview = { ...overview, machines: [{ machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/login', title: 'Login', addedBy: null, usable: true }], error: null }] };
+  previews = { 'tab-m': { targetId: 'tab-m', capturedAt: new Date(Date.parse(started) - 3000).toISOString(), image: { mediaType: 'image/jpeg', data: 'aW1hZ2U=' }, reason: null } };
+  await render([{ id: 'darktop', label: 'Darktop' }]);
   await settle();
   expect(labelled('Tab Login').textContent).toContain('3 s ago');
   const reads = commands('browserPreview').length;
   await act(async () => labelled('Preview of Login').click());
   await settle();
   const dialog = document.body.querySelector('[role="dialog"]')!;
-  expect(dialog.textContent).toContain('Work Chrome · feature-login group');
+  expect(dialog.textContent).toContain('Headless browser on Darktop');
   expect(dialog.querySelector('img[alt="Live view of Login"]')?.getAttribute('src')).toBe('data:image/jpeg;base64,aW1hZ2U=');
   await act(async () => { await vi.advanceTimersByTimeAsync(WATCH_REFRESH_MS); });
   // The dialog reads once when it opens and again after WATCH_REFRESH_MS; the tile waits for its own ten seconds.
@@ -194,8 +210,8 @@ it('opens a tab in the Watch dialog from its preview, reading its preview every 
 
 it('counts the browsers with open tabs, and those running scripts, for the tab label and Environment', () => {
   const tab = { targetId: 'tab-a', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true };
-  expect(browserActivity({ ...overview, chromes: [{ ...chromeWithTab()[0]!, running: 1 }, { ...chromeWithTab()[0]!, pairingId: '00000000-0000-4000-8000-000000000009', approved: false }], cloud: { groupId: group, running: 0, tabs: [tab] }, machines: [{ machineId: 'darktop', groupId: null, tabs: [], error: null }] })).toEqual({ open: 2, running: 1 });
-  expect(browserActivity(overview)).toEqual({ open: 0, running: 0 });
+  expect(browserActivity(RuntimeBrowserOverviewSchema.parse({ ...overview, chromes: [{ ...chromeWithTab()[0]!, running: 1 }, { ...chromeWithTab()[0]!, pairingId: '00000000-0000-4000-8000-000000000009', approved: false }], cloud: { groupId: group, running: 0, tabs: [tab] }, machines: [{ machineId: 'darktop', groupId: null, tabs: [], error: null }] }))).toEqual({ open: 2, running: 1 });
+  expect(browserActivity(RuntimeBrowserOverviewSchema.parse(overview))).toEqual({ open: 0, running: 0 });
 });
 
 it('rereads the overview and visible previews every ten seconds', async () => {
@@ -308,7 +324,7 @@ it('brings a connected Chrome\'s tab to the front from the Watch dialog, showing
   await act(async () => button('Focus in Chrome').click());
   await settle();
   const dialog = document.body.querySelector('[role="dialog"]');
-  expect(dialog?.querySelector('[role="alert"]')?.textContent).toBe('The tab is no longer in this workspace’s group.');
+  expect([...dialog?.querySelectorAll('[role="alert"]') ?? []].map(alert => alert.textContent)).toContain('The tab is no longer in this workspace’s group.');
 });
 
 it('lists captures newest first with who made them, their browser, size or length and failures, filtered by kind', async () => {

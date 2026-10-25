@@ -5,8 +5,9 @@ import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { RuntimeBrowserPageCommentSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserPageComment, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserHolderSchema, RuntimeBrowserPageCommentSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserHolder, type RuntimeBrowserPageComment, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
 import { BROWSER_GROUP_ROWS, PAGE_COMMENT_ROWS, PAGE_COMMENTS_KEPT, retireWorkspaceBrowsers } from './runtime-browser.js';
+import { holdersChanged } from './browser-takeover.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -543,13 +544,35 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
 
   /** The relay's report of one of this workspace's Chrome groups, kept as a row for `gitspace.browsers`. A running
    * runtime republishes; one asleep reads the row when it next opens. Tabs showing the Browser tab hear of it
-   * (`browsers`): reports come when the group's tabs change and, while agents act there, every few seconds. */
+   * (`browsers`): reports come when the group's tabs change, at once when you take a tab or hand it back, and, while
+   * agents act there, every few seconds. A change of the tabs you hold reaches what waits for them and the agent
+   * (`holdersChanged`). */
   async browserGroupReported(raw: unknown, group: RuntimeBrowsersDocumentGroup): Promise<void> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const current = await this.metadata(identity);
     if (current.lifecycle !== 'active' || await this.ctx.storage.get(`runtime.browser.revoked:${group.groupId}`)) return;
-    await this.ctx.storage.put(`${BROWSER_GROUP_ROWS}${group.groupId}`, RuntimeBrowsersDocumentSchema.shape.chrome.element.parse(group));
+    const key = `${BROWSER_GROUP_ROWS}${group.groupId}`;
+    const prior = RuntimeBrowsersDocumentSchema.shape.chrome.element.safeParse(await this.ctx.storage.get(key));
+    const row = RuntimeBrowsersDocumentSchema.shape.chrome.element.parse(group);
+    await this.ctx.storage.put(key, row);
     (await this.runtime?.catch(() => undefined))?.publish();
+    this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
+    // An agent acts on a tab when its latest command went there; one from before agents named their tab acts on all.
+    const agents = [...(prior.success ? prior.data.agents : []), ...row.agents];
+    const tabs = [...row.tabs, ...(prior.success ? prior.data.tabs : [])];
+    await holdersChanged({ storage: this.ctx.storage, workspaceId: identity.workspaceId, runtime: () => this.getRuntime(identity), browser: { source: 'chrome', pairingId: row.pairingId, groupId: row.groupId, name: `Chrome "${row.browser}"` },
+      before: prior.success ? prior.data.held : [], after: row.held, acting: targetId => agents.some(agent => (agent.targetId ?? targetId) === targetId), page: targetId => tabs.find(tab => tab.targetId === targetId) });
+  }
+
+  /** The workspace's cloud browser closed while you held some of its tabs (`BrowserSessionDO`: idle, its connection
+   * ended, or the session restarted): they are the agent's again, and the agent hears why (`note`) where it heard they
+   * were taken. */
+  async browserCloudReturned(raw: unknown, holders: RuntimeBrowserHolder[], note: string): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const groupId = z.string().uuid().optional().parse(await this.ctx.storage.get('runtime.browser.account.group:cloud'));
+    if (!groupId) return;
+    await holdersChanged({ storage: this.ctx.storage, workspaceId: identity.workspaceId, runtime: () => this.getRuntime(identity), browser: { source: 'cloud', pairingId: null, groupId, name: 'Cloud browser' },
+      before: RuntimeBrowserHolderSchema.array().parse(holders), after: [], acting: () => false, page: () => undefined, note });
     this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
   }
 

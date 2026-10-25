@@ -2,7 +2,7 @@ import type { BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/
 import type { ToolServices } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { READ_SITE_ACTIONS, browserOriginMatches, readSiteRefusal, type BrowserSiteLevel } from '@gitspace/protocol-environment';
-import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserArgumentsSchema, RuntimeBrowserToolArgumentsSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserApprovalCardSchema, RuntimeBrowserGrantSchema, RuntimeBrowserSignedGrantSchema, RuntimeBrowsersDocumentSchema, RuntimeToolDispatchSchema, RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, browserBase64, canonicalBrowserAuthorization, signRuntimeBrowserAuthorization, signRuntimeBrowserGrant, type RuntimeBrowserAuthorizationBody, type RuntimeBrowserHolder, type RuntimeBrowserManagement, type RuntimeBrowsersDocument, type RuntimeBrowsersDocumentGroup, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { RuntimeProjectBrowserSettings, RuntimeBrowserPreview, RuntimeBrowserOverview, RuntimeBrowserGrant, RuntimeBrowserCapture, RuntimeBrowserCaptureView, RuntimeBrowserPageComment, RuntimeBrowserPageCommentView } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareSchema } from '@gitspace/protocol-runtime';
 import type { RuntimeAttachment, RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
@@ -10,14 +10,21 @@ import { isAttachmentReady, type WorkspaceRuntime } from '@gitspace/runtime-work
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 import type { AccountStateDO } from './account-state.js';
 import { createAccountBrowserAuthority } from './runtime-browser-account.js';
+import { waitForHandback, type BrowserTabTarget } from './browser-takeover.js';
+import type { BrowserHoldChange } from './browser-session.js';
 import { CAPTURE_FILES, captureFolder, captureName, captureView, captureViews, readCapture, writeCapture, type CaptureDrive, type CaptureFile } from './browser-capture.js';
 import { browserRunSummary, logBrowserRun, recentBrowserRuns, viewNames, type BrowserRunEnd, type BrowserRunRow } from './browser-runs.js';
 import type { SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
+import type { RuntimeTakeoverTab } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
   prepare: ToolServices['prepareBrowser'];
   execute: ToolServices['invoke'];
   manage: NonNullable<SessionControlServices['browser']>;
+  takeoverTab: ToolServices['takeoverTab'];
+  /** Resolves when you hand a tab of the workspace's groups back (docs/APERTURE-DESIGN.md §7.2), at once when you do
+   * not hold it; rejects when `signal` aborts. Event-driven, within this workspace object. */
+  waitForHandback(target: BrowserTabTarget, signal: AbortSignal): Promise<void>;
 }
 type Input = Parameters<ToolServices['invoke']>[0] & { parentAttemptId?: string };
 const savedPreparation = z.object({ fingerprint: z.string(), card: RuntimeBrowserApprovalCardSchema });
@@ -45,10 +52,11 @@ type BrowserEnvironment = {
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
   /** Each workspace's cloud browser lives in its own object (`BrowserSessionDO`), named `<account>:<project>:<workspace>`. */
-  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }>; preview(targetId: string): Promise<RuntimeBrowserPreview>; closeTab(targetId: string): Promise<void>; captureStart(input: { projectId: string; workspaceId: string; captureId: string; groupId: string; targetId: string }): Promise<RuntimeBrowserCapture>; captureStop(input: { projectId: string; workspaceId: string; captureId: string }): Promise<RuntimeBrowserCapture> } };
+  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number; held: RuntimeBrowserHolder[] }>; preview(targetId: string): Promise<RuntimeBrowserPreview>; closeTab(targetId: string): Promise<void>; captureStart(input: { projectId: string; workspaceId: string; captureId: string; groupId: string; targetId: string }): Promise<RuntimeBrowserCapture>; captureStop(input: { projectId: string; workspaceId: string; captureId: string }): Promise<RuntimeBrowserCapture>;
+    holders(): Promise<RuntimeBrowserHolder[]>; takeOver(input: { projectId: string; workspaceId: string; targetId: string; device: string | null }): Promise<BrowserHoldChange>; resume(input: { projectId: string; workspaceId: string; targetId: string }): Promise<BrowserHoldChange> } };
   RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
-type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
+type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation' | 'browserEvent'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
 export async function runtimeBrowserKey(storage: BrowserStorage) {
   const schema = z.object({ privateKey: z.string(), publicKey: z.string() });
   let stored = await storage.get('runtime.browser.signing-key');
@@ -138,7 +146,13 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const authority = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).certifyBrowserAuthority({ accountId: env.ACCOUNT_ID, ...identity, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', publicKey))), issuedAt, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() });
     return { privateKey, authority, issuedAt };
   }
-  const account = createAccountBrowserAuthority(options, signing);
+  /** Who holds a tab when you do (docs/APERTURE-DESIGN.md §7.2): for the cloud browser's group its session, for one of
+   * your Chromes' groups that Chrome's last report; undefined while the agent does. */
+  async function holder(target: BrowserTabTarget): Promise<RuntimeBrowserHolder | undefined> {
+    if (target.groupId === await liveGroup('cloud')) return env.BROWSER_SESSION ? (await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).holders()).find(item => item.targetId === target.targetId) : undefined;
+    return (await workspaceBrowsersDocument(storage)).chrome.find(group => group.groupId === target.groupId)?.held.find(item => item.targetId === target.targetId);
+  }
+  const account = createAccountBrowserAuthority(options, signing, holder);
   function accountPlacement(args: RuntimeBrowserArguments) {
     // Scripts run in the workspace's browser session, on the cloud browser or your Chrome: no machine browser runs them.
     return args.source === 'relay' || args.action === 'run' || !args.on && !options.runtime().attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('browser.headless'));
@@ -345,17 +359,19 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   }
   /** The Inspector's Browser tab: approved sites (and the commit they were read at), the cloud browser's tabs, each
    * attached machine's headless browser, every Chrome confirmed on the account with this workspace's group there (its
-   * colour, and who acts there while it is online), and the workspace's recent runs. Only the main conversation sees
-   * the user's Chromes and their names. Nothing here opens a browser; a machine that cannot answer shows why. */
+   * colour, and who acts there while it is online), and the workspace's recent runs. Every tab says who holds it, the
+   * agent or you (§7.2), and each Chrome whether its extension can be taken over from here. Only the main conversation
+   * sees the user's Chromes and their names. Nothing here opens a browser; a machine that cannot answer shows why. */
   async function overview(conversationId: string): Promise<RuntimeBrowserOverview> {
     const conversation = await options.runtime().browserConversation(conversationId);
     const approved = await options.approvedSites();
     const cloudGroup = await liveGroup('cloud');
-    const cloud = cloudGroup && env.BROWSER_SESSION ? await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).overview() : { tabs: [], running: 0 };
+    const cloud = cloudGroup && env.BROWSER_SESSION ? await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).overview() : { tabs: [], running: 0, held: [] };
     const machines = await Promise.all((await headlessMachines()).slice(0, 16).map(async (placement): Promise<RuntimeBrowserOverview['machines'][number]> => {
       try {
         const answer = machineOverview.parse(await control(conversationId, placement, { action: 'overview' }));
-        return { machineId: placement.machineId, groupId: answer.groupId, tabs: answer.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })), error: null };
+        // No one takes over a machine's headless browser: its tabs are always the agent's.
+        return { machineId: placement.machineId, groupId: answer.groupId, tabs: answer.tabs.map((tab): RuntimeBrowserOverview['machines'][number]['tabs'][number] => ({ ...tab, addedBy: null, usable: true, holder: 'agent' })), error: null };
       } catch (error) {
         return { machineId: placement.machineId, groupId: null, tabs: [], error: (error instanceof Error ? error.message : String(error)).slice(0, 1024) };
       }
@@ -369,15 +385,17 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
         const row = document.chrome.find(group => group.pairingId === browser.pairingId);
         const groupId = row?.groupId ?? await liveGroup(browser.pairingId);
         const grant = !row && groupId ? await storage.get(`runtime.browser.account.grant:${groupId}`) : undefined;
+        const held = row?.held ?? [];
         chromes.push({ pairingId: browser.pairingId, name: browser.name, note: browser.note, connected: browser.connected, approved: browser.approved, isDefault: browser.pairingId === settings.defaultPairingId,
           groupId, groupName: row?.groupName ?? (grant ? RuntimeAccountBrowserSignedGrantSchema.parse(grant).body.groupName : null), groupColor: row?.color ?? null, running: row?.running ?? 0,
           // An offline Chrome's last report may still list agents its extension no longer runs.
           agents: browser.connected ? row?.agents ?? [] : [],
-          tabs: row?.tabs.map(tab => ({ targetId: tab.targetId, url: tab.url, title: tab.title, addedBy: tab.addedBy, usable: tab.usable })) ?? [] });
+          tabs: row?.tabs.map(tab => ({ targetId: tab.targetId, url: tab.url, title: tab.title, addedBy: tab.addedBy, usable: tab.usable, holder: held.some(item => item.targetId === tab.targetId) ? 'you' : 'agent' })) ?? [],
+          held, takeover: browser.takeover });
       }
     }
     const runs = (await recentBrowserRuns(storage)).map(({ where, ...run }) => ({ ...run, where: where.kind === 'chrome' ? { kind: where.kind, name: settings?.browsers.find(browser => browser.pairingId === where.pairingId)?.name ?? null } : where }));
-    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: approved.sites.toSorted((a, b) => a.pattern < b.pattern ? -1 : a.pattern > b.pattern ? 1 : 0), revision: approved.revision }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, machines, chromes, runs });
+    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: approved.sites.toSorted((a, b) => a.pattern < b.pattern ? -1 : a.pattern > b.pattern ? 1 : 0), revision: approved.revision }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true, holder: cloud.held.some(item => item.targetId === tab.targetId) ? 'you' : 'agent' })), held: cloud.held }, machines, chromes, runs });
   }
   /** One tab's preview on a machine's headless browser, captured there. A machine that is gone or cannot answer gets
    * no image and the reason, so the tile says why. */
@@ -466,8 +484,8 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if (command.action === 'captures') return captureViews(options.drive());
     if (command.action === 'captureStart' || command.action === 'captureStop') return capture(conversationId, command);
     if (command.action === 'pageComments') return pageComments();
-    if (command.action === 'stop' || command.action === 'closeTab' || command.action === 'focusTab') {
-      if (!command.groupId) throw new Error('Stop, Close tab and Focus in Chrome name the group');
+    if (command.action === 'stop' || command.action === 'closeTab' || command.action === 'focusTab' || command.action === 'takeOver' || command.action === 'resume') {
+      if (!command.groupId) throw new Error('Stop, Close tab, Focus in Chrome, Take over and Resume agent name the group');
       await account.control(conversationId, { ...command, groupId: command.groupId });
       return null;
     }
@@ -511,5 +529,33 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const statuses = results.map(value => RuntimeBrowserStatusSchema.parse(value));
     return RuntimeBrowserStatusSchema.parse({ groups: statuses.flatMap(item => item.groups).slice(0, 200), records: statuses.flatMap(item => item.records).slice(0, 200) });
   }
-  return { prepare, execute, manage };
+  /** ask_takeover's tab (docs/APERTURE-DESIGN.md §7.2): a tab of the workspace's group on your Chrome or on the cloud
+   * browser, as its card names it, and who holds it now. A machine's headless browser cannot be taken over: no one
+   * steps in there, and agents drive it with Playwright. A Chrome must be online with an extension that can hand a tab
+   * over (5.10 and later). */
+  async function takeoverTab(input: Parameters<ToolServices['takeoverTab']>[0]): Promise<RuntimeTakeoverTab> {
+    const { args } = input;
+    if (!(await options.runtime().browserConversation(input.conversationId)).root) throw new Error('Only the main agent asks the user to take over a tab.');
+    if (args.source === 'headless') {
+      const groupId = await liveGroup('cloud');
+      const cloud = groupId && env.BROWSER_SESSION ? await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).overview() : null;
+      const tab = cloud?.tabs.find(item => item.targetId === args.targetId);
+      if (!groupId || !cloud || !tab) throw new Error((await headlessMachines()).length ? `The cloud browser has no tab ${args.targetId}. Tabs of a machine's headless browser cannot be taken over: open the page on the cloud browser (web_browser run, or source "relay" on the user's Chrome) and ask for that tab.` : `The cloud browser has no tab ${args.targetId}: web_browser tabs lists its tabs.`);
+      return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId, targetId: tab.targetId, url: tab.url, title: tab.title, holder: cloud.held.some(item => item.targetId === tab.targetId) ? 'you' : 'agent' };
+    }
+    if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
+    const settings = await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId);
+    const approved = settings.browsers.filter(browser => browser.approved);
+    // The Chrome the browser tool would use: the one named, else the project's default, else its only approved one.
+    const browser = args.pairingId ? settings.browsers.find(item => item.pairingId === args.pairingId) : settings.browsers.find(item => item.pairingId === settings.defaultPairingId) ?? (approved.length === 1 ? approved[0] : undefined);
+    if (!browser) throw new Error(args.pairingId ? 'No Chrome with that pairingId is paired with this account: web_browser chromes lists them.' : 'This project has no default Chrome: pass the pairingId of the Chrome with the tab (web_browser chromes lists them).');
+    if (!browser.approved) throw new Error(`Chrome "${browser.name}" is not approved for this project.`);
+    if (!browser.connected) throw new Error(`Chrome "${browser.name}" is offline: the user can take over its tabs only while it is online.`);
+    if (!browser.takeover) throw new Error(`The GitSpace extension on Chrome "${browser.name}" cannot hand a tab to the user: ask the user to update the extension (5.10 or later), then ask again.`);
+    const row = (await workspaceBrowsersDocument(storage)).chrome.find(group => group.pairingId === browser.pairingId);
+    const tab = row?.tabs.find(item => item.targetId === args.targetId);
+    if (!row || !tab) throw new Error(`The workspace's group on Chrome "${browser.name}" has no tab ${args.targetId}: web_browser tabs lists its tabs.`);
+    return { source: 'chrome', pairingId: browser.pairingId, browser: browser.name, groupId: row.groupId, targetId: tab.targetId, url: tab.url, title: tab.title, holder: row.held.some(item => item.targetId === tab.targetId) ? 'you' : 'agent' };
+  }
+  return { prepare, execute, manage, takeoverTab, waitForHandback: (target, signal) => waitForHandback(identity.workspaceId, target, async () => await holder(target) !== undefined, signal) };
 }

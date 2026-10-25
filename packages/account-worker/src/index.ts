@@ -50,6 +50,8 @@ import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceS
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { BROWSER_UPLOAD_PATH, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
 import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './browser-share.js';
+import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, serveBrowserWatch } from './browser-watch.js';
+import { BROWSER_WATCH_PATH } from '@gitspace/protocol-runtime';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
@@ -326,7 +328,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
     return view.serviceDeviceAuthority(deviceId, Date.now());
   });
-  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity), browserShareAccount(this.env), () => this.scheduleAlarm());
+  private readonly browserRelay = new AccountBrowserRelay(this.ctx, this.env, identity => workspaceDrive(this.env, identity), browserShareAccount(this.env), () => this.scheduleAlarm(), deviceId => browserWatchDeviceActive(this.env, deviceId));
   async serviceApprove(input: { hostname: string; deviceId: string; state: string; returnTo: string }) {
     const ticket = await this.serviceSessions.approve(input);
     await this.scheduleAlarm();
@@ -603,6 +605,8 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (url.pathname === '/api/browser-relay/extension') return this.browserRelay.fetch(request);
     // A share viewer's socket; it says hello with the token its join sealed.
     if (/^\/api\/shares\/[^/]+\/live$/u.test(url.pathname)) return this.browserRelay.shareFetch(request);
+    // The Watch dialog's socket on a Chrome tab, checked by the public route (`serveBrowserWatch`), which alone sends here.
+    if (url.pathname === BROWSER_WATCH_INTERNAL_PATH) return this.browserRelay.watchFetch(request);
     // A script's CDP connection to a Chrome, from the browser session's sandbox binding. The public handler forwards
     // only `/ws`, `/tunnel/`, the extension's socket and share viewers' sockets here, so this path is internal; its
     // token admits a live run alone.
@@ -1179,6 +1183,8 @@ export default {
     if (url.pathname === BROWSER_UPLOAD_PATH) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), link: target => mintUploadLink(env, { kind: 'browser', ...target }) });
     // Share links: public, before device authority (a join signed by one of the account's devices is checked there).
     if (url.pathname === BROWSER_SHARE_PATH || url.pathname.startsWith('/api/shares/')) return serveBrowserShare(request, env);
+    // The Watch dialog's socket: a tab's live frames and, while you hold it from this device, your input.
+    if (url.pathname === BROWSER_WATCH_PATH) return serveBrowserWatch(request, env);
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|chrome|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');
