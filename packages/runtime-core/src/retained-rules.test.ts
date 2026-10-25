@@ -84,7 +84,7 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
     }, () => harness, identity, (_name, args) => args));
     registry.install(defineExtension({ name: 'effects', tools: [effect], tasks: [backgroundAgentTask] }));
     harness = await Harness.open(storage, { registry: ruleGenerationRegistry(registry), models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
-    lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference, configureModel, wake: async () => {} });
+    lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference, configureModel });
     return harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools: [effect] } });
   };
   const root = await open();

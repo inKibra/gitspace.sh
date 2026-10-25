@@ -34,7 +34,8 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const harness = await Harness.open(new MemoryStorage(), { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
   harnesses.push(harness);
   const root = await harness.root(BACKGROUND_CONTEXT);
-  const state: { root: boolean; projectApproved: boolean; defaultMachineId: string | null; origins: string[]; stepsOnly: string[]; status: RuntimeBrowserStatus; unapproved: RuntimeProjectBrowserSettings['browsers']; machineFailure?: string } = { root: true, projectApproved: true, defaultMachineId: null, origins: ['example.com', 'other.test'], stepsOnly: [], status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }), unapproved: [] };
+  /** `revision`: the commit the approved sites were read at; `relayContent`: what the relay answers a step instead of `{ targetId }`. */
+  const state: { root: boolean; projectApproved: boolean; defaultMachineId: string | null; origins: string[]; stepsOnly: string[]; revision: string | null; relayContent: RuntimeToolResult['content'] | null; status: RuntimeBrowserStatus; unapproved: RuntimeProjectBrowserSettings['browsers']; machineFailure?: string } = { root: true, projectApproved: true, defaultMachineId: null, origins: ['example.com', 'other.test'], stepsOnly: [], revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8', relayContent: null, status: RuntimeBrowserStatusSchema.parse({ groups: [], records: [] }), unapproved: [] };
   const dispatches: Array<RuntimeToolDispatch | RuntimeAccountBrowserAuthorization> = [];
   const pairing = { kind: 'account-relay' as const, accountId: 'account', pairingId: crypto.randomUUID(), generation: 1, approvalId: crypto.randomUUID() };
   const forgottenPairings = new Set<string>();
@@ -43,7 +44,10 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   /** The relay's shares as this fixture keeps them, each with the secret of its link, and every share call it got. */
   const shares = new Map<string, { share: RuntimeBrowserShare; secret: string }>();
   const shareCalls: unknown[] = [];
+  /** Stop, Close tab and Focus in Chrome as the relay got them, and the cloud tabs the browser session closed. */
+  const controlCalls: unknown[] = [], closedCloudTabs: string[] = [];
   const relayRuntime = new AccountBrowserRuntime({ storage, relay: { async tabs() { return []; }, async preview() { return { image: null, reason: 'Preview appears while the agent uses this tab' }; }, async capture() { throw new Error('This fixture exercises group discovery, not captures'); }, async open() { throw new Error('This fixture exercises group discovery, not tab opening'); }, async revoke() {},
+    async control(authorization) { controlCalls.push(authorization.body.command); return {}; },
     async shares(projectId, workspaceId) { shareCalls.push({ action: 'shares', projectId, workspaceId }); return [...shares.values()].flatMap(({ share }) => share.workspace?.projectId === projectId && share.workspace.workspaceId === workspaceId ? [share] : []); },
     async shareCreate(input) {
       shareCalls.push({ action: 'shareCreate', ...input });
@@ -78,7 +82,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
       if (placement.kind === 'account-relay' && forgottenPairings.has(placement.pairingId)) throw new Error('Browser fingerprint confirmation required');
       dispatches.push(authorization);
       if (realRelayRuntime) return relayRuntime.execute(authorization, AbortSignal.timeout(5000));
-      return {status:'completed', requestId:authorization.body.scope.requestId,attemptId:authorization.body.scope.attemptId,content:[{type:'text',text:JSON.stringify(authorization.body.command.type === 'manage' ? state.status : {targetId:'target'})}]};
+      return {status:'completed', requestId:authorization.body.scope.requestId,attemptId:authorization.body.scope.attemptId,content:authorization.body.command.type !== 'manage' && state.relayContent ? state.relayContent : [{type:'text',text:JSON.stringify(authorization.body.command.type === 'manage' ? state.status : {targetId:'target'})}]};
     },
   };
   /** How a machine answers management commands, by machine id; a throw is the machine's failure. */
@@ -95,7 +99,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify(command.type === 'manage' ? state.status : { targetId: 'target' }) }] };
   } } };
   const sessions: Array<{ name: string; authorization: RuntimeAccountBrowserAuthorization }> = [];
-  const BROWSER_SESSION = { getByName: (name: string) => ({ async overview() { return { tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example' }], running: 1 }; }, async preview(targetId: string): Promise<RuntimeBrowserPreview> { return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: 'cloud-jpeg' }, reason: null }; }, async execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> {
+  const BROWSER_SESSION = { getByName: (name: string) => ({ async overview() { return { tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example' }], running: 1 }; }, async preview(targetId: string): Promise<RuntimeBrowserPreview> { return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: 'cloud-jpeg' }, reason: null }; }, async closeTab(targetId: string) { closedCloudTabs.push(targetId); }, async execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> {
     sessions.push({ name, authorization });
     const text = authorization.body.command.type === 'manage' ? JSON.stringify(RuntimeBrowserStatusSchema.parse({ groups: [], records: [] })) : '{"ok":true,"value":1}';
     return { status: 'completed', requestId: authorization.body.scope.requestId, attemptId: authorization.body.scope.attemptId, content: [{ type: 'text', text }] };
@@ -115,10 +119,10 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
     if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
-  }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly }), groupName: async () => 'Workspace', drive: () => drive,
+  }, approvedSites: async () => ({ origins: state.origins, stepsOnly: state.stepsOnly, revision: state.revision }), groupName: async () => 'Workspace', drive: () => drive,
   async fromMachine(move) { moved.push(move); await drive.write(move.path, move.mediaType, machineFiles.get(move.machinePath) ?? new Uint8Array()); } });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls };
+  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls, controlCalls, closedCloudTabs };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -327,25 +331,31 @@ test('with no approved site the workspace still gets its Chrome group: an empty 
     await expect(f.authority.prepare({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse(args), requestId: args.action, attemptId: args.action })).rejects.toThrow('No site is approved for this workspace yet');
   }
 });
-test('the Browser tab sees the approved sites, the cloud browser and every confirmed Chrome, approved or not; a subagent sees no Chrome', async () => {
+test('the Browser tab sees the approved sites and their commit, the cloud browser and every confirmed Chrome, approved or not, with its group’s colour and who acts there while it is online; a subagent sees no Chrome', async () => {
   const f = await fixture(); f.attachments.splice(0);
   const relay = await f.authority.prepare({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' }) });
   const cloud = await f.authority.prepare({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless' }), requestId: 'cloud', attemptId: 'cloud' });
   const home = crypto.randomUUID();
   f.state.unapproved = [{ pairingId: home, generation: 1, name: 'Home', note: '', connected: false, approved: false }];
   const at = new Date().toISOString();
-  await f.storage.put(`runtime.browser.chrome:${relay.groupId}`, { pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId: relay.groupId, groupName: 'Workspace', origins: ['example.com'], expiresAt: at, reportedAt: at, running: 2, tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', site: 'news.example', usable: true }] });
-  expect(RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' }))).toEqual({
-    sites: { origins: ['example.com', 'other.test'], stepsOnly: [] },
+  const agent = { agent: 'main', tool: 'run', commands: 4, startedAt: at, doing: 'Clicking “Medium”' };
+  await f.storage.put(`runtime.browser.chrome:${relay.groupId}`, { pairingId: f.pairing.pairingId, browser: 'Work Chrome', groupId: relay.groupId, groupName: 'Workspace', origins: ['example.com'], expiresAt: at, reportedAt: at, running: 2, color: 'blue', agents: [agent], tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', site: 'news.example', usable: true }] });
+  const overview = async () => RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' }));
+  expect(await overview()).toEqual({
+    sites: { origins: ['example.com', 'other.test'], stepsOnly: [], revision: 'dd0a1575c2e9f4b3a8d6e1f0c7b2a9d4e5f6a7b8' },
     cloud: { groupId: cloud.groupId, running: 1, tabs: [{ targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example', addedBy: null, usable: true }] },
     machines: [],
     chromes: [
-      { pairingId: f.pairing.pairingId, name: 'Work Chrome', note: 'Production account', connected: true, approved: true, isDefault: true, groupId: relay.groupId, groupName: 'Workspace', running: 2, tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', usable: true }] },
-      { pairingId: home, name: 'Home', note: '', connected: false, approved: false, isDefault: false, groupId: null, groupName: null, running: 0, tabs: [] },
+      { pairingId: f.pairing.pairingId, name: 'Work Chrome', note: 'Production account', connected: true, approved: true, isDefault: true, groupId: relay.groupId, groupName: 'Workspace', groupColor: 'blue', running: 2, agents: [agent], tabs: [{ targetId: 'dragged', url: 'https://news.example/', title: 'News', addedBy: 'you', usable: true }] },
+      { pairingId: home, name: 'Home', note: '', connected: false, approved: false, isDefault: false, groupId: null, groupName: null, groupColor: null, running: 0, agents: [], tabs: [] },
     ],
+    runs: [],
   });
+  // Offline, the Chrome's last report may list agents its extension no longer runs.
+  f.offlinePairings.add(f.pairing.pairingId);
+  expect((await overview()).chromes[0]).toMatchObject({ connected: false, groupColor: 'blue', agents: [] });
   f.state.root = false;
-  expect(RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' })).chromes).toEqual([]);
+  expect((await overview()).chromes).toEqual([]);
   expect(f.dispatches).toEqual([]);
 });
 test('the Browser tab lists each attached machine’s headless tabs; a machine that cannot answer says why, and an outdated one asks for an update', async () => {
@@ -441,7 +451,10 @@ function nextFrame(socket: WebSocket) { return new Promise<unknown>(resolve => s
 /** Pairs and confirms a Chrome on a real relay object, as its extension and the user would. */
 async function connectChrome(relay: DurableObjectStub<UserRelayDO>) {
   const root = await extensionKeys(), identity = await extensionKeys(), clientNonce = 'b'.repeat(64);
-  const pairing = await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+  // GitSpace starts the pairing; the extension redeems its short code for the pairing's details.
+  const redeemed = await relay.browserRelayRedeemPairingCode((await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey })).code, '198.51.100.1', 'wss://account.test/api/browser-relay/extension');
+  if (!redeemed.ok) throw new Error(redeemed.message);
+  const pairing = redeemed.value;
   const socket = (await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': '192.0.2.1' } }))).webSocket;
   if (!socket) throw new Error('Missing extension socket');
   const challenge = nextFrame(socket); socket.accept();
@@ -460,7 +473,7 @@ test('a relay call through the relay object explains itself when no Chrome is pa
   await expect(f.authority.prepare(f.input)).rejects.toThrow('No Chrome is paired with this account. Ask the user to pair one in Plugins → Browsers.');
   const chrome = await connectChrome(stub), named = `"Chrome ${chrome.pairingId.slice(0, 8)}" (${chrome.pairingId}`;
   await expect(f.authority.prepare({ ...f.input, attemptId: 'unapproved' })).rejects.toThrow(`No Chrome is approved for this project. Paired: ${named}, online). Ask the user to approve one in Plugins → Browsers or in this workspace’s Browser tab.`);
-  await stub.browserRelaySetProjectSettings('project', 0, { defaultPairingId: chrome.pairingId, approvals: [{ pairingId: chrome.pairingId, note: '' }] });
+  await stub.browserRelaySetProjectSettings('project', 0, { defaultPairingId: chrome.pairingId, approvals: [{ pairingId: chrome.pairingId }] });
   chrome.socket.close();
   await expect.poll(async () => (await stub.browserRelayProjectSettings('project')).browsers[0]?.connected).toBe(false);
   await expect(f.authority.prepare({ ...f.input, attemptId: 'offline' })).rejects.toThrow(`${named}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome.`);
@@ -569,3 +582,80 @@ test('comments people make on a share reach the agent and its subagents newest f
     await vi.waitFor(() => expect(notices.mock.calls.some(([batch]) => batch.some(notice => notice.workspace === projectId && notice.resource === 'page-comments'))).toBe(true));
   } finally { vi.restoreAllMocks(); }
 }, 60_000);
+
+test('Recent runs list each browser call where it ran and what it did, never what was typed, a query or a script, with refusals before any Chrome; the newest 50 of the last 7 days', async () => {
+  const f = await fixture(); f.attachments.splice(0);
+  let now = Date.now();
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const call = async (attemptId: string, args: object) => {
+    now += 1000;
+    const input = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse(args), requestId: attemptId, attemptId };
+    await f.authority.prepare(input);
+    return f.authority.execute(input);
+  };
+  const overview = async () => RuntimeBrowserOverviewSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'overview' }));
+  f.state.relayContent = [{ type: 'text', text: '{"total":2}' }, { type: 'text', text: '- textbox "Customer name:" [ref=4:3]\n- button "Submit order" [ref=4:9]' }];
+  await call('observe', { action: 'observe', source: 'relay', targetId: 'target' });
+  f.state.relayContent = null;
+  await call('fill', { action: 'act', source: 'relay', targetId: 'target', ref: '4:3', operation: 'fill', value: 'Ada Lovelace' });
+  await call('goto', { action: 'navigate', source: 'relay', targetId: 'target', url: 'https://example.com/forms/post?token=s3cret#step-2' });
+  await call('script', { action: 'run', source: 'headless', script: 'await page.fill("#password", "hunter2"); return 1;' });
+  await expect(call('bank', { action: 'navigate', source: 'relay', targetId: 'target', url: 'https://bank.example/' })).rejects.toThrow('Browser origin is not approved');
+  f.state.projectApproved = false;
+  await expect(call('unapproved', { action: 'tabs', source: 'relay' })).rejects.toThrow('Chrome is not approved for this project');
+  const runs = (await overview()).runs;
+  const work = { kind: 'chrome', name: 'Work Chrome' }, unnamed = { kind: 'chrome', name: null };
+  expect(runs.map(({ where, tool, summary, outcome }) => ({ where, tool, summary, outcome }))).toEqual([
+    { where: unnamed, tool: 'tabs', summary: 'Refused: Chrome is not approved for this project', outcome: 'refused' },
+    { where: unnamed, tool: 'navigate', summary: 'Refused: Browser origin is not approved', outcome: 'refused' },
+    { where: { kind: 'cloud' }, tool: 'run', summary: 'run', outcome: 'ok' },
+    { where: work, tool: 'navigate', summary: 'goto example.com/forms/post', outcome: 'ok' },
+    { where: work, tool: 'act', summary: 'act fill “Customer name”', outcome: 'ok' },
+    { where: work, tool: 'observe', summary: 'observe → view, 2 refs', outcome: 'ok' },
+  ]);
+  expect(runs[0]?.details).toEqual(['tabs', 'Chrome is not approved for this project']);
+  expect(runs.map(run => run.at)).toEqual([...runs.map(run => run.at)].sort().reverse());
+  for (const secret of ['Ada Lovelace', 's3cret', 'step-2', 'hunter2', '#password']) expect(JSON.stringify(runs)).not.toContain(secret);
+  // The newest 50 stay; a week later none are listed, and the next run lets them go.
+  for (let index = 0; index < 50; index++) await expect(call(`bank-${index}`, { action: 'navigate', source: 'relay', targetId: 'target', url: 'https://bank.example/' })).rejects.toThrow();
+  expect((await overview()).runs.map(run => run.attemptId)).toEqual(Array.from({ length: 50 }, (_, index) => `bank-${49 - index}`));
+  now += 8 * 86_400_000;
+  expect((await overview()).runs).toEqual([]);
+  await expect(call('later', { action: 'navigate', source: 'relay', targetId: 'target', url: 'https://bank.example/' })).rejects.toThrow();
+  expect([...(await f.storage.list({ prefix: 'runtime.browser.run:' })).keys()]).toHaveLength(1);
+});
+
+test('Stop, Close tab and Focus in Chrome go to the extension of the Chrome holding the workspace’s group, checked by the relay; a cloud tab closes in its browser session', async () => {
+  const f = await fixture('physical', true); f.attachments.splice(0);
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
+  const group = await f.authority.prepare(f.input); await f.authority.execute(f.input);
+  const manage = (command: RuntimeBrowserManagement) => f.authority.manage(f.input.conversationId, undefined, command);
+  expect(await manage({ action: 'stop', groupId: group.groupId })).toBeNull();
+  await manage({ action: 'closeTab', groupId: group.groupId, targetId: 'tab-2' });
+  await manage({ action: 'focusTab', groupId: group.groupId, targetId: 'tab-3' });
+  expect(f.controlCalls).toEqual([{ type: 'manage', action: 'stop', groupId: group.groupId }, { type: 'manage', action: 'closeTab', groupId: group.groupId, targetId: 'tab-2' }, { type: 'manage', action: 'focusTab', groupId: group.groupId, targetId: 'tab-3' }]);
+  // The cloud browser's tab closes in its session; it has no window to bring forward and no Stop here.
+  const cloud = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless' }), requestId: 'cloud', attemptId: 'cloud' };
+  const cloudGroup = await f.authority.prepare(cloud); await f.authority.execute(cloud);
+  await manage({ action: 'closeTab', groupId: cloudGroup.groupId, targetId: 'cloud-tab' });
+  expect(f.closedCloudTabs).toEqual(['cloud-tab']);
+  await expect(manage({ action: 'focusTab', groupId: cloudGroup.groupId, targetId: 'cloud-tab' })).rejects.toThrow('Only your Chrome’s group can be stopped or focused from here');
+  // Your Chrome is main-agent-only.
+  f.state.root = false;
+  await expect(manage({ action: 'stop', groupId: group.groupId })).rejects.toThrow('main-agent-only');
+  expect(f.controlCalls).toHaveLength(3);
+});
+
+test('a Chrome group report tells tabs showing the Browser tab to read it again', async () => {
+  const projectId = `browsers-${crypto.randomUUID()}`, identity = { projectId, workspaceId: projectId };
+  const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await project.setProjectLifecycle((await project.bootstrap({ id: projectId, name: 'Browsers', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' })).revision, 'active');
+  const notices = vi.spyOn(UserProjectIndexDO.prototype, 'liveNotices');
+  try {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`), async space => {
+      const at = new Date().toISOString();
+      await space.browserGroupReported(identity, { pairingId: crypto.randomUUID(), browser: 'Work Chrome', groupId: crypto.randomUUID(), groupName: 'Browsers', origins: ['example.com'], expiresAt: at, reportedAt: at, running: 1, color: 'blue', agents: [{ agent: 'main', tool: 'run', commands: 4, startedAt: at, doing: 'Typing' }], tabs: [] });
+    });
+    await vi.waitFor(() => expect(notices.mock.calls.some(([batch]) => batch.some(notice => notice.workspace === projectId && notice.resource === 'browsers'))).toBe(true));
+  } finally { vi.restoreAllMocks(); }
+});

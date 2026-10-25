@@ -1,6 +1,6 @@
 import { defineDoc, defineTask, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context, JsonValue } from '@earendil-works/chord';
-import { awaitWithContext } from '@earendil-works/chord/context';
+import { awaitWithContext, withAbortSignal } from '@earendil-works/chord/context';
 import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
@@ -13,7 +13,8 @@ export type JobServices = OperationalServices & {
 
 type JobRecord = { acceptance: RuntimeJobAcceptance; observation: RuntimeJobObservation; args: JsonValue; fingerprint: string; spawningTask: TaskId; deadlineAt: string; attemptId: string; cancelRequested: boolean; delivered: boolean };
 type JobInput = { key: string; spawningTask: TaskId };
-type JobState = { phase: 'execute'; poll: number };
+/** `failures`: consecutive failed tries of the current retry run, for its backoff; absent before the first. */
+type JobState = { phase: 'execute'; poll: number; failures?: number };
 export const DurableJobsDoc = defineDoc<{ records: Record<string, JobRecord> }>({ kind: 'gitspace.durable-jobs', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ records: {} }) });
 const OlderObservationSchema = z.object({ status: z.string(), receipt: z.object({ result: RuntimeToolResultSchema }).optional(), completedAt: z.iso.datetime().optional() });
 /** A stored observation, upgraded when it predates tool results replacing executor receipts: a finished job carried
@@ -42,8 +43,17 @@ function pruneFinishedJobs(doc: { records: Record<string, JobRecord> }): void {
   finished.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
   for (const { key } of finished.slice(MAX_FINISHED_JOBS)) delete doc.records[key];
 }
+/**
+ * A failed try (a job's reconciliation, dispatch or completion delivery; a process stop) is tried again after this long,
+ * doubling per consecutive failure up to RETRY_MAX_MS. The count is kept in the task's checkpoint, so a reset keeps its
+ * place. After RETRY_ATTEMPTS failures (about 20 minutes) a job stops trying and says so; a stop is tried again only when
+ * a machine reconnects.
+ */
+const RETRY_FIRST_MS = 1_000, RETRY_MAX_MS = 5 * 60_000, RETRY_ATTEMPTS = 12;
+const retryDelay = (failures: number) => Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 export function createJobTask(services: JobServices) {
-  async function drive(key: string, runtime: TaskRuntime<JobInput, JobState, RuntimeJobObservation, {}>, context: Context, aborting: boolean) {
+  async function drive(key: string, runtime: TaskRuntime<JobInput, JobState, RuntimeJobObservation, {}>, context: Context, aborting: boolean, failures: number) {
     for (;;) {
       const document = await runtime.snapshot(DurableJobsDoc, runtime.conversationId, context);
       const record = document?.records[key];
@@ -61,9 +71,13 @@ export function createJobTask(services: JobServices) {
           ?? (admitted && !expired ? await services.execute({ kind: 'Job', args: record.args, requestId: job.requestId, attemptId: record.attemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), deadlineAt: record.deadlineAt, replay: 'unsafe', signal: runtime.signal }) : null);
         observation = result ? { status: 'terminal', job, result, completedAt: now }
           : { status: 'not-started', job, reason: cancel ? 'cancelled' : admitted ? 'deadline' : 'admission-failed', completedAt: now };
+        // A delivery that fails after this starts its own run of failures.
+        failures = 0;
       } catch (error) {
         if (runtime.signal.aborted) throw error;
-        // A failed reconciliation or dispatch is retried; it is never a terminal job result.
+        // A failed reconciliation or dispatch is retried; after the last try the job ends interrupted, its outcome unknown,
+        // and the conversation is told.
+        if (failures + 1 >= RETRY_ATTEMPTS) observation = { status: 'terminal', job, result: { requestId: job.requestId, attemptId: record.attemptId, status: 'interrupted', content: [{ type: 'text', text: `Its outcome could not be read after ${RETRY_ATTEMPTS} tries: ${errorText(error)}` }] }, completedAt: now };
       }
       observation = RuntimeJobObservationSchema.parse(observation);
       const settled = observation.status === 'terminal' || observation.status === 'not-started';
@@ -77,8 +91,11 @@ export function createJobTask(services: JobServices) {
           await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: completionRequestId, kind: 'command-completed', text, payload: observation });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          runtime.report(error);
-          continuationReady = false;
+          // A run of failed deliveries is reported when it starts and when retrying stops; the job then ends.
+          const last = failures + 1 >= RETRY_ATTEMPTS;
+          if (failures === 0) runtime.report(error);
+          if (last) runtime.report(new Error(`Background command ${job.jobId}'s completion was not delivered after ${RETRY_ATTEMPTS} tries: ${errorText(error)}`));
+          continuationReady = last;
         }
       }
       await runtime.commit(async tx => {
@@ -87,7 +104,7 @@ export function createJobTask(services: JobServices) {
         current.observation = observation;
         if (aborting) current.cancelRequested = true;
         if (settled && continuationReady) { pruneFinishedJobs(doc); current.delivered = true; }
-        if (!current.delivered) return { status: 'running', checkpoint: { phase: 'execute', poll: runtime.now() } };
+        if (!current.delivered) return { status: 'running', checkpoint: { phase: 'execute', poll: runtime.now(), failures: failures + 1 } };
         if (observation.status === 'not-started') return { status: 'terminal', outcome: observation.reason === 'cancelled'
           ? { status: 'aborted', reason: 'Cancelled before execution', result: observation }
           : { status: 'failed', error: { message: observation.message ?? `Job did not start: ${observation.reason}` }, result: observation } };
@@ -96,29 +113,31 @@ export function createJobTask(services: JobServices) {
           : observation.result.status === 'failed'
             ? { status: 'failed', error: { message: observation.result.error.message }, result: observation }
             : { status: 'aborted', reason: 'Executor attempt interrupted', result: observation } };
-        return { status: 'running', checkpoint: { phase: 'execute', poll: runtime.now() } };
+        return { status: 'running', checkpoint: { phase: 'execute', poll: runtime.now(), failures: failures + 1 } };
       }, context);
       if (settled && continuationReady) return;
-      const next = runtime.now() + 1000; await services.wakeAt(next); await runtime.sleep(next, context);
+      failures++;
+      const next = runtime.now() + retryDelay(failures);
+      await services.wakeAt(next); await runtime.sleep(next, context);
     }
   }
   return defineTask<JobInput, JobState, RuntimeJobObservation>({
     name: 'gitspace.Job', version: 1, initial: () => ({ phase: 'execute', poll: 0 }),
-    phases: { async execute(task, runtime, context) { await drive(task.input.key, runtime, context, false); } },
-    async abort(task, runtime, context) { await drive(task.input.key, runtime, context, true); },
+    phases: { async execute(task, runtime, context) { await drive(task.input.key, runtime, context, false, task.state.checkpoint.failures ?? 0); } },
+    async abort(task, runtime, context) { await drive(task.input.key, runtime, context, true, task.state.checkpoint.failures ?? 0); },
   });
 }
 
 type ProcessExitInput = { originAttemptId: string; daemonId: string; restartCount: number; args: JsonValue };
-/** `failing`: the current run of failed observations has been reported (once, when it started). */
-type ProcessExitState = { phase: 'observe'; poll: number; restartCount: number; failing?: boolean };
+/** `failing`: the current run of failed observations has been reported (once, when it started). `failures`: consecutive
+ * failed stop tries, for their backoff; `stopFailing`: their run has been reported. */
+type ProcessExitState = { phase: 'observe'; poll: number; restartCount: number; failing?: boolean; failures?: number; stopFailing?: boolean };
 /**
- * How often a watched process is checked on its machine when no exit report has arrived (the machine was offline when it
- * exited). Its machine reports the exit itself; this alarm only re-runs the watch after the workspace object slept.
+ * Exits machines report for the workspace's processes, by `<daemon id>:<restart count>`; each watch takes its own.
+ * `checks` counts machine reconnections: each makes every watch check its machine once more, as a machine that restarted
+ * lost the exit waits it held.
  */
-const SAFETY_CHECK_MS = 15 * 60_000;
-/** Exits machines report for the workspace's processes, by `<daemon id>:<restart count>`; each watch takes its own. */
-export const ProcessExitsDoc = defineDoc<{ exits: Record<string, { daemon: JsonValue; reportedAt: number }> }>({ kind: 'gitspace.process-exits', version: 1, scope: 'session', initial: () => ({ exits: {} }) });
+export const ProcessExitsDoc = defineDoc<{ exits: Record<string, { daemon: JsonValue; reportedAt: number }>; checks?: number }>({ kind: 'gitspace.process-exits', version: 1, scope: 'session', initial: () => ({ exits: {} }) });
 /** Reports no watch takes (a process started outside a watch) are dropped beyond this many, oldest first. */
 const MAX_PROCESS_EXIT_REPORTS = 100;
 export const processExitKey = (daemon: Pick<DaemonSnapshot, 'id' | 'restartCount'>) => `${daemon.id}:${daemon.restartCount}`;
@@ -130,9 +149,13 @@ export function recordProcessExit(exits: { exits: Record<string, { daemon: JsonV
   const keys = Object.entries(exits.exits).sort((left, right) => left[1].reportedAt - right[1].reportedAt).map(([key]) => key);
   for (const key of keys.slice(0, Math.max(0, keys.length - MAX_PROCESS_EXIT_REPORTS))) delete exits.exits[key];
 }
-/** Waits, without a timer, until the exit under `key` is reported: a pending timer would keep the workspace object in
- * memory for as long as the process runs. */
-async function reportedExit(runtime: TaskRuntime<ProcessExitInput, ProcessExitState, JsonValue, object>, key: string, context: Context): Promise<void> {
+/** Records that a machine reconnected: every process watch checks its machine once more. */
+export function recordMachineReconnection(exits: { checks?: number }): void {
+  exits.checks = (exits.checks ?? 0) + 1;
+}
+/** Waits, without a timer, until the exit under `key` is reported or a machine reconnects after `checks`: a pending timer
+ * would keep the workspace object in memory for as long as the process runs. */
+async function reportedExit(runtime: TaskRuntime<ProcessExitInput, ProcessExitState, JsonValue, object>, key: string, checks: number, context: Context): Promise<void> {
   const watch = await runtime.watchDoc(ProcessExitsDoc, context);
   if (!watch) throw new Error('Process exit reports missing');
   const arrived = Promise.withResolvers<void>();
@@ -141,8 +164,8 @@ async function reportedExit(runtime: TaskRuntime<ProcessExitInput, ProcessExitSt
   runtime.signal.addEventListener('abort', aborted, { once: true });
   try {
     runtime.signal.throwIfAborted();
-    if (watch.value?.exits[key]) return;
-    watch.start(async value => { if (value?.exits[key]) arrived.resolve(); });
+    if (watch.value?.exits[key] || (watch.value?.checks ?? 0) !== checks) return;
+    watch.start(async value => { if (value?.exits[key] || (value?.checks ?? 0) !== checks) arrived.resolve(); });
     await awaitWithContext(Promise.race([arrived.promise, watch.closed.then(end => { if (end.reason === 'listener_error') throw end.error; if (end.reason !== 'stopped') throw new Error(`Process exit reports ${end.reason}`); })]), context);
   } finally { runtime.signal.removeEventListener('abort', aborted); await watch.stop(); }
 }
@@ -154,12 +177,14 @@ export function createProcessExitTask(services: JobServices) {
       let { poll, restartCount, failing = false } = task.state.checkpoint;
       const args = RuntimeProcArgumentsSchema.parse(task.input.args);
       if (args.op !== 'status') throw new Error('Process watch has no admitted status identity');
-      // Each run of this phase checks the machine once: when the watch starts, and when a wake re-runs it after the
-      // workspace object slept. Between runs, the machine's own report ends the wait.
+      // The machine is checked when the watch starts, when this phase runs again after a reset, and after each machine
+      // reconnection; otherwise the machine's own report ends the wait.
       let check = true;
       for (;;) {
         const key = processExitKey({ id: task.input.daemonId, restartCount });
-        const report = (await runtime.snapshot(ProcessExitsDoc, context))?.exits[key];
+        const reports = await runtime.snapshot(ProcessExitsDoc, context);
+        const checks = reports?.checks ?? 0;
+        const report = reports?.exits[key];
         let exited: DaemonSnapshot | null = report ? DaemonSnapshotSchema.parse(report.daemon) : null;
         if (!exited && check) {
           check = false;
@@ -200,15 +225,17 @@ export function createProcessExitTask(services: JobServices) {
           await runtime.commit(async tx => { delete (await tx.doc(ProcessExitsDoc)).exits[key]; return { status: 'terminal', outcome: { status: 'completed', result } }; }, context);
           return;
         }
-        await services.wakeAt(runtime.now() + SAFETY_CHECK_MS);
-        await reportedExit(runtime, key, context);
+        await reportedExit(runtime, key, checks, context);
+        check = true;
       }
     } },
     async abort(task, runtime, context) {
       const args = RuntimeProcArgumentsSchema.parse(task.input.args);
       if (args.op !== 'status') throw new Error('Process watch has no admitted status identity');
-      let { poll, restartCount } = task.state.checkpoint;
+      let { poll, restartCount, failures = 0, stopFailing = false } = task.state.checkpoint;
       for (;;) {
+        // Read before the try, so a reconnection during it is not missed.
+        const checks = (await runtime.snapshot(ProcessExitsDoc, context))?.checks ?? 0;
         try {
           const requestId = `process-stop:${runtime.taskId}:${poll}`;
           const { restartCount: _originRestart, ...launch } = args;
@@ -216,7 +243,7 @@ export function createProcessExitTask(services: JobServices) {
           const sha256 = await receiptDigest(result);
           await runtime.commit(async tx => {
             await tx.appendEntry(runtime.conversationId, { kind: 'gitspace.executor-results', data: { results: [{ attemptId: result.attemptId, sha256 }] } });
-            return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount } };
+            return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failures, stopFailing } };
           }, context);
           if (result.status !== 'completed') throw new Error('Owned process stop remains unresolved');
           const text = result.content.find(item => item.type === 'text');
@@ -231,7 +258,7 @@ export function createProcessExitTask(services: JobServices) {
               const sha256 = await receiptDigest(previous);
               await runtime.commit(async tx => {
                 await tx.appendEntry(runtime.conversationId, { kind: 'gitspace.executor-results', data: { results: [{ attemptId: previous.attemptId, sha256 }] } });
-                return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount } };
+                return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failures, stopFailing } };
               }, context);
               const text = previous.content.find(item => item.type === 'text');
               if (previous.status !== 'completed' || !text || text.type !== 'text') throw new Error('Previous process exit observation missing');
@@ -240,19 +267,30 @@ export function createProcessExitTask(services: JobServices) {
               exited = archived.daemon;
             }
             await services.deliverConversationEvent({ conversationId: String(runtime.conversationId), requestId: `process-exited:${task.input.daemonId}:${restartCount}`, kind: 'process-exited', text: `Process exited:\n${JSON.stringify(exited)}`, payload: exited });
-            await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount: restartCount + 1 } }), context);
+            await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount: restartCount + 1, failures, stopFailing } }), context);
           }
           await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted', reason: 'Conversation stopped', result: response.daemon } }), context);
           return;
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          runtime.report(error);
+          // The stop is kept until its machine confirms it; a run of failures is reported once, when it starts.
+          if (!stopFailing) runtime.report(error);
+          stopFailing = true;
+          failures++;
         }
         poll++;
-        await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'observe', poll, restartCount } }), context);
-        const next = runtime.now() + 1000;
-        await services.wakeAt(next);
-        await runtime.sleep(next, context);
+        await runtime.commit(async tx => { await tx.doc(ProcessExitsDoc); return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failures, stopFailing } }; }, context);
+        // Tries back off while the machine answers but fails; after RETRY_ATTEMPTS only a machine's reconnection (or the
+        // exit's report) tries again, and a reconnection starts the backoff over.
+        const settled = new AbortController();
+        const scoped = withAbortSignal(context.abortSignal ? AbortSignal.any([context.abortSignal, settled.signal]) : settled.signal, context);
+        const waits = [reportedExit(runtime, processExitKey({ id: task.input.daemonId, restartCount }), checks, scoped).then(() => { failures = 0; })];
+        if (failures < RETRY_ATTEMPTS) {
+          const next = runtime.now() + retryDelay(failures);
+          await services.wakeAt(next);
+          waits.push(runtime.sleep(next, scoped));
+        }
+        try { await Promise.race(waits); } finally { settled.abort(); await Promise.allSettled(waits); }
       }
     },
   });
@@ -271,7 +309,6 @@ export async function watchProcessExit(services: JobServices, input: JsonValue, 
     const task = await tx.createTask(createProcessExitTask(services), { originAttemptId: result.attemptId, daemonId: response.daemon.id, restartCount: response.daemon.restartCount, args: { op: 'status', name: response.daemon.name, instanceId: response.daemon.id, restartCount: response.daemon.restartCount, ...(args.on === undefined ? {} : { on: args.on }) } }, { ownership: { kind: 'conversation' }, conversationId: api.conversationId, background: true });
     watches.tasks[identity] = String(task);
   }, context);
-  await services.wakeAt(Date.now());
 }
 export function createJobTool(services: JobServices) {
   const task = createJobTask(services);
@@ -283,7 +320,6 @@ export function createJobTool(services: JobServices) {
       const prior = (await api.snapshot(DurableJobsDoc, api.conversationId, context))?.records[admissionId];
       if (prior) {
         if (prior.fingerprint !== fingerprint) throw new Error('Job admission request changed');
-        await services.wakeAt(Date.now());
         return prior.acceptance;
       }
       const scope = await services.jobScope(args);
@@ -297,7 +333,6 @@ export function createJobTool(services: JobServices) {
         doc.records[admissionId] = { acceptance, observation: acceptance, args, fingerprint, spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 86_400_000).toISOString(), attemptId: `task:${id}`, cancelRequested: false, delivered: false };
         return acceptance;
       }, context);
-      await services.wakeAt(Date.now());
       return acceptance;
     }
     const args = RuntimeBashControlArgumentsSchema.parse(input);
@@ -317,7 +352,6 @@ export function createJobTool(services: JobServices) {
       const observation = RuntimeJobObservationSchema.parse({ status: 'waiting', job: record.acceptance.job, reason: 'reconciliation', observedAt: new Date().toISOString() });
       await api.commit(async tx => { const doc = await tx.doc(DurableJobsDoc, api.conversationId); const current = Object.values(doc.records).find(value => value.attemptId === record.attemptId); if (!current) throw new Error('Job missing'); current.cancelRequested = true; const status = storedObservation(current.observation, current.acceptance.job).status; if (status !== 'terminal' && status !== 'not-started') current.observation = observation; }, context);
       try { await services.cancel(record.attemptId); } catch { /* The job task retries the cancellation. */ }
-      await services.wakeAt(Date.now());
       return observation;
     }
     if (args.op === 'wait' && stored.status !== 'terminal' && stored.status !== 'not-started') {

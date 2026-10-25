@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { BROWSER_RUN_LIMIT_MS, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserCapture, type RuntimeBrowserPreview, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { launchCloudBrowser, type BrowserChannel } from './browser-cdp.js';
 import { AccountBrowserRuntime } from './browser-runtime.js';
-import { BROWSER_SCRIPT_PATH } from './browser-relay.js';
+import { BROWSER_CLOUD_RENEW_MS, BROWSER_SCRIPT_PATH } from './browser-relay.js';
 import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
 import { BROWSER_RUNNER_SOURCE } from './generated/browser-runner.js';
 import { hostedServiceUrlPattern, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
@@ -102,6 +102,8 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   private readonly captures = new CloudCaptures();
   /** Each running script's files (its captures, uploads and the downloads while it runs), by run. */
   private readonly runFiles = new Map<string, ScriptRunFiles>();
+  /** When this object last told the account its cloud browser is open (`tellAccount`); 0 once it said it closed. */
+  private toldOpen = 0;
 
   private shim(): Promise<CdpBrowserShim> {
     if (this.browser) return this.browser;
@@ -119,6 +121,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       await CloudDownloads.open(shim, workspaceDrive(this.env, workspace), download => {
         for (const files of this.runFiles.values()) if (files.browser.source === 'headless') files.downloaded(download);
       });
+      this.tellAccount(true);
       return shim;
     })();
     this.browser = opening;
@@ -127,6 +130,8 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   }
 
   private release(): void {
+    // Also after this object restarted: the account may still count the browser it held before.
+    this.tellAccount(false);
     const upstream = this.upstream;
     void this.captures.stopAll('The cloud browser closed');
     this.browser = undefined;
@@ -143,7 +148,19 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     this.scripts.delete(run);
   }
 
-  private async used(): Promise<void> { await this.ctx.storage.setAlarm(Date.now() + IDLE_CLOSE_MS); }
+  private async used(): Promise<void> {
+    if (this.upstream && Date.now() - this.toldOpen >= BROWSER_CLOUD_RENEW_MS) this.tellAccount(true);
+    await this.ctx.storage.setAlarm(Date.now() + IDLE_CLOSE_MS);
+  }
+
+  /** Tells the account whether this workspace's cloud browser is open, for Plugins → Browsers. A failed notice is only
+   * logged: the account forgets an open browser it stops hearing about. */
+  private tellAccount(open: boolean): void {
+    const session = this.ctx.id.name;
+    if (!session) return;
+    this.toldOpen = open ? Date.now() : 0;
+    this.ctx.waitUntil(this.env.RELAY.getByName(this.env.RELAY_NAME).browserRelayCloudOpen(session, open).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_cloud_open_notice_failed', session, open, error: String(error) }))));
+  }
 
   async alarm(): Promise<void> {
     if (this.scripts.size || this.captures.recording) { await this.used(); return; }
@@ -160,6 +177,13 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   async preview(targetId: string): Promise<RuntimeBrowserPreview> {
     if (!this.browser) return { targetId, capturedAt: new Date().toISOString(), image: null, reason: 'The cloud browser is not running' };
     return browserPreview(await this.browser, targetId);
+  }
+
+  /** Closes one cloud tab (Close tab in the Browser tab); with no browser open there is none to close. */
+  async closeTab(targetId: string): Promise<void> {
+    if (!this.browser) throw new Error('The cloud browser is not running');
+    const client = (await this.browser).client(() => {});
+    try { await client.send('Target.closeTarget', { targetId }); } finally { await client.close(); }
   }
 
   /** Starts recording a cloud tab's screencast into the workspace's drive (you, from the Browser tab). The browser

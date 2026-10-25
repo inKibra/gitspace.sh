@@ -37,7 +37,7 @@ it('resets the generated extension identity, detaches sessions, and preserves re
   let listener: Listener | undefined;
   const detach = vi.fn(async () => {});
   const chrome = {
-    runtime: { id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, onMessage: { addListener: (value: Listener) => { listener = value; } } },
+    runtime: { id: 'extension', getPlatformInfo: async () => ({ os: 'linux' }), getURL: (path: string) => `chrome-extension://extension/${path}`, onMessage: { addListener: (value: Listener) => { listener = value; } } },
     storage: { local: { remove: vi.fn(async () => {}), get: vi.fn(async () => ({})), set: vi.fn(async () => {}) }, session: { get: async () => ({}) } },
     debugger: { detach, onEvent: { addListener() {} }, onDetach: { addListener() {} } },
     tabs: { query: async () => [], onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated: { addListener() {} } },
@@ -146,7 +146,7 @@ it('discovers dragged-in members and immediately denies dragged-out or disallowe
     crypto,TextEncoder,URL,atob,btoa,console,WebSocket,setTimeout,clearTimeout,
     indexedDB:{open:()=>({})},
     chrome:{
-      runtime:{onMessage:{addListener(){}}},
+      runtime:{getPlatformInfo:async()=>({os:'linux'}),onMessage:{addListener(){}}},
       storage:{local:{remove:async()=>{},get:async()=>({})}},
       debugger:{getTargets:async()=>[...tabs].map(([id,tab])=>({id:String(id),tabId:id,type:'page',title:'Page',url:tab.url})),onEvent:{addListener(){}},onDetach:{addListener(){}}},
       tabs:{onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get:async(id:number)=>tabs.get(id),onUpdated:{addListener(){}}},
@@ -195,7 +195,7 @@ it('after a browser restart adopts the one restored group of the workspace, else
     crypto,TextEncoder,URL,atob,btoa,console,WebSocket:class {static OPEN=1;readyState=0;close(){}},setTimeout:()=>0,clearTimeout(){},group,
     indexedDB:{open(){const request={result:database,onsuccess:()=>{},onerror:()=>{}};queueMicrotask(()=>request.onsuccess());return request;}},
     chrome:{
-      runtime:{onMessage:{addListener(){}}},
+      runtime:{getPlatformInfo:async()=>({os:'linux'}),onMessage:{addListener(){}}},
       storage:{local:{remove:async()=>{},get:async()=>({})},session:{get:async()=>({browserEpoch:epoch}),set:async()=>{}}},
       debugger:{onEvent:{addListener(){}},onDetach:{addListener(){}}},
       tabs:{query:async({groupId}:{groupId:number})=>tabs.filter(tab=>tab.groupId===groupId),onCreated: { addListener() {} }, onRemoved: { addListener() {} }, onUpdated:{addListener(){}}},

@@ -87,7 +87,8 @@ export type ProcessExitReporter = (input: z.infer<typeof RuntimeProcessExitedInp
 /** A supervisor exit wait never needs to end early: it is a local socket request. Re-issued after this long. */
 const EXIT_WAIT_MS = 6 * 3_600_000;
 /** Holds the supervisor's exit wait for one workspace process and reports each exit, following automatic restarts, until
- * it stops for good or its name is reused. A machine that restarts loses the wait; the workspace's slow check covers it. */
+ * it stops for good or its name is reused. A machine that restarts loses the wait; the workspace checks its watched
+ * processes when the machine reconnects, and that check holds the wait again. */
 function reportExits(client: DaemonBrokerClient, started: DaemonSnapshot, identity: { projectId: string; workspaceId: string }, report: ProcessExitReporter, watching: Set<string>): void {
   const key = `${identity.workspaceId}:${started.id}`;
   if (watching.has(key)) return;
@@ -171,6 +172,7 @@ export function machineProcessOperation(options: { services: WorkspaceServiceMan
       const result = args.op === 'send' || args.op === 'stop' || args.op === 'restart' ? await mutate(args) : args.op === 'status' || args.op === 'describe' ? existing : await client.request(args, signal);
       if (args.op === 'stop') await options.services.releaseService(dispatch.workspaceId, 'process', args.name);
       if (args.op === 'restart' && result.op === 'restart') reportExits(client, result.daemon, { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, options.reportProcessExit, watching);
+      if (args.op === 'status' && result.op === 'describe' && result.daemon.state !== 'exited' && result.daemon.state !== 'failed') reportExits(client, result.daemon, { projectId: dispatch.projectId, workspaceId: dispatch.workspaceId }, options.reportProcessExit, watching);
       if (args.op === 'restart' && result.op === 'restart' && existing.spec.ready) {
         const readiness = await client.request({ op: 'wait', name: args.name, for: 'ready', timeoutMs: existing.spec.ready.timeoutMs ?? 30_000 }, signal);
         if (readiness.op !== 'wait' || readiness.daemon.id !== result.daemon.id || readiness.timedOut || readiness.daemon.readiness?.timedOut || readiness.daemon.state !== 'ready') throw new Error('Process did not become ready with the admitted identity');

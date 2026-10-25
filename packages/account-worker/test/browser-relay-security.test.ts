@@ -14,12 +14,12 @@ function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socke
 async function connect(relay: HostedBrowserRelay, ip?: string) { const response = await relay.fetch(request(ip)); expect(response.status).toBe(101); if (!response.webSocket) throw new Error('Missing Worker WebSocket'); const socket = response.webSocket; const challenge = frame(socket); socket.accept(); sockets.push(socket); return { socket, challenge: z.object({ serverNonce: z.string() }).parse(await challenge) }; }
 type Connection = { socket: WebSocket; challenge: { serverNonce: string } };
 type Identity = { key: CryptoKeyPair; publicKey: string };
-async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Security fixture Chrome', protocol: BROWSER_EXTENSION_PROTOCOL })); await ready; }
+async function prove(connection: Connection, identity: Identity, pairing: { code: string; pairingId: string }, code = pairing.code) { const clientNonce = 'b'.repeat(64); const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:client:${connection.challenge.serverNonce}:${clientNonce}`)))); const reply = frame(connection.socket); connection.socket.send(JSON.stringify({ pairing: 'client', pairingId: pairing.pairingId, clientNonce, publicKey: identity.publicKey, proof, code })); await reply; const ready = frame(connection.socket); connection.socket.send(JSON.stringify({ hello: true, Browser: 'Chrome/141.0.7390.54', platform: 'Linux', protocol: BROWSER_EXTENSION_PROTOCOL })); await ready; }
 async function fixture(run: (relay: HostedBrowserRelay, state: DurableObjectState) => Promise<void>) { await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (instance, state) => { try { await run(hostedBrowserRelay(instance), state); } finally { for (const socket of sockets.splice(0)) socket.close(); } }); }
 const trust = { algorithm: 'Ed25519' as const, accountId: env.ACCOUNT_ID, publicKey: 'AA==' };
 
 test('a Chrome extension reaches the relay through the public route and is challenged', async () => {
-  await env.RELAY.getByName(env.RELAY_NAME).browserRelayPair(trust, new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws'));
+  await env.RELAY.getByName(env.RELAY_NAME).browserRelayPair(trust);
   const response = await SELF.fetch(new URL('/api/browser-relay/extension', env.ACCOUNT_URL), { headers: { upgrade: 'websocket', origin, 'cf-connecting-ip': '192.0.2.9' } });
   expect(response.status).toBe(101);
   const socket = response.webSocket;
@@ -50,7 +50,7 @@ test('confirmed Chromes execute independently and rejecting candidates or forget
     await expect(relay.confirm(pairing.pairingId, '0'.repeat(64))).rejects.toThrow('fingerprint');
     await relay.confirm(pairing.pairingId, identity.pairedKeyFingerprint);
     const settings = await relay.projectSettings('project');
-    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, note }) => ({ pairingId, note })), { pairingId: pairing.pairingId, note: '' }] });
+    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId }) => ({ pairingId })), { pairingId: pairing.pairingId }] });
     const placement = await relay.placement('project', pairing.pairingId);
     const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: name, source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt }, workspace.key.privateKey, authority);
     const operations: string[] = [];
@@ -148,11 +148,11 @@ test('confirmed proof is admitted despite saturated candidates and cannot be rep
 test('unconfirmed browser product cannot impersonate a trusted confirmation label', () => fixture(async relay => {
   const pairing = await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
   await prove(await connect(relay), await keys(), pairing);
-  expect((await relay.status()).pairings[0]?.browser).toBeNull();
+  expect((await relay.status()).pairings[0]).toMatchObject({ chromeVersion: null, platform: null });
   const pending = (await relay.status()).pairings[0];
   if (!pending || pending.state !== 'pending-confirmation') throw new Error('Missing pending identity');
   await relay.confirm(pairing.pairingId, pending.pairedKeyFingerprint);
-  expect((await relay.status()).pairings[0]?.browser).toBe('Security fixture Chrome');
+  expect((await relay.status()).pairings[0]).toMatchObject({ chromeVersion: 141, platform: 'Linux' });
 }));
 
 test('recent admission proof remains consumed across an older rate window boundary', () => fixture(async relay => {
@@ -233,3 +233,64 @@ test('IPv4 /24 pending budget isolates anonymous networks', () => fixture(async 
   expect((await relay.fetch(request('198.51.100.17'))).status).toBe(429);
   await connect(relay, '198.51.101.1');
 }));
+
+const endpoint = 'wss://account.test/api/browser-relay/extension';
+
+test('a short pairing code redeems its pairing’s details once, while it lasts, however it is typed, and they pair the extension’s key', () => fixture(async relay => {
+  const started = await relay.start(trust);
+  expect(started.code).toMatch(/^[2-9A-HJKMNP-TV-Z]{6}$/u);
+  const redeemed = await relay.redeem(` ${started.code.slice(0, 3).toLowerCase()}-${started.code.slice(3)} `, '192.0.2.10', endpoint);
+  expect(redeemed).toEqual({ ok: true, value: { code: expect.any(String), pairingId: started.pairingId, generation: 1, trust, endpoint, expiresAt: started.expiresAt } });
+  expect(await relay.redeem(started.code, '192.0.2.10', endpoint)).toMatchObject({ ok: false, status: 404 });
+  if (!redeemed.ok) throw new Error(redeemed.message);
+  await prove(await connect(relay), await keys(), redeemed.value);
+  expect((await relay.status()).pairings.find(pairing => pairing.pairingId === started.pairingId)?.state).toBe('pending-confirmation');
+  const late = await relay.start(trust);
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11 * 60_000);
+  expect(await relay.redeem(late.code, '192.0.2.11', endpoint)).toMatchObject({ ok: false, status: 404 });
+}));
+
+test('wrong pairing codes are limited per code and per address: a live code tried wrongly too often is withdrawn with its pairing', () => fixture(async relay => {
+  const first = await relay.start(trust);
+  const wrong = first.code === 'ZZZZZZ' ? 'YYYYYY' : 'ZZZZZZ';
+  for (let index = 0; index < 10; index++) expect(await relay.redeem(wrong, `203.0.${index}.1`, endpoint)).toMatchObject({ ok: false, status: 404 });
+  expect((await relay.status()).pairings.some(pairing => pairing.pairingId === first.pairingId)).toBe(false);
+  expect(await relay.redeem(first.code, '203.0.99.1', endpoint)).toMatchObject({ ok: false, status: 404 });
+  // Ten wrong codes from one address: the next try from there waits, even with a right code.
+  for (let index = 0; index < 10; index++) expect(await relay.redeem(wrong, '192.0.2.20', endpoint)).toMatchObject({ ok: false, status: 404 });
+  const second = await relay.start(trust);
+  expect(await relay.redeem(second.code, '192.0.2.20', endpoint)).toMatchObject({ ok: false, status: 429 });
+  expect(await relay.redeem(second.code, '198.51.100.20', endpoint)).toMatchObject({ ok: true, value: { pairingId: second.pairingId } });
+}));
+
+test('text that cannot be a pairing code is refused without counting against the address or any code', () => fixture(async relay => {
+  const started = await relay.start(trust);
+  for (let index = 0; index < 12; index++) expect(await relay.redeem('not a code', '192.0.2.30', endpoint)).toMatchObject({ ok: false, status: 400 });
+  expect(await relay.redeem(started.code, '192.0.2.30', endpoint)).toMatchObject({ ok: true, value: { pairingId: started.pairingId } });
+}));
+
+test('the extension redeems a pairing code through the public route, from an extension origin only', async () => {
+  const started = await env.RELAY.getByName(env.RELAY_NAME).browserRelayPair(trust);
+  const post = (supplied: string) => SELF.fetch(new URL('/api/browser-relay/pairing-code', env.ACCOUNT_URL), { method: 'POST', headers: { 'content-type': 'application/json', origin: supplied, 'cf-connecting-ip': '192.0.2.40' }, body: JSON.stringify({ code: started.code }) });
+  expect((await post('https://evil.test')).status).toBe(403);
+  const response = await post(origin);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ status: 'ok', value: { pairingId: started.pairingId, endpoint: new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws') } });
+});
+
+test('the account counts the workspaces whose cloud browser is open: a closed one leaves, and one not heard from for ten minutes is forgotten', async () => {
+  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async relay => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-25T12:00:00.000Z'));
+      for (const session of ['account:project:one', 'account:project:two', 'account:project:three']) await relay.browserRelayCloudOpen(session, true);
+      await relay.browserRelayCloudOpen('account:project:two', false);
+      expect((await relay.browserRelayStatus()).cloudWorkspaces).toBe(2);
+      vi.setSystemTime(new Date('2026-10-25T12:06:00.000Z'));
+      // Still in use: its session says so again.
+      await relay.browserRelayCloudOpen('account:project:one', true);
+      vi.setSystemTime(new Date('2026-10-25T12:11:00.000Z'));
+      expect((await relay.browserRelayStatus()).cloudWorkspaces).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+});

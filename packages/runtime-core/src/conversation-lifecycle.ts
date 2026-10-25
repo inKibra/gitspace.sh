@@ -71,7 +71,6 @@ export type ConversationLifecycle = {
 export type ConversationLifecycleOptions = {
   harness: Harness; storage: Storage; admitInference: RuntimeHarnessOptions['admitInference'];
   configureModel(id: ConversationId, model: ModelRef): Promise<void>;
-  wake(): Promise<void>;
   report(error: unknown): void;
 };
 export function createConversationLifecycle(options: ConversationLifecycleOptions): ConversationLifecycle {
@@ -113,8 +112,9 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     await options.configureModel(conversation.id, model);
     await applyInferenceThinking(conversation, model);
   }
-  // The queue is drained when a running subagent's run ends, watched here in memory; after a reset, recovery drains it
-  // and watches the runs again.
+  // A conversation whose run holds back its events or queued input, or whose slot a waiting subagent needs, is watched
+  // in memory until that run ends (answered, failed, aborted or stopped): then what it held back goes in and waiting
+  // subagents start. A reset loses the watch; recovery finds the conversation busy and watches it again.
   const watched = new Set<string>();
   let closing = false;
   harness.subscribeClose(() => { closing = true; });
@@ -125,7 +125,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       try {
         await (await harness.conversation(id, context))?.waitForIdle(context);
         watched.delete(String(id));
-        await serialized(drain);
+        await serialized(async () => { await deliverPending(String(id)); await drain(); });
       } catch (error) {
         watched.delete(String(id));
         if (!closing) options.report(error);
@@ -173,9 +173,9 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     return true;
   }
   // Events wait here, not in the harness follow-up queue: a run that ends without a final boundary (abort, model
-  // error, deploy) leaves that queue unread. The alarm drive flushes the next event once the conversation is idle, and
-  // resumes input such a run left queued: a queued write places the items queued before it, which starts the next run.
-  // A subagent's run waits for a slot unless the queue starts it (`slotted`).
+  // error, deploy) leaves that queue unread. What a busy conversation holds back goes in when its run ends (`watch`);
+  // input such a run left queued resumes the same way: a queued write places the items queued before it, which starts
+  // the next run. A subagent's run waits for a slot unless the queue starts it (`slotted`).
   async function flush(id: string, slotted = false) {
     const conversation = await resolve(id);
     const state = await harness.snapshot(ConversationLifecycleDoc, conversation.id, context);
@@ -183,19 +183,19 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     if (state?.stopped) return;
     const subagent = !slotted && (await harness.snapshot(AgentDefinitionContextDoc, conversation.id, context))?.child;
     const queued = (await harness.snapshot(InboxDoc, conversation.id, context))?.items.find(item => item.mode !== 'write');
-    if (queued && !(await busy(conversation.id))) {
+    if (queued && await busy(conversation.id)) watch(conversation.id);
+    else if (queued) {
       if (subagent && await held(conversation.id)) return;
       await admit(conversation, `queue-resume:${queued.id}`);
       // `edits` (even empty) makes this a queued write; a write of only kind and data is display-only and places nothing.
       await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) }, edits: [] } }, context);
-      await options.wake();
     }
     // An event reaches the conversation once: as input here, or through a wait that returned it, never both; either way
     // it leaves the document, and only its request id stays.
     // Whatever is pending when the conversation is idle goes in as one message, so events that piled up cost one turn.
     const pending = (state?.events ?? []).filter(item => !isHandled(item)).map(item => item.event);
     if (pending.length === 0) return;
-    if (await busy(conversation.id)) { await options.wake(); return; }
+    if (await busy(conversation.id)) { watch(conversation.id); return; }
     if (subagent && await held(conversation.id)) return;
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pending.map(event => event.requestId).join('\n'))));
     const requestId = pending.length === 1 ? pending[0]!.requestId : `events:${[...digest.slice(0, 16)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
@@ -203,7 +203,11 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     const content = formatConversationEvents(pending.map(event => ({ kind: event.kind, source: EVENT_SOURCE[event.kind](event), text: event.text })));
     await conversation.submit({ type: 'input', requestId, content, whenBusy: 'followUp' }, context);
     await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set(pending.map(event => event.requestId))), context);
-    await options.wake();
+  }
+  /** Flushes one conversation; its failure (its admission) is reported, so it keeps no other conversation waiting. */
+  async function deliverPending(id: string) {
+    try { await flush(id); }
+    catch (error) { options.report(new Error(`Conversation ${id} could not resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
   }
   async function setStopped(id: string, stopped: boolean) {
     return harness.commit(async tx => {
@@ -262,10 +266,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     // from resuming: its failure is reported and recovery moves on.
     async recover() {
       await serialized(async () => {
-        for (const record of await conversations()) {
-          try { await flush(String(record.id)); }
-          catch (error) { options.report(new Error(`Conversation ${String(record.id)} could not resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
-        }
+        for (const record of await conversations()) await deliverPending(String(record.id));
         try { await drain(); }
         catch (error) { options.report(new Error(`Waiting subagents could not start: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
       });

@@ -25,7 +25,7 @@ function mockCloudflare() {
     }
     const body: { query: string; variables: { start: string } } = await request.json();
     const account = (data: object) => Response.json({ data: { viewer: { accounts: [data] } } });
-    if (body.query.includes('StorageWatchdogHour')) return account({ objects: [] });
+    if (body.query.includes('StorageWatchdogHour')) return account({ objects: [], alarms: [] });
     if (body.query.includes('StorageWatchdogDay')) return account({ periodic: [], invocations: [], top: [] });
     if (body.query.includes('StorageWatchdogAwake')) return account({ awake: [], reading: [] });
     windows.push(body.variables.start);

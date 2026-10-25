@@ -242,6 +242,14 @@ describe('machine notices', () => {
     ]);
   });
 
+  it('holds no wake for a blip it will never tell', async () => {
+    const workspace = await attachedWorkspace('notice-blip');
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, false);
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    expect(await runInDurableObject(space(workspace.workspaceId), (_instance, state) => state.storage.sql.exec("SELECT owner FROM runtime_alarms WHERE owner='presence-notice'").toArray())).toEqual([]);
+  });
+
   it('tells the conversation of a failed setup step once', async () => {
     const workspace = await attachedWorkspace('notice-setup');
     const [attachment] = await space(workspace.workspaceId).runtimeAttachmentRecords(workspace);

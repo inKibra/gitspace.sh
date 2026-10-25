@@ -33,6 +33,8 @@ const SIZE_INTERVAL_MS = 500;
 /** A press that moves farther than this (CSS px) drags an area instead of picking an element. */
 const DRAG_PX = 8;
 const RECONNECT_MAX_MS = 15_000;
+/** The sharer's own pointer and avatar: gray, apart from the viewers' colors and the agent's blue. */
+const SHARER_GRAY = '#525252';
 /** Chrome's purple tab-group colour, which marks comment mode: the frame's ring, the outlines and the Comment button. */
 const COMMENT_PURPLE = '#a142f4';
 const CommentGlyph = glyph(MessagePlusSquare);
@@ -104,6 +106,8 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const [page, setPage] = useState<Page | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [watchers, setWatchers] = useState<Watcher[]>([]);
+  /** The sharer's own pointer on the tab, from their Chrome: drawn here, not on the tab. */
+  const [sharerAt, setSharerAt] = useState<Point | null>(null);
   const [comments, setComments] = useState<RuntimeBrowserPageComment[]>([]);
   const [online, setOnline] = useState(true);
   const [connected, setConnected] = useState(true);
@@ -166,11 +170,13 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
           setConnected(true);
           setShare(message.share);
           setWatchers(message.viewers.map(viewer => ({ ...viewer, at: null })));
+          setSharerAt(null);
           setComments(message.comments);
           return;
         case 'page': setPage(message); return;
         case 'frame': setFrame(message); return;
         case 'viewers': setWatchers(message.viewers); return;
+        case 'sharer': setSharerAt(message.at); return;
         case 'hit': setHit(message.target); return;
         case 'presence': setOnline(message.online); return;
         case 'comments': {
@@ -334,6 +340,10 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
         <strong>{sharer}</strong> is sharing <span className="font-mono">{page ? siteOf(page.url, share.page.site) : share.page.site}</span> · {shareTimeLeft(share.expiresAt, Date.now())} left
       </p>
       <ul aria-label="Watching" className="flex shrink-0 -space-x-1.5">
+        {/* The sharer, at their Chrome while it is online, in the gray of their pointer. */}
+        {online ? <li title={`${sharer} · sharing`} className="flex size-6 items-center justify-center rounded-full border-2 border-surface-1 text-[10px] font-bold text-white" style={{ background: SHARER_GRAY }}>
+          <span aria-hidden>{[...sharer.trim()][0]?.toUpperCase() ?? '?'}</span><span className="sr-only">{sharer} · sharing</span>
+        </li> : null}
         {shownWatchers.map(watcher => {
           const label = `${watcher.name}${watcher.viewerId === self.viewerId ? ' (you)' : ''}${watcher.guest ? ' · guest' : ''}`;
           return <li key={watcher.viewerId} title={label} className="flex size-6 items-center justify-center rounded-full border-2 border-surface-1 text-[10px] font-bold text-white" style={{ background: browserSharePointerColor(watcher.viewerId) }}>
@@ -370,7 +380,9 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
               {dragBox ? <Outline box={dragBox} label="Selected area" kind="area" /> : null}
               {draft?.kind === 'region' ? <Outline box={draft.region} label="Selected area" kind="chosenArea" /> : null}
               {draft?.kind === 'point' && hit ? <Outline box={hit.box} label={shareTargetLabel(hit)} kind="chosen" /> : null}
-              {/* Everyone's named pointer, yours included, is drawn on the tab itself and arrives in its frames. */}
+              {/* Viewers' named pointers, yours included, and the agent's cursor are drawn on the tab and arrive in its
+                  frames. The sharer's own pointer is drawn here: on the tab it would sit under their cursor. */}
+              {sharerAt && online ? <SharerPointer at={sharerAt} name={sharer} /> : null}
               {draft && popover ? <form
                 aria-label="New comment"
                 onSubmit={event => { event.preventDefault(); submitDraft(); }}
@@ -409,6 +421,21 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
       </aside> : null}
     </div>
   </main>;
+}
+
+/** The sharer's gray pointer and name (the overlay's arrow), gliding to each place their Chrome reports; the arrow's
+ * tip is 2 px into its box. */
+function SharerPointer({ at, name }: { at: Point; name: string }) {
+  return <div
+    role="img" aria-label={`${name}’s pointer`}
+    className="pointer-events-none absolute z-20 -translate-x-0.5 -translate-y-0.5 transition-[left,top] duration-100 ease-out motion-reduce:transition-none"
+    style={{ left: `${at.x * 100}%`, top: `${at.y * 100}%` }}
+  >
+    <svg width="22" height="24" viewBox="0 0 22 24" aria-hidden style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,.35))' }}>
+      <path d="M2 2 L2 19 L6.6 14.8 L9.6 21.6 L12.6 20.3 L9.7 13.6 L16 13.4 Z" fill={SHARER_GRAY} stroke="white" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+    <span aria-hidden className="absolute left-4 top-5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-medium text-white shadow" style={{ background: SHARER_GRAY }}>{name}</span>
+  </div>;
 }
 
 type OutlineKind = 'hover' | 'area' | 'chosen' | 'chosenArea';

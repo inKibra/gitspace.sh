@@ -52,7 +52,7 @@ import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './br
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
-import { RuntimeBrowserNameSchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserNameSchema, RuntimeBrowserNoteSchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
 export {
@@ -422,15 +422,19 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!service || machine?.readyState !== 1) return;
     machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId: service.requestId, code: 1000, reason: '' } satisfies TunnelRequestMessage));
   }
-  browserRelayPair(trust: RuntimeBrowserTrust, endpoint: string) { return this.browserRelay.pair(trust, endpoint); }
+  browserRelayPair(trust: RuntimeBrowserTrust) { return this.browserRelay.pair(trust); }
+  /** A short pairing code your Chrome's extension redeems (public `/api/browser-relay/pairing-code`), limited per address and code. */
+  browserRelayRedeemPairingCode(code: string, ip: string, endpoint: string) { return this.browserRelay.redeemPairingCode(code, ip, endpoint); }
   browserRelayStatus() { return this.browserRelay.status(); }
   browserRelayPlacement(projectId: string, pairingId?: string) { return this.browserRelay.placement(projectId, pairingId); }
   browserRelayProjectSettings(projectId: string) { return this.browserRelay.projectSettings(projectId); }
   browserRelaySetProjectSettings(projectId: string, expectedRevision: number, preferences: RuntimeProjectBrowserPreferences) { return this.browserRelay.setProjectSettings(projectId, expectedRevision, preferences); }
   browserRelayUnpair(pairingId: string) { return this.browserRelay.unpair(pairingId); }
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
-  browserRelayRename(pairingId: string, name: string) { return this.browserRelay.rename(pairingId, name); }
+  browserRelaySetChrome(pairingId: string, change: { name?: string; note?: string }) { return this.browserRelay.setChrome(pairingId, change); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
+  /** A workspace's cloud browser session says its browser opened, is still in use, or closed. */
+  browserRelayCloudOpen(session: string, open: boolean) { return this.browserRelay.cloudOpen(session, open); }
   /** An archived or deleted workspace's Chrome groups end, and its cloud browser's service sessions with them. */
   async browserRelayRetireWorkspace(projectId: string, workspaceId: string) {
     await this.browserRelay.retireWorkspace(projectId, workspaceId);
@@ -443,7 +447,7 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayUpload(step: BrowserUploadStep) { return this.browserRelay.upload(step); }
   /** Share links (`browser-share.ts`): a request your Chrome signed, a link's greeting, and a viewer joining. */
   browserRelayShare(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.shareRequest(request, body); }
-  browserSharePreview(shareId: string, secret: string) { return this.browserRelay.sharePreview(shareId, secret); }
+  browserSharePreview(shareId: string, secret: string, owner: boolean) { return this.browserRelay.sharePreview(shareId, secret, owner); }
   browserShareJoin(shareId: string, secret: string) { return this.browserRelay.shareJoin(shareId, secret); }
 
   private presenceLine: Promise<void> = Promise.resolve();
@@ -1065,20 +1069,32 @@ export default {
       return new Response(null, { status: 303, headers: { location: approval.href, 'cache-control': 'no-store', 'set-cookie': `${SERVICE_STATE_COOKIE}=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300` } });
     }
     if (url.pathname === '/api/browser-relay/extension') return env.RELAY.getByName(env.RELAY_NAME).fetch(request);
+    // A short pairing code typed into your Chrome's extension popup: public, so the relay limits wrong codes per address
+    // and per code; it answers the pairing's details once.
+    if (url.pathname === '/api/browser-relay/pairing-code') {
+      if (request.method !== 'POST' || !/^chrome-extension:\/\/[a-p]{32}$/u.test(request.headers.get('origin') ?? '')) return jsonError(403, 'ORIGIN_REJECTED', 'Chrome extension origin required');
+      const text = Number(request.headers.get('content-length') ?? 0) > 1024 ? '' : await request.text();
+      let raw: unknown = null;
+      try { raw = JSON.parse(text); } catch { /* answered below as a missing code */ }
+      const parsed = z.object({ code: z.string().max(64) }).safeParse(raw);
+      if (!parsed.success) return jsonError(400, 'PAIRING_CODE_INVALID', 'A pairing code is required');
+      const redeemed = await env.RELAY.getByName(env.RELAY_NAME).browserRelayRedeemPairingCode(parsed.data.code, request.headers.get('cf-connecting-ip') ?? '', new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws'));
+      return redeemed.ok ? Response.json({ status: 'ok', value: redeemed.value }) : jsonError(redeemed.status, redeemed.code, redeemed.message);
+    }
     // Upload bytes (Inspector files, your Chrome's downloads and captures) go through upload links, outside RPC's base64
     // chunks and the relay WebSocket; your Chrome begins its uploads signed by its pairing key.
     if (url.pathname.startsWith(`${UPLOAD_LINK_PATH}/`)) return serveUploadLink(request, env, { relay: env.RELAY.getByName(env.RELAY_NAME), drive: identity => workspaceDrive(env, identity) });
     if (url.pathname === BROWSER_UPLOAD_PATH) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), link: target => mintUploadLink(env, { kind: 'browser', ...target }) });
     // Share links: public, before device authority (a join signed by one of the account's devices is checked there).
     if (url.pathname === BROWSER_SHARE_PATH || url.pathname.startsWith('/api/shares/')) return serveBrowserShare(request, env);
-    if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|rename|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
+    if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|chrome|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');
       if (declared !== null && (!/^\d+$/u.test(declared) || !Number.isSafeInteger(Number(declared)))) return jsonError(400, 'REQUEST_LENGTH_INVALID', 'Invalid request content length');
       if (declared !== null && Number(declared) > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > REQUEST_MAX_BYTES) return jsonError(413, 'REQUEST_TOO_LARGE', 'Account request exceeds size limit');
-      const mutatesPairing = /^\/api\/browser-relay\/(pair|unpair|confirm|rename|project-update)$/u.test(url.pathname);
+      const mutatesPairing = /^\/api\/browser-relay\/(pair|unpair|confirm|chrome|project-update)$/u.test(url.pathname);
       const requiresWrite = mutatesPairing || url.pathname === '/api/services/approve';
       const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
         header: request.headers.get('x-gitspace-device'), method: 'POST', target: `${url.pathname}${url.search}`, body,
@@ -1097,7 +1113,7 @@ export default {
         const ticket = await relay.serviceApprove({ ...parsed.data, deviceId: auth.value.device.deviceId });
         return Response.json({ status: 'ok', value: { callback: `https://${parsed.data.hostname}/__gitspace/auth?ticket=${encodeURIComponent(ticket)}` } });
       }
-      if (url.pathname.endsWith('/pair')) return Response.json({ status: 'ok', value: await relay.browserRelayPair(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust(), new URL('/api/browser-relay/extension', env.ACCOUNT_URL).href.replace(/^http/u, 'ws')) });
+      if (url.pathname.endsWith('/pair')) return Response.json({ status: 'ok', value: await relay.browserRelayPair(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust()) });
       if (url.pathname.endsWith('/status')) return Response.json({ status: 'ok', value: await relay.browserRelayStatus() });
       let raw: unknown;
       try { raw = JSON.parse(new TextDecoder().decode(body)); } catch { return jsonError(400, 'PAIRING_REQUEST_INVALID', 'Invalid browser pairing request'); }
@@ -1114,10 +1130,10 @@ export default {
           return jsonError(409, 'PROJECT_BROWSER_UPDATE_REJECTED', error instanceof Error ? error.message : 'Project Chrome update rejected');
         }
       }
-      if (url.pathname.endsWith('/rename')) {
-        const rename = z.object({ pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema }).safeParse(raw);
-        if (!rename.success) return jsonError(400, 'PAIRING_REQUEST_INVALID', 'A paired browser and its name are required');
-        try { return Response.json({ status: 'ok', value: await relay.browserRelayRename(rename.data.pairingId, rename.data.name) }); }
+      if (url.pathname.endsWith('/chrome')) {
+        const change = z.object({ pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema.optional(), note: RuntimeBrowserNoteSchema.optional() }).safeParse(raw);
+        if (!change.success) return jsonError(400, 'PAIRING_REQUEST_INVALID', 'A paired browser and a valid name or note are required');
+        try { return Response.json({ status: 'ok', value: await relay.browserRelaySetChrome(change.data.pairingId, { name: change.data.name, note: change.data.note }) }); }
         catch (error) { return jsonError(404, 'PAIRING_NOT_FOUND', error instanceof Error ? error.message : 'Unknown browser pairing'); }
       }
       const parsed = z.object({ pairingId: z.string().uuid(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).safeParse(raw);

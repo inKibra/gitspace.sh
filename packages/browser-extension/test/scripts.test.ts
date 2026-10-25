@@ -58,8 +58,8 @@ describe('a script on your Chrome', () => {
     expect(chrome.group.title).toBe('Checkout');
     expect(chrome.detached).toEqual(['target-1']);
     expect(chrome.sent).toContainEqual({ targetId: 'target-1', fenced: true });
-    await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '2' }))).rejects.toThrow('You stopped this script in Chrome');
-    await expect(chrome.execute({ operation: 'tabs', attemptId, groupId: chrome.grant.body.groupId })).rejects.toThrow('You stopped this script in Chrome');
+    await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '2' }))).rejects.toThrow('You stopped this script');
+    await expect(chrome.execute({ operation: 'tabs', attemptId, groupId: chrome.grant.body.groupId })).rejects.toThrow('You stopped this script');
   });
 
   it('keeps its group marked until the last script on it ends', async () => {

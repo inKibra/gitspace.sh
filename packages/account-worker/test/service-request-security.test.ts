@@ -143,14 +143,14 @@ describe('account Chrome pairing authority', () => {
     expect((await device.request('/api/browser-relay/extension.zip')).status).toBe(200);
     expect((await device.request('/api/browser-relay/pair')).status).toBe(403);
     expect((await device.request('/api/browser-relay/unpair', { pairingId: crypto.randomUUID() })).status).toBe(403);
-    expect((await device.request('/api/browser-relay/rename', { pairingId: crypto.randomUUID(), name: 'Work' })).status).toBe(403);
+    expect((await device.request('/api/browser-relay/chrome', { pairingId: crypto.randomUUID(), name: 'Work' })).status).toBe(403);
     expect((await device.request('/api/browser-relay/project-status', { projectId: 'project-a' })).status).toBe(200);
     expect((await device.request('/api/browser-relay/project-update', { projectId: 'project-a', expectedRevision: 0, preferences: { defaultPairingId: null, approvals: [] } })).status).toBe(403);
   });
   it('rejects project-scoped browser pairing even with rpc.write', async () => {
     const device = await browserDevice(['rpc.read', 'rpc.write'], { kind: 'project', projectId: 'project-a' });
     expect((await device.request('/api/browser-relay/pair')).status).toBe(403);
-    expect((await device.request('/api/browser-relay/rename', { pairingId: crypto.randomUUID(), name: 'Work' })).status).toBe(403);
+    expect((await device.request('/api/browser-relay/chrome', { pairingId: crypto.randomUUID(), name: 'Work' })).status).toBe(403);
     expect((await device.request('/api/browser-relay/project-update', { projectId: 'project-a', expectedRevision: 0, preferences: { defaultPairingId: null, approvals: [] } })).status).toBe(403);
   });
   it('updates only the named personal project and rejects stale or unconfirmed approval writes', async () => {
@@ -167,8 +167,8 @@ describe('account Chrome pairing authority', () => {
     const other = await device.request('/api/browser-relay/project-status', { projectId: crypto.randomUUID() });
     expect(await other.json()).toMatchObject({ status: 'ok', value: { revision: 0, defaultPairingId: null } });
     const pairingId = crypto.randomUUID();
-    expect((await device.request('/api/browser-relay/project-update', { projectId, expectedRevision: 1, preferences: { defaultPairingId: pairingId, approvals: [{ pairingId, note: '' }] } })).status).toBe(409);
-    expect((await device.request('/api/browser-relay/rename', { pairingId, name: 'Work' })).status).toBe(404);
-    expect((await device.request('/api/browser-relay/rename', { pairingId, name: '' })).status).toBe(400);
+    expect((await device.request('/api/browser-relay/project-update', { projectId, expectedRevision: 1, preferences: { defaultPairingId: pairingId, approvals: [{ pairingId }] } })).status).toBe(409);
+    expect((await device.request('/api/browser-relay/chrome', { pairingId, name: 'Work' })).status).toBe(404);
+    expect((await device.request('/api/browser-relay/chrome', { pairingId, name: '' })).status).toBe(400);
   });
 });

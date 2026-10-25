@@ -78,7 +78,7 @@ async function fixture(storage: Storage, hold = true) {
   const reports: unknown[] = [];
   const admitInference = async () => ({ provider: 'test', modelId: model.id });
   const configureModel = async (id: ConversationId) => { const conversation = await harness.conversation(id, context); if (!conversation) throw new Error('Missing fixture conversation'); await conversation.configure({ model: { provider: 'test', modelId: model.id }, tools }, context); };
-  const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, report: error => { reports.push(error); }, wake: async () => {} });
+  const lifecycle = createConversationLifecycle({ harness, storage, admitInference, configureModel, report: error => { reports.push(error); } });
   ready.resolve(lifecycle);
   const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog: async () => ({ models: [], roles: [] }) });
   invoking.resolve(invoke);

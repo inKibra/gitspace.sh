@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { Window } from 'happy-dom';
 import { browserBase64, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { shareTargetFunction } from '../src/share.js';
-import { command, FRAME, installed, screencasts } from './installed.js';
+import { command, FRAME, installed, png, screencasts } from './installed.js';
 
 const closing: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of closing.splice(0)) await close(); });
@@ -28,7 +28,7 @@ describe('a share of a tab on your Chrome', () => {
   it('streams the tab while someone watches: at most four frames a second, the newest when they come faster, none while the connection is backed up', async () => {
     const chrome = await sharing();
     const shareId = crypto.randomUUID();
-    expect(await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 1600, maxHeight: 900 })).toEqual({ url: 'https://elsewhere.example/', title: 'Elsewhere', width: 1024, height: 512 });
+    expect(await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 1600, maxHeight: 900 })).toEqual({ url: 'https://elsewhere.example/', title: 'Elsewhere', width: 1024, height: 512, icon: null });
     expect(chrome.attached).toEqual(['target-9']);
     expect(screencasts(chrome.commands, 'target-9')).toEqual([{ format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 900 }]);
     const frames = () => chrome.sent.flatMap(message => message.shareFrame ?? []);
@@ -134,12 +134,52 @@ describe('a share of a tab on your Chrome', () => {
     expect(chrome.sent.filter(message => 'error' in message || 'result' in message).map(message => message.id)).toEqual(['relay-1']);
   });
 
+  it('says where your own pointer is over the tab while the account draws it for the viewers, from the overlay’s own world only', async () => {
+    const chrome = await sharing();
+    const shareId = crypto.randomUUID();
+    const pointer = (payload: string, executionContextId: number) => chrome.pageEvent('target-9', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload, executionContextId });
+    // An account that does not draw it (before extension 5.8) never asks, and nothing reports it.
+    await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
+    expect(chrome.overlays('target-9')).toEqual([]);
+    await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600, reportPointer: true });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, report: '__gitspaceStop' });
+    await pointer('pointer {"x":0.5,"y":0.25}', 50);
+    // A page's own script cannot reach the binding of the overlay's world.
+    await pointer('pointer {"x":0.9,"y":0.9}', 7);
+    await pointer('pointer {"x":2,"y":0.9}', 50);
+    await pointer('pointer null', 50);
+    expect(chrome.sent.filter(message => message.share)).toEqual([{ share: { event: 'pointer', shareId, at: { x: 0.5, y: 0.25 } } }, { share: { event: 'pointer', shareId, at: null } }]);
+    // Nobody watches any more: the overlay, which only reported, leaves.
+    await chrome.ask({ operation: 'shareUnwatch', shareId });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ remove: true });
+  });
+
+  it('sends its page’s icon, Chrome’s stored favicon as a small PNG, when shared and when it changes; none where Chrome has only its default', async () => {
+    const chrome = await sharing();
+    const icon = (n: number) => `data:image/png;base64,${browserBase64(png(n))}`;
+    chrome.favicons.set('https://elsewhere.example/', png(1));
+    await chrome.updateTab(9, { favIconUrl: 'https://elsewhere.example/favicon.ico' });
+    expect(await chrome.ask({ operation: 'shareTab', targetId: 'target-9' })).toEqual({ url: 'https://elsewhere.example/', title: 'Elsewhere', groupId: null, icon: icon(1) });
+    const shareId = crypto.randomUUID();
+    await chrome.fromRelay({ operation: 'shares', shares: [shareOf(shareId)] });
+    const pages = () => chrome.sent.flatMap(message => message.share ? [message.share] : []);
+    // A page whose icon Chrome has not stored yet has none; once the page loads with it stored, it goes out.
+    await chrome.updateTab(9, { url: 'https://elsewhere.example/next', title: 'Next', favIconUrl: 'https://elsewhere.example/next.ico' });
+    expect(pages().at(-1)).toEqual({ event: 'page', shareId, url: 'https://elsewhere.example/next', title: 'Next', width: 1200, height: 700, icon: null });
+    chrome.favicons.set('https://elsewhere.example/next', png(2));
+    await chrome.updateTab(9, { status: 'complete' });
+    expect(pages().at(-1)).toEqual({ event: 'page', shareId, url: 'https://elsewhere.example/next', title: 'Next', width: 1200, height: 700, icon: icon(2) });
+    // A page with no icon of its own has none.
+    await chrome.updateTab(9, { url: 'https://elsewhere.example/plain', title: 'Plain', favIconUrl: '' });
+    expect(pages().at(-1)).toMatchObject({ url: 'https://elsewhere.example/plain', icon: null });
+  });
+
   it('ends when its tab closes, and tells the account when its tab navigates', async () => {
     const chrome = await sharing();
     const shareId = crypto.randomUUID();
     await chrome.fromRelay({ operation: 'shares', shares: [shareOf(shareId)] });
     await chrome.updateTab(9, { url: 'https://elsewhere.example/next', title: 'Next' });
-    expect(chrome.sent.filter(message => message.share)).toEqual([{ share: { event: 'page', shareId, url: 'https://elsewhere.example/next', title: 'Next', width: 1200, height: 700 } }]);
+    expect(chrome.sent.filter(message => message.share)).toEqual([{ share: { event: 'page', shareId, url: 'https://elsewhere.example/next', title: 'Next', width: 1200, height: 700, icon: null } }]);
     await chrome.closeTab(9);
     expect(chrome.sent.filter(message => message.share).at(-1)).toEqual({ share: { event: 'closed', shareId } });
   });

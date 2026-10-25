@@ -218,7 +218,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const selected = child ? modelTools(model).filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : modelTools(model);
     await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
-  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport, async wake() { await options.operations.wakeAt(Date.now() + 1000); harness.resume(); } });
+  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport });
   lifecycleReady.resolve(lifecycle);
   await harness.commit(async tx => {
     const workspace = await tx.doc(WorkspaceDoc);

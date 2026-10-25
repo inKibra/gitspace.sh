@@ -5,7 +5,7 @@ import { BROWSER_EXTENSION_PROTOCOL, browserBase64, RuntimeAccountBrowserSignedG
 import { extensionFiles } from '../src/index.js';
 import { browserOverlayFunction } from '../src/overlay.js';
 
-type Tab = { id: number; groupId: number; url: string; index: number; windowId: number; title?: string; width?: number; height?: number };
+type Tab = { id: number; groupId: number; url: string; index: number; windowId: number; title?: string; width?: number; height?: number; favIconUrl?: string; status?: string };
 type Group = { id: number; title: string; color: string; collapsed: boolean };
 type Reply = Record<string, unknown> & { error?: string };
 type DebuggerEvent = (source: { targetId: string }, method: string, params: object) => void;
@@ -49,14 +49,19 @@ export async function settle() {
 
 /** A 32×16 JPEG header, as a screencast frame (base64): enough for its size to be read. */
 export const FRAME = browserBase64(Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0xff, 0xd9]));
+/** A PNG as Chrome's favicon store serves it: the PNG signature and a byte of its own, so icons tell apart. */
+export const png = (n: number) => Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, n]);
+/** The icon `_favicon` serves for a page Chrome has no icon of. */
+const DEFAULT_FAVICON = png(0);
 
 /** The installed service worker on a Chrome whose workspace group (Chrome group 7) holds an agent tab on each of
  * app.example, a.docs.example and bank.example; bank.example allows single steps only. Timers are fake (`advance`).
  * `local` seeds `chrome.storage.local`; `live` keeps the extension's own relay connection (`relay` completes it)
- * instead of a connected stand-in, which speaks `protocol` (an account that saves captures and downloads from 5).
+ * instead of a connected stand-in, which speaks `protocol` (an account that saves captures and downloads from 5) and,
+ * with `activity`, takes each group's colour and agents in its reports.
  * The account answers uploads (`requests`, `uploads`) and serves sealed drive files (`files`); `hold` delays an
  * upload request until the test lets it go. Capture's offscreen document runs as Chrome would load it (`recorders`). */
-export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number } = {}) {
+export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number; activity?: boolean } = {}) {
   const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const workspace = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const identity = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
@@ -100,6 +105,9 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const current: Toolbar = { icon: {}, badge: '', title: '', badgeColor: '' };
   const focused: Array<{ tabId: number; windowId: number }> = [];
   const ungrouped: number[] = [];
+  /** Tabs the extension closed (`chrome.tabs.remove`), and windows it brought to the front. */
+  const removed: number[] = [];
+  const focusedWindows: number[] = [];
   let clock = 0;
   let timerId = 0;
   const timers: Timer[] = [];
@@ -149,8 +157,12 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const uploads = new Map<string, { begin: Record<string, unknown>; parts: Uint8Array<ArrayBuffer>[]; completed: boolean; aborted: boolean }>();
   const files = new Map<string, Uint8Array<ArrayBuffer>>();
   const shares = new Map<string, RuntimeBrowserShare>();
+  /** Pairing details by the short code GitSpace showed for them; the account answers each code once. */
+  const pairingCodes = new Map<string, object>();
   const held: Array<{ matches: (request: AccountRequest) => boolean; release: Promise<void> }> = [];
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
+  /** Chrome's favicon store as `_favicon` serves it, by page; a page it has none of gets `DEFAULT_FAVICON`. */
+  const favicons = new Map<string, Uint8Array<ArrayBuffer>>();
   /** A share request (`POST /api/browser-relay/shares`): a share made (the account answers its link), or ended. */
   const shareRequest = (request: AccountRequest) => {
     const body = JSON.parse(new TextDecoder().decode(request.body));
@@ -166,18 +178,24 @@ export async function installed(options: { local?: Record<string, unknown>; live
     Object.assign(share, { endedAt: new Date().toISOString(), endReason: 'revoked' });
     return json({ status: 'ok', value: { share } });
   };
-  const fetch = async (input: URL | string, init: { method?: string; headers?: Record<string, string>; body?: Uint8Array<ArrayBuffer>; credentials?: string } = {}) => {
+  const fetch = async (input: URL | string, init: { method?: string; headers?: Record<string, string>; body?: Uint8Array<ArrayBuffer> | string; credentials?: string } = {}) => {
     const url = new URL(String(input));
+    if (url.protocol === 'chrome-extension:' && url.pathname === '/_favicon/') return new Response(favicons.get(url.searchParams.get('pageUrl') ?? '') ?? DEFAULT_FAVICON);
     if (url.origin !== 'https://account.gitspace.test') throw new Error(`Unexpected fetch of ${url.href}`);
     if (url.pathname.startsWith('/files/')) {
       const bytes = files.get(url.pathname);
       return bytes ? new Response(bytes) : new Response('Not found', { status: 404 });
     }
-    const request = { method: init.method ?? 'GET', pathname: url.pathname, header: init.headers?.['x-gitspace-browser-upload'] ?? null, body: init.body ?? new Uint8Array(0) };
+    const request = { method: init.method ?? 'GET', pathname: url.pathname, header: init.headers?.['x-gitspace-browser-upload'] ?? null, body: typeof init.body === 'string' ? new TextEncoder().encode(init.body) : init.body ?? new Uint8Array(0) };
     requests.push(request);
     notify();
     for (const hold of held) if (hold.matches(request)) await hold.release;
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/shares') return shareRequest(request);
+    if (request.method === 'POST' && url.pathname === '/api/browser-relay/pairing-code') {
+      const code = String(JSON.parse(new TextDecoder().decode(request.body)).code), details = pairingCodes.get(code);
+      pairingCodes.delete(code);
+      return details ? json({ status: 'ok', value: details }) : new Response(JSON.stringify({ error: { code: 'PAIRING_CODE_REJECTED', message: 'That code is wrong, used or expired.' } }), { status: 404 });
+    }
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/uploads') {
       const begin = JSON.parse(new TextDecoder().decode(request.body));
       const id = `upload-${uploads.size + 1}`;
@@ -258,7 +276,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
 
   const chrome = {
     runtime: {
-      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.7.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
+      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.7.0' }), getPlatformInfo: async () => ({ os: 'win', arch: 'x86-64' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
       getContexts: async () => offscreenOpen ? [{ contextType: 'OFFSCREEN_DOCUMENT' }] : [],
       sendMessage: (message: Record<string, unknown>) => deliver(offscreenListeners, message, workerSender),
     },
@@ -282,6 +300,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
       query: async (query: { groupId?: number; active?: boolean }) => [...tabs.values()].filter(tab => query.active ? tab.id === activeTabId && (query.groupId === undefined || tab.groupId === query.groupId) : tab.groupId === query.groupId),
       update: async (tabId: number) => { focused.push({ tabId, windowId: tabs.get(tabId)?.windowId ?? -1 }); },
       ungroup: async (tabId: number) => { ungrouped.push(tabId); },
+      // Like Chrome: the tab goes, and `onRemoved` reports it.
+      remove: async (ids: number | number[]) => { for (const id of [ids].flat()) { removed.push(id); tabs.delete(id); for (const listener of tabRemoved) listener(id); } },
       // Like Chrome: a new group when none is named, and each tab that moved reports its group.
       group: async ({ tabIds, groupId }: { tabIds: number[]; groupId?: number }) => {
         const id = groupId ?? 100 + groups.size;
@@ -296,7 +316,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
       update: async (id: number, change: Partial<Group>) => { const found = groups.get(id); if (!found) throw new Error(`No group with id: ${id}.`); Object.assign(found, change); if (change.title !== undefined) titles.push(change.title); },
       onRemoved: { addListener() {} },
     },
-    windows: { update: async () => {} },
+    windows: { update: async (windowId: number, change: { focused?: boolean }) => { if (change.focused) focusedWindows.push(windowId); } },
     alarms: {
       create: async (name: string, info: { when?: number; periodInMinutes?: number }) => { alarms.set(name, info); },
       clear: async (name: string) => alarms.delete(name),
@@ -337,7 +357,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
     sent, notify,
   });
   runInContext(extensionFiles('https://account.gitspace.test')['background.js'] ?? '', context);
-  if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4};`, context);
+  if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4}; accountActivity = ${options.activity === true};`, context);
   await settle();
   /** Runs the timers due within `ms` of fake time, in order. */
   const advance = async (ms: number) => {
@@ -384,14 +404,15 @@ export async function installed(options: { local?: Record<string, unknown>; live
   };
   /** Chrome fires an alarm. */
   const alarm = async (name: string) => { alarmListener({ name }); await settle(); };
-  /** The account answers the extension's latest connection: the pairing handshake, then ready at `protocol`. */
-  const relay = async (protocol = BROWSER_EXTENSION_PROTOCOL) => {
+  /** The account answers the extension's latest connection: the pairing handshake, then ready at `protocol`, with
+   * `ready`'s other fields. */
+  const relay = async (protocol = BROWSER_EXTENSION_PROTOCOL, ready: Record<string, unknown> = {}) => {
     const socket = sockets.at(-1);
     if (!socket) throw new Error('The extension opened no relay connection');
     socket.readyState = 1;
     socket.onmessage?.({ data: JSON.stringify({ pairing: 'challenge', serverNonce: 'a'.repeat(64) }) }); await settle();
     socket.onmessage?.({ data: JSON.stringify({ pairing: 'server' }) }); await settle();
-    socket.onmessage?.({ data: JSON.stringify({ ready: true, protocol }) }); await settle();
+    socket.onmessage?.({ data: JSON.stringify({ ...ready, ready: true, protocol }) }); await settle();
   };
   /** The relay sends a message on the extension's latest connection; what follows from it has happened once this
    * resolves. */
@@ -454,8 +475,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
     return proof.pairingId === pairingId && proof.generation === 1 && crypto.subtle.verify('Ed25519', identity.publicKey, Buffer.from(proof.signature, 'base64'), new TextEncoder().encode(message));
   };
   return {
-    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, ungrouped, stored: state,
-    requests, uploads, uploaded, files, shares, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
+    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, stored: state,
+    requests, uploads, uploaded, files, shares, pairingCodes, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
     execute, authorize, begin, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor,
     activate: (tabId: number) => { activeTabId = tabId; },
     answer: (respond: (command: DebuggerCommand) => unknown) => { answer = respond; },

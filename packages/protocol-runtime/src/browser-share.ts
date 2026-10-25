@@ -4,7 +4,8 @@ import { RuntimeBrowserNameSchema } from './browser.js';
 /**
  * Share links (docs/APERTURE-DESIGN.md §8, B1): one live tab on your Chrome, watched by people through
  * `https://<account>/s/<shareId>#<secret>`. Viewers always see the tab and point (their named pointers are drawn on the
- * tab); with `comment` they also comment on what they point at, and their comments land in the tab's workspace. No
+ * tab; the sharer's own pointer, which the tab must not draw under their cursor, is drawn by each viewer); with
+ * `comment` they also comment on what they point at, and their comments land in the tab's workspace. No
  * viewer ever clicks or types in the tab. A share needs an expiry and ends when revoked, when it expires, or when its
  * tab closes. Pasted by you into one of your workspaces' composer, the same link connects the tab to that workspace's
  * group instead (`browserShareConnect`); the agent sees the tab, never the link.
@@ -73,14 +74,23 @@ export const RuntimeBrowserShareSchema = z.strictObject({
 });
 export type RuntimeBrowserShare = z.infer<typeof RuntimeBrowserShareSchema>;
 
+/** A shared page's icon: its favicon as your Chrome has it, a PNG of at most 32×32 pixels as a data URL. */
+export const RuntimeBrowserShareIconSchema = z.string().max(12_000).regex(/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/u);
+
 /** What the greeting shows before anyone joins (`POST /api/shares/<shareId>/preview` with the secret). */
 export const RuntimeBrowserSharePreviewSchema = z.strictObject({
   /** Who is sharing: the account's name. */
   sharer: z.string().max(128),
-  page: z.strictObject({ title: z.string().max(500), site: z.string().max(253) }),
+  /** The shared page; `icon` is null until its Chrome sends one (extension 5.8 and later) or where the page has none. */
+  page: z.strictObject({ title: z.string().max(500), site: z.string().max(253), icon: RuntimeBrowserShareIconSchema.nullable() }),
   comment: z.boolean(), expiresAt: z.iso.datetime(),
   /** Set once the share has ended: the greeting says "This share has ended". */
   ended: RuntimeBrowserShareEndSchema.nullable(),
+  /** The name of the Chrome holding the tab, for the account's own devices (a pasted link's chip names it); null for
+   * everyone else. */
+  browser: RuntimeBrowserNameSchema.nullable(),
+  /** Whether that Chrome is connected now, so the tab shows as soon as someone joins. */
+  online: z.boolean(),
 });
 export type RuntimeBrowserSharePreview = z.infer<typeof RuntimeBrowserSharePreviewSchema>;
 
@@ -142,6 +152,9 @@ export const RuntimeBrowserShareServerMessageSchema = z.discriminatedUnion('type
   z.strictObject({ type: z.literal('frame'), data: z.string().max(1_500_000), width: z.number().int().positive(), height: z.number().int().positive() }),
   /** Everyone watching, with their pointers (null: off the tab). */
   z.strictObject({ type: z.literal('viewers'), viewers: z.array(RuntimeBrowserShareViewerSchema.extend({ at: RuntimeBrowserSharePointSchema.nullable() })) }),
+  /** The sharer's own pointer on the tab (null: off it), as their Chrome reports it (extension 5.8 and later). Each
+   * viewer draws it over the frames: it is not drawn on the tab, where the sharer's own cursor already is. */
+  z.strictObject({ type: z.literal('sharer'), at: RuntimeBrowserSharePointSchema.nullable() }),
   /** The answer to the latest `hit`: what is under that point, or nothing. */
   z.strictObject({ type: z.literal('hit'), at: RuntimeBrowserSharePointSchema, target: RuntimeBrowserShareTargetSchema.nullable() }),
   /** The share's comments, oldest first, whenever one is added. */

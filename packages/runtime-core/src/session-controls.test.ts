@@ -21,7 +21,7 @@ async function open(browser: NonNullable<SessionControlServices['browser']> = un
   registry.install(sessionControlsExtension);
   const harness = await Harness.open(storage, { registry, models: createModels(), settings: { compaction: { enabled: false } } }, context);
   const root = await harness.root(context);
-  const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference: unexpected, configureModel: unexpected, wake: async () => {} });
+  const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference: unexpected, configureModel: unexpected });
   const controls = createSessionControls({
     harness, root, lifecycle, admitInference: unexpected, configureModel: unexpected, reload: async () => {},
     catalog: async () => ({ models: [{ provider: 'test', id: 'astra', name: 'Astra', contextWindow: 100000 }], roles }),
@@ -74,5 +74,20 @@ test('share links and page comments are a person’s: each command asks the work
       { action: 'shareConnect', shareId, secret: 's'.repeat(43) },
       { action: 'pageComments' },
     ]);
+  } finally { await harness.close(context); }
+});
+
+test('Stop, Close tab and Focus in Chrome are a person’s: each asks the workspace’s browser management for its group and tab', async () => {
+  const groupId = '00000000-0000-4000-8000-00000000000a';
+  const asked: RuntimeBrowserManagement[] = [];
+  const { harness, root, controls } = await open(async (_conversationId, _machineId, command) => { asked.push(command); return null; });
+  try {
+    const id = String(root.id);
+    await expect(controls.execute(id, { type: 'browserStop', groupId })).rejects.toThrow('Browser management requires human capability');
+    expect(asked).toEqual([]);
+    await controls.execute(id, { type: 'browserStop', groupId }, true);
+    await controls.execute(id, { type: 'browserCloseTab', groupId, targetId: 'tab' }, true);
+    expect(await controls.execute(id, { type: 'browserFocusTab', groupId, targetId: 'tab' }, true)).toMatchObject({ control: { sessionId: id } });
+    expect(asked).toEqual([{ action: 'stop', groupId }, { action: 'closeTab', groupId, targetId: 'tab' }, { action: 'focusTab', groupId, targetId: 'tab' }]);
   } finally { await harness.close(context); }
 });

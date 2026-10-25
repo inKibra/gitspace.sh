@@ -25,19 +25,21 @@ type Connection = 'connected' | 'connecting' | 'off' | 'update' | 'unpaired';
 type Acting = { agent: string; doing: string };
 type Group = { groupId: string; name: string; color: string; project: string | null; tabs: number; acting: Acting | null };
 type Recording = { captureId: string; title: string; track: 'video' | 'frames'; startedAt: number; saving: boolean };
-/** What the service worker's `popupState` answers. `chrome` (this Chrome's name) and `projects` (those that approved
- * it) are null until the account said. */
+/** What the service worker's `popupState` answers. `chrome` (this Chrome's name), `pairedAt` (when you paired it) and
+ * `projects` (those that approved it) are null until the account said; `pairedAt` stays null for a Chrome paired before
+ * GitSpace recorded it. */
 type PopupState = {
   enabled: boolean; reenableAt: number | null; account: string; chrome: string | null; connection: Connection;
-  projects: string[] | null; fingerprint: string | null; compatibility: string | null; groups: Group[];
+  projects: string[] | null; fingerprint: string | null; pairedAt: string | null; compatibility: string | null; groups: Group[];
   activeTab: { tabId: number; groupId: string; name: string; color: string; capture: { recording: string | null; unavailable: string | null } } | null;
   shareTab: { tabId: number; host: string; grouped: boolean; unavailable: string | null } | null;
   shares: RuntimeBrowserShare[]; recordings: Recording[]; log: RunLogEntry[];
 };
+/** LEGACY: pairing details pasted as JSON, as GitSpace showed them before short pairing codes; remove at 5.9. */
 type Pairing = { code: string; pairingId: string; generation: number; expiresAt: string; trust: { algorithm: 'Ed25519'; accountId: string; publicKey: string } };
 type PopupRequest = { popupState: true } | { setEnabled: { enabled: boolean; minutes?: number } } | { stopGroup: string } | { focusGroup: string }
   | { ungroupTab: number } | { startCapture: number } | { stopCapture: string } | { shareCreate: { tabId: number; comment: boolean; expiresInMinutes: number } }
-  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pair: Pairing } | { resetIdentity: true };
+  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { pair: Pairing } | { resetIdentity: true };
 /** The service worker answers the popup's next state, `ok` for pairing and reset, or why it refused. */
 type Reply = PopupState | { ok: true } | { error: string };
 declare const chrome: { runtime: { sendMessage(message: PopupRequest): Promise<Reply> } };
@@ -56,7 +58,7 @@ async function request(message: PopupRequest): Promise<PopupState | null> {
   if ('error' in reply) throw new Error(reply.error);
   return 'ok' in reply ? null : reply;
 }
-/** Pairing details as GitSpace shows them (Plugins → Browsers → Pair a Chrome), still valid. */
+/** LEGACY (remove at 5.9): pairing details pasted as JSON, as GitSpace showed them before short codes, still valid. */
 function isPairing(value: unknown): value is Pairing {
   if (typeof value !== 'object' || value === null || !('code' in value) || !('pairingId' in value) || !('generation' in value) || !('expiresAt' in value) || !('trust' in value)) return false;
   const { code, pairingId, generation, expiresAt, trust } = value;
@@ -250,10 +252,11 @@ function Off({ state, act }: { state: PopupState; act: Act }) {
   </div>;
 }
 
-/** This Chrome's identity: the fingerprint to compare when pairing, pairing, reset, and the latest scripts. */
+/** This Chrome's identity: the fingerprint to compare when pairing, when you paired it, pairing with a code, reset, and
+ * the latest scripts. */
 function Identity({ state, onBack, onPair, onReset }: { state: PopupState; onBack(): void; onPair(text: string): Promise<boolean>; onReset(): void }) {
-  const [details, setDetails] = useState('');
-  const submit = (event: FormEvent) => { event.preventDefault(); void onPair(details).then(paired => { if (paired) setDetails(''); }); };
+  const [code, setCode] = useState('');
+  const submit = (event: FormEvent) => { event.preventDefault(); void onPair(code).then(paired => { if (paired) setCode(''); }); };
   return <>
     <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
       <Button variant="ghost" size="compact" onClick={onBack}>← Back</Button>
@@ -264,14 +267,15 @@ function Identity({ state, onBack, onPair, onReset }: { state: PopupState; onBac
       {state.fingerprint ? <>
         <p className="font-mono text-body tracking-wide">{shortFingerprint(state.fingerprint)}</p>
         <p className="break-all font-mono text-[10px] text-muted-foreground">{state.fingerprint}</p>
+        {state.pairedAt ? <p className="text-caption">Paired {new Date(state.pairedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}</p> : null}
         <p className="text-[11px] text-muted-foreground">Compare it with the one GitSpace shows when you pair this Chrome, then confirm it there.</p>
       </> : <p className="text-caption text-muted-foreground">No identity yet: pairing makes one.</p>}
     </section>
     <section className="flex flex-col gap-2 border-t border-border px-4 py-3">
       <Heading>Pair</Heading>
-      <p className="text-[11px] text-muted-foreground">Paste the pairing details from GitSpace: Plugins → Browsers → Pair a Chrome.</p>
+      <p className="text-[11px] text-muted-foreground">Type the code GitSpace shows in Plugins → Browsers → Pair a Chrome. It works once, for 10 minutes.</p>
       <form className="flex gap-2" onSubmit={submit}>
-        <input value={details} onChange={event => setDetails(event.target.value)} autoComplete="off" required placeholder="Pairing details" aria-label="Pairing details" className="h-7 min-w-0 flex-1 rounded-lg border border-border bg-transparent px-2.5 text-caption outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]" />
+        <input value={code} onChange={event => setCode(event.target.value)} autoComplete="off" spellCheck={false} required placeholder="K7P-2QX" aria-label="Pairing code" className="h-7 min-w-0 flex-1 rounded-lg border border-border bg-transparent px-2.5 font-mono text-caption tracking-wider outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]" />
         <Button size="compact" type="submit">Pair</Button>
       </form>
     </section>
@@ -320,10 +324,13 @@ function Popup() {
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)); return false; }
   };
   const pair = (text: string) => {
+    const confirm = 'Compare the fingerprint above with the one GitSpace shows, then confirm it there before agents can use this Chrome.';
+    if (!text.trim().startsWith('{')) return identity({ pairCode: text }, confirm);
+    // LEGACY (remove at 5.9): pairing details pasted as JSON.
     let value: unknown = null;
     try { value = JSON.parse(text); } catch {}
-    if (!isPairing(value)) { setMessage('Copy fresh pairing details from GitSpace: Plugins → Browsers → Pair a Chrome'); return Promise.resolve(false); }
-    return identity({ pair: value }, 'Compare the fingerprint above with the one GitSpace shows, then confirm it there before agents can use this Chrome.');
+    if (!isPairing(value)) { setMessage('Get a new pairing code from GitSpace: Plugins → Browsers → Pair a Chrome'); return Promise.resolve(false); }
+    return identity({ pair: value }, confirm);
   };
   if (!state) return <div className="px-4 py-3 text-caption text-muted-foreground">{message}</div>;
   return <div className="flex flex-col bg-surface-1 text-left" inert={busy}>

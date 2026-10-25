@@ -54,7 +54,10 @@ async function workspace() {
 
 /** A paired Chrome, confirmed and approved for the project, whose extension reports `protocol`. */
 async function chrome(relay: UserRelayDO, root: Identity, projectId: string, options: { protocol: number; ip: string }, answer: (message: Message) => unknown): Promise<Chrome> {
-  const pairing = await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+  // GitSpace starts the pairing; the extension redeems its short code for the pairing's details.
+  const redeemed = await relay.browserRelayRedeemPairingCode((await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey })).code, '198.51.100.1', 'wss://account.test/api/browser-relay/extension');
+  if (!redeemed.ok) throw new Error(redeemed.message);
+  const pairing = redeemed.value;
   const socket = (await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': options.ip } }))).webSocket;
   if (!socket) throw new Error('Missing extension socket');
   const challenge = frame(socket); socket.accept();
@@ -68,13 +71,15 @@ async function chrome(relay: UserRelayDO, root: Identity, projectId: string, opt
     received.push(message); operations.deliver();
     if (typeof message.id !== 'number') return;
     const { id } = message;
-    void Promise.resolve().then(() => message.operation === 'tabs' ? [] : answer(message)).then(result => socket.send(JSON.stringify({ id, result: result ?? {} })), (error: unknown) => socket.send(JSON.stringify({ id, error: { message: error instanceof Error ? error.message : String(error) } })));
+    // Like an extension, it answers only while its socket is open.
+    const reply = (value: object) => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id, ...value })); };
+    void Promise.resolve().then(() => message.operation === 'tabs' ? [] : answer(message)).then(result => reply({ result: result ?? {} }), (error: unknown) => reply({ error: { message: error instanceof Error ? error.message : String(error) } }));
   });
   const status = (await relay.browserRelayStatus()).pairings.find(item => item.pairingId === pairing.pairingId);
   if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
   await relay.browserRelayConfirm(pairing.pairingId, status.pairedKeyFingerprint);
   const settings = await relay.browserRelayProjectSettings(projectId);
-  await relay.browserRelaySetProjectSettings(projectId, settings.revision, { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, note: '' }] });
+  await relay.browserRelaySetProjectSettings(projectId, settings.revision, { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId }] });
   return { socket, identity, pairingId: pairing.pairingId, generation: pairing.generation, received, placement: await relay.browserRelayPlacement(projectId, pairing.pairingId), next: operations.next };
 }
 
@@ -169,7 +174,7 @@ test('a tab shared from your Chrome: its link greets only with its secret, viewe
       // The greeting needs the secret: a wrong one and an unknown share get the same answer.
       expect(await route(shareId, 'preview', { secret: 'x'.repeat(43) })).toMatchObject({ status: 404, error: { code: 'SHARE_UNKNOWN' } });
       expect(await route(crypto.randomUUID(), 'preview', { secret })).toMatchObject({ status: 404, error: { code: 'SHARE_UNKNOWN' } });
-      expect(await route(shareId, 'preview', { secret })).toEqual({ status: 200, value: { sharer: 'test', page: { title: 'Docs', site: 'example.com' }, comment: false, expiresAt: made.expiresAt, ended: null } });
+      expect(await route(shareId, 'preview', { secret })).toEqual({ status: 200, value: { sharer: 'test', page: { title: 'Docs', site: 'example.com', icon: null }, comment: false, expiresAt: made.expiresAt, ended: null, browser: null, online: true } });
       expect(await route(shareId, 'join', { secret: 'x'.repeat(43), name: 'Mia' })).toMatchObject({ status: 404, error: { code: 'SHARE_UNKNOWN' } });
 
       // Mia watches: the Chrome streams the tab at the largest viewer's size, and its frames reach her.
@@ -394,13 +399,62 @@ test('one of the account’s own devices joins under the account’s name, not a
     const root = await keys();
     const browser = await chrome(relay, root, projectId, { protocol: 6, ip: '192.0.2.56' }, message => message.operation === 'shareTab' ? { ...page, groupId: null } : {});
     try {
-      const { shareId, secret } = await share(browser, { targetId: 'your-tab', comment: false, expiresInMinutes: 15 });
-      expect(await route(shareId, 'preview', { secret })).toMatchObject({ status: 200, value: { sharer: 'Bradley' } });
+      const { share: made, shareId, secret } = await share(browser, { targetId: 'your-tab', comment: false, expiresInMinutes: 15 });
+      // Asked by one of the account's devices, the greeting also names the Chrome holding the tab; asked by anyone else, not.
+      const previewPath = `/api/shares/${shareId}/preview`, previewBody = encoder.encode(JSON.stringify({ secret }));
+      const signedPreview = signRpcRequest({ deviceId: binding.deviceId, signingPrivateKey: deviceKey, method: 'POST', path: previewPath, body: previewBody });
+      expect(await route(shareId, 'preview', { secret }, { 'x-gitspace-device': signedPreview })).toMatchObject({ status: 200, value: { sharer: 'Bradley', browser: made.browser } });
+      expect(await route(shareId, 'preview', { secret })).toMatchObject({ status: 200, value: { sharer: 'Bradley', browser: null } });
+      expect(await route(shareId, 'preview', { secret }, { 'x-gitspace-device': 'forged' })).toMatchObject({ status: 401 });
       const path = `/api/shares/${shareId}/join`, body = encoder.encode(JSON.stringify({ secret, name: 'typed name' }));
       const device = signRpcRequest({ deviceId: binding.deviceId, signingPrivateKey: deviceKey, method: 'POST', path, body });
       expect(await route(shareId, 'join', { secret, name: 'typed name' }, { 'x-gitspace-device': device })).toMatchObject({ status: 200, value: { name: 'Bradley', guest: false } });
       expect(await route(shareId, 'join', { secret, name: 'typed name' }, { 'x-gitspace-device': 'forged' })).toMatchObject({ status: 401 });
       expect(await route(shareId, 'join', { secret, name: 'typed name' })).toMatchObject({ status: 200, value: { name: 'typed name', guest: true } });
     } finally { browser.socket.close(); }
+  });
+});
+
+test('your Chrome sends the shared page’s icon for the greeting, which says whether the Chrome is online, and your own pointer over the tab for the viewers to draw, at most ten times a second', async () => {
+  const { projectId } = await workspace();
+  const icon = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==';
+  await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
+    const root = await keys();
+    const browser = await chrome(relay, root, projectId, { protocol: 6, ip: '192.0.2.57' }, message => message.operation === 'shareTab' ? { ...page, groupId: null, icon } : message.operation === 'shareWatch' ? { ...page, width: 1280, height: 800, icon } : {});
+    const pointer = (at: { x: number; y: number } | null) => browser.socket.send(JSON.stringify({ share: { event: 'pointer', shareId, at } }));
+    const { shareId, secret } = await share(browser, { targetId: 'your-tab', comment: false, expiresInMinutes: 60 });
+    try {
+      expect(await route(shareId, 'preview', { secret })).toMatchObject({ status: 200, value: { page: { title: 'Docs', site: 'example.com', icon }, online: true } });
+      // The tab moves on to a page whose icon is not a small PNG: it shows none.
+      browser.socket.send(JSON.stringify({ share: { event: 'page', shareId, url: 'https://example.com/next', title: 'Next', width: 1280, height: 800, icon: 'data:image/svg+xml;base64,PHN2Zz4=' } }));
+      await expect.poll(async () => (await route(shareId, 'preview', { secret })).value).toMatchObject({ page: { title: 'Next', icon: null } });
+
+      // Mia watches: the Chrome is asked for your pointer too, and she sees where it is, the latest at most once per
+      // tenth of a second.
+      const mia = await watch(shareId, secret, 'Mia');
+      expect(await browser.next('shareWatch')).toMatchObject({ shareId, reportPointer: true });
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout'] });
+      vi.setSystemTime(Date.now() + 1000);
+      pointer({ x: 0.25, y: 0.5 });
+      expect(await mia.next('sharer')).toEqual({ type: 'sharer', at: { x: 0.25, y: 0.5 } });
+      for (const x of [0.3, 0.35, 0.4]) pointer({ x, y: 0.5 });
+      // The Chrome's messages are taken in order: this frame comes after the pointer moved.
+      browser.socket.send(JSON.stringify({ shareFrame: { shareId, data: 'frame-1', width: 800, height: 500 } }));
+      await mia.next('frame');
+      expect(mia.received.filter(message => message.type === 'sharer')).toHaveLength(1);
+      vi.advanceTimersByTime(100);
+      expect(await mia.next('sharer')).toEqual({ type: 'sharer', at: { x: 0.4, y: 0.5 } });
+      vi.useRealTimers();
+
+      // Someone joining later sees it where it is now; when the Chrome goes, so does the pointer, and the greeting says
+      // the Chrome is offline.
+      const ana = await watch(shareId, secret, 'Ana');
+      expect(await ana.next('sharer')).toEqual({ type: 'sharer', at: { x: 0.4, y: 0.5 } });
+      browser.socket.close();
+      expect(await mia.next('sharer')).toEqual({ type: 'sharer', at: null });
+      expect(await route(shareId, 'preview', { secret })).toMatchObject({ status: 200, value: { online: false } });
+      mia.socket.close();
+      ana.socket.close();
+    } finally { vi.useRealTimers(); if (browser.socket.readyState === WebSocket.OPEN) browser.socket.close(); }
   });
 });

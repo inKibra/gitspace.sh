@@ -140,9 +140,12 @@ export class CloudFilesProof extends DurableObject {
     const attachments = new AttachmentStore(this.ctx.storage, { seal: async secret => secret, open: async secret => secret, dispatch: async () => { throw new Error('No machine transport in fixture'); } });
     const admission = RuntimeAttachInputSchema.parse({ projectId: 'p', workspaceId: 'cloud', machineId: 'm', generation: 0, checkout: { kind: 'shared', branch: 'main' }, capabilities: ['read', 'write', 'edit'] });
     store = open(); failPush = false;
-    // An uncertain write finishes when the same attempt runs again; nothing waits for it meanwhile.
-    assert.equal((await invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry')).status, 'completed');
+    // A later wake finishes an uncertain write with the commit it planned; nothing waits for it meanwhile.
+    assert.equal(store.hasPendingWrites(), true);
+    assert.deepEqual((await store.finishPendingWrites()).map(result => result.status), ['completed']);
     assert.equal(files.get('retry.txt'), 'durable');
+    assert.equal(store.hasPendingWrites(), false);
+    assert.equal((await invoke('write', { path: 'retry.txt', content: 'durable' }, 'retry')).status, 'completed');
     loseResponse = true;
     await assert.rejects(invoke('write', { path: 'published.txt', content: 'persisted before response' }, 'published'));
     const pushedBeforeRecovery = pushes;

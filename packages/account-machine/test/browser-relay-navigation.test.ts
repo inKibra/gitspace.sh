@@ -26,7 +26,7 @@ function harness(timeout = 60_000, sameDocument = false, destination = 'https://
     clearTimeout: (id: number) => { timers.delete(id); },
     indexedDB: { open: () => ({}) }, expiresAt, destination,
     chrome: {
-      runtime: { onMessage: { addListener() {} } }, storage: { local: { remove: async () => {}, get: async () => ({}) } },
+      runtime: { getPlatformInfo: async () => ({ os: 'linux' }), onMessage: { addListener() {} } }, storage: { local: { remove: async () => {}, get: async () => ({}) } },
       debugger: {
         getTargets: async () => [{ id: 'target', tabId: 1, type: 'page', url }],
         attach: async () => {}, detach: async () => { detached++; },

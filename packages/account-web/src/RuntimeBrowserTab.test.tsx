@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
-import { RuntimeSnapshotSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserGroupAgent, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserRun, type RuntimeBrowserShare, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { liveNotices } from './live-notices.js';
@@ -16,9 +16,15 @@ vi.mock('./browser-relay-client.js', () => ({ projectBrowserSettings: vi.fn(), u
 
 const work = '00000000-0000-4000-8000-000000000001';
 const group = '00000000-0000-4000-8000-0000000000aa';
+const home = '00000000-0000-4000-8000-000000000002';
+const homeGroup = '00000000-0000-4000-8000-0000000000ab';
+const cloudGroup = '00000000-0000-4000-8000-0000000000ac';
+const machineGroup = '00000000-0000-4000-8000-0000000000bb';
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', cursor: 0, conversations: [], attachments: [], tasks: [], questions: [], documents: {} });
-const empty = { groupId: null, groupName: null, running: 0, tabs: [] };
+const empty = { groupId: null, groupName: null, groupColor: null, running: 0, agents: [], tabs: [] };
 const started = '2026-10-24T12:00:00.000Z';
+/** The main agent's script on a Chrome, begun 12 s before `started`. */
+const acting: RuntimeBrowserGroupAgent = { agent: 'main', tool: 'run', commands: 4, startedAt: '2026-10-24T11:59:48.000Z', doing: 'Clicking “Medium”' };
 let overview: RuntimeBrowserOverview;
 let previews: Record<string, RuntimeBrowserPreview>;
 let captures: RuntimeBrowserCaptureView[];
@@ -56,7 +62,15 @@ function share(id: number, fields: Partial<RuntimeBrowserShare> = {}): RuntimeBr
 function comment(id: number, text: string, guest: boolean, cropUrl: string | null): RuntimeBrowserPageCommentView {
   return { cropUrl, comment: { version: 1, commentId: `00000000-0000-4000-8000-0000000000f${id}`, shareId: null, by: { name: guest ? 'Ana' : 'Brad', guest }, text, page: { url: 'https://app.example.com/login', title: 'Login' }, target: { box: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, role: 'button', name: 'Sign in', text: 'Sign in', selectors: ['#sign-in'] }, region: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, viewport: { width: 1280, height: 720 }, scroll: { x: 0, y: 0 }, crop: null, createdAt: started } };
 }
-const chromeWithTab = (): RuntimeBrowserOverview['chromes'] => [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', running: 0, tabs: [{ targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'you', usable: true }] }];
+const chromeWithTab = (): RuntimeBrowserOverview['chromes'] => [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', groupColor: null, running: 0, agents: [], tabs: [{ targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'you', usable: true }] }];
+function run(id: number, fields: Partial<RuntimeBrowserRun> = {}): RuntimeBrowserRun {
+  return { attemptId: `attempt-${id}`, at: started, where: { kind: 'cloud' }, tool: 'run', summary: `Run ${id}`, outcome: 'ok', durationMs: 1200, details: [], ...fields };
+}
+/** `HH:MM` of `iso` in local time. */
+function clock(iso: string): string {
+  const date = new Date(iso);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
 function capture(id: number, fields: Partial<RuntimeBrowserCapture>, files: Record<string, string> = {}): RuntimeBrowserCaptureView {
   return { capture: { version: 1, captureId: `00000000-0000-4000-8000-0000000000c${id}`, name: `Capture ${id}`, by: 'agent', source: 'headless', browser: 'Cloud browser', page: { url: 'https://app.example.com', title: 'App' }, target: null, startedAt: started, endedAt: started, state: 'saved', reason: null, tracks: {}, ...fields }, files };
 }
@@ -65,7 +79,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   vi.clearAllMocks();
-  overview = { sites: { origins: ['https://app.example.com', 'https://bank.example.com'], stepsOnly: ['https://bank.example.com'] }, cloud: { groupId: null, running: 0, tabs: [] }, machines: [], chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }] };
+  overview = { sites: { origins: ['https://app.example.com', 'https://bank.example.com'], stepsOnly: ['https://bank.example.com'], revision: null }, cloud: { groupId: null, running: 0, tabs: [] }, machines: [], chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: false, isDefault: false, ...empty }], runs: [] };
   previews = {};
   captures = [];
   shares = [];
@@ -73,7 +87,7 @@ beforeEach(() => {
   rpc.session.mockImplementation(async ({ command }: { command: RuntimeSessionCommand }) => {
     if (command.type === 'browserOverview') return { status: 'ok', value: { control: {}, browserOverview: overview } };
     if (command.type === 'browserPreview') return { status: 'ok', value: { control: {}, browserPreview: previews[command.targetId] } };
-    if (command.type === 'browserRevoke') return { status: 'ok', value: { control: {} } };
+    if (command.type === 'browserRevoke' || command.type === 'browserStop' || command.type === 'browserCloseTab' || command.type === 'browserFocusTab') return { status: 'ok', value: { control: {} } };
     if (command.type === 'browserStatus') return { status: 'ok', value: { control: {}, browserStatus: { groups: [], records: [] } } };
     if (command.type === 'browserCaptures') return { status: 'ok', value: { control: {}, browserCaptures: captures } };
     if (command.type === 'browserCaptureStart') {
@@ -119,7 +133,7 @@ it('offers to approve a confirmed Chrome when none is approved here, making it t
   expect(container.textContent).toContain("Agents here can't use your Chrome yet");
   expect(container.textContent).toContain('Work Chrome is paired and online, but not approved for Golconda');
   await act(async () => button('Approve Work Chrome for Golconda').click());
-  expect(updateProjectBrowserSettings).toHaveBeenCalledWith('project', 4, { defaultPairingId: work, approvals: [{ pairingId: work, note: 'staging admin' }] });
+  expect(updateProjectBrowserSettings).toHaveBeenCalledWith('project', 4, { defaultPairingId: work, approvals: [{ pairingId: work }] });
   expect(container.textContent).not.toContain("Agents here can't use your Chrome yet");
   expect(container.querySelector(`[aria-label="Work Chrome"]`)?.textContent).toContain('Project default');
 });
@@ -133,7 +147,7 @@ it('links to pairing when no Chrome is confirmed on the account', async () => {
 });
 
 it('shows each tab with who opened it and its preview, or why there is none, and no recovery section without records', async () => {
-  overview = { ...overview, chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', running: 2, tabs: [
+  overview = { ...overview, chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', groupColor: null, running: 2, agents: [], tabs: [
     { targetId: 'tab-a', url: 'https://app.example.com/login', title: 'Login', addedBy: 'agent', usable: true },
     { targetId: 'tab-b', url: 'https://app.example.com/settings', title: 'Settings', addedBy: 'you', usable: true },
   ] }] };
@@ -145,6 +159,7 @@ it('shows each tab with who opened it and its preview, or why there is none, and
   const chrome = container.querySelector('[aria-label="Work Chrome"]')!;
   expect(chrome.textContent).toContain('feature-login');
   expect(chrome.textContent).toContain('▶ feature-login');
+  // LEGACY: an extension before 5.8 reports running scripts but no agents.
   expect(chrome.textContent).toContain('2 scripts running');
   expect(chrome.textContent).toContain('Opened by agent');
   expect(chrome.textContent).toContain('You added it');
@@ -197,7 +212,7 @@ it('rereads the overview and visible previews every ten seconds', async () => {
 });
 
 it('revokes this workspace\'s group on a Chrome only after you confirm, then shows it without a group', async () => {
-  overview = { ...overview, chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', running: 0, tabs: [] }] };
+  overview = { ...overview, chromes: [{ pairingId: work, name: 'Work Chrome', note: '', connected: true, approved: true, isDefault: true, groupId: group, groupName: 'feature-login', groupColor: null, running: 0, agents: [], tabs: [] }] };
   const confirm = vi.fn(() => false);
   vi.stubGlobal('confirm', confirm);
   await render();
@@ -212,7 +227,6 @@ it('revokes this workspace\'s group on a Chrome only after you confirm, then sho
 });
 
 it('shows each attached machine\'s headless browser with its tabs and previews, and revokes its group on that machine', async () => {
-  const machineGroup = '00000000-0000-4000-8000-0000000000bb';
   overview = { ...overview, machines: [
     { machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null },
     { machineId: 'old-box', groupId: null, tabs: [], error: 'Update GitSpace on this machine to see its browser' },
@@ -229,6 +243,73 @@ it('shows each attached machine\'s headless browser with its tabs and previews, 
   expect(old.textContent).toContain('No open tabs.');
   await act(async () => button('Revoke access').click());
   expect(commands('browserRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserRevoke', machineId: 'darktop', groupId: machineGroup }]);
+});
+
+it('shows the group in its Chrome colour with ▶ and each agent acting there: its call, commands, time and what it is doing', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(started));
+  overview = { ...overview, chromes: [{ ...chromeWithTab()[0]!, groupColor: 'blue', agents: [acting] }] };
+  await render();
+  await settle();
+  const chrome = labelled('Work Chrome');
+  const chip = [...chrome.querySelectorAll<HTMLElement>('span')].find(span => span.textContent === '▶ feature-login');
+  expect(chip?.style.background).toMatch(/^(#1a73e8|rgb\(26, 115, 232\))$/u);
+  expect(chrome.textContent).toContain('main · browser.run · 4 commands · 0:12 · Clicking “Medium”');
+  expect(chrome.textContent).not.toContain('scripts running');
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(chrome.textContent).toContain('main · browser.run · 4 commands · 0:17 · Clicking “Medium”');
+});
+
+it('stops what agents run in a connected Chrome\'s group, then reads the browsers again; an offline Chrome has no Stop', async () => {
+  overview = { ...overview, chromes: [{ ...chromeWithTab()[0]!, agents: [acting] }, { ...chromeWithTab()[0]!, pairingId: home, name: 'Home Chrome', isDefault: false, connected: false, groupId: homeGroup, running: 1, tabs: [] }] };
+  await render();
+  expect([...labelled('Home Chrome').querySelectorAll('button')].map(element => element.textContent?.trim())).not.toContain('Stop');
+  const reads = commands('browserOverview').length;
+  overview = { ...overview, chromes: overview.chromes.map(chrome => chrome.pairingId === work ? { ...chrome, agents: [] } : chrome) };
+  await act(async () => button('Stop').click());
+  expect(commands('browserStop').map(([input]) => input.command)).toEqual([{ type: 'browserStop', groupId: group }]);
+  expect(commands('browserOverview')).toHaveLength(reads + 1);
+  expect(labelled('Work Chrome').textContent).not.toContain('▶');
+  expect([...labelled('Work Chrome').querySelectorAll('button')].map(element => element.textContent?.trim())).not.toContain('Stop');
+});
+
+it('closes a tab of a connected Chrome\'s group or of the cloud browser from its tile, then reads the browsers again; not on an offline Chrome or a machine', async () => {
+  overview = { ...overview,
+    chromes: [chromeWithTab()[0]!, { ...chromeWithTab()[0]!, pairingId: home, name: 'Home Chrome', isDefault: false, connected: false, groupId: homeGroup, tabs: [{ targetId: 'tab-h', url: 'https://app.example.com/home', title: 'Home', addedBy: 'you', usable: true }] }],
+    cloud: { groupId: cloudGroup, running: 0, tabs: [{ targetId: 'tab-c', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true }] },
+    machines: [{ machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null }] };
+  await render([{ id: 'darktop', label: 'Darktop' }]);
+  expect(labelled('Tab Home').querySelector('[aria-label="Close tab Home"]')).toBeNull();
+  expect(labelled('Tab Dashboard').querySelector('[aria-label="Close tab Dashboard"]')).toBeNull();
+  const reads = commands('browserOverview').length;
+  overview = { ...overview, chromes: overview.chromes.map(chrome => chrome.pairingId === work ? { ...chrome, tabs: [] } : chrome) };
+  await act(async () => labelled('Close tab Login').click());
+  expect(commands('browserCloseTab').map(([input]) => input.command)).toEqual([{ type: 'browserCloseTab', groupId: group, targetId: 'tab-a' }]);
+  expect(commands('browserOverview')).toHaveLength(reads + 1);
+  expect(container.querySelector('[aria-label="Tab Login"]')).toBeNull();
+  await act(async () => labelled('Close tab App').click());
+  expect(commands('browserCloseTab').map(([input]) => input.command)).toEqual([{ type: 'browserCloseTab', groupId: group, targetId: 'tab-a' }, { type: 'browserCloseTab', groupId: cloudGroup, targetId: 'tab-c' }]);
+});
+
+it('brings a connected Chrome\'s tab to the front from the Watch dialog, showing there why it could not', async () => {
+  vi.useFakeTimers();
+  overview = { ...overview, chromes: chromeWithTab(), cloud: { groupId: cloudGroup, running: 0, tabs: [{ targetId: 'tab-c', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true }] } };
+  await render();
+  await settle();
+  await act(async () => labelled('Watch App').click());
+  expect([...document.body.querySelector('[role="dialog"]')!.querySelectorAll('button')].map(element => element.textContent?.trim())).not.toContain('Focus in Chrome');
+  await act(async () => button('Done').click());
+
+  await act(async () => labelled('Watch Login').click());
+  await act(async () => button('Focus in Chrome').click());
+  await settle();
+  expect(commands('browserFocusTab').map(([input]) => input.command)).toEqual([{ type: 'browserFocusTab', groupId: group, targetId: 'tab-a' }]);
+  const answer = rpc.session.getMockImplementation()!;
+  rpc.session.mockImplementation(async (input: { command: RuntimeSessionCommand }) => input.command.type === 'browserFocusTab' ? { status: 'error', error: new Error('The tab is no longer in this workspace’s group.') } : answer(input));
+  await act(async () => button('Focus in Chrome').click());
+  await settle();
+  const dialog = document.body.querySelector('[role="dialog"]');
+  expect(dialog?.querySelector('[role="alert"]')?.textContent).toBe('The tab is no longer in this workspace’s group.');
 });
 
 it('lists captures newest first with who made them, their browser, size or length and failures, filtered by kind', async () => {
@@ -446,4 +527,52 @@ it('shows page comments with where they point, who made them and on which page, 
   expect(second.textContent).toContain('Make it blue');
   expect(second.textContent).not.toContain('guest');
   expect(second.querySelector('img')).toBeNull();
+});
+
+it('names the commit the approved sites were read at', async () => {
+  overview = { ...overview, sites: { ...overview.sites, revision: 'dd0a157c4b1e9f2a3d5c6b7a8e9f0a1b2c3d4e5f' } };
+  await render();
+  expect(labelled('Approved sites').querySelector('p')?.textContent).toBe('From .gitspace/bundle.json at dd0a157, approved in Environment. Your Chrome only opens these; the cloud browser is unrestricted.');
+});
+
+it('lists recent runs newest first with when and where they ran, failures and refusals in red, and their details on demand', async () => {
+  overview = { ...overview, runs: [
+    run(1, { at: '2026-10-24T19:21:00.000Z', where: { kind: 'chrome', name: 'Work Chrome' }, tool: 'act', summary: 'act fill “Customer name”', durationMs: 900, details: ['ref 4ed25e98:3', 'changed 1 field'] }),
+    run(2, { at: '2026-10-24T19:20:00.000Z', summary: 'goto localhost:5173/settings', outcome: 'failed' }),
+    run(3, { at: '2026-10-24T19:15:00.000Z', where: { kind: 'machine', machineId: 'darktop' }, tool: 'screenshot', summary: 'screenshot app.example.com/dash' }),
+    run(4, { at: '2026-10-24T19:12:00.000Z', where: { kind: 'chrome', name: null }, summary: 'Refused: no Chrome approved for Golconda', outcome: 'refused' }),
+  ] };
+  await render([{ id: 'darktop', label: 'Darktop' }]);
+  const runs = labelled('Recent runs');
+  expect([...runs.querySelectorAll('li[aria-label]')].map(row => row.textContent)).toEqual([
+    `${clock('2026-10-24T19:21:00.000Z')}Work Chromeact fill “Customer name”Details`,
+    `${clock('2026-10-24T19:20:00.000Z')}Cloud browsergoto localhost:5173/settingsDetails`,
+    `${clock('2026-10-24T19:15:00.000Z')}Headless browser on Darktopscreenshot app.example.com/dashDetails`,
+    `${clock('2026-10-24T19:12:00.000Z')}Your ChromeRefused: no Chrome approved for GolcondaDetails`,
+  ]);
+  expect(labelled('Run act fill “Customer name”').querySelector('.text-destructive')).toBeNull();
+  expect(labelled('Run goto localhost:5173/settings').querySelector('.text-destructive')?.textContent).toBe('goto localhost:5173/settings');
+  expect(labelled('Run Refused: no Chrome approved for Golconda').querySelector('.text-destructive')?.textContent).toBe('Refused: no Chrome approved for Golconda');
+
+  const first = labelled('Run act fill “Customer name”');
+  await act(async () => first.querySelector('button')!.click());
+  expect([...first.querySelectorAll('li')].map(line => line.textContent)).toEqual(['browser.act · took 0.9 s', 'ref 4ed25e98:3', 'changed 1 field']);
+  await act(async () => first.querySelector('button')!.click());
+  expect(first.querySelectorAll('li')).toHaveLength(0);
+});
+
+it('reads the browsers again when a report of a Chrome group is announced', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(started));
+  overview = { ...overview, chromes: chromeWithTab() };
+  await render();
+  await settle();
+  expect(labelled('Recent runs').textContent).toContain('No browser runs yet.');
+  const reads = commands('browserOverview').length;
+  overview = { ...overview, chromes: [{ ...chromeWithTab()[0]!, agents: [acting] }], runs: [run(1, { summary: 'goto app.example.com/login' })] };
+  await act(async () => { liveNotices.receive({ ...workspaceLiveKey('workspace', 'browsers', 'project'), version: 1 }); });
+  await settle();
+  expect(commands('browserOverview')).toHaveLength(reads + 1);
+  expect(labelled('Work Chrome').textContent).toContain('main · browser.run · 4 commands · 0:12');
+  expect(labelled('Recent runs').querySelector('[aria-label="Run goto app.example.com/login"]')).not.toBeNull();
 });

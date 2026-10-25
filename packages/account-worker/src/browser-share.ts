@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import {
   BROWSER_SHARE_PER_CHROME, BROWSER_SHARE_VIEWERS, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareAuditSchema, RuntimeBrowserShareBoxSchema,
-  RuntimeBrowserShareChromeRequestSchema, RuntimeBrowserShareEndSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareJoinSchema, RuntimeBrowserShareNameSchema,
+  RuntimeBrowserShareChromeRequestSchema, RuntimeBrowserShareEndSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareIconSchema, RuntimeBrowserShareJoinSchema, RuntimeBrowserShareNameSchema,
   RuntimeBrowserSharePointSchema, RuntimeBrowserShareSchema, RuntimeBrowserShareTargetSchema, RuntimeBrowserShareViewerMessageSchema, RuntimeBrowserShareViewerSchema,
   browserSharePointerColor, browserUnbase64,
   type RuntimeBrowserConnectedTab, type RuntimeBrowserPageComment, type RuntimeBrowserShare, type RuntimeBrowserShareAudit, type RuntimeBrowserSharePreview,
@@ -58,17 +58,23 @@ const JOIN_BODY_BYTES = 4096;
 /** CSS pixels as the extension measures them, whole and at least one. */
 const pixels = z.number().positive().transform(value => Math.max(1, Math.round(value)));
 const Page = z.object({ url: z.string(), title: z.string() });
+/** A page's icon from the extension (5.8 and later; older ones send none); one that is not a small PNG counts as none. */
+const PageIcon = RuntimeBrowserShareIconSchema.nullable().catch(null);
 const Viewport = z.object({ width: pixels, height: pixels });
 const ShareWorkspace = z.object({ projectId: z.string(), workspaceId: z.string(), groupId: z.string().uuid() });
 type ShareWorkspace = z.infer<typeof ShareWorkspace>;
 const ShareRecord = z.object({
   shareId: z.string().uuid(), secret: z.string(), pairingId: z.string().uuid(), targetId: z.string(), workspace: ShareWorkspace.nullable(),
-  page: Page, viewport: Viewport.nullable(), comment: z.boolean(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime(),
+  // LEGACY: shares stored before page icons have none; drop the default two days after this release (a share lasts at
+  // most a day and stays listed a day after it ends).
+  page: Page, icon: RuntimeBrowserShareIconSchema.nullable().default(null), viewport: Viewport.nullable(), comment: z.boolean(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime(),
   endedAt: z.iso.datetime().nullable(), endReason: RuntimeBrowserShareEndSchema.nullable(),
 });
 type ShareRecord = z.infer<typeof ShareRecord>;
 type ShareEnd = NonNullable<ShareRecord['endReason']>;
 type Point = z.infer<typeof RuntimeBrowserSharePointSchema>;
+/** A broadcast sent at most once per `POINTERS_MS`: when it last went, and whether one waits for the time to be up. */
+type Throttle = { last: number; pending: boolean };
 /** A viewer socket's attachment: its id (per-socket state in memory is keyed by it: each event may hand over a new
  * object for the same socket), its share, and once it said hello its viewer, pointer and screen area. */
 const ViewerSocket = z.object({ socketId: z.string().uuid(), shareId: z.string().uuid(), deadline: z.number(), viewer: RuntimeBrowserShareViewerSchema.nullable(), at: RuntimeBrowserSharePointSchema.nullable(), size: Viewport.nullable() });
@@ -77,16 +83,18 @@ type ViewerSocket = z.infer<typeof ViewerSocket>;
 const ShareViewerToken = z.object({ shareId: z.string().uuid(), viewerId: z.string().uuid(), name: RuntimeBrowserShareNameSchema, guest: z.boolean(), expiresAt: z.iso.datetime() });
 type ShareViewerToken = z.infer<typeof ShareViewerToken>;
 /** The extension's answers. */
-const SharedTab = z.object({ url: z.string(), title: z.string(), groupId: z.string().uuid().nullable() });
-const Watched = z.object({ url: z.string(), title: z.string(), width: pixels, height: pixels });
+const SharedTab = z.object({ url: z.string(), title: z.string(), groupId: z.string().uuid().nullable(), icon: PageIcon.optional() });
+const Watched = z.object({ url: z.string(), title: z.string(), width: pixels, height: pixels, icon: PageIcon.optional() });
 const Hit = z.object({ target: RuntimeBrowserShareTargetSchema.nullable() });
 const Anchor = z.object({ page: Page, target: RuntimeBrowserShareTargetSchema.nullable(), region: RuntimeBrowserShareBoxSchema, viewport: Viewport, scroll: z.object({ x: z.number(), y: z.number() }), crop: z.string().nullable() });
 /** One JPEG frame of a shared tab, from the extension (`{shareFrame}`). */
 export const BrowserShareFrameSchema = z.object({ shareId: z.string().uuid(), data: z.string().max(1_500_000), width: z.number().int().positive(), height: z.number().int().positive() });
-/** A shared tab's page changed, or the tab closed (`{share}` from the extension). */
+/** A shared tab's page changed, the tab closed, or your pointer moved over it (`{share}` from the extension; `pointer`
+ * only once a watch asked for it with `reportPointer`). */
 export const BrowserShareEventSchema = z.discriminatedUnion('event', [
-  z.object({ event: z.literal('page'), shareId: z.string().uuid(), url: z.string(), title: z.string(), width: pixels, height: pixels }),
+  z.object({ event: z.literal('page'), shareId: z.string().uuid(), url: z.string(), title: z.string(), width: pixels, height: pixels, icon: PageIcon.optional() }),
   z.object({ event: z.literal('closed'), shareId: z.string().uuid() }),
+  z.object({ event: z.literal('pointer'), shareId: z.string().uuid(), at: RuntimeBrowserSharePointSchema.nullable() }),
 ]);
 /** A join as the relay answers it; the route seals the viewer's token. */
 export type BrowserShareJoin = { status: 'ok'; viewerId: string; expiresAt: string } | { status: 'unknown' } | { status: 'ended' } | { status: 'full' };
@@ -138,9 +146,10 @@ export function browserShareAccount(env: Env): BrowserShareAccount {
 
 /**
  * The share routes, public before device authority: `POST /api/shares/<shareId>/preview` (the greeting, for the secret),
- * `POST /api/shares/<shareId>/join` (a viewer's token; signed by one of the account's devices, its owner joins under the
- * account's name, not as a guest), `GET /api/shares/<shareId>/live` (the viewer's socket, to the relay object), and
- * `POST BROWSER_SHARE_PATH`, your Chrome's signed requests. An unknown share and a wrong secret get the same answer.
+ * `POST /api/shares/<shareId>/join` (a viewer's token), `GET /api/shares/<shareId>/live` (the viewer's socket, to the
+ * relay object), and `POST BROWSER_SHARE_PATH`, your Chrome's signed requests. Signed by one of the account's devices,
+ * a preview names the shared tab's Chrome and a join is the owner's, under the account's name, not a guest's. An
+ * unknown share and a wrong secret get the same answer.
  */
 export async function serveBrowserShare(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url), relay = env.RELAY.getByName(env.RELAY_NAME);
@@ -162,21 +171,20 @@ export async function serveBrowserShare(request: Request, env: Env): Promise<Res
     if (bytes.byteLength > JOIN_BODY_BYTES) throw new Error('Too large');
     body = JSON.parse(new TextDecoder().decode(bytes));
   } catch { return browserRouteReply(refusal(400, 'SHARE_INVALID', `Send at most ${JOIN_BODY_BYTES} bytes of JSON`)); }
-  if (action === 'preview') {
-    const secret = z.object({ secret: z.string().max(128) }).safeParse(body);
-    const preview = secret.success ? await relay.browserSharePreview(shareId, secret.data.secret) : null;
-    return browserRouteReply(preview ? { ok: true, value: preview } : unknown);
-  }
-  const join = RuntimeBrowserShareJoinSchema.safeParse(body);
-  if (!join.success) return browserRouteReply(refusal(400, 'SHARE_INVALID', 'A join names the secret and your name'));
-  let name = join.data.name, guest = true;
   const device = request.headers.get('x-gitspace-device');
   if (device !== null) {
     const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({ header: device, method: 'POST', target: `${url.pathname}${url.search}`, body: bytes, capabilities: [], accountScope: true }, now));
     if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401 });
-    name = (await accountDisplayName(env))?.slice(0, 60).trim() || name;
-    guest = false;
   }
+  const owner = device !== null;
+  if (action === 'preview') {
+    const secret = z.object({ secret: z.string().max(128) }).safeParse(body);
+    const preview = secret.success ? await relay.browserSharePreview(shareId, secret.data.secret, owner) : null;
+    return browserRouteReply(preview ? { ok: true, value: preview } : unknown);
+  }
+  const join = RuntimeBrowserShareJoinSchema.safeParse(body);
+  if (!join.success) return browserRouteReply(refusal(400, 'SHARE_INVALID', 'A join names the secret and your name'));
+  const name = owner ? (await accountDisplayName(env))?.slice(0, 60).trim() || join.data.name : join.data.name, guest = !owner;
   const joined = await relay.browserShareJoin(shareId, join.data.secret);
   const refused: Record<Exclude<BrowserShareJoin['status'], 'ok'>, BrowserRequestFailure> = {
     unknown, ended: refusal(410, 'SHARE_ENDED', 'This share has ended'), full: refusal(429, 'SHARE_FULL', `This share is full: ${BROWSER_SHARE_VIEWERS} people are watching`),
@@ -191,8 +199,11 @@ export async function serveBrowserShare(request: Request, env: Env): Promise<Res
 export class BrowserShares {
   /** The frame size each watched share last asked of its extension; forgotten when its Chrome disconnects. */
   private readonly watching = new Map<string, { width: number; height: number }>();
-  /** Each share's pointer and viewer broadcasts, at most one per `POINTERS_MS`. */
-  private readonly throttles = new Map<string, { last: number; pending: boolean }>();
+  /** Each share's pointer and viewer broadcasts, and its sharer's pointer broadcasts, each at most one per `POINTERS_MS`. */
+  private readonly throttles = new Map<string, Throttle>();
+  private readonly sharerThrottles = new Map<string, Throttle>();
+  /** The sharer's own pointer on each watched share's tab, as their Chrome last reported it (null: off the tab). */
+  private readonly sharers = new Map<string, Point | null>();
   /** A viewer socket's hit test in flight, and the latest point asked while it runs. */
   private readonly hits = new Map<string, { next: Point | null }>();
   /** A viewer socket's hello being checked: the object takes other messages while it awaits the token's key, and a
@@ -218,7 +229,7 @@ export class BrowserShares {
     const now = Date.now();
     const record: ShareRecord = {
       shareId: crypto.randomUUID(), secret: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'), pairingId, targetId: input.targetId, workspace: held,
-      page: { url: tab.url.slice(0, 8192), title: tab.title.slice(0, 500) }, viewport: null, comment: input.comment,
+      page: { url: tab.url.slice(0, 8192), title: tab.title.slice(0, 500) }, icon: tab.icon ?? null, viewport: null, comment: input.comment,
       createdAt: iso(now), expiresAt: iso(now + minutes.data * 60_000), endedAt: null, endReason: null,
     };
     await this.ctx.storage.put(`${SHARE}${record.shareId}`, record);
@@ -279,10 +290,11 @@ export class BrowserShares {
     return { connected: { pairingId: record.pairingId, browser: pairing.name, groupId: input.groupId, targetId: record.targetId, ...page } };
   }
 
-  /** The greeting before anyone joins; null for an unknown share or a wrong secret alike. */
-  async preview(shareId: string, secret: string): Promise<RuntimeBrowserSharePreview | null> {
+  /** The greeting before anyone joins; null for an unknown share or a wrong secret alike. `owner`: asked by one of the
+   * account's devices, which also learn the Chrome's name. */
+  async preview(shareId: string, secret: string, owner: boolean): Promise<RuntimeBrowserSharePreview | null> {
     const record = await this.current(shareId);
-    return record && equalSecret(record.secret, secret) ? this.greeting(record) : null;
+    return record && equalSecret(record.secret, secret) ? this.greeting(record, owner) : null;
   }
 
   /** A viewer may join a live share with room: their id and when the token the route seals for them lapses. */
@@ -364,11 +376,12 @@ export class BrowserShares {
     for (const { socket } of viewers) if (socket.readyState === 1) socket.send(text);
   }
 
-  /** A shared tab's page changed, or the tab closed (which ends the share). */
+  /** A shared tab's page changed, the tab closed (which ends the share), or your pointer moved over it. */
   async event(pairingId: string, event: z.infer<typeof BrowserShareEventSchema>): Promise<void> {
     const record = await this.current(event.shareId);
     if (!record || record.endedAt || record.pairingId !== pairingId) return;
     if (event.event === 'closed') { await this.end(record, 'closed', (await this.host.pairing(pairingId))?.name ?? 'Chrome'); return; }
+    if (event.event === 'pointer') return this.sharerMoved(record.shareId, event.at);
     await this.pageChanged(record.shareId, event);
   }
 
@@ -381,11 +394,13 @@ export class BrowserShares {
     for (const record of live) { this.watching.delete(record.shareId); await this.watch(record); }
   }
 
-  /** A Chrome disconnected: its viewers see it offline, and its watches are asked again when it is back. */
+  /** A Chrome disconnected: its viewers see it offline, without its sharer's pointer, and its watches are asked again
+   * when it is back. */
   async offline(pairingId: string): Promise<void> {
     for (const record of await this.live(pairingId)) {
       this.watching.delete(record.shareId);
-      for (const { socket } of this.viewers(record.shareId)) this.send(socket, { type: 'presence', online: false });
+      this.sharers.delete(record.shareId);
+      for (const { socket } of this.viewers(record.shareId)) { this.send(socket, { type: 'presence', online: false }); this.send(socket, { type: 'sharer', at: null }); }
     }
   }
 
@@ -423,9 +438,11 @@ export class BrowserShares {
     if (others.length >= BROWSER_SHARE_VIEWERS) return closeOpenSocket(socket, 1008, 'This share is full');
     const viewer: RuntimeBrowserShareViewer = { viewerId: token.viewerId, name: token.name, guest: token.guest, joinedAt: iso(Date.now()) };
     socket.serializeAttachment({ ...state, viewer } satisfies ViewerSocket);
-    this.send(socket, { type: 'joined', viewerId: viewer.viewerId, share: await this.greeting(record), viewers: [...others.map(other => other.viewer), viewer], comments: await this.comments(record.shareId) });
+    this.send(socket, { type: 'joined', viewerId: viewer.viewerId, share: await this.greeting(record, false), viewers: [...others.map(other => other.viewer), viewer], comments: await this.comments(record.shareId) });
     if (record.viewport) this.send(socket, { type: 'page', ...record.page, ...record.viewport });
     this.send(socket, { type: 'presence', online: this.host.online(record.pairingId) });
+    const sharer = this.sharers.get(record.shareId);
+    if (sharer) this.send(socket, { type: 'sharer', at: sharer });
     await this.audit(record.shareId, 'joined', viewer.name, viewer.guest, null);
     this.changed(record);
     await this.publish(record.pairingId);
@@ -475,11 +492,13 @@ export class BrowserShares {
     } catch (error) { this.send(socket, { type: 'error', message: `Your comment was not saved: ${described(error)}`.slice(0, 1024) }); }
   }
 
-  /** Asks the extension for frames at the largest viewer's size (at most `FRAME_MAX`), or to stop once nobody watches. */
+  /** Asks the extension for frames at the largest viewer's size (at most `FRAME_MAX`) and for your pointer over the tab
+   * (`reportPointer`; extensions before 5.8 ignore it), or to stop once nobody watches. */
   private async watch(record: ShareRecord, gone?: WebSocket): Promise<void> {
     const viewers = this.viewers(record.shareId, gone), watching = this.watching.get(record.shareId);
     if (!viewers.length) {
       this.watching.delete(record.shareId);
+      this.sharers.delete(record.shareId);
       if (this.host.online(record.pairingId)) await this.host.request(record.pairingId, { operation: 'shareUnwatch', shareId: record.shareId }).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_unwatch_failed', shareId: record.shareId, error: described(error) })));
       return;
     }
@@ -488,7 +507,7 @@ export class BrowserShares {
     if ((watching && watching.width === width && watching.height === height) || !this.host.online(record.pairingId)) return;
     this.watching.set(record.shareId, { width, height });
     try {
-      const page = Watched.parse(await this.host.request(record.pairingId, { operation: 'shareWatch', shareId: record.shareId, targetId: record.targetId, maxWidth: width, maxHeight: height }));
+      const page = Watched.parse(await this.host.request(record.pairingId, { operation: 'shareWatch', shareId: record.shareId, targetId: record.targetId, maxWidth: width, maxHeight: height, reportPointer: true }));
       await this.pageChanged(record.shareId, page);
     } catch (error) {
       this.watching.delete(record.shareId);
@@ -496,10 +515,11 @@ export class BrowserShares {
     }
   }
 
-  private async pageChanged(shareId: string, page: { url: string; title: string; width: number; height: number }): Promise<void> {
+  /** The page, viewport or icon of a shared tab changed; an extension that sends no icon (before 5.8) keeps the one held. */
+  private async pageChanged(shareId: string, page: { url: string; title: string; width: number; height: number; icon?: string | null }): Promise<void> {
     const record = await this.current(shareId);
     if (!record || record.endedAt) return;
-    const next: ShareRecord = { ...record, page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) }, viewport: { width: page.width, height: page.height } };
+    const next: ShareRecord = { ...record, page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) }, icon: page.icon === undefined ? record.icon : page.icon, viewport: { width: page.width, height: page.height } };
     await this.ctx.storage.put(`${SHARE}${shareId}`, next);
     for (const { socket } of this.viewers(shareId)) this.send(socket, { type: 'page', ...next.page, width: page.width, height: page.height });
   }
@@ -507,14 +527,30 @@ export class BrowserShares {
   /** Viewers or pointers changed: everyone watching gets the viewer list, the extension the pointers to draw, at most
    * once per `POINTERS_MS` and always with the latest. */
   private changed(record: ShareRecord, gone?: WebSocket): void {
-    let throttle = this.throttles.get(record.shareId);
-    if (!throttle) { throttle = { last: 0, pending: false }; this.throttles.set(record.shareId, throttle); }
+    this.throttle(this.throttles, record.shareId, now => this.flush(record, now ? gone : undefined));
+  }
+
+  /** Your pointer over a watched share's tab moved: everyone watching hears where (`sharer`), at most once per
+   * `POINTERS_MS` and always the latest. */
+  private sharerMoved(shareId: string, at: Point | null): void {
+    if (!this.viewers(shareId).length) return;
+    this.sharers.set(shareId, at);
+    this.throttle(this.sharerThrottles, shareId, () => {
+      const latest = this.sharers.get(shareId) ?? null;
+      for (const { socket } of this.viewers(shareId)) this.send(socket, { type: 'sharer', at: latest });
+    });
+  }
+
+  /** Runs `send` for a share at most once per `POINTERS_MS`: now (`now` true), or once that time is up, when it sends
+   * whatever is latest then; not at all if the share ended meanwhile, which dropped its throttle. */
+  private throttle(throttles: Map<string, Throttle>, shareId: string, send: (now: boolean) => void): void {
+    let throttle = throttles.get(shareId);
+    if (!throttle) { throttle = { last: 0, pending: false }; throttles.set(shareId, throttle); }
     if (throttle.pending) return;
     const current = throttle, wait = current.last + POINTERS_MS - Date.now();
-    if (wait <= 0) { current.last = Date.now(); return this.flush(record, gone); }
+    if (wait <= 0) { current.last = Date.now(); return send(true); }
     current.pending = true;
-    // A share that ended meanwhile dropped its throttle, and is not flushed.
-    setTimeout(() => { if (this.throttles.get(record.shareId) !== current) return; current.pending = false; current.last = Date.now(); this.flush(record); }, wait);
+    setTimeout(() => { if (throttles.get(shareId) !== current) return; current.pending = false; current.last = Date.now(); send(false); }, wait);
   }
 
   private flush(record: ShareRecord, gone?: WebSocket): void {
@@ -538,6 +574,8 @@ export class BrowserShares {
     }
     this.watching.delete(record.shareId);
     this.throttles.delete(record.shareId);
+    this.sharerThrottles.delete(record.shareId);
+    this.sharers.delete(record.shareId);
     if (this.host.online(record.pairingId)) {
       this.host.notify(record.pairingId, { operation: 'shareEnded', shareId: record.shareId, reason });
       this.ctx.waitUntil(this.host.request(record.pairingId, { operation: 'shareUnwatch', shareId: record.shareId }).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_unwatch_failed', shareId: record.shareId, error: described(error) }))));
@@ -616,10 +654,14 @@ export class BrowserShares {
     return [...(await this.ctx.storage.list({ prefix: `${COMMENT}${shareId}:` })).values()].map(row => RuntimeBrowserPageCommentSchema.parse(row));
   }
 
-  private async greeting(record: ShareRecord): Promise<RuntimeBrowserSharePreview> {
+  /** What a share's greeting shows; `owner` (one of the account's devices) also learns the name of its Chrome. */
+  private async greeting(record: ShareRecord, owner: boolean): Promise<RuntimeBrowserSharePreview> {
     let site = '';
     try { site = new URL(record.page.url).hostname.slice(0, 253); } catch { /* A page with no URL names no site. */ }
-    return { sharer: (await this.account.name()).slice(0, 128), page: { title: record.page.title, site }, comment: record.comment, expiresAt: record.expiresAt, ended: record.endReason };
+    return {
+      sharer: (await this.account.name()).slice(0, 128), page: { title: record.page.title, site, icon: record.icon }, comment: record.comment, expiresAt: record.expiresAt, ended: record.endReason,
+      browser: owner ? (await this.host.pairing(record.pairingId))?.name ?? null : null, online: !record.endedAt && this.host.online(record.pairingId),
+    };
   }
 
   private async view(record: ShareRecord): Promise<RuntimeBrowserShare> {

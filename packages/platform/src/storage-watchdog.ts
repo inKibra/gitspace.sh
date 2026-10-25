@@ -4,8 +4,8 @@ import { platformObjectStorage } from './storage-quarantine.js';
 
 /**
  * The platform's storage watchdog, run every ten minutes over every Durable Object of the Cloudflare account (not
- * only GitSpace's). It reads the last hour of writes per object and today's Durable Object cost from Cloudflare's
- * analytics, then:
+ * only GitSpace's). It reads the last hour of writes and alarms per object and today's Durable Object cost from
+ * Cloudflare's analytics, then:
  * - quarantines an object that wrote at least `WATCHDOG_QUARANTINE_ROWS` rows in the last hour, unless it is already
  *   quarantined or was resumed within that hour (its earlier writes still count there). Only GitSpace's tenant and
  *   platform objects can be quarantined; any other object is reported;
@@ -13,7 +13,11 @@ import { platformObjectStorage } from './storage-quarantine.js';
  *   cost reaches `WATCHDOG_ALERT_DAILY_USD`;
  * - reports an object awake at least `WATCHDOG_AWAKE_HOURS` of the last 24 hours, or that read at least
  *   `WATCHDOG_READ_ROWS` rows in them. An idle workspace sleeps: one that does not holds an alarm, timer or request
- *   open, and is billed for every hour of it.
+ *   open, and is billed for every hour of it;
+ * - reports an object that ran more than `WATCHDOG_ALARMS_PER_HOUR` alarms in the last hour. An object should wake
+ *   only for a deadline, the heartbeat that resumes in-flight work, or a retry with backoff. The limit sits above a
+ *   running conversation's 30 s heartbeat (about 120 alarms an hour) and below the slowest polling loop seen in
+ *   production (one alarm every 6.5 s, about 550 an hour).
  * Reports go by email (`WATCHDOG_EMAIL`) and, for a tenant's object, to its Inbox. A report is sent once, and again
  * only if the problem still holds `WATCHDOG_REPEAT_MS` later; quarantines are reported each time. After
  * `WATCHDOG_BLIND_RUNS` runs in a row without analytics, the watchdog reports that it is blind.
@@ -25,6 +29,7 @@ export const WATCHDOG_QUARANTINE_ROWS = 5_000_000;
 export const WATCHDOG_ALERT_DAILY_USD = 20;
 export const WATCHDOG_AWAKE_HOURS = 20;
 export const WATCHDOG_READ_ROWS = 20_000_000;
+export const WATCHDOG_ALARMS_PER_HOUR = 300;
 const WATCHDOG_REPEAT_MS = 6 * 3_600_000;
 const WATCHDOG_BLIND_RUNS = 3;
 const HOUR_MS = 3_600_000;
@@ -44,6 +49,7 @@ export const DURABLE_OBJECT_USD = {
 
 const objectHourSchema = z.object({
   objects: z.array(z.object({ dimensions: z.object({ namespaceId: z.string(), objectId: z.string() }), sum: z.object({ rowsWritten: z.number() }) })),
+  alarms: z.array(z.object({ dimensions: z.object({ namespaceId: z.string(), objectId: z.string() }), sum: z.object({ requests: z.number() }) })),
 });
 const daySchema = z.object({
   periodic: z.array(z.object({ sum: z.object({ activeTime: z.number(), rowsRead: z.number(), rowsWritten: z.number() }) })),
@@ -77,6 +83,9 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
       viewer { accounts(filter: { accountTag: $accountTag }) {
         objects: durableObjectsPeriodicGroups(limit: ${OBJECT_LIMIT}, orderBy: [sum_rowsWritten_DESC], filter: { datetime_geq: $start, datetime_lt: $end }) {
           dimensions { namespaceId objectId } sum { rowsWritten }
+        }
+        alarms: durableObjectsInvocationsAdaptiveGroups(limit: ${OBJECT_LIMIT}, orderBy: [sum_requests_DESC], filter: { datetime_geq: $start, datetime_lt: $end, type: "alarm" }) {
+          dimensions { namespaceId objectId } sum { requests }
         }
       } }
     }`, {}, objectHourSchema),
@@ -183,6 +192,14 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
     const reason = `was awake ${hours} of the last 24 hours and read ${integer.format(sum.rowsRead)} rows (alert at ${WATCHDOG_AWAKE_HOURS} hours or ${integer.format(WATCHDOG_READ_ROWS)} rows); an idle object should sleep`;
     console.error(JSON.stringify({ event: 'storage-watchdog-sleepless', objectId, namespaceId, className: who.className, script: who.script, ...sum }));
     findings.push({ key: `sleepless:${objectId}`, line: `${describe(who, objectId)}: ${reason}.`, inbox: { objectId, owner: who, reason } });
+  }
+
+  for (const { dimensions: { namespaceId, objectId }, sum: { requests } } of hour.alarms) {
+    if (requests <= WATCHDOG_ALARMS_PER_HOUR) break;
+    const who = await owner(namespaceId);
+    const reason = `ran ${integer.format(requests)} alarms in the last hour (alert above ${WATCHDOG_ALARMS_PER_HOUR}); an object should wake only for a deadline, the heartbeat of in-flight work, or a retry with backoff`;
+    console.error(JSON.stringify({ event: 'storage-watchdog-alarms', objectId, namespaceId, className: who.className, script: who.script, alarms: requests }));
+    findings.push({ key: `alarms:${objectId}`, line: `${describe(who, objectId)}: ${reason}.`, inbox: { objectId, owner: who, reason } });
   }
 
   const periodic = day.periodic[0]?.sum ?? { activeTime: 0, rowsRead: 0, rowsWritten: 0 };

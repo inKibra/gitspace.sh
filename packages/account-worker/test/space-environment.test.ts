@@ -76,14 +76,14 @@ describe('workspace environment', () => {
         await instance.mutateLifecycleState(identity, { op: 'policy', automatic: true }, human);
         await projectAuthority.setEnvironmentValue('RETAINED', 'yes');
         expect(approvedBrowserOrigins(await instance.getLifecycleState(identity))).toEqual([]);
-        expect(approvedBrowserOrigins(await instance.refreshBrowserOrigins(identity))).toEqual(['example.com']);
+        expect(approvedBrowserOrigins((await instance.refreshBrowserOrigins(identity)).state)).toEqual(['example.com']);
         expect(await stored()).toEqual(approvals);
         // Only a successful committed removal prunes the retained observation.
         committed.mockRejectedValueOnce(new Error('Committed repository unavailable'));
         await expect(instance.refreshBrowserOrigins(identity)).rejects.toThrow('Committed repository unavailable');
         committed.mockResolvedValueOnce({ commit: 'b'.repeat(40), origins: [] });
-        expect(approvedBrowserOrigins(await instance.refreshBrowserOrigins(identity))).toEqual([]);
-        expect(approvedBrowserOrigins(await instance.refreshBrowserOrigins(identity))).toEqual([]);
+        expect(approvedBrowserOrigins((await instance.refreshBrowserOrigins(identity)).state)).toEqual([]);
+        expect(approvedBrowserOrigins((await instance.refreshBrowserOrigins(identity)).state)).toEqual([]);
         expect((await stored()).some(entry => entry.executionHash === origin.hash)).toBe(false);
       } finally {
         committed.mockRestore(); fork.mockRestore(); initialize.mockRestore();

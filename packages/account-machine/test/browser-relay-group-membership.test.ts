@@ -32,7 +32,7 @@ it('a tab dragged into the workspace group is usable on its site; a tab a group 
     indexedDB: { open() { const request = { result: database, onsuccess: () => {}, onerror: () => {} }; queueMicrotask(() => request.onsuccess()); return request; } },
     grant: { groupId: 'group', groupName: 'Workspace', projectId: 'project', workspaceId: 'workspace', origins: ['approved.example'], expiresAt: new Date(Date.now() + 60_000).toISOString() },
     chrome: {
-      runtime: { onMessage: { addListener() {} } },
+      runtime: { getPlatformInfo: async () => ({ os: 'linux' }), onMessage: { addListener() {} } },
       storage: { local: { remove: async () => {}, get: async () => ({}) }, session: { get: async () => ({ browserEpoch: 'epoch' }) } },
       debugger: { getTargets: async () => [...tabs.values()].map(tab => ({ id: `target-${tab.id}`, tabId: tab.id, type: 'page', title: 'Page', url: tab.url })), onEvent: { addListener() {} }, onDetach: { addListener() {} } },
       tabs: {

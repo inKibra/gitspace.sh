@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
-import { RuntimeIdentitySchema, type RuntimeBrowserCaptureView, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserShare, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, type RuntimeBrowserCaptureView, type RuntimeBrowserGroupColor, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserRun, type RuntimeBrowserShare, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, useShape } from '@gitspace/ui';
-import { Cloud01, Eye, Monitor01, Plus, Server01, StopCircle, VideoRecorder } from '@untitledui/icons';
+import { Cloud01, Eye, Monitor01, Plus, Server01, StopCircle, VideoRecorder, XClose } from '@untitledui/icons';
 import { approveChrome } from './browser-approvals.js';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { glyph } from './glyph.js';
@@ -45,6 +45,10 @@ const TAB_ORIGIN: Record<NonNullable<Tab['addedBy']>, string> = { agent: 'Opened
 /** What the composer gets from Ask agent to add a site; the user names the site and sends it. */
 const ADD_SITE_REQUEST = 'Please add this site to browser.origins in .gitspace/bundle.json and commit it, so I can approve it in Environment: ';
 const PlusGlyph = glyph(Plus);
+const StopGlyph = glyph(StopCircle);
+/** Chrome's own tab-group colours, the ones the extension draws its group dots with, so a group looks the same here as
+ * in Chrome's tab strip. */
+const GROUP_COLORS: Record<RuntimeBrowserGroupColor, string> = { grey: '#5f6368', blue: '#1a73e8', red: '#d93025', yellow: '#f9ab00', green: '#188038', pink: '#d01884', purple: '#a142f4', cyan: '#007b83', orange: '#fa903e' };
 
 /** Runs `tick` every `ms` while the page is visible, the way the Browser tab and its previews refresh. */
 function useVisibleInterval(tick: () => void, ms: number) {
@@ -96,8 +100,9 @@ function age(ms: number): string {
 }
 
 /** The Inspector's Browser tab: the approved sites; this workspace's browsers (each Chrome this project approved, with its
- * tab group, the cloud browser and each attached machine's headless browser) with their tabs and previews; captures;
- * shares; page comments; and recovery records when there are any. `onCompose` adds text to the chat composer's draft. */
+ * tab group and who acts there, the cloud browser and each attached machine's headless browser) with their tabs and
+ * previews; captures; recent runs; shares; page comments; and recovery records when there are any. `onCompose` adds text
+ * to the chat composer's draft. */
 export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, onOpenEnvironment, onCompose }: { snapshot: RuntimeSnapshot; projectName: string; browsers: WorkspaceBrowsers; machines: readonly { id: string; label: string }[]; onOpenEnvironment(): void; onCompose?: (text: string) => void }) {
   const identity = useMemo(() => RuntimeIdentitySchema.parse(snapshot), [snapshot.projectId, snapshot.workspaceId]);
   const { request, overview, read: readOverview } = browsers;
@@ -164,6 +169,9 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
   // A comment made on a share of this workspace's tabs is announced; the list is read again.
   const commentNotices = useLiveChanges(workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId));
   useEffect(() => { if (commentNotices !== null) void readComments(); }, [commentNotices, readComments]);
+  // Each report of a Chrome group (its tabs, colour and who acts there) is announced; the overview is read again.
+  const browserNotices = useLiveChanges(workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId));
+  useEffect(() => { if (browserNotices !== null) void readOverview(); }, [browserNotices, readOverview]);
   const act = async (key: string, operation: () => Promise<void>) => {
     if (busy.current) return;
     busy.current = true; setPending(key); setError(null);
@@ -178,6 +186,9 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
   const revoke = (groupId: string, machineId?: string) => {
     if (window.confirm('Revoke access? This ends this workspace’s tab group on that browser and stops its agents using it; the next use starts a new group.')) void act(`revoke:${groupId}`, async () => { await request({ type: 'browserRevoke', ...(machineId === undefined ? {} : { machineId }), groupId }); await readOverview(); });
   };
+  /** Stops what agents run in a group now. */
+  const stop = (groupId: string) => void act(`stop:${groupId}`, async () => { await request({ type: 'browserStop', groupId }); await readOverview(); });
+  const closeTab = (groupId: string, targetId: string) => void act(`close:${groupId}:${targetId}`, async () => { await request({ type: 'browserCloseTab', groupId, targetId }); await readOverview(); });
   /** Shows the capture a start or stop returned in place of its listed state. */
   const keepCapture = (view: RuntimeBrowserCaptureView | undefined) => {
     if (!view) throw new Error('The workspace did not return the capture.');
@@ -210,7 +221,7 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
       <section aria-label="Approved sites" className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2"><h3 className="text-body font-medium">Approved sites</h3>{onCompose ? <Button variant="ghost" size="compact" onClick={() => onCompose(ADD_SITE_REQUEST)}>Ask agent to add a site</Button> : null}</div>
         {overview.sites.origins.length ? <ul className="flex flex-wrap gap-1.5">{overview.sites.origins.map(origin => <li key={origin} className="inline-flex items-center gap-1 rounded-md bg-surface-3 px-2 py-0.5 font-mono text-caption">{origin}<span className="font-sans text-muted-foreground">· {overview.sites.stepsOnly.includes(origin) ? 'single steps' : 'scripts'}</span></li>)}</ul> : null}
-        <p className="text-caption text-muted-foreground">{overview.sites.origins.length ? 'From .gitspace/bundle.json, approved in ' : 'No sites approved yet. They come from .gitspace/bundle.json once you approve them in '}<button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={onOpenEnvironment}>Environment</button>. Your Chrome only opens these; the cloud browser is unrestricted.</p>
+        <p className="text-caption text-muted-foreground">{overview.sites.origins.length ? overview.sites.revision ? `From .gitspace/bundle.json at ${overview.sites.revision.slice(0, 7)}, approved in ` : 'From .gitspace/bundle.json, approved in ' : 'No sites approved yet. They come from .gitspace/bundle.json once you approve them in '}<button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={onOpenEnvironment}>Environment</button>. Your Chrome only opens these; the cloud browser is unrestricted.</p>
       </section>
       {approved.length === 0 ? overview.chromes.length ? <section aria-label="Chrome approval" className="flex flex-col gap-3 rounded-xl border border-[#f59e0b]/50 bg-[#f59e0b]/10 p-3">
         <div>
@@ -225,28 +236,41 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
         <div><h3 className="text-body font-medium">Let agents use your own Chrome</h3><p className="text-caption text-muted-foreground">For sites where you&apos;re signed in. Agents get one tab group per workspace and only the sites above.</p></div>
         <div><Button variant="secondary" size="compact" leadingIcon={PlusGlyph} onClick={() => navigateProductUrl(browserPluginsUrl(identity.projectId))}>Pair a Chrome</Button></div>
       </section> : null}
-      {approved.map(chrome => <BrowserCard key={chrome.pairingId} label={chrome.name} icon={<Monitor01 width={18} height={18} />} title={chrome.name} meta={`Your Chrome · ${chrome.connected ? 'online' : 'offline'}`} badges={chrome.isDefault ? <Badge size="compact" color="gray">Project default</Badge> : null}>
-        {chrome.note ? <p className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{chrome.note}</p> : null}
-        {chrome.groupId === null ? <p className="text-caption text-muted-foreground">No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them.</p> : <>
-          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-3 px-2.5 py-2">
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-1 px-1.5 py-0.5 text-caption font-medium">{chrome.running > 0 ? '▶ ' : ''}{chrome.groupName ?? 'This workspace’s group'}</span>
-            {chrome.running > 0 ? <span className="text-caption">{chrome.running} {chrome.running === 1 ? 'script' : 'scripts'} running</span> : null}
-            <span className="flex-1" />
-            <RevokeButton groupId={chrome.groupId} pending={pending} onRevoke={revoke} />
-          </div>
-          <TabTiles {...tiles} groupId={chrome.groupId} tabs={chrome.tabs} watchLabel={`${chrome.name} · ${chrome.groupName ?? 'this workspace’s'} group`} onShare={shareTab} />
-          {chrome.tabs.length && chrome.connected ? <p className="text-caption text-muted-foreground">{CHROME_CAPTURE_HINT}</p> : null}
-        </>}
-      </BrowserCard>)}
+      {approved.map(chrome => {
+        const active = chrome.agents.length > 0 || chrome.running > 0;
+        const groupId = chrome.groupId;
+        return <BrowserCard key={chrome.pairingId} label={chrome.name} icon={<Monitor01 width={18} height={18} />} title={chrome.name} meta={`Your Chrome · ${chrome.connected ? 'online' : 'offline'}`} badges={chrome.isDefault ? <Badge size="compact" color="gray">Project default</Badge> : null}>
+          {chrome.note ? <p className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{chrome.note}</p> : null}
+          {groupId === null ? <p className="text-caption text-muted-foreground">No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them.</p> : <>
+            <div className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-3 px-2.5 py-2">
+              {chrome.groupColor ? <span className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-caption font-medium text-white" style={{ background: GROUP_COLORS[chrome.groupColor] }}>{active ? '▶ ' : ''}{chrome.groupName ?? 'This workspace’s group'}</span>
+                : <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-1 px-1.5 py-0.5 text-caption font-medium">{active ? '▶ ' : ''}{chrome.groupName ?? 'This workspace’s group'}</span>}
+              {chrome.agents.length ? <span className="flex min-w-0 flex-col">{chrome.agents.map((agent, index) => <span key={index} className="text-caption">
+                {agent.agent} · <code>browser.{agent.tool}</code> · {agent.commands} {agent.commands === 1 ? 'command' : 'commands'} · <span className="tabular-nums"><Elapsed since={agent.startedAt} /></span>
+                {agent.doing ? <span className="text-muted-foreground"> · {agent.doing}</span> : null}
+              </span>)}</span>
+                // LEGACY: extensions before 5.8 report no agents; remove once every paired extension reports them.
+                : chrome.running > 0 ? <span className="text-caption">{chrome.running} {chrome.running === 1 ? 'script' : 'scripts'} running</span> : null}
+              <span className="ml-auto flex items-center gap-2">
+                {chrome.connected && active ? <Button variant="secondary" size="compact" leadingIcon={StopGlyph} disabled={pending !== null} loading={pending === `stop:${groupId}`} onClick={() => stop(groupId)}>Stop</Button> : null}
+                <RevokeButton groupId={groupId} pending={pending} onRevoke={revoke} />
+              </span>
+            </div>
+            <TabTiles {...tiles} groupId={groupId} tabs={chrome.tabs} watchLabel={`${chrome.name} · ${chrome.groupName ?? 'this workspace’s'} group`} onShare={shareTab} onCloseTab={chrome.connected ? closeTab : null} focusInChrome={chrome.connected} />
+            {chrome.tabs.length && chrome.connected ? <p className="text-caption text-muted-foreground">{CHROME_CAPTURE_HINT}</p> : null}
+          </>}
+        </BrowserCard>;
+      })}
       <BrowserCard label="Cloud browser" icon={<Cloud01 width={18} height={18} />} title="Cloud browser" meta={`Headless · this workspace’s profile${overview.cloud.running ? ` · ${overview.cloud.running} running` : ''}`} badges={null} action={overview.cloud.groupId ? <RevokeButton groupId={overview.cloud.groupId} pending={pending} onRevoke={revoke} /> : null}>
-        {overview.cloud.groupId ? <TabTiles {...tiles} groupId={overview.cloud.groupId} tabs={overview.cloud.tabs} watchLabel="Cloud browser" onShare={null} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
+        {overview.cloud.groupId ? <TabTiles {...tiles} groupId={overview.cloud.groupId} tabs={overview.cloud.tabs} watchLabel="Cloud browser" onShare={null} onCloseTab={closeTab} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
       </BrowserCard>
       {overview.machines.map(machine => <BrowserCard key={machine.machineId} label={`Headless browser on ${machineLabel(machine.machineId)}`} icon={<Server01 width={18} height={18} />} title={`Headless browser on ${machineLabel(machine.machineId)}`} meta="Headless · on this machine" badges={null} action={machine.groupId ? <RevokeButton groupId={machine.groupId} pending={pending} onRevoke={groupId => revoke(groupId, machine.machineId)} /> : null}>
         {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
-        {machine.groupId ? <TabTiles {...tiles} groupId={machine.groupId} tabs={machine.tabs} watchLabel={`Headless browser on ${machineLabel(machine.machineId)}`} onShare={null} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
+        {machine.groupId ? <TabTiles {...tiles} groupId={machine.groupId} tabs={machine.tabs} watchLabel={`Headless browser on ${machineLabel(machine.machineId)}`} onShare={null} onCloseTab={null} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
       </BrowserCard>)}
     </> : null}
     <BrowserCaptures captures={captures} error={capturesError} onMention={onCompose} />
+    {overview ? <RecentRuns runs={overview.runs} machineLabel={machineLabel} /> : null}
     <BrowserShares shares={shares} error={sharesError} pending={pending} onStop={stopShare} />
     <BrowserPageComments comments={comments} error={commentsError} />
     {recovery.length ? <section aria-label="Browser recovery" className="flex flex-col gap-2">
@@ -294,8 +318,10 @@ function RevokeButton({ groupId, pending, onRevoke }: { groupId: string; pending
 }
 
 /** A group's tabs as tiles. `pending` is the Browser tab's action in progress, if any: one action runs at a time.
- * `watchLabel` names the browser and group in the Watch dialog. `onShare` is set for a Chrome's group: its tiles get Share. */
-function TabTiles({ groupId, tabs, watchLabel, request, pending, captures, onShare }: { groupId: string; tabs: readonly Tab[]; watchLabel: string; request: Request; pending: string | null; captures: CaptureControls; onShare: ShareCreate | null }) {
+ * `watchLabel` names the browser and group in the Watch dialog. `onShare` is set for a Chrome's group: its tiles get Share.
+ * `onCloseTab` is set where tabs can be closed from here: their tiles get Close tab. `focusInChrome` gives the Watch
+ * dialog Focus in Chrome (a connected Chrome's group). */
+function TabTiles({ groupId, tabs, watchLabel, request, pending, captures, onShare, onCloseTab, focusInChrome }: { groupId: string; tabs: readonly Tab[]; watchLabel: string; request: Request; pending: string | null; captures: CaptureControls; onShare: ShareCreate | null; onCloseTab: ((groupId: string, targetId: string) => void) | null; focusInChrome: boolean }) {
   const [watching, setWatching] = useState<Tab | null>(null);
   if (!tabs.length) return <p className="text-caption text-muted-foreground">No open tabs.</p>;
   return <>
@@ -316,10 +342,11 @@ function TabTiles({ groupId, tabs, watchLabel, request, pending, captures, onSha
             : <Button variant="ghost" size="icon-compact" aria-label={`Capture ${label}`} title="Capture" disabled={pending !== null} loading={pending === `capture:${groupId}:${tab.targetId}`} onClick={() => captures.start(groupId, tab.targetId)}><VideoRecorder width={14} height={14} /></Button>}
           {onShare ? <ShareTab label={label} pending={pending === `share:${groupId}:${tab.targetId}`} busy={pending !== null} onCreate={(options, onCreated) => onShare(groupId, tab.targetId, options, onCreated)} /> : null}
           <Button variant="ghost" size="icon-compact" aria-label={`Watch ${label}`} title="Watch" onClick={() => setWatching(tab)}><Eye width={14} height={14} /></Button>
+          {onCloseTab ? <Button variant="ghost" size="icon-compact" aria-label={`Close tab ${label}`} title="Close tab" disabled={pending !== null} loading={pending === `close:${groupId}:${tab.targetId}`} onClick={() => onCloseTab(groupId, tab.targetId)}><XClose width={14} height={14} /></Button> : null}
         </div>
       </li>;
     })}</ul>
-    {watching ? <WatchDialog key={watching.targetId} groupId={groupId} tab={watching} watchLabel={watchLabel} request={request} onClose={() => setWatching(null)} /> : null}
+    {watching ? <WatchDialog key={watching.targetId} groupId={groupId} tab={watching} watchLabel={watchLabel} request={request} focusInChrome={focusInChrome} onClose={() => setWatching(null)} /> : null}
   </>;
 }
 
@@ -360,11 +387,18 @@ function TabPreview({ groupId, tab, request, recording, onWatch }: { groupId: st
   </button>;
 }
 
-/** Watching one tab: its preview large, read every few seconds while the dialog is open. */
-function WatchDialog({ groupId, tab, watchLabel, request, onClose }: { groupId: string; tab: Tab; watchLabel: string; request: Request; onClose(): void }) {
+/** Watching one tab: its preview large, read every few seconds while the dialog is open. With `focusInChrome`, Focus in
+ * Chrome brings the tab to the front in that Chrome; its failure shows here. */
+function WatchDialog({ groupId, tab, watchLabel, request, focusInChrome, onClose }: { groupId: string; tab: Tab; watchLabel: string; request: Request; focusInChrome: boolean; onClose(): void }) {
   const { preview, error } = useTabPreview(groupId, tab.targetId, request, WATCH_REFRESH_MS);
+  const [focusing, setFocusing] = useState(false);
+  const [focusError, setFocusError] = useState<string | null>(null);
   const image = preview?.image;
   const title = tab.title || tab.url;
+  const focus = async () => {
+    setFocusing(true); setFocusError(null);
+    try { await request({ type: 'browserFocusTab', groupId, targetId: tab.targetId }); } catch (cause) { setFocusError(rpcErrorMessage(cause, 'Focus the tab in Chrome')); } finally { setFocusing(false); }
+  };
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}><DialogContent size="lg">
     <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{watchLabel} · a new screenshot every few seconds</DialogDescription></DialogHeader>
     <div className="relative flex aspect-[16/10] items-center justify-center overflow-hidden rounded-lg border border-border bg-surface-2">
@@ -372,6 +406,40 @@ function WatchDialog({ groupId, tab, watchLabel, request, onClose }: { groupId: 
         : <p className="p-4 text-center text-caption text-muted-foreground">{error ?? preview?.reason ?? 'Loading preview…'}</p>}
       {image && preview ? <PreviewAge capturedAt={preview.capturedAt} /> : null}
     </div>
-    <DialogFooter><Button variant="primary" onClick={onClose}>Done</Button></DialogFooter>
+    {focusError ? <p role="alert" className="text-caption text-destructive">{focusError}</p> : null}
+    <DialogFooter>
+      {focusInChrome ? <Button variant="ghost" loading={focusing} onClick={() => void focus()}>Focus in Chrome</Button> : null}
+      <Button variant="primary" onClick={onClose}>Done</Button>
+    </DialogFooter>
   </DialogContent></Dialog>;
+}
+
+/** The workspace's browser runs, newest first: when each began, where it ran and what it did, a failure or refusal in
+ * red. Details shows the call, how long it took and the run's notes. */
+function RecentRuns({ runs, machineLabel }: { runs: readonly RuntimeBrowserRun[]; machineLabel(machineId: string): string }) {
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (attemptId: string) => setOpen(previous => {
+    const next = new Set(previous);
+    if (!next.delete(attemptId)) next.add(attemptId);
+    return next;
+  });
+  return <section aria-label="Recent runs" className="flex flex-col gap-2">
+    <h3 className="text-body font-medium">Recent runs</h3>
+    {runs.length ? <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-1 text-caption">{runs.map(run => {
+      const where = run.where.kind === 'chrome' ? run.where.name ?? 'Your Chrome' : run.where.kind === 'cloud' ? 'Cloud browser' : `Headless browser on ${machineLabel(run.where.machineId)}`;
+      const shown = open.has(run.attemptId);
+      return <li key={run.attemptId} aria-label={`Run ${run.summary}`} className="flex flex-col">
+        <div className="flex items-center gap-2 px-3 py-2">
+          <time dateTime={run.at} title={new Date(run.at).toLocaleString()} className="tabular-nums text-muted-foreground">{new Date(run.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })}</time>
+          <span className="w-28 shrink-0 truncate" title={where}>{where}</span>
+          <span className={`min-w-0 flex-1 truncate font-mono ${run.outcome === 'ok' ? '' : 'text-destructive'}`} title={run.summary}>{run.summary}</span>
+          <Button variant="ghost" size="compact" aria-expanded={shown} onClick={() => toggle(run.attemptId)}>Details</Button>
+        </div>
+        {shown ? <ul className="flex flex-col gap-0.5 px-3 pb-2 text-muted-foreground">
+          <li><code>browser.{run.tool}</code> · took {(run.durationMs / 1000).toFixed(1)} s</li>
+          {run.details.map((line, index) => <li key={index} className="break-words font-mono">{line}</li>)}
+        </ul> : null}
+      </li>;
+    })}</ul> : <p className="text-caption text-muted-foreground">No browser runs yet.</p>}
+  </section>;
 }

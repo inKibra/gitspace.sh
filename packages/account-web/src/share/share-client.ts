@@ -30,9 +30,10 @@ async function shareRequest(shareId: string, action: 'preview' | 'join', body: o
   throw new ShareRequestError(failure.data?.error.code ?? `HTTP_${response.status}`, response.status, failure.data?.error.message ?? `The share answered ${response.status}`);
 }
 
-/** The greeting: who shares what, until when. Redeems nothing. */
-export async function previewShare(shareId: string, secret: string): Promise<RuntimeBrowserSharePreview> {
-  return RuntimeBrowserSharePreviewSchema.parse(await shareRequest(shareId, 'preview', { secret }, false));
+/** The greeting: who shares what, until when. Redeems nothing. `signed`: with this browser's enrolled device, which also
+ * learns the name of the shared tab's Chrome. */
+export async function previewShare(shareId: string, secret: string, signed: boolean): Promise<RuntimeBrowserSharePreview> {
+  return RuntimeBrowserSharePreviewSchema.parse(await shareRequest(shareId, 'preview', { secret }, signed));
 }
 
 /** Joins as a viewer. `signed`: with this browser's enrolled device, so the account's owner joins under their own name. */

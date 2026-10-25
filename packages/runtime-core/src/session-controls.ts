@@ -95,7 +95,8 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
-  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserPageCommentView[]>;
+  /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null). */
+  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserPageCommentView[] | null>;
 };
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
@@ -218,6 +219,13 @@ export function createSessionControls(services: SessionControlServices) {
         if (command.type === 'browserShareConnect') return { control: await control(target), browserConnectedTab: RuntimeBrowserConnectedTabSchema.parse(await services.browser(id, undefined, { action: 'shareConnect', shareId: command.shareId, secret: command.secret })) };
         const management: RuntimeBrowserManagement = command.type === 'browserShareCreate' ? { action: 'shareCreate', groupId: command.groupId, targetId: command.targetId, comment: command.comment, expiresInMinutes: command.expiresInMinutes } : { action: 'shareRevoke', shareId: command.shareId };
         return { control: await control(target), browserShare: RuntimeBrowserShareSchema.parse(await services.browser(id, undefined, management)) };
+      }
+      // Your Chrome's workspace group from the Browser tab: Stop, Close tab (a cloud tab too) and Focus in Chrome.
+      case 'browserStop': case 'browserCloseTab': case 'browserFocusTab': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        await services.browser(String(target.id), undefined, command.type === 'browserStop' ? { action: 'stop', groupId: command.groupId } : { action: command.type === 'browserCloseTab' ? 'closeTab' : 'focusTab', groupId: command.groupId, targetId: command.targetId });
+        return { control: await control(target) };
       }
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {

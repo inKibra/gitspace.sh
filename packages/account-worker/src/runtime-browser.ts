@@ -11,6 +11,7 @@ import type { FleetMachineDefinition } from '@gitspace/protocol/account-director
 import type { AccountStateDO } from './account-state.js';
 import { createAccountBrowserAuthority } from './runtime-browser-account.js';
 import { CAPTURE_FILES, captureFolder, captureName, captureView, captureViews, readCapture, writeCapture, type CaptureDrive, type CaptureFile } from './browser-capture.js';
+import { browserRunSummary, logBrowserRun, recentBrowserRuns, viewNames, type BrowserRunEnd, type BrowserRunRow } from './browser-runs.js';
 import type { SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
@@ -34,6 +35,8 @@ const ShareConnection = z.union([z.strictObject({ connected: RuntimeBrowserConne
 const PAGE_COMMENT_CROPS = 'browser/comments/';
 /** Page comments the Browser tab shows, newest first. */
 const PAGE_COMMENTS_SHOWN = 100;
+/** Element names the recent runs remember from observed pages, at most. */
+const REF_NAMES_KEPT = 1000;
 type BrowserStorageTransaction = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> };
 type BrowserStorage = BrowserStorageTransaction & { list(options: { prefix: string; reverse?: boolean; limit?: number }): Promise<Map<string, unknown>>; delete(key: string): Promise<boolean>; transaction<T>(callback: (tx: BrowserStorageTransaction) => Promise<T>): Promise<T> };
 type BrowserEnvironment = {
@@ -42,7 +45,7 @@ type BrowserEnvironment = {
   ACCOUNT_STATE: { getByName(name: string): Pick<AccountStateDO, 'certifyBrowserAuthority'> };
   FLEET_CATALOG: { getByName(name: string): { getMachine(id: string): Promise<Pick<FleetMachineDefinition, 'kind' | 'desiredState'> | null> } };
   /** Each workspace's cloud browser lives in its own object (`BrowserSessionDO`), named `<account>:<project>:<workspace>`. */
-  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }>; preview(targetId: string): Promise<RuntimeBrowserPreview>; captureStart(input: { projectId: string; workspaceId: string; captureId: string; groupId: string; targetId: string }): Promise<RuntimeBrowserCapture>; captureStop(input: { projectId: string; workspaceId: string; captureId: string }): Promise<RuntimeBrowserCapture> } };
+  BROWSER_SESSION?: { getByName(name: string): { execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult>; overview(): Promise<{ tabs: { targetId: string; url: string; title: string }[]; running: number }>; preview(targetId: string): Promise<RuntimeBrowserPreview>; closeTab(targetId: string): Promise<void>; captureStart(input: { projectId: string; workspaceId: string; captureId: string; groupId: string; targetId: string }): Promise<RuntimeBrowserCapture>; captureStop(input: { projectId: string; workspaceId: string; captureId: string }): Promise<RuntimeBrowserCapture> } };
   RELAY?: { getByName(name: string): { browserRelayPlacement(projectId: string, pairingId?: string): Promise<RuntimeAccountBrowserPlacement>; browserRelayProjectSettings(projectId: string): Promise<RuntimeProjectBrowserSettings>; browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> } };
 };
 type BrowserRuntime = Pick<WorkspaceRuntime, 'harness' | 'browserConversation'> & { attachments: Pick<WorkspaceRuntime['attachments'], 'list' | 'execute'> };
@@ -88,8 +91,9 @@ export async function retireWorkspaceBrowsers(storage: { list(options: { prefix:
   for (const key of (await storage.list({ prefix: BROWSER_GROUP_ROWS })).keys()) await storage.delete(key);
   await relay.browserRelayRetireWorkspace(identity.projectId, identity.workspaceId);
 }
+/** `approvedSites`: the approved sites, and the commit their `.gitspace/bundle.json` was read at (null with none). */
 export type RuntimeBrowserAuthorityOptions = {
-  storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ origins: string[]; stepsOnly: string[] }>; groupName(): Promise<string>;
+  storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ origins: string[]; stepsOnly: string[]; revision: string | null }>; groupName(): Promise<string>;
   /** The workspace's drive, where captures are kept. */
   drive(): CaptureDrive;
   /** Moves a file on an attached machine (`machinePath`, inside its /tmp) to the workspace's drive at `path`. */
@@ -186,7 +190,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     return { conversation, args, sites };
   }
-  async function prepare(input: Input) {
+  async function prepareCall(input: Input) {
     const { args, sites } = await context(input), origins = sites.origins;
     if (accountPlacement(args)) return account.prepare(input, args, sites);
     const fingerprint = canonicalBrowserAuthorization({ ...input, signal: undefined, args });
@@ -249,7 +253,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }));
     return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify(list) }] };
   }
-  async function execute(input: Input): Promise<RuntimeToolResult> {
+  async function executeCall(input: Input): Promise<RuntimeToolResult> {
     const tool = RuntimeBrowserToolArgumentsSchema.parse(input.args);
     if (tool.action === 'chromes') return chromes(input);
     if (tool.action === 'comments') return comments(input, tool.limit);
@@ -289,14 +293,51 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     return result;
   }
+  /** Element names of the pages the agent observed, by ref, so the recent runs name what a later `act` acted on; the
+   * newest `REF_NAMES_KEPT`, while this object stays awake. */
+  const refNames = new Map<string, string>();
+  /** Logs one browser call in the workspace's recent runs (`browser-runs.ts`), where it ran by its prepared placement;
+   * a call whose arguments are no browser action is not a run, and a log that fails never fails the call. */
+  async function record(input: Input, startedAt: number, end: BrowserRunEnd) {
+    try {
+      const parsed = RuntimeBrowserArgumentsSchema.safeParse(input.args);
+      if (!parsed.success) return;
+      const args = parsed.data;
+      if ('result' in end && args.action === 'observe') {
+        const view = end.result.content.flatMap(part => part.type === 'text' ? [part.text] : [])[1];
+        for (const [ref, name] of view ? viewNames(view) : []) { refNames.delete(ref); refNames.set(ref, name); }
+        for (const ref of refNames.keys()) { if (refNames.size <= REF_NAMES_KEPT) break; refNames.delete(ref); }
+      }
+      const saved = savedPreparation.safeParse(await storage.get(`runtime.browser.prepare:${input.attemptId}`));
+      const card = saved.success ? saved.data.card : undefined;
+      const where: BrowserRunRow['where'] = !card ? args.source === 'relay' ? { kind: 'chrome', pairingId: args.pairingId ?? null } : { kind: 'cloud' }
+        : !('placement' in card) ? { kind: 'machine', machineId: card.machineId } : card.placement.kind === 'cloud' ? { kind: 'cloud' } : { kind: 'chrome', pairingId: card.placement.pairingId };
+      await logBrowserRun(storage, { attemptId: input.attemptId, at: new Date(startedAt).toISOString(), where, tool: args.action, durationMs: Math.max(0, Date.now() - startedAt), ...browserRunSummary(args, end, refNames) });
+    } catch (error) { console.warn(JSON.stringify({ event: 'browser_run_log_failed', attemptId: input.attemptId, error: String(error) })); }
+  }
+  /** Prepares a browser call; a refusal here, before anything reaches a browser, is in the recent runs. */
+  async function prepare(input: Input) {
+    try { return await prepareCall(input); }
+    catch (error) { await record(input, Date.now(), { error: error instanceof Error ? error.message : String(error), refused: true }); throw error; }
+  }
+  /** Runs a browser call; how it ended is in the recent runs. */
+  async function execute(input: Input): Promise<RuntimeToolResult> {
+    const startedAt = Date.now();
+    let result: RuntimeToolResult;
+    try { result = await executeCall(input); }
+    catch (error) { await record(input, startedAt, { error: error instanceof Error ? error.message : String(error), refused: false }); throw error; }
+    await record(input, startedAt, { result });
+    return result;
+  }
   /** The workspace's live group on a browser (`cloud` or a pairing id): none until first use or after a revocation. */
   async function liveGroup(browser: string) {
     const groupId = z.string().uuid().optional().parse(await storage.get(`runtime.browser.account.group:${browser}`));
     return groupId && !await storage.get(`runtime.browser.revoked:${groupId}`) ? groupId : null;
   }
-  /** The Inspector's Browser tab: approved sites, the cloud browser's tabs, each attached machine's headless browser,
-   * and every Chrome confirmed on the account with this workspace's group there. Only the main conversation sees the
-   * user's Chromes. Nothing here opens a browser; a machine that cannot answer shows why. */
+  /** The Inspector's Browser tab: approved sites (and the commit they were read at), the cloud browser's tabs, each
+   * attached machine's headless browser, every Chrome confirmed on the account with this workspace's group there (its
+   * colour, and who acts there while it is online), and the workspace's recent runs. Only the main conversation sees
+   * the user's Chromes and their names. Nothing here opens a browser; a machine that cannot answer shows why. */
   async function overview(conversationId: string): Promise<RuntimeBrowserOverview> {
     const conversation = await options.runtime().browserConversation(conversationId);
     const approved = await options.approvedSites();
@@ -311,8 +352,8 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       }
     }));
     const chromes: RuntimeBrowserOverview['chromes'] = [];
-    if (conversation.root && env.RELAY) {
-      const settings = await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId);
+    const settings = conversation.root && env.RELAY ? await env.RELAY.getByName(env.RELAY_NAME).browserRelayProjectSettings(identity.projectId) : undefined;
+    if (settings) {
       const document = await workspaceBrowsersDocument(storage);
       for (const browser of settings.browsers) {
         // The newest report of the workspace's group on this Chrome, or the group before the Chrome has reported it.
@@ -320,11 +361,14 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
         const groupId = row?.groupId ?? await liveGroup(browser.pairingId);
         const grant = !row && groupId ? await storage.get(`runtime.browser.account.grant:${groupId}`) : undefined;
         chromes.push({ pairingId: browser.pairingId, name: browser.name, note: browser.note, connected: browser.connected, approved: browser.approved, isDefault: browser.pairingId === settings.defaultPairingId,
-          groupId, groupName: row?.groupName ?? (grant ? RuntimeAccountBrowserSignedGrantSchema.parse(grant).body.groupName : null), running: row?.running ?? 0,
+          groupId, groupName: row?.groupName ?? (grant ? RuntimeAccountBrowserSignedGrantSchema.parse(grant).body.groupName : null), groupColor: row?.color ?? null, running: row?.running ?? 0,
+          // An offline Chrome's last report may still list agents its extension no longer runs.
+          agents: browser.connected ? row?.agents ?? [] : [],
           tabs: row?.tabs.map(tab => ({ targetId: tab.targetId, url: tab.url, title: tab.title, addedBy: tab.addedBy, usable: tab.usable })) ?? [] });
       }
     }
-    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort() }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, machines, chromes });
+    const runs = (await recentBrowserRuns(storage)).map(({ where, ...run }) => ({ ...run, where: where.kind === 'chrome' ? { kind: where.kind, name: settings?.browsers.find(browser => browser.pairingId === where.pairingId)?.name ?? null } : where }));
+    return RuntimeBrowserOverviewSchema.parse({ sites: { origins: [...new Set(approved.origins)].sort(), stepsOnly: [...new Set(approved.stepsOnly)].sort(), revision: approved.revision }, cloud: { groupId: cloudGroup, running: cloud.running, tabs: cloud.tabs.map(tab => ({ ...tab, addedBy: null, usable: true })) }, machines, chromes, runs });
   }
   /** One tab's preview on a machine's headless browser, captured there. A machine that is gone or cannot answer gets
    * no image and the reason, so the tile says why. */
@@ -400,8 +444,9 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if ('connected' in asked) return asked.connected;
     const id = crypto.randomUUID();
     const tabs: Input = { tool: 'browser', args: { action: 'tabs', source: 'relay', pairingId: asked.needsGroup.pairingId }, conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' };
-    const { groupId } = await prepare(tabs);
-    const listed = await execute(tabs);
+    // Your connecting a link is not a run of the agent's: it is not in the recent runs.
+    const { groupId } = await prepareCall(tabs);
+    const listed = await executeCall(tabs);
     if (listed.status !== 'completed') throw new Error(listed.status === 'failed' ? listed.error.message : 'Making this workspace’s group on that Chrome was interrupted');
     const connected = ShareConnection.parse(await account.share(conversationId, { ...command, groupId }));
     if ('needsGroup' in connected) throw new Error('That Chrome did not keep this workspace’s group; connect the link again');
@@ -412,6 +457,11 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
     if (command.action === 'captures') return captureViews(options.drive());
     if (command.action === 'captureStart' || command.action === 'captureStop') return capture(conversationId, command);
     if (command.action === 'pageComments') return pageComments();
+    if (command.action === 'stop' || command.action === 'closeTab' || command.action === 'focusTab') {
+      if (!command.groupId) throw new Error('Stop, Close tab and Focus in Chrome name the group');
+      await account.control(conversationId, { ...command, groupId: command.groupId });
+      return null;
+    }
     if (command.action === 'shares' || command.action === 'shareCreate' || command.action === 'shareRevoke' || command.action === 'shareConnect') return share(conversationId, command);
     // A group names its browser: a machine's headless group is previewed on that machine, any other by the account.
     if (command.action === 'preview') {

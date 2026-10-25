@@ -241,8 +241,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     storage: ctx.storage, env, identity, runtime: options.runtime,
     selectExecution: (args, candidates) => selections.cache(args, candidates),
     approvedSites: async () => {
-      const state = await options.environment.refreshBrowserOrigins(identity);
-      return { origins: approvedBrowserOrigins(state), stepsOnly: stepsOnlyBrowserOrigins(state) };
+      const { state, commit } = await options.environment.refreshBrowserOrigins(identity);
+      return { origins: approvedBrowserOrigins(state), stepsOnly: stepsOnlyBrowserOrigins(state), revision: commit };
     },
     groupName: async () => {
       const project = await authority().getProject();
@@ -791,8 +791,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         try { return await runtime.cloudFiles.execute({ ...input, tool: input.tool }, input.signal); }
         catch (error) {
           if (!CloudPublicationUncertain.is(error)) throw error;
-          await options.schedule(Date.now() + 1_000);
-          return interrupted(input, `Snapshot publication is awaiting durable recovery. Do not repeat the mutation as a new attempt. ${error.message}`);
+          await runtime.publicationUncertain(error);
+          return interrupted(input, `Snapshot publication is awaiting durable recovery: a later wake finishes it, and a notice in this conversation says how it ended. Do not repeat the mutation as a new attempt. ${error.message}`);
         }
       }
       // A human run the account authorized: the same dispatch an agent's `environment` run makes, to the cache it names.

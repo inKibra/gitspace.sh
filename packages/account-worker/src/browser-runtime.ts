@@ -6,6 +6,8 @@ import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServic
 import type { BrowserChannel } from './browser-cdp.js';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 
+/** Management actions from the Browser tab on your Chrome's workspace group: Stop, Close tab, Focus in Chrome. */
+const CONTROLS: Record<string, true | undefined> = { stop: true, closeTab: true, focusTab: true };
 type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: BrowserChannel; sessionId: string; stale: boolean; servicePolicy?: BrowserServicePolicy; unsubscribeServices?: () => void; unsubscribe(): void };
 export type AccountBrowserTransport = {
   open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ channel: BrowserChannel; targetId: string }>;
@@ -14,6 +16,8 @@ export type AccountBrowserTransport = {
   /** `captureStart` / `captureStop` on your Chrome (docs/APERTURE-DESIGN.md §11). */
   capture(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeBrowserCapture>;
   revoke(groupId: string, pairingId: string): Promise<void>;
+  /** Stop, Close tab and Focus in Chrome from the Browser tab (`stop`, `closeTab`, `focusTab`) on your Chrome. */
+  control(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<Record<string, never>>;
   /** Share links (docs/APERTURE-DESIGN.md §8), kept by the relay for the workspace that signed: its shares, live and
    * recently ended; a share of a tab in its group on this Chrome; ending one of its shares; connecting a pasted share's
    * tab to its group on the share's Chrome (`needsGroup` names that Chrome while the workspace has no live group there). */
@@ -36,6 +40,8 @@ export class AccountBrowserRuntime {
   constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices }) {}
   async execute(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization;
+    // Stop never waits behind the step it stops, nor Close tab and Focus in Chrome behind the workspace's step.
+    if (body.command.type === 'manage' && CONTROLS[body.command.action]) return this.perform(authorization, signal);
     const scope = JSON.stringify([body.scope.projectId, body.scope.workspaceId]);
     const predecessor = this.queues.get(scope) ?? Promise.resolve();
     const operation = predecessor.catch(() => {}).then(() => this.perform(authorization, signal));
@@ -101,15 +107,16 @@ export class AccountBrowserRuntime {
         if (!command.secret) throw new Error('Connecting a share takes the secret of its link');
         return json(await relay.shareConnect({ projectId: scope.projectId, workspaceId: scope.workspaceId, shareId: command.shareId, secret: command.secret, ...(command.groupId ? { groupId: command.groupId } : {}) }));
       }
-      const recording = command.action === 'captureStart' || command.action === 'captureStop';
-      if ((command.action !== 'revoke' && command.action !== 'preview' && command.action !== 'shareCreate' && !recording) || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
+      const recording = command.action === 'captureStart' || command.action === 'captureStop', control = CONTROLS[command.action] === true;
+      if ((command.action !== 'revoke' && command.action !== 'preview' && command.action !== 'shareCreate' && !recording && !control) || !command.groupId) throw new Error('Account browser recovery requires revoking the exact group');
       const stored = await this.options.storage.get(`browser.account.group:${command.groupId}`);
       const grant = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : this.groups.get(command.groupId);
       if (!grant || grant.projectId !== scope.projectId || grant.workspaceId !== scope.workspaceId) throw new Error('Browser group outside workspace');
-      // Previews, captures and shares of tabs on your Chrome come from its extension; the cloud browser's previews and
-      // captures from the workspace's browser session.
-      if (command.action === 'preview' || command.action === 'shareCreate' || recording) {
+      // Previews, captures, shares and controls of tabs on your Chrome go to its extension; the cloud browser's previews
+      // and captures to the workspace's browser session.
+      if (command.action === 'preview' || command.action === 'shareCreate' || recording || control) {
         if (!this.options.relay || canonicalBrowserAuthorization(grant.placement) !== canonicalBrowserAuthorization(scope.placement)) throw new Error('Browser group outside this Chrome');
+        if (control) return json(await this.options.relay.control(authorization, signal));
         if (command.action === 'shareCreate') {
           const expiresInMinutes = RuntimeBrowserShareExpirySchema.safeParse(command.expiresInMinutes);
           if (!command.targetId || command.comment === undefined) throw new Error('A share names its tab and whether people may comment');

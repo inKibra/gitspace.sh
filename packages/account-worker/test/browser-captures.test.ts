@@ -41,7 +41,10 @@ async function workspace() {
 /** A paired Chrome whose extension reports `protocol`: confirmed and approved for the project unless `confirmed` is
  * false. Every relay request is recorded; `answer` gives its result (default `{}`). */
 async function chrome(relay: UserRelayDO, root: Identity, projectId: string, options: { protocol?: number; confirmed?: boolean; ip: string }, answer: (message: Record<string, unknown>) => unknown = () => ({})): Promise<Chrome> {
-  const pairing = await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+  // GitSpace starts the pairing; the extension redeems its short code for the pairing's details.
+  const redeemed = await relay.browserRelayRedeemPairingCode((await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey })).code, '198.51.100.1', 'wss://account.test/api/browser-relay/extension');
+  if (!redeemed.ok) throw new Error(redeemed.message);
+  const pairing = redeemed.value;
   const socket = (await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': options.ip } }))).webSocket;
   if (!socket) throw new Error('Missing extension socket');
   const challenge = frame(socket); socket.accept();
@@ -60,7 +63,7 @@ async function chrome(relay: UserRelayDO, root: Identity, projectId: string, opt
   if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
   await relay.browserRelayConfirm(pairing.pairingId, status.pairedKeyFingerprint);
   const settings = await relay.browserRelayProjectSettings(projectId);
-  await relay.browserRelaySetProjectSettings(projectId, settings.revision, { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, note: '' }] });
+  await relay.browserRelaySetProjectSettings(projectId, settings.revision, { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId }] });
   return { socket, identity, pairingId: pairing.pairingId, generation: pairing.generation, operations, placement: await relay.browserRelayPlacement(projectId, pairing.pairingId) };
 }
 

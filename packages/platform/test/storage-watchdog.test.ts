@@ -13,9 +13,9 @@ const scheduledTime = Date.parse('2026-10-14T02:20:00Z');
 const HOUR = 3_600_000;
 const object = (letter: string) => letter.repeat(64);
 
-/** Cloudflare's API: the account's namespaces, the last hour's writes per object (descending), today's totals, and the
- * last 24 hours of each object's waking and reading. */
-function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: number }, lastDay: Record<string, { activeHours: number; rowsRead: number }> = {}) {
+/** Cloudflare's API: the account's namespaces, the last hour's writes and alarms per object (descending), today's
+ * totals, and the last 24 hours of each object's waking and reading. */
+function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: number }, lastDay: Record<string, { activeHours: number; rowsRead: number }> = {}, alarms: Record<string, number> = {}) {
   globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     if (new URL(request.url).pathname.endsWith('/workers/durable_objects/namespaces')) {
@@ -23,7 +23,10 @@ function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: numb
     }
     const body: { query: string } = await request.json();
     const groups = Object.entries(hour).map(([objectId, rowsWritten]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { rowsWritten } }));
-    if (body.query.includes('StorageWatchdogHour')) return Response.json({ data: { viewer: { accounts: [{ objects: groups }] } } });
+    if (body.query.includes('StorageWatchdogHour')) {
+      const alarmGroups = Object.entries(alarms).map(([objectId, requests]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { requests } }));
+      return Response.json({ data: { viewer: { accounts: [{ objects: groups, alarms: alarmGroups.toSorted((a, b) => b.sum.requests - a.sum.requests) }] } } });
+    }
     if (body.query.includes('StorageWatchdogAwake')) {
       const objects = Object.entries(lastDay).map(([objectId, usage]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { activeTime: usage.activeHours * HOUR * 1000, rowsRead: usage.rowsRead } }));
       return Response.json({ data: { viewer: { accounts: [{
@@ -128,6 +131,23 @@ test('the watchdog reports an object awake 20 of the last 24 hours, or reading 2
   expect(emails).toEqual([expect.objectContaining({ subject: 'GitSpace watchdog: 2 Durable Object alerts' })]);
   await run(scheduledTime + 10 * 60_000);
   expect(emails).toHaveLength(1);
+});
+
+test('the watchdog reports an object running more than 300 alarms an hour to its tenant, and again only if it still does six hours later', async () => {
+  mockCloudflare({}, { rowsWritten: 0 }, {}, { [object('9')]: 120, [object('a')]: 3_500, [object('b')]: 300 });
+  const { asked, emails, run } = platform();
+  await run();
+  expect(asked).toEqual([{ objectId: object('a'), className: 'SpaceAuthorityDO', action: 'alert', reason: expect.stringContaining('ran 3,500 alarms in the last hour') }]);
+  expect(emails).toEqual([{
+    subject: 'GitSpace watchdog: 1 Durable Object alert',
+    text: expect.stringContaining('- SpaceAuthorityDO aaaaaaaaaaaa… (GitSpace tenant acme): ran 3,500 alarms in the last hour (alert above 300); an object should wake only for a deadline, the heartbeat of in-flight work, or a retry with backoff.\n'),
+  }]);
+
+  await run(scheduledTime + 10 * 60_000);
+  expect(emails).toHaveLength(1);
+  await run(scheduledTime + 6 * HOUR);
+  expect(emails).toHaveLength(2);
+  expect(asked.filter(item => item.objectId === object('a'))).toHaveLength(2);
 });
 
 test('the watchdog reports that it is blind after three runs without analytics', async () => {

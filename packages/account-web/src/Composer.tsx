@@ -1,10 +1,9 @@
 import type { SkillView } from '@gitspace/protocol';
-import { parseBrowserShareLink, RuntimeBrowserSharePreviewSchema, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import { parseBrowserShareLink, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { z } from 'zod';
 import { connectedTabText, TabChip } from './connected-tab.js';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
@@ -15,6 +14,7 @@ import { navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
+import { previewShare } from './share/share-client.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -31,10 +31,6 @@ async function imageAttachment(file: File): Promise<{ data: string; mimeType: st
 
 type ShareLink = { text: string; shareId: string; secret: string };
 type ShareChip = { state: 'reading' } | { state: 'ready'; preview: RuntimeBrowserSharePreview } | { state: 'failed'; message: string };
-const SharePreviewResponseSchema = z.union([
-  z.object({ status: z.literal('ok'), value: RuntimeBrowserSharePreviewSchema }),
-  z.object({ status: z.literal('error'), error: z.object({ message: z.string() }) }),
-]);
 const SHARE_ENDED: Record<NonNullable<RuntimeBrowserSharePreview['ended']>, string> = { revoked: 'Sharing stopped', expired: 'This share expired', closed: 'The shared tab was closed' };
 
 /** Why a pasted share can no longer connect: it ended or its time ran out. Null while it may. */
@@ -54,13 +50,11 @@ function shareLinksIn(text: string): ShareLink[] {
   return [...links.values()];
 }
 
-/** The greeting of a pasted share link: its page title, or why there is none. */
+/** The greeting of a pasted share link (asked as this browser's device, so it names the shared tab's Chrome), or why
+ * there is none. */
 async function readShareChip(link: ShareLink): Promise<ShareChip> {
   try {
-    const response = await fetch(new URL(`/api/shares/${link.shareId}/preview`, window.location.origin), { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: link.secret }) });
-    const body = SharePreviewResponseSchema.safeParse(await response.json().catch(() => null));
-    if (!body.success) return { state: 'failed', message: `The share link could not be read (HTTP ${response.status}).` };
-    return body.data.status === 'ok' ? { state: 'ready', preview: body.data.value } : { state: 'failed', message: body.data.error.message };
+    return { state: 'ready', preview: await previewShare(link.shareId, link.secret, true) };
   } catch (failure) {
     return { state: 'failed', message: rpcErrorMessage(failure, 'Read share link') };
   }
@@ -307,11 +301,15 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     {joined.map((tab) => <p key={`${tab.pairingId}:${tab.targetId}`} role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full bg-foreground/40" />Tab connected: {URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} joined this workspace&apos;s group in {tab.browser}. The agent may use it while it stays there.</p>)}
     {tabs.length ? <ul aria-label="Shared tabs" className="flex flex-col gap-1.5">{tabs.map((link) => {
       const chip = shareChips.get(link.text);
+      const preview = chip?.state === 'ready' ? chip.preview : null;
       const ended = shareEnded(chip);
-      const title = chip?.state === 'ready' ? chip.preview.page.title || chip.preview.page.site : null;
-      return <li key={link.text} aria-label={`Tab ${title ?? 'from a share link'}`} className="flex min-w-0 flex-wrap items-center gap-2">
-        <TabChip host={chip?.state === 'ready' ? chip.preview.page.site : 'Shared tab'} detail={chip?.state === 'ready' ? chip.preview.page.title || null : null} />
-        <span className={`min-w-0 text-caption ${chip?.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{ended ? `${ended} · it won't join this workspace` : chip?.state === 'failed' ? chip.message : chip?.state === 'ready' ? 'Pasted tab link · joins this workspace when you send' : 'Reading the shared tab…'}</span>
+      const caption = ended ? `${ended} · it won't join this workspace`
+        : chip?.state === 'failed' ? chip.message
+        : preview && !preview.online ? `${preview.browser ?? 'Its Chrome'} is offline · open that Chrome to connect this tab`
+        : preview ? 'Pasted tab link · joins this workspace when you send' : 'Reading the shared tab…';
+      return <li key={link.text} aria-label={`Tab ${preview ? preview.page.title || preview.page.site : 'from a share link'}`} className="flex min-w-0 flex-wrap items-center gap-2">
+        <TabChip host={preview?.page.site ?? 'Shared tab'} detail={preview?.browser ?? null} />
+        <span className={`min-w-0 text-caption ${chip?.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{caption}</span>
         <Button variant="ghost" size="icon-compact" aria-label="Remove tab" disabled={connecting} onClick={() => setTabs((current) => current.filter((item) => item.text !== link.text))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}

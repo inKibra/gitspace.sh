@@ -6,14 +6,20 @@ import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { verticalSliceFixture } from './App.js';
 import { Composer, type ComposerProps } from './Composer.js';
+import { currentDevice } from './device-session.js';
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
+
+vi.mock('./device-session.js', () => ({ currentDevice: vi.fn(), deviceRejected: vi.fn() }));
 
 let root: Root;
 let container: HTMLDivElement;
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const keyPair = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
+  if (!('privateKey' in keyPair)) throw new Error('Expected a key pair');
+  vi.mocked(currentDevice).mockResolvedValue({ deviceId: '44444444-4444-4444-8444-444444444444', label: 'Browser', publicKey: '', keyPair, enrolledAt: 0, userId: 'user', enrollUrl: 'https://account.test', canDelegate: false });
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -78,7 +84,7 @@ it('keeps the draft and its attachment when the upload fails', async () => {
 const shareId = '00000000-0000-4000-8000-0000000000d1';
 const secret = 'test-share-secret'.padEnd(43, 'x');
 const control: SessionControlView = { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null };
-const greeting: RuntimeBrowserSharePreview = { sharer: 'Brad', page: { title: 'Checkout', site: 'shop.example.com' }, comment: true, expiresAt: '2026-10-24T13:00:00.000Z', ended: null };
+const greeting: RuntimeBrowserSharePreview = { sharer: 'Brad', page: { title: 'Checkout', site: 'shop.example.com', icon: null }, comment: true, expiresAt: '2026-10-24T13:00:00.000Z', ended: null, browser: 'Work Chrome', online: true };
 /** An hour before the greeting's share expires. */
 function beforeShareExpiry() {
   vi.useFakeTimers({ toFake: ['Date'] });
@@ -91,8 +97,8 @@ async function typeDraft(text: string) {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, text);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  // The greeting's fetch, its body and the render it causes.
-  for (let turn = 0; turn < 5; turn += 1) await act(async () => {});
+  // The greeting's fetch (signed in WebCrypto, outside React's turns), its body and the render it causes.
+  await vi.waitFor(async () => { await act(async () => {}); expect(container.textContent).not.toContain('Reading the shared tab…'); });
   return textarea;
 }
 async function send() {
@@ -116,10 +122,13 @@ it('swaps a pasted share link out of the draft into a chip of its tab, connects 
   expect(container.querySelector('[aria-label="Tab Checkout"]')?.textContent).toContain('shop.example.com');
   expect(container.querySelector('[aria-label="Tab Checkout"]')?.textContent).toContain('joins this workspace when you send');
   expect(fetch).toHaveBeenCalledOnce();
-  const [url, init] = fetch.mock.calls[0]!;
-  expect(String(url)).toBe(`${window.location.origin}/api/shares/${shareId}/preview`);
-  expect(init?.method).toBe('POST');
-  expect(JSON.parse(String(init?.body))).toEqual({ secret });
+  const request = new Request(...fetch.mock.calls[0]!);
+  expect(request.url).toBe(`${window.location.origin}/api/shares/${shareId}/preview`);
+  expect(request.method).toBe('POST');
+  expect(await request.json()).toEqual({ secret });
+  // Asked as this browser's device, the account names the Chrome holding the tab, and the chip shows it.
+  expect(request.headers.get('x-gitspace-device')).toEqual(expect.any(String));
+  expect(container.querySelector('[aria-label="Tab Checkout"]')?.textContent).toContain('shop.example.com· Work Chrome');
 
   await send();
   expect(sessionCommand.mock.calls.map(([command]) => command)).toEqual([{ type: 'browserShareConnect', shareId, secret }]);
@@ -147,10 +156,18 @@ it('keeps the draft and its tab chip and shows why when the tab cannot be connec
   expect(container.querySelector('[aria-label="Tab Checkout"]')).not.toBeNull();
 });
 
+it('says when the shared tab’s Chrome is offline, so sending would not connect it', async () => {
+  beforeShareExpiry();
+  vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async () => Response.json({ status: 'ok', value: { ...greeting, online: false } })));
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={vi.fn()} sessionCommand={vi.fn()} />));
+  await typeDraft(`Look at ${window.location.origin}/s/${shareId}#${secret}`);
+  expect(container.querySelector('[aria-label="Tab Checkout"]')?.textContent).toContain('Work Chrome is offline · open that Chrome to connect this tab');
+});
+
 it('sends without connecting a tab whose share ended or that you removed', async () => {
   beforeShareExpiry();
   const ended = '00000000-0000-4000-8000-0000000000d2';
-  vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async (input) => Response.json({ status: 'ok', value: String(input).includes(ended) ? { ...greeting, page: { title: 'Old cart', site: 'shop.example.com' }, ended: 'revoked' } : greeting })));
+  vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async (input) => Response.json({ status: 'ok', value: new Request(input).url.includes(ended) ? { ...greeting, page: { title: 'Old cart', site: 'shop.example.com', icon: null }, ended: 'revoked' } : greeting })));
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
   const sessionCommand = vi.fn<NonNullable<ComposerProps['sessionCommand']>>(async () => ({ control, browserConnectedTab: connectedTab }));
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} sessionCommand={sessionCommand} />));

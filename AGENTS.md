@@ -82,6 +82,7 @@ Follow existing package boundaries and typed contracts.
 - Do not assume a workspace move copies the machine disk. Keep project state separate from disposable machine state.
 - Use the `workspace-services` skill for services and `space-artifacts` for artifact publication. Do not substitute legacy CLI commands for these interfaces.
 - Pi session state, inference, login, refresh and account selection belong to the cloud. Machines execute authorized effects; do not add a machine inference fallback. Preserve bounded history and durable recovery when modifying these paths.
+- **No polling.** Never schedule a wake, alarm, timer or retry to check whether something has happened yet. Wake work from the event that finishes what it waits for: a run ending, a message arriving, a commit. A Durable Object alarm exists only for (1) a deadline the work itself names (a job's timeout, a sleep until a time); (2) the heartbeat that resumes in-flight work after the object is evicted; (3) a retry after a failure, with backoff and a point where it gives up and tells someone. A wake that re-arms itself when there is nothing due is a bug: an idle object must hold no alarm, timer or open request, and is billed for every hour it stays awake.
 
 ## Security
 

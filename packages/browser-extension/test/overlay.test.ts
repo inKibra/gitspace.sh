@@ -83,4 +83,38 @@ describe('the in-page overlay', () => {
     // The cursor alone never draws an overlay that is gone.
     expect(call(browserOverlayFunction, { cursor: { x: 1, y: 1, type: 'mouseMoved' } })).toBe(false);
   });
+
+  it('with report, says where your own pointer is, at most ten times a second and the latest each time, and when it leaves the tab; never the agent’s pointer, and nothing once reporting stops', () => {
+    const { window, call, host } = page();
+    const reports: string[] = [];
+    // The page's timers, which the test runs.
+    const timers = new Map<number, () => void>();
+    let timer = 0;
+    Object.assign(window, {
+      __gitspaceStop: (payload: string) => { reports.push(payload); },
+      setTimeout: (run: () => void) => { timers.set(++timer, run); return timer; },
+      clearTimeout: (id: number) => { timers.delete(id); },
+    });
+    const elapse = () => { for (const [id, run] of [...timers]) { timers.delete(id); run(); } };
+    // Without a related target: the pointer left the page, not moved within it.
+    const mouse = (type: string, x = 0, y = 0) => window.document.dispatchEvent(new window.MouseEvent(type, { clientX: x, clientY: y }));
+    call(browserOverlayFunction, { show: null, report: '__gitspaceStop' });
+    expect(host()).not.toBeNull();
+    mouse('mousemove', 512, 384); mouse('mousemove', 256, 192); mouse('mousemove', 768, 576);
+    expect(reports).toEqual(['pointer {"x":0.5,"y":0.5}']);
+    elapse();
+    expect(reports).toEqual(['pointer {"x":0.5,"y":0.5}', 'pointer {"x":0.75,"y":0.75}']);
+    // The agent's events land where its cursor is; they are not yours.
+    call(browserOverlayFunction, { cursor: { x: 100, y: 100, type: 'mouseMoved' } });
+    mouse('mousemove', 100, 100);
+    elapse();
+    expect(reports).toHaveLength(2);
+    mouse('mouseout');
+    elapse();
+    expect(reports.at(-1)).toBe('pointer null');
+    call(browserOverlayFunction, { show: null, report: null });
+    mouse('mousemove', 512, 384);
+    elapse();
+    expect(reports).toHaveLength(3);
+  });
 });

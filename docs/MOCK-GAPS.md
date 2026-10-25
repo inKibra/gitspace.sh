@@ -3,6 +3,8 @@
 Mock sources: `packages/account-web/src/BrowsersMock.tsx` (M), `src/BrowsersMockShare.tsx` (MS). All shipped paths below are relative to `packages/account-web/src` unless they name another package. Design doc: `docs/APERTURE-DESIGN.md` (D).
 Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, not in mock) · **[BACKEND]** needs server/extension/protocol data or operations that don't exist yet.
 
+**Phase 2 built (2026-10-25, extension 5.8.0):** the [BACKEND] rows for each Chrome's version, OS, last seen, paired date, agents using it now and one note (27, 28, 31, 59, 60), the cloud browser's open-tab count (46), the short pairing code, the group colour, activity, Stop, Close tab and Focus in Chrome (130, 131, 132, 148, 159), Recent runs with refusals (194, 195), the approved sites' bundle commit (106), and the share preview's Chrome name, favicon, live dot and the sharer's pointer (207, 233, 235, 282). Still open: site levels read / interact / full (105, needs a decision), previews of tabs you added (144, kept private), another account's user joining as themselves (249, needs a decision), and the later phases (take over, comments, captures).
+
 ---
 
 ## View 1 · Plugins → Browsers (M:48-148 vs BrowserPlugins.tsx, PluginsPage.tsx)
@@ -204,7 +206,7 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 |---|---|---|
 | Link detected in the draft and turned into a chip | MATCH (own-account links only) | Composer.tsx:39-46, 145-153 |
 | Link **swapped out of the text**: the draft shows only "Can you summarise…" with the chip inside the composer box | DIFFERENT: the raw link stays in the textarea; chips render in a list above the InputMessage | Composer.tsx:284-295 |
-| Chip: Monitor icon · bold host "news.ycombinator.com" · muted "· Studio desktop" (Chrome name) | DIFFERENT: bold "Tab" label · page title · muted site; no icon. Chrome name MISSING [BACKEND]: share preview has no browser name (protocol-runtime/src/browser-share.ts:77-84) | Composer.tsx:287-292 |
+| Chip: Monitor icon · bold host "news.ycombinator.com" · muted "· Studio desktop" (Chrome name) | MATCH (phase 2): the preview, asked as this browser's device, names the Chrome (`browser`, account-worker/src/browser-share.ts:658); EXTRA caption "{Chrome} is offline · open that Chrome to connect this tab" when it is offline | Composer.tsx:303-312 |
 | Caption next to chip "Pasted tab link · joins this workspace when you send" | DIFFERENT: only a `title` tooltip ("Sending connects this tab to the workspace; …") | Composer.tsx:287 |
 | Ghost icon X "Remove tab" | MISSING | — |
 | Send connects the tab first, link never reaches the agent | MATCH (browserShareConnect, link replaced with machine text) | Composer.tsx:160-174 |
@@ -230,9 +232,9 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 | Logo row: favicon 28px + "GitSpace" | DIFFERENT: kicker text "Shared tab · GitSpace", no logo | :43 |
 | h2 "Bradley is sharing a tab with you" (title, tracking-tight) | MATCH (h1, no tracking-tight) | :44 |
 | Subtitle "Live, as it happens in Bradley's Chrome." | MISSING | — |
-| Page tile (rounded-xl border bg-surface-2 p-3): site icon square ("Y" on orange) | MISSING. [BACKEND] preview has no favicon (browser-share.ts:77-84) | :46-49 |
+| Page tile (rounded-xl border bg-surface-2 p-3): site icon square ("Y" on orange) | MATCH (phase 2): the page's favicon from the sharing Chrome (`page.icon`; extension background.js:1100 `shareIcon`); without one, the site's first letter on surface-3 | share/ShareGreeting.tsx:51-55 |
 | Tile title "Hacker News" + **mono** host | DIFFERENT: host not mono; tile `bg-card px-4 py-3` | :46-48 |
-| Tile right: green dot "live" | MISSING. [BACKEND] preview lacks the Chrome's online state (presence only arrives after joining, browser-share.ts:150) | — |
+| Tile right: green dot "live" | MATCH (phase 2): `online` in the preview; gray dot "offline" while the Chrome is offline | share/ShareGreeting.tsx:59-61 |
 | One ✓/✕ list | DIFFERENT: two headed lists "You can" / "You can't" with Check / X icons | :50-62 |
 | "✓ Watch the tab live" | MATCH | :35 |
 | "✓ Point: everyone sees your pointer with your name" | DIFFERENT "Point at things: everyone watching sees your pointer and name" | :36 |
@@ -246,7 +248,7 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 ### Greeting · Signed in to GitSpace (MS:27, 52-56)
 | Mock element | Status | Shipped |
 |---|---|---|
-| Another GitSpace user (Ana Ruiz) recognised: box "Joining as **Ana Ruiz** (signed in to GitSpace)" on surface-2, no name field, Join enabled, footer without "No account needed." | DIFFERENT / [BACKEND]: only this account's **own** enrolled device is recognised, and joins as the sharer ("Joining as {sharer}", plain text, no "(signed in to GitSpace)", no box). Other accounts are always guests: browser-share.ts:36-37 ("guest unless they joined signed in as the account's owner"), account-worker/src/browser-share.ts:141. Design: D §8 l.200 ("their name (from their GitSpace account when signed in…)") | ShareGreeting.tsx:66-67; SharePage.tsx:37-40, 69-72 |
+| Another GitSpace user (Ana Ruiz) recognised: box "Joining as **Ana Ruiz** (signed in to GitSpace)" on surface-2, no name field, Join enabled, footer without "No account needed." | NOT BUILT [BACKEND, needs a decision]: no identity spans accounts (each account's devices live in its own vault and IndexedDB on its own host; the apex `gitspace.sh` has no session; sealing and signing keys are per account), so another account's user cannot be verified without new infrastructure (a platform-brokered or per-account-issued assertion). The account's **own** device is recognised, in the mock's box ("Joining as {sharer} (signed in to GitSpace)") | ShareGreeting.tsx:70-72; SharePage.tsx:37-40 |
 
 ### Greeting · Shared capture (MS:28-39)
 Whole state MISSING. [BACKEND] capture share links don't exist (D §8 l.217 "Not built yet: … capture shares (§11)", D §11 l.269, milestone B3 l.323). Elements:
@@ -279,7 +281,7 @@ Whole state MISSING. [BACKEND] capture share links don't exist (D §8 l.217 "Not
 | Draft popover: white card w-72 to the right of the target, "On {label} · as **Ana (guest)**" | DIFFERENT: card w-64 at the click point/area corner; "On role “name”" / "On this area" / "On this spot"; **"as {name} (guest)" MISSING** | :350-357 |
 | Field placeholder "Write a comment…" | MISSING (textarea has no placeholder) | :359 |
 | Cancel as a text link (left) · purple "Comment" (right) | DIFFERENT: ghost "Cancel" + primary "Comment", both right; EXTRA "Sending…", error text, Ctrl/⌘+Enter, Esc | :363-371 |
-| Named pointers overlaid: "main · agent" (blue), "Bradley" (gray), "You (Ana)" (purple) | DIFFERENT: the viewer draws no pointers; they arrive drawn into the tab's frames by the extension (comment :349). Owner's own Chrome pointer: [BACKEND] the share protocol has no sharer-pointer message (server messages, browser-share.ts:137-154) [INFERENCE about extension overlay] | :349 |
+| Named pointers overlaid: "main · agent" (blue), "Bradley" (gray), "You (Ana)" (purple) | MATCH (phase 2) for "Bradley": the sharer's Chrome reports their pointer over the tab and each viewer draws it in gray with their name (`sharer` message; account-worker/src/browser-share.ts:535); it is never drawn on the tab, under the sharer's own cursor. The agent's cursor and the viewers' pointers arrive drawn into the frames by the overlay (its labels are the overlay's: "main", "Ana · watching") | share/ShareViewer.tsx:383-385, 428-441 |
 | Numbered comment pin on the page ("1") | MISSING. Comments show only in the sidebar; pins on the live frame would need the page's scroll offset (page message has none, browser-share.ts:140) | — |
 | — | EXTRA: Comments sidebar list (ShareComments: name, guest badge, time, text, "On …") | ShareComments.tsx:5-24, ShareViewer.tsx:387 |
 | — | EXTRA: banners "{sharer}'s Chrome is offline…", "Connection lost. Reconnecting…", notice+Dismiss; "Waiting for the tab…" | :327-329, 344 |

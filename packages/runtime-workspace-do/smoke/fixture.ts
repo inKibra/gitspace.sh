@@ -4,6 +4,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createOperationalTasks, type OperationalServices } from '../../runtime-core/src/tasks.js';
 import { RuntimeAnswerInputSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSaveSchema } from '@gitspace/protocol-runtime/draft';
+import { workspaceTurnReportSchema } from '@gitspace/blocks';
 import { createWorkspaceRuntime, type WorkspaceRuntimeOptions } from '../src/runtime.js';
 import { createRunningMarks } from '../src/running-marks.js';
 import { createReplicaStore } from '../src/replica-store.js';
@@ -125,6 +126,8 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         const rowsRead = await this.counted.rowsReadDuring(() => runtime.wake());
         return Response.json({ alarm: await this.ctx.storage.getAlarm(), rowsRead });
       }
+      // A workspace's report that wakes the main conversation: an event delivered to it, held while it is busy.
+      if (url.pathname === '/report') { await runtime.workspaceReport(workspaceTurnReportSchema.parse(await request.json()), 'wake'); return Response.json({ delivered: true }); }
       if (url.pathname === '/enable-definitions') { await this.ctx.storage.put('definitions-enabled', true); return Response.json({ enabled: true }); }
       if (url.pathname === '/draft') return Response.json(await runtime.saveDraft(WorkspaceDraftSaveSchema.parse(await request.json()), request.headers.get('x-fixture-device') ?? 'fixture-browser'));
       if (url.pathname === '/events') {

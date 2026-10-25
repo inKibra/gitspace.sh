@@ -70,6 +70,27 @@ test('a workspace process that exits on its own is reported to the account with 
   }
 }, 30_000);
 
+test('a status check after a machine restart holds the exit wait again, so the exit is still reported', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'proc-recheck-'));
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine', root, 'gssh.dev', 'test', new HostedRoutesFake([{ id: 'machine', label: 'alpha' }]).authority('machine'));
+  // The machine host before its restart held the wait; the one after it holds none until the workspace checks.
+  const before = machineProcessOperation({ services: manager, reportProcessExit: async () => {} });
+  const reported = Promise.withResolvers<Parameters<Parameters<typeof machineProcessOperation>[0]['reportProcessExit']>[0]>();
+  const after = machineProcessOperation({ services: manager, reportProcessExit: async input => { reported.resolve(input); } });
+  const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, checkout: { kind: 'shared', branch: 'main' }, state: 'ready', capabilities: ['proc'], updatedAt: new Date().toISOString() });
+  const local = { attachment, rootPath: root, executionSecret: 'secret', prerequisitesComplete: true };
+  const dispatch = (args: unknown) => RuntimeToolDispatchSchema.parse({ version: 1, projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'cache', generation: 1, conversationId: 'conversation', conversationKind: 'main', taskId: 'task', requestId: 'request', attemptId: 'attempt', tool: 'proc', deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'unsafe', args });
+  try {
+    const [started] = await before(dispatch({ op: 'start', spec: { name: 'server', application: '/bin/sleep', args: ['30'], cwd: '.', env: {}, pty: false, restart: 'no', persist: true, detached: false } }), local, AbortSignal.timeout(20_000));
+    const daemon = started?.type === 'text' ? JSON.parse(started.text).daemon : null;
+    await after(dispatch({ op: 'status', name: 'server', instanceId: daemon.id, restartCount: 0 }), local, AbortSignal.timeout(20_000));
+    await after(dispatch({ op: 'stop', name: 'server', instanceId: daemon.id, restartCount: 0 }), local, AbortSignal.timeout(20_000));
+    expect(await reported.promise).toMatchObject({ workspaceId: 'workspace', daemon: { id: daemon.id, name: 'server', restartCount: 0 } });
+  } finally {
+    await manager.dispose(); await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test('a failed route renewal is retried on the next tick instead of ending the machine', async () => {
   const root = await mkdtemp(join(tmpdir(), 'route-lease-'));
   const renewals: string[] = [];

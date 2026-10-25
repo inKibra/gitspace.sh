@@ -488,6 +488,17 @@ export class CloudFileStore {
   private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null, publicationId?: string): void {
     this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', publicationId ? `${checkpoint.worktreeCommit}:${publicationId}` : checkpoint.worktreeCommit, JSON.stringify({ ...checkpoint, ...(publicationId ? { publicationId } : {}) }), previous ? JSON.stringify(previous) : null);
   }
+  /** Whether a write's publication outcome is unknown (an uncertain push): its plan is kept to finish it. */
+  hasPendingWrites(): boolean {
+    return this.storage.sql.exec('SELECT id FROM runtime_cloud_files WHERE pending IS NOT NULL LIMIT 1').toArray().length > 0;
+  }
+  /** Finishes every write whose publication outcome is unknown with the commit it planned, as its attempt running again
+   * would; a publication still uncertain throws `CloudPublicationUncertain`. */
+  async finishPendingWrites(): Promise<RuntimeToolResult[]> {
+    const results: RuntimeToolResult[] = [];
+    for (const row of this.storage.sql.exec<{ input: string }>('SELECT input FROM runtime_cloud_files WHERE pending IS NOT NULL').toArray()) results.push(await this.execute(InvocationSchema.parse(JSON.parse(row.input))));
+    return results;
+  }
   async flushRetention(): Promise<void> {
     do {
       this.retaining ??= this.drainRetention().finally(() => { this.retaining = undefined; });

@@ -16,7 +16,10 @@ function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socke
 /** A paired, confirmed and project-approved Chrome whose extension reports `protocol`. Its group holds one tab of yours;
  * `open` with a url adds an agent tab; every operation is recorded. */
 async function chrome(relay: UserRelayDO, root: Identity, protocol: number) {
-  const pairing = await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+  // GitSpace starts the pairing; the extension redeems its short code for the pairing's details.
+  const redeemed = await relay.browserRelayRedeemPairingCode((await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey })).code, '198.51.100.1', 'wss://account.test/api/browser-relay/extension');
+  if (!redeemed.ok) throw new Error(redeemed.message);
+  const pairing = redeemed.value;
   const response = await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': '192.0.2.1' } }));
   const socket = response.webSocket;
   if (!socket) throw new Error('Missing extension socket');
@@ -29,7 +32,7 @@ async function chrome(relay: UserRelayDO, root: Identity, protocol: number) {
   if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
   await relay.browserRelayConfirm(pairing.pairingId, status.pairedKeyFingerprint);
   const settings = await relay.browserRelayProjectSettings('project');
-  await relay.browserRelaySetProjectSettings('project', settings.revision, { defaultPairingId: pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, note }) => ({ pairingId, note })), { pairingId: pairing.pairingId, note: '' }] });
+  await relay.browserRelaySetProjectSettings('project', settings.revision, { defaultPairingId: pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId }) => ({ pairingId })), { pairingId: pairing.pairingId }] });
   const operations: Operation[] = [];
   const tabs = [{ targetId: 'your-tab', title: 'Docs', url: 'https://example.com/docs', addedBy: 'you' }];
   socket.addEventListener('message', event => {

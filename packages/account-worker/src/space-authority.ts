@@ -10,6 +10,7 @@ import { BROWSER_GROUP_ROWS, PAGE_COMMENT_ROWS, PAGE_COMMENTS_KEPT, retireWorksp
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
+import { createRuntimeQaServices } from './runtime-services.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
@@ -109,7 +110,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0)');
     if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(portable_lfs_outbox)').toArray().some(column => column.name === 'attempts')) this.ctx.storage.sql.exec('ALTER TABLE portable_lfs_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
     this.ctx.storage.sql.exec('DROP TABLE IF EXISTS base_branch_steps');
-    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner IN ('baseBranch','directory')");
+    // Owners of earlier releases have no handler: their wakes would fire forever.
+    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner NOT IN ('runtime','lfs','presence-notice')");
     createWorkspaceMetadataTables(this.ctx.storage);
   }
 
@@ -142,9 +144,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return operation;
   }
 
+  /** Every owner's handler clears or moves its own wake, so an alarm that finds nothing due leaves none behind. */
   async alarm(): Promise<void> {
-    const startedAt = Date.now();
-    const due = this.ctx.storage.sql.exec<{ owner: string; timestamp: number }>("SELECT owner, timestamp FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", startedAt).toArray();
+    const due = this.ctx.storage.sql.exec<{ owner: string }>("SELECT owner FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", Date.now()).toArray();
     await this.flushPortableLfs();
     if (due.some(row => row.owner === 'presence-notice')) await this.noticeOfflineMachines();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
@@ -152,14 +154,6 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       await this.scheduleAlarm('runtime', null);
       const identity = await this.ctx.storage.get<Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>>('runtime.identity');
       if (identity) await (await this.getRuntime(identity)).wake();
-    }
-    // A wake that was due and that its handler neither cleared nor moved has nothing to do: re-arming it would fire again
-    // at once, forever (an empty outbox). It is dropped; a handler that has work
-    // schedules again.
-    const stale = due.filter(row => this.ctx.storage.sql.exec<{ timestamp: number }>('SELECT timestamp FROM runtime_alarms WHERE owner=?', row.owner).toArray()[0]?.timestamp === row.timestamp);
-    for (const row of stale) {
-      console.error(JSON.stringify({ event: 'space_alarm_stale_wake_dropped', owner: row.owner, dueAt: new Date(row.timestamp).toISOString() }));
-      await this.scheduleAlarm(row.owner, null);
     }
   }
 
@@ -268,10 +262,13 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       await this.scheduleAlarm('presence-notice', Date.now() + OFFLINE_NOTICE_MS);
       return;
     }
-    const told = offline[machineId]?.told;
+    await runtime.machineReconnected();
+    const entry = offline[machineId];
     delete offline[machineId];
     await this.ctx.storage.put('presence.offline', offline);
-    if (told) await runtime.notice(`Machine ${await this.machineLabel(machineId)} is back online; commands can run on it again.`);
+    if (entry?.told) await runtime.notice(`Machine ${await this.machineLabel(machineId)} is back online; commands can run on it again.`);
+    // Back before its absence was told: its notice is no longer due.
+    else if (entry) await this.scheduleOfflineNotice(offline);
   }
 
   private async offlineMachines(): Promise<Record<string, { since: number; told: boolean }>> {
@@ -291,8 +288,13 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       }
       await this.ctx.storage.put('presence.offline', offline);
     }
+    await this.scheduleOfflineNotice(offline);
+  }
+
+  /** The presence alarm is due at the next untold absence's notice, and cleared when none is left. */
+  private scheduleOfflineNotice(offline: z.infer<typeof OfflineMachinesSchema>): Promise<void> {
     const next = Math.min(...Object.values(offline).filter(entry => !entry.told).map(entry => entry.since + OFFLINE_NOTICE_MS));
-    await this.scheduleAlarm('presence-notice', Number.isFinite(next) ? next : null);
+    return this.scheduleAlarm('presence-notice', Number.isFinite(next) ? next : null);
   }
 
   private async machineLabel(machineId: string): Promise<string> {
@@ -535,13 +537,15 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   }
 
   /** The relay's report of one of this workspace's Chrome groups, kept as a row for `gitspace.browsers`. A running
-   * runtime republishes; one asleep reads the row when it next opens. */
+   * runtime republishes; one asleep reads the row when it next opens. Tabs showing the Browser tab hear of it
+   * (`browsers`): reports come when the group's tabs change and, while agents act there, every few seconds. */
   async browserGroupReported(raw: unknown, group: RuntimeBrowsersDocumentGroup): Promise<void> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const current = await this.metadata(identity);
     if (current.lifecycle !== 'active' || await this.ctx.storage.get(`runtime.browser.revoked:${group.groupId}`)) return;
     await this.ctx.storage.put(`${BROWSER_GROUP_ROWS}${group.groupId}`, RuntimeBrowsersDocumentSchema.shape.chrome.element.parse(group));
     (await this.runtime?.catch(() => undefined))?.publish();
+    this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
   }
 
   /** A comment someone watching one of this workspace's shares made on its tab (docs/APERTURE-DESIGN.md §8), kept as a
@@ -678,8 +682,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       if (result.status === 'failed') throw new Error(result.error.message);
       if (result.status !== 'completed') throw new Error('Environment bundle write was interrupted');
     } catch (error) {
-      // The publication is durably pending: the runtime alarm finishes it, as it does for an agent write.
-      if (CloudPublicationUncertain.is(error)) await this.scheduleAlarm('runtime', Date.now() + 1_000);
+      // The publication is durably pending: a later wake of the runtime finishes it, as it does for an agent write.
+      if (CloudPublicationUncertain.is(error)) await runtime.publicationUncertain(error);
       throw error;
     }
   }
@@ -742,8 +746,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     this.environment.markDerived(source(state));
     return state;
   }
-  /** Re-derives the browser origins the workspace's committed HEAD declares. */
-  async refreshBrowserOrigins(raw: unknown): Promise<LifecycleState> {
+  /** Re-derives the browser origins the workspace's committed HEAD declares; `commit` is the HEAD they were read at,
+   * null in a repository without one. */
+  async refreshBrowserOrigins(raw: unknown): Promise<{ state: LifecycleState; commit: string | null }> {
     const { identity, project } = await this.environmentReady(raw);
     const shared = await project.environmentShared();
     const summary = await project.getProject();
@@ -753,13 +758,13 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     try {
       await ensureProjectCodeRepository(this.env, code, summary);
       await code.forkWorkspace(summary.id, identity.workspaceId);
-      const { origins } = await committedBrowserOrigins({
+      const { commit, origins } = await committedBrowserOrigins({
         code, repository: artifactsWorkspaceRepository(identity.workspaceId), branch: metadata.branch,
         checkpoint: () => this.runtimeCodeCheckpoint(identity),
       });
       const result = this.environment.setBrowserOrigins(identity.projectId, identity.workspaceId, origins, shared);
       if (result.shared) await project.applyEnvironmentShared(result.shared);
-      return result.state;
+      return { state: result.state, commit };
     } catch (error) {
       // Unavailable is not an observed removal: retain membership and approvals.
       this.environment.markBrowserOriginsUnavailable(identity.projectId, identity.workspaceId, shared);
@@ -1065,7 +1070,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
 
   private async flushPortableLfs(): Promise<void> {
     const state = this.get();
-    if (!state) return;
+    // With no placement there is nothing to flush: its wake is cleared like an emptied outbox's.
+    if (!state) return this.scheduleAlarm('lfs', null);
     for (const row of this.ctx.storage.sql.exec<{ snapshot_id: string; inventory: string; attempts: number }>('SELECT snapshot_id,inventory,attempts FROM portable_lfs_outbox WHERE attempts<?', PORTABLE_LFS_MAX_ATTEMPTS).toArray()) {
       try {
         const retained = PortableLfsRetentionSchema.parse(JSON.parse(row.inventory));
@@ -1075,13 +1081,16 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
         this.ctx.storage.sql.exec('DELETE FROM portable_lfs_outbox WHERE snapshot_id=? AND inventory=?', row.snapshot_id, row.inventory);
         await this.ctx.storage.sync();
       } catch (error) {
-        // Retried with backoff, never by a throwing alarm; the last failure leaves the snapshot pending.
+        // Retried with backoff, never by a throwing alarm; the last failure leaves the snapshot pending and is reported.
+        const message = error instanceof Error ? error.message : String(error);
         this.ctx.storage.sql.exec('UPDATE portable_lfs_outbox SET attempts=attempts+1 WHERE snapshot_id=?', row.snapshot_id);
-        console.error(JSON.stringify({ event: 'portable_lfs_retention_failed', snapshotId: row.snapshot_id, attempts: row.attempts + 1, message: error instanceof Error ? error.message : String(error) }));
+        console.error(JSON.stringify({ event: 'portable_lfs_retention_failed', snapshotId: row.snapshot_id, attempts: row.attempts + 1, message }));
         if (row.attempts + 1 < PORTABLE_LFS_MAX_ATTEMPTS) {
           await this.scheduleAlarm('lfs', Date.now() + Math.min(3_600_000, 1_000 * 2 ** row.attempts));
           return;
         }
+        await createRuntimeQaServices(this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId })).report(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`)
+          .catch((reported: unknown) => console.error(JSON.stringify({ event: 'portable_lfs_report_failed', snapshotId: row.snapshot_id, message: reported instanceof Error ? reported.message : String(reported) })));
       }
     }
     await this.scheduleAlarm('lfs', null);

@@ -56,8 +56,11 @@ export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCa
  * Share links (`browser-share.ts`): `shares` lists the workspace's shares; `shareCreate` (`groupId`, `targetId`,
  * `comment`, `expiresInMinutes`) shares a tab of the workspace's Chrome group; `shareRevoke` (`shareId`) ends one;
  * `shareConnect` (`shareId`, `secret`, `groupId`) moves a pasted share's tab into the workspace's group on its Chrome;
- * `pageComments`: the workspace's page comments, newest first. */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'pageComments']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
+ * `pageComments`: the workspace's page comments, newest first. Your Chrome's workspace group from the Browser tab:
+ * `stop` (`groupId`) ends its scripts and its single step, as Stop in Chrome does; `closeTab` (`groupId`, `targetId`)
+ * closes a tab of the group (on the cloud browser, one of its tabs); `focusTab` (`groupId`, `targetId`) brings a tab of
+ * the group to the front of its window. */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'pageComments', 'stop', 'closeTab', 'focusTab']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
   shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(1440).optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
@@ -100,8 +103,22 @@ export type RuntimeBrowserAuthorization = z.infer<typeof RuntimeBrowserAuthoriza
 export const RuntimeBrowserPublicKeySchema = z.strictObject({ algorithm: z.literal('Ed25519'), publicKey: z.string().max(128) });
 export const RuntimeBrowserTrustSchema = RuntimeBrowserPublicKeySchema.extend({ accountId: id });
 export type RuntimeBrowserTrust = z.infer<typeof RuntimeBrowserTrustSchema>;
+/** The pairing details a short pairing code stands for: the extension redeems the code (`/api/browser-relay/pairing-code`)
+ * for them, then proves its new key to `endpoint` with `code`. LEGACY: extensions before 5.8 take these details pasted
+ * as JSON, and 5.8 still does; remove that path from the extension at 5.9. */
 export const RuntimeAccountBrowserPairingSchema = z.strictObject({ code: z.string().min(1), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), trust: RuntimeBrowserTrustSchema, endpoint: z.url(), expiresAt: z.iso.datetime() });
 export type RuntimeAccountBrowserPairing = z.infer<typeof RuntimeAccountBrowserPairingSchema>;
+/** A short pairing code's characters: digits and capitals without 0, 1, I, L, O and U, which read alike. */
+const BROWSER_PAIRING_CODE = /^[2-9A-HJKMNP-TV-Z]{6}$/;
+/** A short pairing code as typed, with case, spaces and hyphens ignored; null when the text cannot be one. */
+export function browserPairingCode(text: string): string | null {
+  const code = text.toUpperCase().replace(/[\s-]/g, '');
+  return BROWSER_PAIRING_CODE.test(code) ? code : null;
+}
+/** A pairing GitSpace started (Plugins → Browsers → Pair a Chrome): its short single-use code to type into the
+ * extension's popup, until `expiresAt`. */
+export const RuntimeAccountBrowserPairingCodeSchema = z.strictObject({ pairingId: z.string().uuid(), code: z.string().regex(BROWSER_PAIRING_CODE), expiresAt: z.iso.datetime() });
+export type RuntimeAccountBrowserPairingCode = z.infer<typeof RuntimeAccountBrowserPairingCodeSchema>;
 /**
  * The Chrome extension's protocol (docs/APERTURE-DESIGN.md §12a), independent of release ids. A release accepts
  * extensions at this protocol and the one before; an extension from before protocols were reported counts as 0.
@@ -126,22 +143,42 @@ export function browserExtensionUpdateRequired(protocol: number, current = BROWS
 export const RuntimeBrowserExtensionSchema = z.strictObject({ version: z.string().max(40).nullable(), protocol: z.number().int().nonnegative(), updateRequired: z.boolean() });
 /** A paired Chrome's name, one per Chrome, shown everywhere it appears (Plugins, the Browser tab, the agent's list). */
 export const RuntimeBrowserNameSchema = z.string().trim().min(1).max(128);
-const browserPairingStatus = { connected: z.boolean(), browser: z.string().nullable(), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), name: RuntimeBrowserNameSchema, extension: RuntimeBrowserExtensionSchema.nullable() };
+/** A paired Chrome's note for agents (the account it is signed in to, say), one per Chrome, in every project. */
+export const RuntimeBrowserNoteSchema = z.string().trim().max(2048);
+/** The operating system a Chrome's extension reports in its hello. */
+export const RuntimeBrowserPlatformSchema = z.enum(['Windows', 'macOS', 'Linux', 'ChromeOS']);
+export type RuntimeBrowserPlatform = z.infer<typeof RuntimeBrowserPlatformSchema>;
+const browserPairingStatus = {
+  connected: z.boolean(), pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, extension: RuntimeBrowserExtensionSchema.nullable(),
+  /** Chrome's major version and OS as the Chrome last said them at its hello, kept while it is offline; null before
+   * it said them (the OS comes from extensions 5.8 and later). */
+  chromeVersion: z.number().int().positive().nullable(), platform: RuntimeBrowserPlatformSchema.nullable(),
+  /** When the relay last heard from the Chrome, coarsely: its connect, its disconnect, and its messages at most every
+   * ten minutes. Null before it was first heard from since this was recorded. */
+  seenAt: z.iso.datetime().nullable(),
+  /** When you confirmed its fingerprint. LEGACY: null for Chromes confirmed before this was recorded; drop the null
+   * once each of them has been paired again. */
+  pairedAt: z.iso.datetime().nullable(),
+  /** Agents using the Chrome now, in every workspace of the account. */
+  agentsUsing: z.number().int().nonnegative(),
+};
 export const RuntimeAccountBrowserIdentitySchema = z.discriminatedUnion('state', [
   z.strictObject({ ...browserPairingStatus, state: z.literal('awaiting-key'), pairedKeyFingerprint: z.null(), expiresAt: z.iso.datetime() }),
   z.strictObject({ ...browserPairingStatus, state: z.literal('pending-confirmation'), pairedKeyFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.null() }),
   z.strictObject({ ...browserPairingStatus, state: z.literal('confirmed'), pairedKeyFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.null() }),
 ]);
-export const RuntimeAccountBrowserRelayStatusSchema = z.strictObject({ pairings: z.array(RuntimeAccountBrowserIdentitySchema) });
+/** The account's paired Chromes for Plugins → Browsers, and `cloudWorkspaces`: how many of its workspaces have their
+ * cloud browser open now. */
+export const RuntimeAccountBrowserRelayStatusSchema = z.strictObject({ pairings: z.array(RuntimeAccountBrowserIdentitySchema), cloudWorkspaces: z.number().int().nonnegative() });
 export type RuntimeAccountBrowserRelayStatus = z.infer<typeof RuntimeAccountBrowserRelayStatusSchema>;
-/** A project's approval of one Chrome, with its note for this project's agents. The name belongs to the pairing. */
-const projectBrowserApproval = z.strictObject({ pairingId: z.string().uuid(), note: z.string().max(2048) });
+/** A project's approval of one Chrome. Its name and note belong to the Chrome. */
+const projectBrowserApproval = z.strictObject({ pairingId: z.string().uuid() });
 export const RuntimeProjectBrowserPreferencesSchema = z.strictObject({ defaultPairingId: z.string().uuid().nullable(), approvals: z.array(projectBrowserApproval).max(32) }).superRefine((value, ctx) => {
   if (new Set(value.approvals.map(item => item.pairingId)).size !== value.approvals.length) ctx.addIssue({ code: 'custom', message: 'Browser approvals must be unique', path: ['approvals'] });
   if (value.defaultPairingId && !value.approvals.some(item => item.pairingId === value.defaultPairingId)) ctx.addIssue({ code: 'custom', message: 'Default Chrome must be approved for this project', path: ['defaultPairingId'] });
 });
 export type RuntimeProjectBrowserPreferences = z.infer<typeof RuntimeProjectBrowserPreferencesSchema>;
-export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean() })).max(32) });
+export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean() })).max(32) });
 export type RuntimeProjectBrowserSettings = z.infer<typeof RuntimeProjectBrowserSettingsSchema>;
 export const RuntimeBrowserArtifactSchema = z.strictObject({ id, url: z.string().max(8192), mediaType: z.string().max(128), bytes: z.number().int().nonnegative(), expiresAt: z.iso.datetime() });
 export const RuntimeBrowserArtifactPageSchema = z.strictObject({ artifact: RuntimeBrowserArtifactSchema, offset: z.number().int().nonnegative(), data: z.string().max(90000), nextOffset: z.number().int().nonnegative().nullable() });
@@ -162,13 +199,28 @@ export const RuntimeBrowserTabOriginSchema = z.enum(['agent', 'page', 'you']);
 /** A tab in a workspace's Chrome group as the extension reports it. `site` is the host a tab you dragged in showed
  * at that moment: dragging it in consents to that site for that tab. */
 export const RuntimeBrowserGroupTabSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema, site: z.string().max(253).nullable() });
-/** The extension's report of one workspace group's tabs, sent whenever membership, a URL or a title changes. */
+/** Chrome's tab-group colours, by the names Chrome gives them (`chrome.tabGroups.Color`). */
+export const RuntimeBrowserGroupColorSchema = z.enum(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
+export type RuntimeBrowserGroupColor = z.infer<typeof RuntimeBrowserGroupColorSchema>;
+/** One agent acting on a workspace group now, as the extension reports it: a script (`tool` `run`) or a single step
+ * (`tool` its action) whose signed authority lasts; who acts (`main`: only the main agent uses your Chrome); the
+ * commands it sent so far; when it began; and what it is doing in a few words (`browser-extension/src/activity.ts`,
+ * never what is typed). */
+export const RuntimeBrowserGroupAgentSchema = z.strictObject({ agent: z.enum(['main', 'subagent']), tool: RuntimeBrowserPreparationSchema.shape.action, commands: z.number().int().nonnegative(), startedAt: z.iso.datetime(), doing: z.string().max(120).nullable() });
+export type RuntimeBrowserGroupAgent = z.infer<typeof RuntimeBrowserGroupAgentSchema>;
+/** The extension's report of one workspace group's tabs, sent whenever membership, a URL or a title changes, and
+ * while agents act there at most every few seconds. `color` and `agents` come from extensions from 5.8, and only to a
+ * relay whose `ready` said it takes them (`groupActivity`). */
 export const RuntimeBrowserGroupReportSchema = z.strictObject({ groupId: z.string().uuid(), tabs: z.array(RuntimeBrowserGroupTabSchema).max(200),
   /** Scripts running on the group. */
-  running: z.number().int().nonnegative() });
+  running: z.number().int().nonnegative(),
+  /** The group's colour in Chrome's tab strip. */
+  color: RuntimeBrowserGroupColorSchema.optional(),
+  agents: z.array(RuntimeBrowserGroupAgentSchema).max(32).optional() });
 export type RuntimeBrowserGroupReport = z.infer<typeof RuntimeBrowserGroupReportSchema>;
 /** The `gitspace.browsers` workspace document (docs/APERTURE-DESIGN.md §4.2): each Chrome group with the tabs the
- * workspace may use (`usable`: on the grant's origins or the site you consented to). */
+ * workspace may use (`usable`: on the grant's origins or the site you consented to). `color` is null and `agents`
+ * empty from an extension that does not report them. */
 export const RuntimeBrowsersDocumentSchema = z.strictObject({
   chrome: z.array(z.strictObject({
     pairingId: z.string().uuid(), browser: z.string().max(128), groupId: z.string().uuid(), groupName: id,
@@ -176,25 +228,49 @@ export const RuntimeBrowsersDocumentSchema = z.strictObject({
     tabs: z.array(RuntimeBrowserGroupTabSchema.extend({ usable: z.boolean() })).max(200),
     /** LEGACY: rows stored before running counts have none; remove the default once they have been rewritten. */
     running: z.number().int().nonnegative().default(0),
+    color: RuntimeBrowserGroupColorSchema.nullable().default(null),
+    agents: z.array(RuntimeBrowserGroupAgentSchema).max(32).default([]),
   })).max(32),
 });
 export type RuntimeBrowsersDocument = z.infer<typeof RuntimeBrowsersDocumentSchema>;
 export type RuntimeBrowsersDocumentGroup = RuntimeBrowsersDocument['chrome'][number];
 /** A tab as the Inspector's Browser tab shows it. `addedBy` is null on the cloud browser, where only agents open tabs. */
 export const RuntimeBrowserTabViewSchema = z.strictObject({ targetId: id, url: z.string().max(8192), title: z.string().max(500), addedBy: RuntimeBrowserTabOriginSchema.nullable(), usable: z.boolean() });
-/** The workspace's browsers for the Inspector's Browser tab (`manage` `overview`): the approved sites, the cloud
- * browser, the attached machines' headless browsers, and every Chrome confirmed on the account with whether this project approved it. `groupId` is the
- * workspace's group on that browser, null until one exists. */
+/** One browser call of the workspace in its recent runs: when it began, where it ran (a Chrome by name, null when
+ * it was refused before one was chosen; the cloud browser; or a machine's headless browser), the call, a short summary
+ * of what it did (an action, an element's name, a host and path: never what was typed, a value, a query or a script's
+ * text), how it ended (`refused`: before it reached a browser), how long it took, and a few lines more for Details. */
+export const RuntimeBrowserRunSchema = z.strictObject({
+  attemptId: id, at: z.iso.datetime(),
+  where: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('chrome'), name: RuntimeBrowserNameSchema.nullable() }),
+    z.strictObject({ kind: z.literal('cloud') }),
+    z.strictObject({ kind: z.literal('machine'), machineId: id }),
+  ]),
+  tool: RuntimeBrowserPreparationSchema.shape.action, summary: z.string().max(200), outcome: z.enum(['ok', 'failed', 'refused']),
+  durationMs: z.number().int().nonnegative(), details: z.array(z.string().max(300)).max(12),
+});
+export type RuntimeBrowserRun = z.infer<typeof RuntimeBrowserRunSchema>;
+/** The workspace's browser runs the Browser tab lists, newest first: at most this many, from the last `BROWSER_RUNS_DAYS`. */
+export const BROWSER_RUNS_KEPT = 50;
+export const BROWSER_RUNS_DAYS = 7;
+/** The workspace's browsers for the Inspector's Browser tab (`manage` `overview`): the approved sites (`revision`: the
+ * commit their `.gitspace/bundle.json` was read at, null when there is none), the cloud browser, the attached
+ * machines' headless browsers, every Chrome confirmed on the account with whether this project approved it, and the
+ * workspace's recent runs. `groupId` is the workspace's group on that browser, null until one exists; on a Chrome,
+ * `groupColor` is its colour in Chrome's tab strip (null until its extension reports it) and `agents` who acts there
+ * now (empty while it is offline). */
 export const RuntimeBrowserOverviewSchema = z.strictObject({
-  sites: z.strictObject({ origins: z.array(BrowserOriginPatternSchema), stepsOnly: z.array(BrowserOriginPatternSchema) }),
+  sites: z.strictObject({ origins: z.array(BrowserOriginPatternSchema), stepsOnly: z.array(BrowserOriginPatternSchema), revision: z.string().max(64).nullable() }),
   cloud: z.strictObject({ groupId: z.string().uuid().nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200) }),
   chromes: z.array(z.strictObject({
     pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema, note: z.string().max(2048), connected: z.boolean(), approved: z.boolean(), isDefault: z.boolean(),
-    groupId: z.string().uuid().nullable(), groupName: id.nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200),
+    groupId: z.string().uuid().nullable(), groupName: id.nullable(), groupColor: RuntimeBrowserGroupColorSchema.nullable(), running: z.number().int().nonnegative(), agents: z.array(RuntimeBrowserGroupAgentSchema).max(32), tabs: z.array(RuntimeBrowserTabViewSchema).max(200),
   })).max(32),
   /** Headless browsers on the workspace's attached machines (agents' headless steps run there when one is ready);
    * `error` when that machine could not answer. */
   machines: z.array(z.strictObject({ machineId: id, groupId: z.string().uuid().nullable(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200), error: z.string().max(1024).nullable() })).max(16),
+  runs: z.array(RuntimeBrowserRunSchema).max(BROWSER_RUNS_KEPT),
 });
 export type RuntimeBrowserOverview = z.infer<typeof RuntimeBrowserOverviewSchema>;
 /** Where browser files live in the workspace's drive (`drive://workspace/<path>`). */

@@ -72,8 +72,9 @@ const CHUNKS_PER_BLOB = 4096;
 const GARBAGE_ROWS = 256, SCOPE_PAGE = 256, BEHIND_LIMIT = 100;
 /** A blob whose read fails this often is skipped (reported as unreadable) instead of blocking the build. */
 const BLOB_ATTEMPTS = 3;
-/** A failed build attempt waits this long, doubling per consecutive failure up to `RETRY_MAX_MS`. */
-const RETRY_FIRST_MS = 30_000, RETRY_MAX_MS = 30 * 60_000;
+/** A failed build attempt waits this long, doubling per consecutive failure up to `RETRY_MAX_MS`. After `RETRY_ATTEMPTS`
+ * failures (about an hour) indexing stops until the working copy changes again. */
+const RETRY_FIRST_MS = 30_000, RETRY_MAX_MS = 30 * 60_000, RETRY_ATTEMPTS = 8;
 /** Media, fonts, archives and compiled objects: binary, so never read. */
 const BINARY_PATH = /\.(png|jpe?g|gif|webp|avif|bmp|ico|icns|tiff?|heic|psd|mp3|wav|flac|ogg|m4a|aac|mp4|mov|webm|mkv|avi|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|jar|pdf|exe|dll|so|dylib|wasm|class|pyc|sqlite3?)$/iu;
 /** Generated text no one searches by hand: never read, and reported as skipped. */
@@ -183,14 +184,18 @@ export class CodeSearchIndex {
     });
   }
 
-  /** A snapshot was published: index it from an alarm, never inside the publishing request. */
+  /** A snapshot was published: index it from an alarm, never inside the publishing request. A build that stopped
+   * retrying tries again. */
   changed(): Promise<void> {
-    return this.unavailable ? Promise.resolve() : this.options.schedule(Date.now());
+    if (this.unavailable) return Promise.resolve();
+    this.options.storage.sql.exec('UPDATE code_search_state SET failures=0, retry_at=NULL WHERE singleton=1 AND failures>=?', RETRY_ATTEMPTS);
+    return this.options.schedule(Date.now());
   }
 
   /** Advance indexing for one alarm's window, rescheduling while work remains. Steps are safe to run concurrently;
    * the lease only keeps two drives from duplicating reads, and never makes a caller wait on another's promise.
-   * A failed attempt (a thrown step, or a reset during one) waits out a doubling backoff before the next. */
+   * A failed attempt (a thrown step, or a reset during one) waits out a doubling backoff before the next, until retrying
+   * stops. */
   async drive(): Promise<void> {
     if (this.unavailable) return;
     if (Date.now() < this.leaseUntil) return;
@@ -201,6 +206,7 @@ export class CodeSearchIndex {
       // reset during the step (out of memory, or a deploy). Retrying at once would repeat what reset it.
       if (state.running_since !== null) { await this.failed(new Error(`The indexing run started ${new Date(state.running_since).toISOString()} never finished: the workspace was reset during it`), 0); return; }
     }
+    if (state.failures >= RETRY_ATTEMPTS) return;
     if (state.retry_at !== null && this.now() < state.retry_at) { await this.options.schedule(state.retry_at); return; }
     const lease = this.leaseUntil = Date.now() + this.limits.stepWindowMs + 2 * this.limits.readTimeoutMs;
     try { await this.advance(); } finally {
@@ -227,15 +233,16 @@ export class CodeSearchIndex {
   }
 
   /** Records a failed attempt and when the next may run. The log line is written every time; the workspace QA record
-   * gets a run of failures once, when it starts. */
+   * gets a run of failures twice: when it starts and when retrying stops. */
   private async failed(error: unknown, stepMs: number): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const failures = this.state().failures + 1;
-    const retryAt = this.now() + Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+    const retryAt = failures < RETRY_ATTEMPTS ? this.now() + Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS) : null;
     this.options.storage.sql.exec('UPDATE code_search_state SET failure=?, failures=?, retry_at=?, running_since=NULL WHERE singleton=1', message, failures, retryAt);
-    this.log({ event: 'code_search_step_failed', repository: this.options.repository, message, stepMs, failures, retryInMs: retryAt - this.now(), ...this.progress() });
+    this.log({ event: 'code_search_step_failed', repository: this.options.repository, message, stepMs, failures, retryInMs: retryAt === null ? null : retryAt - this.now(), ...this.progress() });
     if (failures === 1) this.options.report(error);
-    await this.options.schedule(retryAt);
+    if (retryAt === null) this.options.report(new Error(`code_search stopped retrying after ${failures} failed indexing steps: ${message}. The next change to the working copy tries again.`));
+    else await this.options.schedule(retryAt);
   }
 
   /** One bounded unit of work. */
@@ -286,7 +293,7 @@ export class CodeSearchIndex {
     if (commit === null) {
       const progress = this.progress();
       const counted = progress.targetCommit === null ? 'starting' : `${progress.indexedFiles} of ${progress.queuedFiles}${progress.pendingTrees ? '+' : ''} files indexed${progress.pendingTrees ? `, ${progress.pendingTrees} directories left to list` : ''}`;
-      throw new Error(`code_search is building the first index: ${counted}${progress.failure ? ` (the last step failed and is retried: ${progress.failure})` : ''}; retry shortly, or use grep on an attached machine`);
+      throw new Error(`code_search is building the first index: ${counted}${progress.failure ? ` (${state.failures >= RETRY_ATTEMPTS ? 'indexing stopped after failed steps until the working copy changes' : 'the last step failed and is retried'}: ${progress.failure})` : ''}; retry shortly, or use grep on an attached machine`);
     }
     const { generation } = state;
     const sql = this.options.storage.sql;
@@ -322,7 +329,7 @@ export class CodeSearchIndex {
       const notes: string[] = [];
       if (stoppedAt !== null) notes.push(`Verified ${verifiedFiles} files in path order and stopped before ${stoppedAt}${query === null ? ': the pattern has no 3-character literal to look up in the index' : candidates === null ? ': too many files contain the pattern\'s literals' : ''}. Narrow path, glob or pattern, or use grep on an attached machine for an exhaustive search.`);
       if (skippedFiles) notes.push(`${skippedFiles} files in scope are not indexed (over ${this.limits.blobBytes / 1024} KiB, a line over ${this.limits.chunkBytes / 1024} KiB, generated (minified, a source map or a lockfile), or unreadable); grep on an attached machine searches them.`);
-      if (stale) notes.push(`The index is at ${commit}, ${behind === null ? 'an unknown number of' : behind} snapshot(s) behind the working copy; newer changes are being indexed${state.target_commit === null ? '' : ` (${state.build_indexed} of ${state.build_queued} changed files done)`}${state.failure ? `; the last indexing step failed and is retried: ${state.failure}` : ''}.`);
+      if (stale) notes.push(`The index is at ${commit}, ${behind === null ? 'an unknown number of' : behind} snapshot(s) behind the working copy; ${state.failures >= RETRY_ATTEMPTS ? 'indexing stopped after failed steps until the working copy changes' : 'newer changes are being indexed'}${state.target_commit === null ? '' : ` (${state.build_indexed} of ${state.build_queued} changed files done)`}${state.failure ? `; the last indexing step failed${state.failures >= RETRY_ATTEMPTS ? '' : ' and is retried'}: ${state.failure}` : ''}.`);
       return { matches, truncated, partial: stoppedAt !== null, indexedCommit: commit, behind, verifiedFiles, skippedFiles, notes };
     } finally { regex.free(); }
   }

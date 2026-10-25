@@ -17,7 +17,7 @@ async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInfere
     if (!conversation) throw new Error('Conversation missing');
     await conversation.configure({ model }, BACKGROUND_CONTEXT);
   };
-  const lifecycle = createConversationLifecycle({ harness, storage, configureModel, admitInference: runtime.admitInference, wake: async () => {} });
+  const lifecycle = createConversationLifecycle({ harness, storage, configureModel, admitInference: runtime.admitInference });
   const unavailable = async (): Promise<never> => { throw new Error('Unused history operation'); };
   const controls = createSessionControls({
     harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session,

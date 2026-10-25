@@ -5,8 +5,8 @@ import type { BrowserPluginsState } from './BrowserPlugins.js';
 
 const noop = async () => undefined;
 const browsers: BrowserPluginsState = {
-  relay: { pairings: [] }, settings: {}, loading: false, error: null, refresh: noop, pollStatus: async () => ({ pairings: [] }), downloadExtension: noop,
-  pair: async () => { throw new Error('Not paired in this test'); }, confirm: noop, rename: noop, forget: noop, updateProject: noop,
+  relay: { cloudWorkspaces: 0, pairings: [] }, settings: {}, loading: false, error: null, refresh: noop, pollStatus: async () => ({ cloudWorkspaces: 0, pairings: [] }), downloadExtension: noop,
+  pair: async () => { throw new Error('Not paired in this test'); }, confirm: noop, updateChrome: noop, forget: noop, updateProject: noop,
 };
 const composioProps = {
   composioCatalog: { configured: true, toolkits: [] },

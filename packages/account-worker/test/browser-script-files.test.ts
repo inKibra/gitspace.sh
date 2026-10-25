@@ -40,7 +40,10 @@ function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socke
 /** A paired, confirmed Chrome approved for the project, whose extension reports `protocol`. Its group holds one tab of
  * yours, a page Playwright can adopt; `answer` gives a page command's result, and every command is recorded. */
 async function chrome(relay: UserRelayDO, root: Identity, projectId: string, protocol: number, answer: (command: Command) => unknown) {
-  const pairing = await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+  // GitSpace starts the pairing; the extension redeems its short code for the pairing's details.
+  const redeemed = await relay.browserRelayRedeemPairingCode((await relay.browserRelayPair({ algorithm: 'Ed25519', accountId: env.ACCOUNT_ID, publicKey: root.publicKey })).code, '198.51.100.1', 'wss://account.test/api/browser-relay/extension');
+  if (!redeemed.ok) throw new Error(redeemed.message);
+  const pairing = redeemed.value;
   const response = await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': '192.0.2.1' } }));
   const socket = response.webSocket;
   if (!socket) throw new Error('Missing extension socket');
@@ -53,7 +56,7 @@ async function chrome(relay: UserRelayDO, root: Identity, projectId: string, pro
   if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
   await relay.browserRelayConfirm(pairing.pairingId, status.pairedKeyFingerprint);
   const settings = await relay.browserRelayProjectSettings(projectId);
-  await relay.browserRelaySetProjectSettings(projectId, settings.revision, { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId, note: '' }] });
+  await relay.browserRelaySetProjectSettings(projectId, settings.revision, { defaultPairingId: pairing.pairingId, approvals: [{ pairingId: pairing.pairingId }] });
   const commands: Command[] = [];
   const url = 'https://example.com/docs';
   socket.addEventListener('message', event => {

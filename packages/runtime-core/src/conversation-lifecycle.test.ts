@@ -24,7 +24,6 @@ async function fixture(storage: Storage = new MemoryStorage(), blocked = false, 
   const seen: string[] = [];
   const threeStarted = Promise.withResolvers<void>();
   let aborted = 0;
-  let wakeCount = 0;
   let backgroundAborted = 0;
   const background = defineTask<null, { phase: 'wait' }, null>({ name: 'proof.BackgroundCommand', version: 1, initial: () => ({ phase: 'wait' }), phases: { async wait(_task, runtime, ctx) { await runtime.sleep(Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { backgroundAborted++; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
   const registry = createRegistry(); registry.install(defineExtension({ name: 'proof.background', tasks: [background] }));
@@ -48,8 +47,8 @@ async function fixture(storage: Storage = new MemoryStorage(), blocked = false, 
     if (input.selection?.kind === 'role' && input.selection.role === 'Deep') throw new Error('Inference role Deep is not defined in this profile');
     return { provider: 'test', modelId: model.id };
   };
-  const lifecycle = createConversationLifecycle({ harness, storage, admitInference, report: error => { reports.push(error); }, async configureModel(id, selected) { const conversation = await harness.conversation(id, context); if (!conversation) throw new Error('Missing fixture conversation'); await conversation.configure({ model: selected }, context); }, async wake() { wakeCount++; } });
-  return { harness, root, lifecycle, storage, seen, reports, aborted: () => aborted, backgroundAborted: () => backgroundAborted, wakeCount: () => wakeCount, threeStarted: threeStarted.promise };
+  const lifecycle = createConversationLifecycle({ harness, storage, admitInference, report: error => { reports.push(error); }, async configureModel(id, selected) { const conversation = await harness.conversation(id, context); if (!conversation) throw new Error('Missing fixture conversation'); await conversation.configure({ model: selected }, context); } });
+  return { harness, root, lifecycle, storage, seen, reports, aborted: () => aborted, backgroundAborted: () => backgroundAborted, threeStarted: threeStarted.promise };
 }
 
 test('idle event delivery wakes inference with visible durable sender labels and does not duplicate retries', async () => {
@@ -64,7 +63,6 @@ test('idle event delivery wakes inference with visible durable sender labels and
     expect(f.seen[0]).toContain('source=\\"Reviewer (child-1)\\"');
     const entries = await f.root.entries({}, 100, undefined, context);
     expect(entries.items.filter(entry => entry.kind === 'gitspace.agent-message').map(entry => entry.data)).toEqual([{ requestId: 'message-1', text: 'Boundary checked', sender: { id: 'child-1', name: 'Reviewer' } }]);
-    expect(f.wakeCount()).toBe(1);
   } finally { await f.harness.close(context); }
 });
 
@@ -217,7 +215,6 @@ test('Stop aborts three actual running child conversations and persists the latc
     for (const id of children) expect((await f.harness.snapshot(ConversationLifecycleDoc, id, context))?.stopped).toBe(true);
     await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId: 'late-completion', kind: 'command-completed', text: 'Background command finished after Stop' });
     expect(f.seen).toHaveLength(3);
-    expect(f.wakeCount()).toBe(0);
   } finally { await f.harness.close(context); }
   const reopened = await fixture(await openNodeJsonlStorage(directory, context));
   try {

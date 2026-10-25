@@ -40,7 +40,7 @@ let joins: number;
 
 const answer = (value: unknown, status = 200) => new Response(JSON.stringify(status === 200 ? { status: 'ok', value } : { error: value }), { status, headers: { 'content-type': 'application/json' } });
 function preview(overrides: Partial<RuntimeBrowserSharePreview> = {}): RuntimeBrowserSharePreview {
-  return { sharer: 'Ada', page: { title: 'Checkout', site: 'shop.example' }, comment: true, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(), ended: null, ...overrides };
+  return { sharer: 'Ada', page: { title: 'Checkout', site: 'shop.example', icon: null }, comment: true, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(), ended: null, browser: null, online: true, ...overrides };
 }
 function joinedMessage(share = preview()): RuntimeBrowserShareServerMessage {
   return { type: 'joined', viewerId: grace, share, viewers: [{ viewerId: grace, name: 'Grace', guest: true, joinedAt }], comments: [] };
@@ -138,6 +138,19 @@ it('greets with the preview fetched by the fragment secret and redeems nothing u
   expect(document.body.querySelector('input')?.value).toBe('Grace');
 });
 
+it('shows the page’s icon on the greeting, and whether the sharing Chrome is live', async () => {
+  const icon = 'data:image/png;base64,iVBORw0KGgo=';
+  await open(preview({ page: { title: 'Checkout', site: 'shop.example', icon } }));
+  expect(byLabel('Shared page')?.querySelector('img')?.getAttribute('src')).toBe(icon);
+  expect(byLabel('Shared page')?.textContent).toMatch(/live$/u);
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await open(preview({ online: false }));
+  expect(byLabel('Shared page')?.querySelector('img')).toBeNull();
+  expect(byLabel('Shared page')?.textContent).toMatch(/offline$/u);
+});
+
 it('says an ended share has ended, without offering to join', async () => {
   await open(preview({ ended: 'revoked' }));
   expect(document.body.textContent).toContain('This share has ended');
@@ -195,6 +208,20 @@ it('after Join says hello, offers its size, sends its pointer at most 20 times a
   expect(byLabel('Linus\'s pointer')).toBeNull();
   expect(byLabel('Watching')?.textContent).toContain('Grace (you)');
   expect(byLabel('Watching')?.textContent).toContain('Linus');
+});
+
+it('draws the sharer’s own pointer as their Chrome reports it, named, until it leaves the tab or the Chrome goes offline, and shows them as present while it is online', async () => {
+  await watch();
+  expect(byLabel('Watching')?.textContent).toContain('Ada · sharing');
+  await latest().receive({ type: 'sharer', at: { x: 0.25, y: 0.5 } });
+  const drawn = byLabel('Ada’s pointer');
+  expect([drawn?.style.left, drawn?.style.top, drawn?.textContent]).toEqual(['25%', '50%', 'Ada']);
+  await latest().receive({ type: 'sharer', at: null });
+  expect(byLabel('Ada’s pointer')).toBeNull();
+  await latest().receive({ type: 'sharer', at: { x: 0.5, y: 0.5 } });
+  await latest().receive({ type: 'presence', online: false });
+  expect(byLabel('Ada’s pointer')).toBeNull();
+  expect(byLabel('Watching')?.textContent).not.toContain('Ada · sharing');
 });
 
 it('offers no Comment mode on a view-only share', async () => {

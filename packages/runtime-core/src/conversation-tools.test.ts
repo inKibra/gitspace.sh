@@ -52,7 +52,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
     return { provider: selected.model.provider, modelId: selected.model.id, thinking: selected.thinking, ...(selected.role ? { role: selected.role } : {}) };
   };
   const configureModel = async (id: ConversationId, selected: ModelRef) => { const child = await harness.conversation(id, context); if (!child) throw new Error('Missing child'); const metadata = (await harness.snapshot(AgentDefinitionContextDoc, id, context))?.child; await child.configure({ model: { provider: selected.provider, modelId: selected.modelId }, tools: metadata ? tools.filter(tool => metadata.tools.includes(tool.name)) : tools }, context); };
-  const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference, configureModel, wake: async () => {} }); ready.resolve(lifecycle);
+  const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference, configureModel }); ready.resolve(lifecycle);
   const invoke = createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog, refreshDefinitions: target => controls.loadDefinitions(target) });
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
@@ -305,7 +305,8 @@ test('children address parent and siblings by name or id and reject unrelated co
     await second.child.waitForIdle(context);
     await f.call({ op: 'send', to: 'parent', message: 'Parent result' }, 'to-parent', String(first.child.id));
     await f.root.waitForIdle(context);
-    // Queued events reach an idle parent one wake at a time (the alarm in production); drive the wakes here.
+    // A reply that arrives while the parent runs goes in when that run ends, which can be after `waitForIdle` returns;
+    // a recovery drive delivers whatever is still pending.
     for (let attempt = 0; attempt < 5 && !f.seen.join('\n').includes('Parent result'); attempt++) { await f.lifecycle.recover(); await f.root.waitForIdle(context); }
     expect(f.seen.join('\n')).toContain('source=\\"First');
     expect(f.seen.join('\n')).toContain('Named sibling message');

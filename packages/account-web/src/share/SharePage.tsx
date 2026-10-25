@@ -33,7 +33,7 @@ export function SharePage() {
   useEffect(() => {
     if (!SECRET.test(secret)) { setStage({ kind: 'unavailable', ...UNKNOWN }); return; }
     let active = true;
-    void Promise.all([previewShare(shareId, secret), currentDevice()]).then(([preview, device]) => {
+    void Promise.all([previewShare(shareId, secret, false), currentDevice()]).then(([preview, device]) => {
       if (!active) return;
       document.title = preview.ended ? 'Share ended · GitSpace' : `${preview.page.title || preview.page.site} · shared by ${preview.sharer}`;
       setStage(preview.ended ? { kind: 'ended', reason: preview.ended, sharer: preview.sharer } : { kind: 'greeting', preview, asAccount: device !== null, notice: null });

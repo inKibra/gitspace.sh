@@ -300,6 +300,25 @@ export class CodeSearchProof extends DurableObject {
     const repaired = await retried.search({ pattern: 'replaced', path: 'src' });
     assert.deepEqual([repaired.indexedCommit, repaired.behind, repaired.matches, repaired.notes], [snapshot.current.worktreeCommit, 0, ['src/a.ts:1:export const replaced = 1;'], []]);
 
+    // Retrying stops after 8 failures (about an hour) and says so; the next change to the working copy tries again.
+    files.set('src/a.ts', 'export const stopped = 1;\n');
+    snapshot.current = await repository.commit(files);
+    repository.failTrees = true;
+    reports.length = 0; events.length = 0;
+    for (let attempt = 0; attempt < 8; attempt++) { await retried.drive(); this.clock += 30 * 60_000; }
+    assert.deepEqual(events.filter(event => event.event === 'code_search_step_failed').map(event => event.retryInMs), [30_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, null]);
+    assert.deepEqual(reports.map(error => error instanceof Error ? error.message : String(error)), ['Artifacts is unavailable', 'code_search stopped retrying after 8 failed indexing steps: Artifacts is unavailable. The next change to the working copy tries again.']);
+    this.scheduled.length = 0; events.length = 0;
+    await retried.drive();
+    assert.deepEqual([this.scheduled, events], [[], []], 'A drive after retrying stopped reads nothing and arms nothing');
+    assert.match((await retried.search({ pattern: 'stopped', path: 'src' })).notes.join(' '), /indexing stopped after failed steps until the working copy changes.*; the last indexing step failed: Artifacts is unavailable/u);
+    repository.failTrees = false;
+    this.scheduled.length = 0;
+    await retried.changed();
+    assert.equal(this.scheduled.length, 1, 'A change to the working copy wakes indexing again');
+    await retried.drive();
+    assert.deepEqual((await retried.search({ pattern: 'stopped', path: 'src' })).matches, ['src/a.ts:1:export const stopped = 1;']);
+
     // A repository read that never answers fails the step after the read timeout instead of wedging every later drive.
     const wedged = this.open(repository, snapshot, { limits: { ...limits, readTimeoutMs: 20 }, reports, events });
     files.set('src/wedged.ts', 'wedged\n');

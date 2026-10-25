@@ -2,6 +2,7 @@ import { BACKGROUND_SOURCE, OFFSCREEN_SOURCE, POPUP_FONT_ORIGIN, POPUP_SOURCE, P
 
 export { relayCommandAllowed } from './commands.js';
 export { verifyRelayAuthorization } from './authorization.js';
+export { NAMED_KEYS } from './activity.js';
 
 /** The popup's page: `popup.js` (React, `popup.tsx`) renders into it with `popup.css`, GitSpace's theme, light or
  * dark with Chrome. */
@@ -18,6 +19,6 @@ export function extensionFiles(accountUrl: string): Record<string, string> {
     'popup.html': POPUP_HTML,
     'offscreen.js': OFFSCREEN_SOURCE,
     'offscreen.html': '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace recorder</title></head><body><script src="offscreen.js"></script></body></html>',
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.7.1', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen'], host_permissions: [`${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.8.0', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen', 'favicon'], host_permissions: [`${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
   };
 }

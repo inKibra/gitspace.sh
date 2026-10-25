@@ -11,7 +11,11 @@ export class BrowserRelayFixture extends DurableObject<FixtureEnv> {
   async fetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === '/api/browser-relay/extension') return this.browser.fetch(request);
-    if (url.pathname === '/pair') return Response.json(await this.browser.pair(RuntimeBrowserTrustSchema.parse(await request.json()), url.origin));
+    if (url.pathname === '/pair') {
+      // GitSpace starts the pairing; the extension redeems its short code for the pairing's details, answered here.
+      const redeemed = await this.browser.redeemPairingCode((await this.browser.pair(RuntimeBrowserTrustSchema.parse(await request.json()))).code, '127.0.0.1', url.origin);
+      return redeemed.ok ? Response.json(redeemed.value) : Response.json({ error: redeemed.message }, { status: redeemed.status });
+    }
     if (url.pathname === '/status') return Response.json(await this.browser.status());
     if (url.pathname === '/placement') { const body = z.object({ projectId: z.string(), pairingId: z.string().uuid().optional() }).parse(await request.json()); return Response.json(await this.browser.placement(body.projectId, body.pairingId)); }
     if (url.pathname === '/project-update') { const body = z.object({ projectId: z.string(), expectedRevision: z.number().int().nonnegative(), preferences: RuntimeProjectBrowserPreferencesSchema }).parse(await request.json()); return Response.json(await this.browser.setProjectSettings(body.projectId, body.expectedRevision, body.preferences)); }

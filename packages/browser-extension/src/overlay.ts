@@ -4,30 +4,34 @@
  * a white toolbar at the bottom of the tab (the GitSpace mark, who acts and on which workspace, what it is doing,
  * Capture, and Stop for the agent; while a capture records, REC with its time and Stop capture), a frame round the
  * tab (blue while the agent acts, red while a capture records), the agent's cursor at each point it clicks or moves to,
- * and the named pointers of the people watching the tab's shares.
+ * and the named pointers of the people watching the tab's shares. It draws nothing for your own pointer: while a share
+ * shows it to its viewers, it says where it is instead (`report`), and each viewer draws it.
  *
  * A fixed function the extension calls in its own isolated world (`Runtime.callFunctionOn`), never in the page's. The
  * overlay leaves the page and what the agent reads alone: a closed shadow root under an `aria-hidden` host marked
  * `data-gitspace-overlay` (which the screenshot mask hides), styled inline only (no stylesheet a page's CSP could
  * refuse), nothing focusable, and pointer-transparent except the toolbar while your own pointer is over it, so an
  * agent's clicks and hit tests reach the page. Its buttons call the binding named in `show` (added to this world
- * only) with `stop`, `capture` or `captureStop`.
+ * only) with `stop`, `capture` or `captureStop`; with `report`, your pointer calls the binding it names with
+ * `pointer {"x":…,"y":…}` (fractions of the viewport) at most ten times a second, and `pointer null` once it leaves the
+ * tab. Mouse events at the agent's cursor are the agent's, and are not reported.
  *
  * One argument: `{ show?: { mode: 'run' | 'step' | 'capture', workspace, agent, doing, binding, capture: 'none' |
  * 'ready' | 'recording', recording: { startedAt, sound } | null } | null, cursor?: { x, y, type }, pointers?: [{ id,
- * name, color, x, y }], conceal?: boolean, remove?: true }`. `agent` and `doing` (what it is doing) may be null.
- * `show` installs the overlay where the document lacks it (after a navigation) and refreshes it; `show: null` hides
- * the toolbar, frame and cursor, leaving the pointers. `pointers` (x and y are fractions of the viewport) is everyone
- * pointing now: each glides to its new place, eased, and one left out leaves; they install the overlay too. An
- * overlay not refreshed for 75 s removes itself, so one whose debugger channel Chrome dropped does not stay. The cursor
- * travels to each point along a curved path, eased, overshooting slightly and settling, in the time Fitts's law gives
- * a hand (260 + 170·log2(1 + d/22) ms); it presses on `mousePressed` (with a ripple) and fades after 5 s idle.
+ * name, color, x, y }], report?: string | null, conceal?: boolean, remove?: true }`. `agent` and `doing` (what it is
+ * doing) may be null. `show` installs the overlay where the document lacks it (after a navigation) and refreshes it;
+ * `show: null` hides the toolbar, frame and cursor, leaving the pointers. `pointers` (x and y are fractions of the
+ * viewport) is everyone pointing now: each glides to its new place, eased, and one left out leaves; they install the
+ * overlay too, as `report` does. An overlay not refreshed for 75 s removes itself, so one whose debugger channel Chrome
+ * dropped does not stay. The cursor travels to each point along a curved path, eased, overshooting slightly and
+ * settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms); it presses on `mousePressed` (with a
+ * ripple) and fades after 5 s idle.
  */
 export const browserOverlayFunction = `function(command) {
   const key = '__gitspaceOverlay';
   if (command.remove) { if (globalThis[key]) globalThis[key].dispose(); return true; }
   let overlay = globalThis[key];
-  if (!overlay && !command.show && !command.pointers?.length) return false;
+  if (!overlay && !command.show && !command.pointers?.length && !command.report) return false;
   if (!overlay) {
     for (const stale of document.querySelectorAll('[data-gitspace-overlay]')) stale.remove();
     const BLUE = '#1a73e8', RED = '#dc2626';
@@ -91,7 +95,7 @@ export const browserOverlayFunction = `function(command) {
     arrowPath.setAttribute('fill', BLUE);
     const label = make('span', labelCss + ';background:' + BLUE, cursor);
     const people = make('div', 'position:fixed;inset:0;pointer-events:none', root);
-    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', capture: 'none', clock: 0 };
+    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', capture: 'none', clock: 0, report: null, at: null, reported: 'null', reportedAt: 0, reportTimer: 0 };
     const place = (x, y) => { state.x = x; state.y = y; cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)'; };
     const pressAt = () => {
       arrow.animate([{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }], { duration: 240, easing: 'ease-out' });
@@ -151,14 +155,34 @@ export const browserOverlayFunction = `function(command) {
       }
       for (const [id, pointer] of pointers) if (!now.has(id)) { cancelAnimationFrame(pointer.frame); pointer.element.remove(); pointers.delete(id); }
     };
-    // Your own pointer over the toolbar makes it clickable; the agent's pointer (each point it is about to use) never does.
+    // Your own pointer while a share shows it to its viewers (report): where it is, at most ten times a second and
+    // always the latest, and null once it left the tab.
+    const report = at => {
+      state.at = at;
+      if (!state.report || state.reportTimer) return;
+      const send = () => {
+        state.reportTimer = 0;
+        const text = JSON.stringify(state.at), call = globalThis[state.report];
+        if (!state.report || text === state.reported || typeof call !== 'function') return;
+        state.reported = text; state.reportedAt = Date.now();
+        call('pointer ' + text);
+      };
+      const wait = state.reportedAt + 100 - Date.now();
+      if (wait <= 0) send(); else state.reportTimer = setTimeout(send, wait);
+    };
+    // Your own pointer over the toolbar makes it clickable; the agent's pointer (each point it is about to use) never
+    // does, and is not reported.
     const hover = event => {
       const box = bar.getBoundingClientRect();
       const inside = event.clientX >= box.left - 4 && event.clientX <= box.right + 4 && event.clientY >= box.top - 4 && event.clientY <= box.bottom + 4;
       const agent = state.target && Math.abs(event.clientX - state.target[0]) < 1 && Math.abs(event.clientY - state.target[1]) < 1;
       bar.style.pointerEvents = inside && !agent ? 'auto' : 'none';
+      if (!agent) report({ x: Math.min(1, Math.max(0, event.clientX / innerWidth)), y: Math.min(1, Math.max(0, event.clientY / innerHeight)) });
     };
+    const leave = event => { if (event.type === 'visibilitychange' ? document.visibilityState === 'hidden' : !event.relatedTarget) report(null); };
     document.addEventListener('mousemove', hover, { capture: true, passive: true });
+    document.addEventListener('mouseout', leave, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', leave);
     // Nothing on the toolbar reaches the page, and pressing it never moves focus out of the page.
     for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) bar.addEventListener(type, event => { event.stopPropagation(); if (type !== 'click') event.preventDefault(); });
     const press = command => { const call = globalThis[state.binding]; if (typeof call === 'function') call(command); return typeof call === 'function'; };
@@ -204,17 +228,20 @@ export const browserOverlayFunction = `function(command) {
     };
     overlay = {
       apply(next) {
-        if (next.show !== undefined || next.pointers) { state.seen = Date.now(); if (!host.isConnected) document.documentElement.appendChild(host); }
+        if (next.show !== undefined || next.pointers || next.report) { state.seen = Date.now(); if (!host.isConnected) document.documentElement.appendChild(host); }
         if (next.show) show(next.show);
         if (next.show === null) { state.binding = ''; clearInterval(state.clock); bar.style.display = 'none'; frame.style.opacity = '0'; cursor.style.opacity = '0'; }
         if (next.pointers) point(next.pointers);
+        if (next.report !== undefined && next.report !== state.report) { clearTimeout(state.reportTimer); state.reportTimer = 0; state.report = next.report; state.reported = 'null'; }
         if (next.conceal !== undefined) host.style.visibility = next.conceal ? 'hidden' : 'visible';
         if (next.cursor) move(next.cursor.x, next.cursor.y, next.cursor.type);
       },
       dispose() {
-        cancelAnimationFrame(state.frame); clearTimeout(state.fade); clearInterval(expiry); clearInterval(state.clock);
+        cancelAnimationFrame(state.frame); clearTimeout(state.fade); clearInterval(expiry); clearInterval(state.clock); clearTimeout(state.reportTimer);
         for (const pointer of pointers.values()) cancelAnimationFrame(pointer.frame);
         document.removeEventListener('mousemove', hover, { capture: true });
+        document.removeEventListener('mouseout', leave, { capture: true });
+        document.removeEventListener('visibilitychange', leave);
         host.remove(); delete globalThis[key];
       },
     };

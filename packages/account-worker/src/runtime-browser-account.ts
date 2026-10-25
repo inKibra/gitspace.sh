@@ -119,6 +119,20 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     const conversation = await options.runtime().browserConversation(conversationId);
     return RuntimeBrowserCaptureSchema.parse(await managed(conversationId, conversation.root, placement, command));
   }
+  /** Stop, Close tab and Focus in Chrome from the Browser tab, on the browser its group names: your Chrome's extension
+   * does each; the cloud browser's session closes one of its tabs. */
+  async function control(conversationId: string, command: RuntimeBrowserManagement & { groupId: string }): Promise<void> {
+    const stored = await storage.get(`runtime.browser.account.grant:${command.groupId}`);
+    if (!stored || await storage.get(`runtime.browser.revoked:${command.groupId}`)) throw new Error('This tab’s group has ended');
+    const placement = storedGrantSchema.parse(stored).body.placement;
+    if (placement.kind === 'cloud') {
+      if (command.action !== 'closeTab' || !command.targetId) throw new Error('Only your Chrome’s group can be stopped or focused from here');
+      if (!env.BROWSER_SESSION) throw new Error('Browser session unavailable');
+      return env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).closeTab(command.targetId);
+    }
+    const conversation = await options.runtime().browserConversation(conversationId);
+    await managed(conversationId, conversation.root, placement, command);
+  }
   /** Share links on your Chromes (docs/APERTURE-DESIGN.md §8), kept by the relay. A new share is signed for its
    * group's Chrome. Listing, ending and connecting shares name no Chrome of their own, so one of the account's confirmed
    * Chromes carries them (an approved, online one when there is one); the relay checks the share's own Chrome where it
@@ -169,5 +183,5 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
     }
     return RuntimeBrowserStatusSchema.parse({ groups: statuses.flatMap(status => status.groups), records: statuses.flatMap(status => status.records), browsers: settings?.browsers.filter(browser => browser.approved) ?? [] });
   }
-  return { prepare, execute, dispatch, manage, capture, share };
+  return { prepare, execute, dispatch, manage, capture, share, control };
 }

@@ -48,9 +48,17 @@ export function ShareGreeting({ preview, asAccount, initialName, notice, onJoin 
         <h1 className="text-title font-semibold tracking-tight text-foreground">{sharer} is sharing a tab with you</h1>
         <p className="text-body text-muted-foreground">Live, as it happens in {sharer}&apos;s Chrome.</p>
       </header>
-      <section aria-label="Shared page" className="flex min-w-0 flex-col rounded-xl border border-border bg-surface-2 p-3">
-        <span className="truncate text-body font-medium text-foreground">{preview.page.title || preview.page.site}</span>
-        <span className="truncate font-mono text-caption text-muted-foreground">{preview.page.site}</span>
+      <section aria-label="Shared page" className="flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface-2 p-3">
+        {preview.page.icon
+          ? <img src={preview.page.icon} alt="" width={36} height={36} className="size-9 shrink-0 rounded-lg" />
+          : <span aria-hidden className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-surface-3 text-body font-bold text-muted-foreground">{[...preview.page.site][0]?.toUpperCase() ?? '?'}</span>}
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-body font-medium text-foreground">{preview.page.title || preview.page.site}</span>
+          <span className="truncate font-mono text-caption text-muted-foreground">{preview.page.site}</span>
+        </div>
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 text-caption text-muted-foreground">
+          <span aria-hidden className={`size-2 rounded-full ${preview.online ? 'bg-[#22c55e]' : 'bg-foreground/30'}`} />{preview.online ? 'live' : 'offline'}
+        </span>
       </section>
       <ul aria-label="What you can do" className="flex flex-col gap-1.5 text-body text-foreground">
         <li>✓ Watch the tab live</li>

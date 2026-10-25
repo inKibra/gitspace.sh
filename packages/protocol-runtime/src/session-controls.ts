@@ -54,6 +54,11 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserShareRevoke'), shareId: z.string().uuid() }),
   z.object({ type: z.literal('browserShareConnect'), shareId: z.string().uuid(), secret: z.string().min(16).max(128) }),
   z.object({ type: z.literal('browserPageComments') }),
+  /** Your Chrome's workspace group from the Browser tab: end its scripts and its single step (Stop); close one of its
+   * tabs (also a cloud browser tab); bring one of its tabs to the front in Chrome (Focus in Chrome). */
+  z.object({ type: z.literal('browserStop'), groupId: z.string().uuid() }),
+  z.object({ type: z.literal('browserCloseTab'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
+  z.object({ type: z.literal('browserFocusTab'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),

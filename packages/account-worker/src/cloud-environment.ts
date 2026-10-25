@@ -18,7 +18,7 @@ export async function refreshCloudEnvironment(input: {
   checkpoint: RuntimeGitCheckpoint;
 }): Promise<LifecycleState> {
   const { code, environment, identity, checkpoint } = input;
-  const state = await environment.refreshBrowserOrigins(identity);
+  const { state } = await environment.refreshBrowserOrigins(identity);
   // Only the `.gitspace` paths are read, one tree per path segment; never the whole worktree.
   const reader = code.reader(artifactsWorkspaceRepository(identity.workspaceId));
   const trees = new Map<string, Promise<ArtifactsTreeEntry[] | null>>();
