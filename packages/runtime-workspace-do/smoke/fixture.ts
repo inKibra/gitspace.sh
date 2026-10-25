@@ -4,7 +4,8 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createOperationalTasks, type OperationalServices } from '../../runtime-core/src/tasks.js';
 import { RuntimeAnswerInputSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSaveSchema } from '@gitspace/protocol-runtime/draft';
-import { createWorkspaceRuntime } from '../src/runtime.js';
+import { createWorkspaceRuntime, type WorkspaceRuntimeOptions } from '../src/runtime.js';
+import { createRunningMarks } from '../src/running-marks.js';
 import { createReplicaStore } from '../src/replica-store.js';
 import { QuestionsDoc } from '../../runtime-core/src/documents.js';
 import { AgentDefinitionContextDoc } from '../../runtime-core/src/subagent-state.js';
@@ -77,6 +78,31 @@ function countedStorage(storage: DurableObjectStorage) {
     },
   };
 }
+/** The smoke workspace runtime over `storage`; `services` replaces any of its services. */
+function openSmokeRuntime(ctx: DurableObjectState, storage: DurableObjectStorage, operations: OperationalServices, services: Partial<WorkspaceRuntimeOptions> = {}) {
+  const models = createModels();
+  models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [model], stream, streamSimple: stream });
+  return createWorkspaceRuntime({
+    storage, identity, models, model: modelRef,
+    code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], changedSnapshotPaths: unsupported, reader: () => ({ readTree: async oid => definitionTrees.get(oid) ?? null, readBlob: async oid => oid === 'c'.repeat(40) ? new Blob([repositoryDefinition]) : null, close: async () => {} }) },
+    initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
+    lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
+    tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, preflight: async () => {} },
+    operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
+    onReport: error => console.error('RUNTIME_REPORT', String(error)),
+    admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
+    refuseRequest: (signal, reason) => { refused.set(signal, reason); },
+    bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => {
+      if (await ctx.storage.get('fail-binding')) throw new Error('fixture inference binding failed');
+      for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');
+    },
+    session: { catalog: async () => ({ inference: { profileId: 'fixture-profile', profileName: 'Fixture', profileRevision: 1, assignmentRevision: 1 }, models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [{ id: 'scout', label: 'Scout', provider: 'fixture', model: 'fixture', thinking: null, current: false }] }), reload: unsupported },
+    qa: { list: async () => [], act: unsupported },
+    attachments: { seal: unsupported, open: unsupported, dispatch: unsupported },
+    waitUntil: promise => ctx.waitUntil(promise), schedule: timestamp => ctx.storage.setAlarm(timestamp),
+    ...services,
+  });
+}
 export class RuntimeSmoke extends DurableObject<unknown> {
   protected readonly runtime;
   private readonly operations: OperationalServices;
@@ -84,28 +110,8 @@ export class RuntimeSmoke extends DurableObject<unknown> {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     this.counted = countedStorage(ctx.storage);
-    const models = createModels();
-    models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [model], stream, streamSimple: stream });
     this.operations = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => ctx.storage.setAlarm(timestamp) };
-    this.runtime = createWorkspaceRuntime({
-      storage: this.counted.storage, identity, models, model: modelRef,
-      code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], changedSnapshotPaths: unsupported, reader: () => ({ readTree: async oid => definitionTrees.get(oid) ?? null, readBlob: async oid => oid === 'c'.repeat(40) ? new Blob([repositoryDefinition]) : null, close: async () => {} }) },
-      initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
-      lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
-      tools: { invoke: unsupported, prepareBrowser: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, preflight: async () => {} },
-      operations: this.operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
-      onReport: error => console.error('RUNTIME_REPORT', String(error)),
-      admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
-      refuseRequest: (signal, reason) => { refused.set(signal, reason); },
-      bindInferenceConversation: async (conversationId, _signal, _submissions, requests) => {
-        if (await ctx.storage.get('fail-binding')) throw new Error('fixture inference binding failed');
-        for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');
-      },
-      session: { catalog: async () => ({ inference: { profileId: 'fixture-profile', profileName: 'Fixture', profileRevision: 1, assignmentRevision: 1 }, models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [{ id: 'scout', label: 'Scout', provider: 'fixture', model: 'fixture', thinking: null, current: false }] }), reload: unsupported },
-      qa: { list: async () => [], act: unsupported },
-      attachments: { seal: unsupported, open: unsupported, dispatch: unsupported },
-      waitUntil: promise => ctx.waitUntil(promise), schedule: timestamp => ctx.storage.setAlarm(timestamp),
-    });
+    this.runtime = openSmokeRuntime(ctx, this.counted.storage, this.operations);
   }
   async alarm() { await (await this.runtime).wake(); }
   async fetch(request: Request): Promise<Response> {
@@ -256,6 +262,33 @@ export class ReplicaSmoke extends DurableObject {
     return Response.json({ cursor: reopened.cursor() });
   }
 }
-export default { fetch(request: Request, env: { SMOKE: DurableObjectNamespace<RuntimeSmoke>; REPLICA: DurableObjectNamespace<ReplicaSmoke> }) {
-  return new URL(request.url).pathname === '/replica-proof' ? env.REPLICA.getByName('replica').fetch(request) : env.SMOKE.getByName('runtime-regressions').fetch(request);
+/** A reset cuts off whatever the object was running; the next open reports it from the running marks. Each proof hangs
+ * one stage in a fresh object and answers the marks the next open would report. */
+export class ResetMarksSmoke extends DurableObject {
+  async fetch(request: Request): Promise<Response> {
+    const operations: OperationalServices = { execute: unsupported, reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => this.ctx.storage.setAlarm(timestamp) };
+    if (new URL(request.url).searchParams.get('stage') === 'open') {
+      // A conversation holding a 0.3 MB message; the next open's rebuild reads it, then asks for the QA items, which
+      // never come.
+      await (await openSmokeRuntime(this.ctx, this.ctx.storage, operations)).notice('n'.repeat(300_000));
+      const listed = Promise.withResolvers<void>();
+      void openSmokeRuntime(this.ctx, this.ctx.storage, operations, { qa: { list: () => { listed.resolve(); return Promise.withResolvers<never>().promise; }, act: unsupported } });
+      await listed.promise;
+    } else {
+      // A workspace report the conversation has not taken in: admission fails, then never answers while recovery delivers it.
+      let admit = async (): Promise<never> => { throw new Error('Inference admission is unavailable'); };
+      const runtime = await openSmokeRuntime(this.ctx, this.ctx.storage, operations, { admitInference: () => admit() });
+      await runtime.workspaceReport({ projectId: identity.projectId, workspaceId: 'feature', name: `Feature ${'x'.repeat(200_000)}`, requestId: 'report', outcome: 'finished', excerpt: null }, 'wake').catch(() => {});
+      const admitting = Promise.withResolvers<void>();
+      admit = () => { admitting.resolve(); return Promise.withResolvers<never>().promise; };
+      void runtime.wake();
+      await admitting.promise;
+    }
+    return Response.json(createRunningMarks(this.ctx.storage.sql).leftover.map(({ step, detail }) => ({ step, detail })));
+  }
+}
+export default { fetch(request: Request, env: { SMOKE: DurableObjectNamespace<RuntimeSmoke>; REPLICA: DurableObjectNamespace<ReplicaSmoke>; RESET: DurableObjectNamespace<ResetMarksSmoke> }) {
+  const url = new URL(request.url);
+  if (url.pathname === '/reset-marks') return env.RESET.getByName(url.searchParams.get('stage') ?? '').fetch(request);
+  return url.pathname === '/replica-proof' ? env.REPLICA.getByName('replica').fetch(request) : env.SMOKE.getByName('runtime-regressions').fetch(request);
 } };

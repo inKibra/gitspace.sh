@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { strict as assert } from 'node:assert';
 import { searchSnapshotFiles, type SearchArguments } from '../../protocol-runtime/src/search.js';
 import { CodeSearchIndex, type CodeSearchEvent, type CodeSearchLimits, type CodeSearchSource, type CodeSearchStorage } from '../src/cloud-search-index.js';
+import { createRunningMarks, type RunningStep } from '../src/running-marks.js';
 
 type Commit = { worktreeCommit: string; worktreeTree: string };
 
@@ -9,6 +10,12 @@ async function sha1(text: string): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-1', new TextEncoder().encode(text)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
+/** A repository blob that records when its bytes are read. */
+class RecordedBlob extends Blob {
+  private readonly loaded: () => void;
+  constructor(content: string, loaded: () => void) { super([content]); this.loaded = loaded; }
+  override async arrayBuffer(): Promise<ArrayBuffer> { this.loaded(); return super.arrayBuffer(); }
+}
 /** A content-addressed repository that records every object read. */
 class Repository {
   readonly trees = new Map<string, ArtifactsTreeEntry[]>();
@@ -16,6 +23,8 @@ class Repository {
   readonly commits: Commit[] = [];
   readonly treeReads: string[] = [];
   readonly blobReads: string[] = [];
+  /** Blobs whose bytes were read, not only their size. */
+  readonly blobLoads: string[] = [];
   failTrees = false;
   /** Tree reads that never answer, as a wedged repository call would; `hung` settles once one starts. */
   hangTrees = false;
@@ -23,6 +32,10 @@ class Repository {
   readonly failBlobs = new Set<string>();
   /** Per-read delay, standing in for the repository service's round trip. */
   latencyMs = 0;
+  /** Blob reads wait for `blobRelease`; `blobsHung` settles once one starts. */
+  hangBlobs = false;
+  blobsHung = Promise.withResolvers<void>();
+  blobRelease = Promise.withResolvers<void>();
   readonly source: CodeSearchSource = {
     reader: () => ({
       readTree: async oid => {
@@ -35,9 +48,10 @@ class Repository {
       readBlob: async oid => {
         if (this.latencyMs) await new Promise(resolve => setTimeout(resolve, this.latencyMs));
         if (this.failBlobs.has(oid)) throw new Error('MEMORY_LIMIT');
+        if (this.hangBlobs) { this.blobsHung.resolve(); await this.blobRelease.promise; }
         this.blobReads.push(oid);
         const content = this.blobs.get(oid);
-        return content === undefined ? null : new Blob([content]);
+        return content === undefined ? null : new RecordedBlob(content, () => { this.blobLoads.push(oid); });
       },
       close: async () => {},
     }),
@@ -118,7 +132,7 @@ export class CodeSearchProof extends DurableObject {
     return Response.json(latency ? await this.firstBuild(latency) : url.searchParams.has('benchmark') ? await this.benchmark() : await this.proof());
   }
 
-  private open(repository: Repository, snapshot: { current: Commit | null }, options: { limits?: Partial<CodeSearchLimits>; storage?: CodeSearchStorage; reports?: unknown[]; events?: CodeSearchEvent[] } = {}) {
+  private open(repository: Repository, snapshot: { current: Commit | null }, options: { limits?: Partial<CodeSearchLimits>; storage?: CodeSearchStorage; reports?: unknown[]; events?: CodeSearchEvent[]; mark?(step: string, detail: string): RunningStep } = {}) {
     return new CodeSearchIndex({
       storage: options.storage ?? this.ctx.storage, source: repository.source, repository: 'workspace-proof',
       snapshots: {
@@ -130,7 +144,7 @@ export class CodeSearchProof extends DurableObject {
         },
       },
       schedule: async timestamp => { this.scheduled.push(timestamp - this.clock); }, now: () => this.clock,
-      report: error => { if (!options.reports) throw error; options.reports.push(error); }, log: event => { options.events?.push(event); }, limits: options.limits,
+      report: error => { if (!options.reports) throw error; options.reports.push(error); }, log: event => { options.events?.push(event); }, mark: options.mark, limits: options.limits,
     });
   }
 
@@ -321,14 +335,40 @@ export class CodeSearchProof extends DurableObject {
     await racers[0]!.drive();
     await parity(files);
 
-    // An isolate reset during a build step (out of memory, a deploy) leaves the build marked running: the next isolate's
-    // first drive counts it as a failed attempt and backs off instead of repeating the step that reset it.
+    // A build step names itself in the running marks while it reads, so a reset during it is reported on the next open
+    // with what it was reading; a blob over the size limit is settled from its size, its bytes never read.
+    const marks = createRunningMarks(sql);
+    const progress: string[] = [];
+    const marked = this.open(repository, snapshot, { limits: { ...limits, stepBytes: 64 * 1024 }, reports, events, mark: (step, detail) => {
+      const mark = marks.stage(step, detail);
+      return { update: next => { progress.push(next); mark.update(next); }, end: () => mark.end() };
+    } });
+    files.set('data/large.json', `${'x'.repeat(9_000)}\n`);
+    files.set('data/small.txt', 'small\n');
+    snapshot.current = await repository.commit(files);
+    repository.hangBlobs = true;
+    const reading = marked.drive();
+    await repository.blobsHung.promise;
+    assert.deepEqual(createRunningMarks(sql).leftover.map(({ step, detail }) => ({ step, detail })), [{ step: 'code search', detail: 'reading 2 blobs, 4 at a time, up to 64 KiB' }]);
+    repository.hangBlobs = false;
+    repository.blobRelease.resolve();
+    await reading;
+    assert.deepEqual(progress.filter(line => !/^applying 1 changed directories: \d+ tree entries$/u.test(line)), ['indexing 2 blobs: 0 KiB read, 1 over 4 KiB skipped (largest 9 KiB)']);
+    const large = await repository.blobId(files.get('data/large.json') ?? '');
+    assert.ok(repository.blobReads.includes(large) && !repository.blobLoads.includes(large), 'The oversized blob is settled from its size without reading its bytes');
+    assert.ok(repository.blobLoads.includes(await repository.blobId('small\n')));
+    assert.equal(sql.exec('SELECT id FROM runtime_running').toArray().length, 0, 'A finished step leaves no mark');
+
+    // An isolate reset during a build step (out of memory, a deploy) leaves the step's running mark, which the next open
+    // reports, and the build marked running: the next isolate's first drive counts it as a failed attempt and backs off
+    // instead of repeating the step that reset it.
     files.set('src/reset.ts', 'reset\n');
     snapshot.current = await repository.commit(files);
     repository.hangTrees = true;
     repository.hung = Promise.withResolvers<void>();
-    void this.open(repository, snapshot, { limits: { ...limits, readTimeoutMs: 3_600_000 } }).drive();
+    void this.open(repository, snapshot, { limits: { ...limits, readTimeoutMs: 3_600_000 }, mark: marks.stage }).drive();
     await repository.hung.promise;
+    assert.deepEqual(createRunningMarks(sql).leftover.map(({ step, detail }) => ({ step, detail })), [{ step: 'code search', detail: 'listing 1 changed directories, 4 at a time' }]);
     repository.hangTrees = false;
     repository.treeReads.length = 0; events.length = 0; this.scheduled.length = 0;
     const restarted = this.open(repository, snapshot, { limits, reports, events });

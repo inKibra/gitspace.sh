@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
 import type { GitIntermediateCheckpoint, PendingGitSnapshot } from '../src/git-checkpoint.js';
 import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError } from '../src/artifacts-git-remote.js';
+import { GitLfsObjectSchema } from '@gitspace/protocol-workspace';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -115,6 +116,28 @@ describe('Git intermediate checkpoint', () => {
     const publications: GitIntermediateCheckpoint[] = [];
     const snapshots = new IncrementalGitSnapshots({
       repositoryPath: source, spaceId: 'lfs-order', allocateRevision: async () => 2,
+      loadPending: async () => pending, loadCommitted: async () => committed,
+      savePending: async next => { pending = next; }, clearPending: async () => { pending = null; },
+      publish: async checkpoint => { publications.push(checkpoint); }, commit: async checkpoint => checkpoint,
+    });
+    expect(await snapshots.capture()).toEqual(committed);
+    expect(publications).toEqual([]);
+    expect(pending).toBeNull();
+  });
+
+  it('an unchanged checkout is not published again when the committed snapshot lists its LFS objects in another order', async () => {
+    const { source } = fixture();
+    const location = { origin: 'https://github.com/example/repo.git', endpoint: 'https://github.com/example/repo.git/info/lfs' };
+    const first = { oid: GitLfsObjectSchema.shape.oid.parse('a'.repeat(64)), size: 12, source: 'origin' as const, location };
+    const second = { oid: GitLfsObjectSchema.shape.oid.parse('b'.repeat(64)), size: 34, source: 'r2' as const };
+    const captured = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'lfs-object-order', revision: 1 });
+    // The cloud keeps the order its merges added objects in; a capture sorts them by oid.
+    const committed = { ...captured, lfs: { objects: [second, first], heldBack: [{ path: 'z.bin', kind: 'modified' as const }, { path: 'a.bin', kind: 'added' as const }] } };
+    const stored = { ...captured, lfs: { objects: [first, second], heldBack: [{ path: 'a.bin', kind: 'added' as const }, { path: 'z.bin', kind: 'modified' as const }] } };
+    let pending: PendingGitSnapshot | null = { checkpoint: stored, base: committed.worktreeCommit };
+    const publications: GitIntermediateCheckpoint[] = [];
+    const snapshots = new IncrementalGitSnapshots({
+      repositoryPath: source, spaceId: 'lfs-object-order', allocateRevision: async () => 2,
       loadPending: async () => pending, loadCommitted: async () => committed,
       savePending: async next => { pending = next; }, clearPending: async () => { pending = null; },
       publish: async checkpoint => { publications.push(checkpoint); }, commit: async checkpoint => checkpoint,

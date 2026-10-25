@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
-import { ConversationLifecycleDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
+import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
@@ -384,8 +384,8 @@ test('a machine tool with no ready machine attaches the default one and says to 
         expect(attachment.state).toBe('attaching');
         ctx.storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.state','ready') WHERE id=?", attachment.attachmentId);
         await runtime.cacheReady(attachment.attachmentId, attachment.generation);
-        const events = (await runtime.harness.snapshot(ConversationLifecycleDoc, root.id, BACKGROUND_CONTEXT))?.events ?? [];
-        expect(events.map(item => item.event)).toEqual([expect.objectContaining({ kind: 'machine-ready', requestId: `machine-ready:${attachment.attachmentId}:${attachment.generation}`, text: expect.stringContaining('Machine Darktop is attached and ready') })]);
+        const entries = (await root.entries({}, 100, undefined, BACKGROUND_CONTEXT)).items.filter(entry => entry.kind === 'gitspace.machine-ready');
+        expect(entries.map(entry => entry.data)).toEqual([expect.objectContaining({ requestId: `machine-ready:${attachment.attachmentId}:${attachment.generation}`, text: expect.stringContaining('Machine Darktop is attached and ready') })]);
       } finally { machine.mockRestore(); await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   });

@@ -1,4 +1,4 @@
-import { defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryId } from '@earendil-works/pi-durable';
+import { AgentDoc, defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryId } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
@@ -116,7 +116,8 @@ export function createConversationTools(options: ConversationToolOptions) {
         const submission = await options.lifecycle.runWhileActive(childId, async () => {
           input.signal?.throwIfAborted();
           const model = await options.admitInference({ conversationId: childId, requestId: input.attemptId, parentConversationId: input.conversationId, selection: metadata.model ? { kind: 'explicit', ...metadata.model } : metadata.selection });
-          const thinking = metadata.thinking ?? model.thinking ?? null;
+          // The definition's effort, else its role's; with neither, the parent's current effort.
+          const thinking = metadata.thinking ?? model.thinking ?? (await harness.snapshot(AgentDoc, target.id, context))?.thinkingLevel ?? null;
           await child.commit(async tx => { const childState = await tx.doc(AgentDefinitionContextDoc, child.id); if (childState.child && !childState.child.model) { childState.child.model = { provider: model.provider, modelId: model.modelId }; childState.child.thinking = thinking; if (model.role) { childState.child.role = model.role; (await tx.doc(SessionControlsDoc, child.id)).role = model.role; } } }, context);
           await options.configureModel(child.id, model);
           const instructions = metadata.definition ? parseCloudAgentDefinition(metadata.definition.path, metadata.definition.content).instructions : '';

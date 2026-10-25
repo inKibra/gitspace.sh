@@ -31,6 +31,19 @@ export const GitLfsSnapshotSchema = z.object({
   heldBack: z.array(GitLfsHeldBackSchema),
 });
 export type GitLfsSnapshot = z.infer<typeof GitLfsSnapshotSchema>;
+/** A snapshot's objects and held-back paths are sets: two snapshots listing the same entries, in any order and with
+ * each entry's keys in any order, are the same. */
+export function sameGitLfsSnapshot(a: GitLfsSnapshot | undefined, b: GitLfsSnapshot | undefined): boolean {
+  return gitLfsSnapshotKey(a) === gitLfsSnapshotKey(b);
+}
+function gitLfsSnapshotKey(snapshot: GitLfsSnapshot | undefined): string | null {
+  if (snapshot === undefined) return null;
+  // Parsing writes each entry's keys in the schema's order.
+  const { objects, heldBack } = GitLfsSnapshotSchema.parse(snapshot);
+  objects.sort((a, b) => a.oid < b.oid ? -1 : a.oid > b.oid ? 1 : 0);
+  heldBack.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return JSON.stringify({ objects, heldBack });
+}
 export const GitLfsProtectionSchema = z.object({ objects: z.array(GitLfsObjectSchema) });
 
 /** Plaintext interface; implementations encrypt storage and verify oid/size. */

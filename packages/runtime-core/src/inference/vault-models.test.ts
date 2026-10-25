@@ -199,8 +199,23 @@ describe('vault-bound provider dispatch', () => {
     expect((await test.models.completeSimple(deep, context)).stopReason).toBe('stop');
   });
 
+  it('serves a pinned model the catalog no longer lists, with its role\'s context limit, on the view\'s own pins only', async () => {
+    const retired = { ...chat, id: 'retired', name: 'Retired chat', contextWindow: 1_000_000 };
+    const test = await fixture({ settings: { modelRoles: { default: `${providerId}/retired` }, contextLimits: { default: 120_000 } } });
+    const pins = served();
+    const view = await test.models.scope({ pins, pinnedModels: [retired] });
+    expect(test.models.getModel(providerId, 'retired')).toBeUndefined();
+    const pinned = view.getModel(providerId, 'retired');
+    expect(pinned).toEqual({ ...retired, contextWindow: 120_000 });
+    expect(view.getModel(providerId, chat.id)).toEqual(chat);
+    if (!pinned) throw new Error('Pinned model missing');
+    expect((await view.completeSimple(pinned, context)).content).toEqual([{ type: 'text', text: 'alpha:original' }]);
+    expect(await pins.read(providerId)).toEqual({ credentialId: 'alpha' });
+    expect(await test.pins.read(providerId)).toBeNull();
+  });
+
   it('starts every conversation of a workspace on one account and another workspace on the other', async () => {
-    // The runtime builds one collection per conversation; each here is one conversation.
+    // Each catalog here stands for one conversation's view.
     const conversations = await Promise.all([fixture({ workspaceId: 'workspace-b' }), fixture({ workspaceId: 'workspace-b' }), fixture({ workspaceId: 'workspace-a' })]);
     const answers = await Promise.all(conversations.map(test => test.models.completeSimple(test.chatModel, context)));
     expect(answers.map(answer => answer.content)).toEqual([

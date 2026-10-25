@@ -72,3 +72,28 @@ test('a reply a reset cut off is described by when the provider answered and how
     expect(marked()).toEqual([{ detail: 'anthropic/opus: 1 messages, 0.0 MB, system 3 KB, 1 tools 2 KB; answered 200 after 2 s; reply after 6 s: 2 events, thinking 40 KB, text 0 KB, tool-call arguments 120 KB' }]);
   } finally { setSystemTime(); }
 });
+
+test('a stage a reset cut off is reported with the last progress it recorded, and arms no heartbeat', () => {
+  const database = new Database(':memory:');
+  let heartbeats = 0;
+  const marks = createRunningMarks(storage(database), () => { heartbeats++; });
+  marks.stage('conversation recovery', '3 conversations, lifecycle documents 0.1 MB').end();
+  const opening = marks.stage('runtime open', 'opening storage; database 1.0 MB');
+  opening.update('rebuilding the snapshot: reading conversation 7 after 6 (12.4 MB of entries read, 0.3 MB of views)');
+  // A stage ends within its call: arming the heartbeat for it would wake an idle workspace again.
+  expect(heartbeats).toBe(0);
+  expect(marks.active()).toBe(false);
+  expect(createRunningMarks(storage(database)).leftover.map(({ step, detail }) => ({ step, detail }))).toEqual([
+    { step: 'runtime open', detail: 'rebuilding the snapshot: reading conversation 7 after 6 (12.4 MB of entries read, 0.3 MB of views)' },
+  ]);
+});
+
+test('a compaction request a reset cut off is named as compaction, not as a turn', () => {
+  const database = new Database(':memory:');
+  const models = createRunningMarks(storage(database)).models({ ...createModels(), completeSimple: () => new Promise<never>(() => {}) });
+  const model: Model<Api> = { id: 'opus', name: 'Opus', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
+  void models.completeSimple(model, { messages: [{ role: 'user', content: 'x'.repeat(250_000), timestamp: 1 }] });
+  expect(createRunningMarks(storage(database)).leftover.map(({ step, detail }) => ({ step, detail }))).toEqual([
+    { step: 'compaction request', detail: 'anthropic/opus: 1 messages, 0.3 MB, system 0 KB, 0 tools 0 KB' },
+  ]);
+});

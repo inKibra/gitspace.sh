@@ -225,6 +225,14 @@ test('legacy-only discovery refreshes before spawn when canonical files appear',
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });
 
+test('a child whose definition and role set no effort runs at its parent\'s effort', async () => {
+  const f = await fixture('spawns', [{ path: '.agents/agents/plain.md', content: '---\nname: plain\nmodel: test/file-model\ntools: read\n---\nPlain persona.' }]);
+  try {
+    const plain = await f.spawned({ op: 'spawn', agent: 'plain', name: 'Plain', task: 'Inspect' });
+    expect((await plain.child.agent(context)).thinkingLevel).toBe('max');
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
 test('role and file children independently resolve selection, persona, thinking and readonly tools', async () => {
   const f = await fixture();
   try {

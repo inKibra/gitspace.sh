@@ -9,7 +9,7 @@ import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDo
 import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
-import { createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
+import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
@@ -25,7 +25,8 @@ import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifac
 import type { GitLfsConfirmedObject, GitLfsStore, WorkspaceReport, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat, type WithdrawnNotices } from './transcript.js';
-import { createRunningMarks } from './running-marks.js';
+import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
+import { createLfsRetentionRetry } from './lfs-retention-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void };
 /** The main conversation's turn for an input submitted with a request id. */
@@ -155,10 +156,18 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const heartbeat = () => { options.schedule(Date.now() + HEARTBEAT_MS).catch(options.onReport); };
   const marks = createRunningMarks(options.storage.sql, heartbeat);
   if (marks.leftover.length) console.error(JSON.stringify({ event: 'runtime_reset_during', workspaceId: options.identity.workspaceId, running: marks.leftover }));
+  // Opening reads every conversation's newest entries, screenshots included: its mark names the stage it reached.
+  const opening = marks.stage('runtime open', `opening storage; database ${megabytes(options.storage.sql.databaseSize)}`);
+  try { return await openWorkspaceRuntime(options, marks, heartbeat, opening); }
+  finally { opening.end(); }
+}
+async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: RunningMarks, heartbeat: () => void, opening: RunningStep): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
+  opening.update('opening the harness');
   const runtime = await createRuntimeHarness({ ...options, storage, models: marks.models(options.models), unfinished: marks.unfinished });
   const { harness } = runtime;
   const withdrawn = createWithdrawnNotices(options.storage.sql);
+  opening.update('withdrawing sync failure notices');
   await withdrawSyncFailureNotices(storage, harness, runtime.root, withdrawn, options.storage.sql);
   const attachments = new AttachmentStore(options.storage, { ...options.attachments, dispatch: input => { heartbeat(); return options.attachments.dispatch(input); } });
   // Sync merges and cloud writes build snapshots in memory: each is marked while it runs.
@@ -172,14 +181,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     listSnapshotPaths: (repository, tree) => marks.run('path list', `tree ${tree.slice(0, 12)}`, () => options.code.listSnapshotPaths(repository, tree)),
     changedSnapshotPaths: (repository, before, after) => marks.run('path diff', `tree ${before.slice(0, 12)} to ${after.slice(0, 12)}`, () => options.code.changedSnapshotPaths(repository, before, after)),
   };
-  const cloudFiles = new CloudFileStore(options.storage, attachments, code, options.identity.workspaceId, codeChanged, options.lfs, async (checkpoint, publicationId) => {
-    try { await options.retainLfs(checkpoint, publicationId); }
-    catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
-  }, options.initialCheckpoint, options.documentMarkdown);
+  const retention = createLfsRetentionRetry(options.storage.sql, { workspaceId: options.identity.workspaceId, retain: options.retainLfs, schedule: options.schedule, report: options.onReport });
+  const cloudFiles = new CloudFileStore(options.storage, attachments, code, options.identity.workspaceId, codeChanged, options.lfs, retention.retain, options.initialCheckpoint, options.documentMarkdown);
   const codeSearch = new CodeSearchIndex({
     storage: options.storage, source: options.code, repository: artifactsWorkspaceRepository(options.identity.workspaceId),
     snapshots: { current: () => cloudFiles.snapshot(), distance: (ancestor, descendant, limit) => cloudFiles.snapshotDistance(ancestor, descendant, limit) },
-    schedule: options.schedule, report: options.onReport,
+    schedule: options.schedule, report: options.onReport, mark: marks.stage,
   });
   /** Every canonical snapshot change republishes the projection, queues indexing for the next alarm and tells every
    * attached machine except the one whose publication made it. */
@@ -208,11 +215,12 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     let failing = false;
     return { failed(error: unknown) { if (!failing) { failing = true; options.onReport(error); } }, succeeded() { failing = false; } };
   };
-  const retention = failureRun();
   const publishing = failureRun();
+  /** Opening and waking flush the outbox. A failed retention has scheduled its own retry and reported itself; any other
+   * failure (storage) is reported here. */
   async function flushCloudRetention() {
-    try { await cloudFiles.flushRetention(); retention.succeeded(); }
-    catch (error) { retention.failed(error); await options.schedule(Date.now() + 5_000); }
+    try { await cloudFiles.flushRetention(); }
+    catch (error) { if (!retention.handled(error)) options.onReport(error); }
   }
   let definitionFiles: { commit: string; files: Array<{ path: string; content: string }> } | undefined;
   // Definitions live in two fixed directories. Reading just those trees keeps the first message of a large repository
@@ -290,7 +298,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   let agents: WorkspaceStatusSummary['agents'] = { green: 0, blue: 0, orange: 0, red: 0 };
   const TASK_ORDER: Record<StoredTask['state']['status'], number> = { pending: 0, running: 1, waiting: 2, completing: 3, terminal: 4 };
   const TERMINAL_TASK_WINDOW = 128;
-  async function conversationView(record: ConversationRecord): Promise<ConversationView | undefined> {
+  async function conversationView(record: ConversationRecord, read?: { entries: number }): Promise<ConversationView | undefined> {
     const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
     if (!conversation) return undefined;
     // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
@@ -303,6 +311,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       cursor = page.next;
     } while (cursor && newest.length < 256);
     const entries = newest.reverse();
+    if (read) { const sizes = messageCharacters(entries.flatMap(entry => entry.model ?? [])); read.entries += sizes.characters + sizes.imageCharacters; }
     const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
     const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
     // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
@@ -320,17 +329,24 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   async function refreshConversations(): Promise<void> {
     if (!conversationsLoaded) {
       conversationViews.clear();
+      // The first load, while the runtime opens, reads every conversation's newest entries whole: its mark counts them.
+      const read = { conversations: 0, entries: 0, views: 0 };
       let cursor: Cursor | undefined;
       do {
         const page = await storage.scanConversations({}, 128, cursor, BACKGROUND_CONTEXT);
         for (const record of page.items) {
           conversationIds.set(String(record.id), record.id);
-          const view = await conversationView(record);
-          if (view) conversationViews.set(view.id, view);
+          opening.update(`rebuilding the snapshot: reading conversation ${String(record.id)} after ${read.conversations} (${megabytes(read.entries)} of entries read, ${megabytes(read.views)} of views)`);
+          const view = await conversationView(record, read);
+          read.conversations++;
+          if (!view) continue;
+          conversationViews.set(view.id, view);
+          for (const message of view.messages) for (const part of message.content) if (part.type === 'text') read.views += part.text.length;
         }
         cursor = page.next;
       } while (cursor);
       conversationsLoaded = true;
+      opening.update(`rebuilding the snapshot: reading tasks and building it from ${read.conversations} conversations (${megabytes(read.entries)} of entries read, ${megabytes(read.views)} of views)`);
     }
     // Commits during this refresh mark again and queue the next rebuild.
     const dirty = [...dirtyConversations];
@@ -481,7 +497,9 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
     }
     publish();
   });
+  opening.update('flushing cloud retention');
   await flushCloudRetention();
+  opening.update('rebuilding the snapshot');
   await rebuild();
   async function conversation(id?: string) {
     if (id === undefined) return runtime.root;
@@ -536,8 +554,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       };
       const attachment = authorize();
       const checkpoint = await cloudFiles.commitMachine(input.checkpoint, input.previousWorktreeCommit, attachment.machineId, authorize);
-      try { await cloudFiles.flushRetention(); }
-      catch (error) { await options.schedule(Date.now() + 5_000); throw error; }
+      await cloudFiles.flushRetention();
       await options.storage.sync();
       publish(); await line;
       return { accepted: true, cursor: snapshot.cursor, checkpoint };
@@ -616,6 +633,7 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
         const selection = (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
         const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
         await runtime.configureModel(target.id, admitted);
+        await applyInferenceThinking(target, admitted);
         await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
       });
       if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId, input.draftText); publish(); }
@@ -657,7 +675,16 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
       const indexing = codeSearch.drive();
       // Tasks keep the object in memory only through their own pending I/O and timers; an alarm is re-armed only while
       // marked work or a machine command is still running (a step outliving those 15 minutes).
-      try { await flushCloudRetention(); await runtime.lifecycle.recover(); harness.resume(); if (marks.active() || attachments.dispatching()) heartbeat(); }
+      try {
+        await flushCloudRetention();
+        // Recovery reads every conversation's lifecycle document, the events delivered to it included. Pi stores a
+        // document's kind JSON-encoded.
+        const sizes = options.storage.sql.exec<{ conversations: number; lifecycle: number }>(`SELECT (SELECT COUNT(*) FROM conversations) AS conversations, (SELECT COALESCE(SUM(length(r.content)), 0) FROM documents d JOIN document_revisions r ON r.document_id=d.id WHERE d.kind='"gitspace.conversation-lifecycle"' AND d.retired_at IS NULL) AS lifecycle`).one();
+        const recovering = marks.stage('conversation recovery', `${sizes.conversations} conversations, lifecycle documents ${megabytes(sizes.lifecycle)}`);
+        try { await runtime.lifecycle.recover(); } finally { recovering.end(); }
+        harness.resume();
+        if (marks.active() || attachments.dispatching()) heartbeat();
+      }
       finally { await indexing; }
     },
     publish,

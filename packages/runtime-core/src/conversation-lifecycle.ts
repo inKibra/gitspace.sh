@@ -18,8 +18,42 @@ const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent)
   'machine-ready': () => 'Machine',
   workspace: event => event.sender?.name ?? 'Workspace',
 };
-type StoredEvent = { event: ConversationEvent; delivered: boolean; consumed: boolean };
-export const ConversationLifecycleDoc = defineDoc<{ stopped: boolean; events: StoredEvent[] }>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [] }) });
+/** An event the conversation has not had yet: neither placed as its input nor returned by a wait. */
+type StoredEvent = {
+  event: ConversationEvent;
+  /** LEGACY: older releases kept handled events, marked by these flags. `handleEvents` drops them on the document's
+   * next write and `flush` writes every such document on recovery; remove once deployed workspaces have recovered. */
+  delivered?: boolean;
+  consumed?: boolean;
+};
+/**
+ * Request ids of handled events a conversation remembers, so a repeat delivery is dropped. Repeats come from a
+ * producer that replays after the object reset between delivering and recording it delivered: the job and process-exit
+ * tasks, the background agent task, the subagent reply hook, an `agents` send tool attempt. Each redelivers on its next
+ * run, while at most the events of its concurrent producers reach the conversation, far fewer than this. Workspace
+ * reports and machine-ready notices are sent once.
+ */
+const HANDLED_REQUEST_IDS = 256;
+type ConversationLifecycleState = {
+  stopped: boolean;
+  events: StoredEvent[];
+  /** Oldest first; absent in documents written before handled events were dropped. */
+  handled?: string[];
+};
+export const ConversationLifecycleDoc = defineDoc<ConversationLifecycleState>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [], handled: [] }) });
+const isHandled = (item: StoredEvent) => item.delivered === true || item.consumed === true;
+/** Drops the events with these request ids, and any an older release kept as handled, remembering their request ids. */
+export function handleEvents(state: ConversationLifecycleState, requestIds: ReadonlySet<string>): void {
+  const kept: StoredEvent[] = [];
+  const handled: string[] = [];
+  for (const item of state.events) {
+    if (isHandled(item) || requestIds.has(item.event.requestId)) handled.push(item.event.requestId);
+    else kept.push(item);
+  }
+  if (handled.length === 0) return;
+  state.events = kept;
+  state.handled = [...state.handled ?? [], ...handled].slice(-HANDLED_REQUEST_IDS);
+}
 export type ConversationLifecycle = {
   deliver(event: ConversationEvent): Promise<void>;
   wait(conversationId: string, options: { timeoutMs: number; signal?: AbortSignal }): Promise<ConversationEvent | { kind: 'timeout' | 'stopped' }>;
@@ -65,6 +99,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
   async function flush(id: string) {
     const conversation = await resolve(id);
     const state = await harness.snapshot(ConversationLifecycleDoc, conversation.id, context);
+    if (state?.events.some(isHandled)) await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set()), context);
     if (state?.stopped) return;
     const admit = async (requestId: string) => {
       const child = (await harness.snapshot(AgentDefinitionContextDoc, conversation.id, context))?.child;
@@ -80,9 +115,10 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       await conversation.submit({ type: 'write', entry: { kind: 'gitspace.queue-resumed', data: { submission: String(queued.id) }, edits: [] } }, context);
       await options.wake();
     }
-    // An event reaches the conversation once: as input here, or through a wait that returned it (consumed), never both.
+    // An event reaches the conversation once: as input here, or through a wait that returned it, never both; either way
+    // it leaves the document, and only its request id stays.
     // Whatever is pending when the conversation is idle goes in as one message, so events that piled up cost one turn.
-    const pending = (state?.events ?? []).filter(item => !item.delivered && !item.consumed).map(item => item.event);
+    const pending = (state?.events ?? []).filter(item => !isHandled(item)).map(item => item.event);
     if (pending.length === 0) return;
     if ((await harness.snapshot(LiveDoc, conversation.id, context))?.run !== undefined) { await options.wake(); return; }
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pending.map(event => event.requestId).join('\n'))));
@@ -90,8 +126,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     await admit(requestId);
     const content = formatConversationEvents(pending.map(event => ({ kind: event.kind, source: EVENT_SOURCE[event.kind](event), text: event.text })));
     await conversation.submit({ type: 'input', requestId, content, whenBusy: 'followUp' }, context);
-    const delivered = new Set(pending.map(event => event.requestId));
-    await conversation.commit(async tx => { for (const stored of (await tx.doc(ConversationLifecycleDoc, conversation.id)).events) if (delivered.has(stored.event.requestId)) stored.delivered = true; }, context);
+    await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set(pending.map(event => event.requestId))), context);
     await options.wake();
   }
   async function setStopped(id: string, stopped: boolean) {
@@ -144,8 +179,9 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
         const conversation = await resolve(event.conversationId);
         await conversation.commit(async tx => {
           const state = await tx.doc(ConversationLifecycleDoc, conversation.id);
-          if (state.events.some(item => item.event.requestId === event.requestId)) return;
-          state.events.push({ event, delivered: false, consumed: false });
+          handleEvents(state, new Set());
+          if (state.events.some(item => item.event.requestId === event.requestId) || state.handled?.includes(event.requestId)) return;
+          state.events.push({ event });
           await tx.appendEntry(conversation.id, { kind: `gitspace.${event.kind}`, data: { requestId: event.requestId, text: event.text, ...(event.sender ? { sender: event.sender } : {}), ...(event.payload === undefined ? {} : { payload: event.payload }) } });
         }, context);
         await flush(event.conversationId);
@@ -155,7 +191,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw new Error('Wait timeout must be between 1 and 300000 milliseconds');
       signal?.throwIfAborted();
       const conversation = await resolve(id);
-      await conversation.commit(async tx => { await tx.doc(ConversationLifecycleDoc, conversation.id); }, context);
+      await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set()), context);
       const watch = await harness.watchDoc(ConversationLifecycleDoc, conversation.id, context);
       if (!watch) throw new Error('Conversation lifecycle missing');
       const result = Promise.withResolvers<ConversationEvent | { kind: 'timeout' | 'stopped' }>();
@@ -167,10 +203,9 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
           const next = await conversation.commit(async tx => {
             const state = await tx.doc(ConversationLifecycleDoc, conversation.id);
             if (state.stopped) return { kind: 'stopped' as const };
-            const pending = state.events.find(item => !item.consumed && !item.delivered);
-            if (!pending) return null;
-            pending.consumed = true;
-            return ConversationEventSchema.parse(pending.event);
+            const pending = state.events.find(item => !isHandled(item));
+            handleEvents(state, new Set(pending ? [pending.event.requestId] : []));
+            return pending ? ConversationEventSchema.parse(pending.event) : null;
           }, context);
           if (next) result.resolve(next);
         } catch (error) { result.reject(error); } finally { checking = false; }

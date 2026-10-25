@@ -68,6 +68,59 @@ test('idle event delivery wakes inference with visible durable sender labels and
   } finally { await f.harness.close(context); }
 });
 
+test('handled events leave the lifecycle document bounded while a recent repeat is still dropped', async () => {
+  const f = await fixture();
+  try {
+    const event = (index: number): ConversationEvent => ({ conversationId: String(f.root.id), requestId: `job-${index}`, kind: 'command-completed', text: `job:${index} completed` });
+    for (let index = 0; index < 1000; index++) await f.lifecycle.deliver(event(index));
+    await f.root.waitForIdle(context);
+    // Whatever arrived during the last run went in on no later delivery; the next drive places it.
+    await f.lifecycle.recover();
+    await f.root.waitForIdle(context);
+    const state = await f.harness.snapshot(ConversationLifecycleDoc, f.root.id, context);
+    expect(state?.events).toEqual([]);
+    expect(state?.handled).toHaveLength(256);
+    const runs = f.seen.length;
+    await f.lifecycle.deliver(event(999));
+    await f.root.waitForIdle(context);
+    expect(f.seen).toHaveLength(runs);
+    const entries = await f.root.entries({}, 2000, undefined, context);
+    expect(entries.items.filter(entry => entry.kind === 'gitspace.command-completed')).toHaveLength(1000);
+  } finally { await f.harness.close(context); }
+}, 20000);
+
+test('events consumed by waits leave the lifecycle document empty', async () => {
+  const f = await fixture();
+  try {
+    for (const requestId of ['first', 'second']) {
+      const waiting = f.lifecycle.wait(String(f.root.id), { timeoutMs: 1000 });
+      await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId, kind: 'agent-message', text: requestId });
+      expect(await waiting).toMatchObject({ requestId });
+    }
+    expect(await f.harness.snapshot(ConversationLifecycleDoc, f.root.id, context)).toMatchObject({ events: [], handled: ['first', 'second'] });
+  } finally { await f.harness.close(context); }
+});
+
+test('recovery drops the handled events an older release kept, remembering the most recent of them', async () => {
+  const f = await fixture();
+  try {
+    const event = (requestId: string): ConversationEvent => ({ conversationId: String(f.root.id), requestId, kind: 'agent-message', text: requestId });
+    await f.root.commit(async tx => {
+      const state = await tx.doc(ConversationLifecycleDoc, f.root.id);
+      delete state.handled;
+      for (let index = 0; index < 1000; index++) state.events.push({ event: event(`old-${index}`), delivered: index % 2 === 0, consumed: index % 2 === 1 });
+    }, context);
+    await f.lifecycle.recover();
+    const state = await f.harness.snapshot(ConversationLifecycleDoc, f.root.id, context);
+    expect(state?.events).toEqual([]);
+    expect(state?.handled).toEqual(Array.from({ length: 256 }, (_, index) => `old-${744 + index}`));
+    expect(f.seen).toEqual([]);
+    await f.lifecycle.deliver(event('old-999'));
+    await f.root.waitForIdle(context);
+    expect(f.seen).toEqual([]);
+  } finally { await f.harness.close(context); }
+});
+
 test('events delivered during a run that ends without an answer reach the agent on the next drive', async () => {
   const f = await fixture(new MemoryStorage(), true);
   try {
@@ -98,7 +151,7 @@ test('a conversation whose admission fails does not keep recovery from deliverin
     await expect(f.lifecycle.deliver({ conversationId: String(broken.id), requestId: 'to-broken', kind: 'agent-message', text: 'Unadmittable' })).rejects.toThrow('role Deep');
     // Pending for the root since before a reset: only recovery delivers it.
     const pending: ConversationEvent = { conversationId: String(f.root.id), requestId: 'to-root', kind: 'command-completed', text: 'Background command job:9 completed' };
-    await f.root.commit(async tx => { (await tx.doc(ConversationLifecycleDoc, f.root.id)).events.push({ event: pending, delivered: false, consumed: false }); }, context);
+    await f.root.commit(async tx => { (await tx.doc(ConversationLifecycleDoc, f.root.id)).events.push({ event: pending }); }, context);
     await f.lifecycle.recover();
     await f.root.waitForIdle(context);
     expect(f.seen.some(messages => messages.includes('Background command job:9 completed'))).toBe(true);

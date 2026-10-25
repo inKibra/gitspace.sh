@@ -194,4 +194,45 @@ describe('durable inference selection intent', () => {
     } finally { await f.harness.close(BACKGROUND_CONTEXT); }
   });
 
+  it('lists one admitted view per conversation however many admissions it had, and keeps a superseded one only while its request runs', async () => {
+    const bodies = new Map<string, unknown>();
+    const state = { storage: {
+      get: async (key: string) => bodies.get(key),
+      put: async (key: string, value: unknown) => { bodies.set(key, structuredClone(value)); },
+      delete: async (key: string) => bodies.delete(key),
+    } } as unknown as DurableObjectState;
+    let profile: InferenceProfile = { version: 1, id: 'profile', name: 'Profile', revision: 1, settings: {}, createdAt: stamp, updatedAt: stamp };
+    const accounts = vi.fn(async () => [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: 'test' }]);
+    const vault = {
+      resolveCloudInference: async () => ({ profile, assignmentRevision: 1 }),
+      cloudInferenceCatalog: async () => ({ profile, assignmentRevision: 1, accounts: [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: null }] }),
+      cloudCredentialAccounts: accounts,
+      cloudResolveCredential: async () => { throw new Error('Admission must not resolve provider credentials'); },
+    };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json([], { headers: { etag: 'catalog-1' } }));
+    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), []);
+    const model = (await runtime.session.catalog()).models[0]!;
+    profile = { ...profile, settings: { 'modelRoles.default': `openai/${model.id}` } };
+    // Each listed view asks the vault for its accounts once when the router lists available models.
+    const listedViews = async () => {
+      accounts.mockClear();
+      await runtime.models.getAvailable();
+      return accounts.mock.calls.length;
+    };
+    const conversations = ['root', 'child-1', 'child-2', 'child-3'];
+    for (let index = 0; index < 200; index++) {
+      expect(await runtime.admitInference({ conversationId: conversations[index % conversations.length]!, requestId: `request-${index}` })).toMatchObject({ provider: 'openai', modelId: model.id });
+    }
+    expect(await listedViews()).toBe(conversations.length);
+    await runtime.admitInference({ conversationId: 'root', requestId: 'running' });
+    const running = new AbortController();
+    await runtime.bindInferenceConversation('root', running.signal, [], ['running'], { fastMode: false });
+    await runtime.admitInference({ conversationId: 'root', requestId: 'queued' });
+    expect(await listedViews()).toBe(conversations.length + 1);
+    expect(runtime.models.getModel('openai', model.id)).toMatchObject({ provider: 'openai', id: model.id });
+    running.abort();
+    expect(await listedViews()).toBe(conversations.length);
+    expect(runtime.models.getModel('openai', model.id)).toMatchObject({ provider: 'openai', id: model.id });
+  });
+
 });

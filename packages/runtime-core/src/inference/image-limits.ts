@@ -6,7 +6,16 @@ import type { Api, Context, ImageContent, Model, TextContent } from '@earendil-w
  * per request, 32 MiB per request), else pi's defaults. Nothing resizes images yet: one over these limits is replaced
  * by a note saying why, so a single oversized screenshot cannot fail every later turn of a conversation.
  */
-export interface ImageLimits { maxWidth: number; maxHeight: number; maxBytes: number; maxPerRequest: number | null; maxRequestBytes: number | null }
+export interface ImageLimits { maxWidth: number; maxHeight: number; maxBytes: number; maxPerRequest: number; maxImageBytes: number; maxRequestBytes: number | null }
+
+/**
+ * GitSpace's own ceiling on the images in one request, below what models accept: a workspace object builds each request
+ * in its 128 MB isolate (the history, then the serialized body and its bytes), and 26 screenshots (15.9 MB of a 17.6 MB
+ * request) exhausted it on every attempt. 16 images, or 10 MB of base64 (above 16 typical screenshots, so the count
+ * decides unless images are unusually large), whichever comes first.
+ */
+const REQUEST_IMAGES = 16;
+const REQUEST_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined): ImageLimits {
   const images = model?.inputLimits?.images;
@@ -14,7 +23,8 @@ export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined):
     maxWidth: images?.resize?.maxWidth ?? DEFAULT_IMAGE_LIMITS.maxWidth,
     maxHeight: images?.resize?.maxHeight ?? DEFAULT_IMAGE_LIMITS.maxHeight,
     maxBytes: images?.resize?.maxBytes ?? DEFAULT_IMAGE_LIMITS.maxBytes,
-    maxPerRequest: images?.maxPerRequest ?? null,
+    maxPerRequest: Math.min(images?.maxPerRequest ?? REQUEST_IMAGES, REQUEST_IMAGES),
+    maxImageBytes: REQUEST_IMAGE_BYTES,
     maxRequestBytes: model?.inputLimits?.maxRequestBytes ?? null,
   };
 }
@@ -74,10 +84,10 @@ export function admitToolImages<T extends TextContent | ImageContent>(content: r
 }
 
 /**
- * The request to send, fitted to the model's image limits: an image over the size limits becomes a note; past the
- * per-request count or byte budget, the oldest images become notes in blocks of a quarter of the count limit, so the
- * omitted set (and the prompt cache before it) changes once per block rather than on every turn. Stored history is
- * unchanged; only what is sent differs.
+ * The request to send, fitted to its image limits: an image over the size limits becomes a note; past the per-request
+ * count or byte budget, the oldest images become notes in blocks of half the count limit, so the omitted set (and the
+ * prompt cache before it) changes once per block rather than on every turn. Stored history is unchanged; only what is
+ * sent differs.
  */
 export function fitRequestImages(context: Context, limits: ImageLimits): Context {
   type Located = { message: number; part: number; bytes: number };
@@ -94,14 +104,13 @@ export function fitRequestImages(context: Context, limits: ImageLimits): Context
       else images.push({ message: index, part: partIndex, bytes: part.data.length });
     });
   });
-  const block = limits.maxPerRequest === null ? 1 : Math.max(1, Math.floor(limits.maxPerRequest / 4));
-  let omitted = limits.maxPerRequest !== null && images.length > limits.maxPerRequest ? Math.ceil((images.length - limits.maxPerRequest) / block) * block : 0;
-  if (limits.maxRequestBytes !== null) {
-    // Kept images are the newest; the total counts text too, as the request does.
-    const budget = limits.maxRequestBytes - textBytes;
-    while (omitted < images.length && images.slice(omitted).reduce((total, image) => total + image.bytes, 0) > budget) omitted = Math.min(images.length, omitted + block);
-  }
-  for (const image of images.slice(0, omitted)) refusals.set(`${image.message}:${image.part}`, '[Image not shown: older images were left out to keep this request within the model\'s limits.]');
+  const block = Math.max(1, Math.floor(limits.maxPerRequest / 2));
+  let omitted = images.length > limits.maxPerRequest ? Math.ceil((images.length - limits.maxPerRequest) / block) * block : 0;
+  // Kept images are the newest; the model's request budget counts text too, as the request does.
+  const budget = Math.min(limits.maxImageBytes, limits.maxRequestBytes === null ? Infinity : limits.maxRequestBytes - textBytes);
+  // The newest image is always sent: it alone is within `maxBytes`, below the budget.
+  while (omitted < images.length - 1 && images.slice(omitted).reduce((total, image) => total + image.bytes, 0) > budget) omitted = Math.min(images.length - 1, omitted + block);
+  for (const image of images.slice(0, omitted)) refusals.set(`${image.message}:${image.part}`, '[Image not shown: older images were left out to keep this request within its image limits. Capture it again if you need it.]');
   if (refusals.size === 0) return context;
   return {
     ...context,

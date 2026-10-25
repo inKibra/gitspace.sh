@@ -20,7 +20,7 @@ try {
   if (!built.success) throw new AggregateError(built.logs, 'Runtime smoke fixture build failed');
   assert.equal(built.outputs.length, 1);
   const contents = await built.outputs[0]!.text();
-  const options = { modules: [{ type: 'ESModule' as const, path: join(directory, 'fixture.js'), contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { SMOKE: { className: 'RuntimeSmoke', useSQLite: true }, REPLICA: { className: 'ReplicaSmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'state'), outboundService: () => { throw new Error('External network forbidden in runtime smoke'); } };
+  const options = { modules: [{ type: 'ESModule' as const, path: join(directory, 'fixture.js'), contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { SMOKE: { className: 'RuntimeSmoke', useSQLite: true }, REPLICA: { className: 'ReplicaSmoke', useSQLite: true }, RESET: { className: 'ResetMarksSmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'state'), outboundService: () => { throw new Error('External network forbidden in runtime smoke'); } };
   worker = new Miniflare(options);
   async function request(path: string, body?: unknown, expectedFailure = false): Promise<unknown> {
     assert(worker);
@@ -45,6 +45,13 @@ try {
   }
   const assistantReplies = (snapshot: RuntimeSnapshot) => snapshot.conversations.flatMap(item => item.messages).filter(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text.startsWith('fixture reply:'))).length;
   console.log('PASS replica stores the cursor only: migration, in-memory replay, reset after reopen, large Unicode draft', await request('/replica-proof'));
+
+  // A reset during the open's rebuild or the alarm's conversation recovery is reported on the next open: the stage it
+  // reached and how much it held.
+  const resetMarks = z.array(z.object({ step: z.string(), detail: z.string() }));
+  assert.deepEqual(resetMarks.parse(await request('/reset-marks?stage=open')), [{ step: 'runtime open', detail: 'rebuilding the snapshot: reading tasks and building it from 1 conversations (0.3 MB of entries read, 0.3 MB of views)' }]);
+  assert.deepEqual(resetMarks.parse(await request('/reset-marks?stage=recovery')), [{ step: 'conversation recovery', detail: '1 conversations, lifecycle documents 0.6 MB' }]);
+  console.log('PASS a reset during the open or recovery names the stage and its sizes on the next open');
 
   const events = async (after: number) => z.array(RuntimeWatchEventSchema).parse(await request(`/events?after=${after}`));
   const current = RuntimeSnapshotSchema.parse(await request('/')).cursor;

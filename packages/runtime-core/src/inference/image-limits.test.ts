@@ -9,7 +9,7 @@ function png(width: number, height: number, padding = 0): ImageContent {
   const view = new DataView(bytes.buffer);
   view.setUint32(16, width);
   view.setUint32(20, height);
-  return { type: 'image', mimeType: 'image/png', data: btoa(String.fromCharCode(...bytes)) };
+  return { type: 'image', mimeType: 'image/png', data: btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join('')) };
 }
 /** A JPEG whose frame header (SOF0) follows an APP0 segment, as camera and browser JPEGs do. */
 function jpeg(width: number, height: number): ImageContent {
@@ -34,21 +34,31 @@ it('sends an image over the model\'s size as a note naming its size, and leaves 
   expect(fitRequestImages(fits, opus)).toBe(fits);
 });
 
-it('leaves out the oldest images past the per-request count in blocks, so one more image does not change what was left out', () => {
-  const limits: ImageLimits = { ...opus, maxPerRequest: 8 };
-  const conversation = (count: number): Context => ({ messages: Array.from({ length: count }, (_, index) => screenshot(png(100, 100), String(index))) });
-  const shown = (count: number) => sent(fitRequestImages(conversation(count), limits)).filter((_, index) => index % 2 === 1).map(part => part === 'image');
-  expect(shown(8).every(Boolean)).toBe(true);
-  // Past 8 the oldest 2 (a quarter of the limit) go at once, and stay the same 2 at 10.
-  expect(shown(9)).toEqual([false, false, ...new Array<boolean>(7).fill(true)]);
-  expect(shown(10)).toEqual([false, false, ...new Array<boolean>(8).fill(true)]);
-  expect(shown(11)).toEqual([false, false, false, false, ...new Array<boolean>(7).fill(true)]);
+it('sends at most 16 images, leaving out the oldest in blocks of 8 so one more image does not change what was left out', () => {
+  const shown = (count: number) => sent(fitRequestImages({ messages: Array.from({ length: count }, (_, index) => screenshot(png(100, 100), String(index))) }, opus)).filter((_, index) => index % 2 === 1).map(part => part === 'image');
+  // Opus accepts 600 a request; GitSpace sends 16.
+  expect(shown(16).every(Boolean)).toBe(true);
+  expect(shown(17)).toEqual([...new Array<boolean>(8).fill(false), ...new Array<boolean>(9).fill(true)]);
+  expect(shown(24)).toEqual([...new Array<boolean>(8).fill(false), ...new Array<boolean>(16).fill(true)]);
+  expect(shown(25)).toEqual([...new Array<boolean>(16).fill(false), ...new Array<boolean>(9).fill(true)]);
 });
 
-it('leaves out the oldest images until the request fits the model\'s byte budget', () => {
+it('leaves out the oldest images until the request fits its byte budget', () => {
   const image = png(100, 100, 3_000);
   const limits: ImageLimits = { ...opus, maxPerRequest: 4, maxRequestBytes: image.data.length * 2 + 200 };
   const fitted = fitRequestImages({ messages: ['a', 'b', 'c', 'd'].map(id => screenshot(image, id)) }, limits);
   expect(sent(fitted).filter(part => part === 'image')).toHaveLength(2);
-  expect(sent(fitted).slice(0, 2)).toEqual(['capture a', '[Image not shown: older images were left out to keep this request within the model\'s limits.]']);
+  expect(sent(fitted).slice(0, 2)).toEqual(['capture a', '[Image not shown: older images were left out to keep this request within its image limits. Capture it again if you need it.]']);
+});
+
+it('sends at most 10 MB of images however few there are, and always the newest', () => {
+  // Four 3 MB screenshots: past 10 MB the oldest block goes, but the newest is kept.
+  const large = png(1000, 1000, 2_400_000);
+  const fitted = fitRequestImages({ messages: ['a', 'b', 'c', 'd'].map(id => screenshot(large, id)) }, opus);
+  expect(sent(fitted).filter(part => part === 'image')).toHaveLength(1);
+  expect(sent(fitted).at(-1)).toBe('image');
+  // 26 typical screenshots (about 600 KB each, as in the request that exhausted a workspace object) send the newest 10.
+  const typical = png(1280, 800, 450_000);
+  const many = sent(fitRequestImages({ messages: Array.from({ length: 26 }, (_, index) => screenshot(typical, String(index))) }, opus)).filter(part => part === 'image');
+  expect(many).toHaveLength(10);
 });

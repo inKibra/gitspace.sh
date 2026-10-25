@@ -1209,3 +1209,27 @@ test('native reconciliation preserves staged and working layers across a large d
     expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: result.value.worktreeCommit, filepath: 'directory-256/file-256' })).blob)).toBe('working\n');
   } finally { await f.close(); }
 });
+
+test('a blob over the largest read limit comes back unread, so its size refuses it without its bytes in memory', async () => {
+  /** A repository blob that counts reads of its bytes. */
+  class CountedBlob extends Blob {
+    reads = 0;
+    override async arrayBuffer(): Promise<ArrayBuffer> { this.reads++; return super.arrayBuffer(); }
+    override async text(): Promise<string> { this.reads++; return super.text(); }
+  }
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const oversized = new CountedBlob([new Uint8Array(8 * 1024 * 1024 + 1)]);
+  const small = new CountedBlob(['small file\n']);
+  const repo: ArtifactsRepo = {
+    [Symbol.dispose]() {}, createToken: unsupported, listTokens: unsupported, revokeToken: unsupported, info: unsupported, readTree: unsupported, readCommit: unsupported, log: unsupported, fork: unsupported,
+    readBlob: async oid => oid === 'a'.repeat(40) ? oversized : small,
+    readFile: async ({ path }) => path === 'data/large.json' ? oversized : small,
+  };
+  const code = new ArtifactsCodeStore({ get: async () => repo, create: unsupported, import: unsupported, delete: unsupported, list: unsupported });
+  expect((await code.readFile('fixture', 'c'.repeat(40), 'data/large.json'))?.size).toBe(8 * 1024 * 1024 + 1);
+  expect((await code.readBlob('fixture', 'a'.repeat(40)))?.size).toBe(8 * 1024 * 1024 + 1);
+  expect(oversized.reads).toBe(0);
+  // A blob within the limit is still loaded inside the retried read.
+  expect(await (await code.readFile('fixture', 'c'.repeat(40), 'small.txt'))?.text()).toBe('small file\n');
+  expect(small.reads).toBe(1);
+});

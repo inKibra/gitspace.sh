@@ -37,9 +37,13 @@ async function attemptRead<T>(operation: string, oid: string, call: () => Promis
     }
   }
 }
+/** Blobs up to this size are loaded inside the retried read: the largest limit a reader checks (the 8 MiB cloud read
+ * and merge text limits). */
+const LOADED_BLOB_BYTES = 8 * 1024 * 1024;
 /** A blob's bytes arrive when it is read, not when the call returns; reading them inside the attempt retries and names
- * a failure to fetch them. */
-const loadedBlob = async (blob: Blob | null) => blob && new Blob([await blob.arrayBuffer()]);
+ * a failure to fetch them. A larger blob comes back unread: readers refuse it by its size, so its bytes are never
+ * fetched (one that reads it anyway reads it outside the retry). */
+const loadedBlob = async (blob: Blob | null) => blob && blob.size <= LOADED_BLOB_BYTES ? new Blob([await blob.arrayBuffer()]) : blob;
 /** The repository handle as merges and listings use it: reads paced and retried, each tree read once (the versions a
  * merge compares share most of their directories), writes passed through. */
 function pacedRepository(repo: ArtifactsRepo): RepositoryReads {

@@ -2,7 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { createAssistantMessageEventStream, createModels, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
-import type { JsonObject } from '@earendil-works/pi-durable';
+import { AgentDoc, type JsonObject } from '@earendil-works/pi-durable';
 import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { WorkspaceTurnReport } from '@gitspace/blocks';
@@ -52,7 +52,7 @@ async function watchFixture(ctx: DurableObjectState) {
     initialCheckpoint: async () => checkpoint,
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
     retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
-    admitInference: async () => ({ provider: 'fixture', modelId: 'fixture' }), bindInferenceConversation: async () => undefined, refuseRequest: () => {},
+    admitInference: async () => ({ provider: 'fixture', modelId: 'fixture', thinking: 'high' }), bindInferenceConversation: async () => undefined, refuseRequest: () => {},
     session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },
     onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async () => {},
@@ -89,6 +89,18 @@ test('only the turn the project agent started reports, once; later turns, a pers
       await f.submit('machine', 'Sync finished on Darktop.');
       await f.settle();
       expect(f.reports).toHaveLength(1);
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a turn the project agent starts runs at the effort its admission chose', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    try {
+      f.reply('Plan drafted.');
+      await f.start('start:effort', 'Draft the plan.');
+      await f.settle();
+      expect((await f.runtime.harness.snapshot(AgentDoc, f.root.id, BACKGROUND_CONTEXT))?.thinkingLevel).toBe('high');
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

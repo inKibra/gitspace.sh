@@ -5,7 +5,7 @@ import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, R
 import { z } from 'zod';
 import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
-import { ConversationLifecycleDoc } from './conversation-lifecycle.js';
+import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
 
 export type JobServices = OperationalServices & {
   deliverConversationEvent(input: { conversationId: string; requestId: string; kind: 'command-completed' | 'process-exited'; text: string; payload?: JsonValue }): Promise<void>;
@@ -26,6 +26,21 @@ function storedObservation(value: unknown, job: RuntimeJobAcceptance['job']): Ru
   if (older.data?.status === 'terminal' && older.data.receipt) return { status: 'terminal', job, result: older.data.receipt.result, completedAt: at };
   if (older.data?.status === 'not-started') return { status: 'not-started', job, reason: 'admission-failed', completedAt: at, message: 'The executor prevented the launch' };
   return { status: 'waiting', job, reason: 'reconciliation', observedAt: at };
+}
+/** Finished jobs kept for `list` and later reads of their handles; older ones are dropped as the document is written. */
+const MAX_FINISHED_JOBS = 32;
+/**
+ * Drops the oldest finished jobs beyond MAX_FINISHED_JOBS. A job is finished once its completion was delivered: its task
+ * has ended and the conversation holds its result. Running jobs, and settled ones not delivered yet, stay.
+ */
+function pruneFinishedJobs(doc: { records: Record<string, JobRecord> }): void {
+  const finished = Object.entries(doc.records).flatMap(([key, record]) => {
+    const observation = storedObservation(record.observation, record.acceptance.job);
+    return record.delivered && (observation.status === 'terminal' || observation.status === 'not-started') ? [{ key, completedAt: observation.completedAt }] : [];
+  });
+  if (finished.length <= MAX_FINISHED_JOBS) return;
+  finished.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+  for (const { key } of finished.slice(MAX_FINISHED_JOBS)) delete doc.records[key];
 }
 export function createJobTask(services: JobServices) {
   async function drive(key: string, runtime: TaskRuntime<JobInput, JobState, RuntimeJobObservation, {}>, context: Context, aborting: boolean) {
@@ -71,7 +86,7 @@ export function createJobTask(services: JobServices) {
         const current = doc.records[key];
         current.observation = observation;
         if (aborting) current.cancelRequested = true;
-        if (settled && continuationReady) current.delivered = true;
+        if (settled && continuationReady) { pruneFinishedJobs(doc); current.delivered = true; }
         if (!current.delivered) return { status: 'running', checkpoint: { phase: 'execute', poll: runtime.now() } };
         if (observation.status === 'not-started') return { status: 'terminal', outcome: observation.reason === 'cancelled'
           ? { status: 'aborted', reason: 'Cancelled before execution', result: observation }
@@ -276,6 +291,7 @@ export function createJobTool(services: JobServices) {
         const doc = await tx.doc(DurableJobsDoc, api.conversationId);
         const existing = doc.records[admissionId];
         if (existing) { if (existing.acceptance.job.conversationId !== String(api.conversationId) || existing.fingerprint !== fingerprint) throw new Error('Job admission request changed'); return existing.acceptance; }
+        pruneFinishedJobs(doc);
         const id = await tx.createTask(task, { key: admissionId, spawningTask: api.taskId }, { ownership: { kind: 'conversation' }, conversationId: api.conversationId, background: true });
         const acceptance = RuntimeJobAcceptanceSchema.parse({ status: 'accepted', acceptedAt: new Date().toISOString(), job: { ...scope, jobId: `job:${id}`, taskId: String(id), conversationId: String(api.conversationId), requestId: `task:${id}` } });
         doc.records[admissionId] = { acceptance, observation: acceptance, args, fingerprint, spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 86_400_000).toISOString(), attemptId: `task:${id}`, cancelRequested: false, delivered: false };
@@ -289,15 +305,12 @@ export function createJobTool(services: JobServices) {
     const records = Object.values(document?.records ?? {}).filter(record => record.acceptance.job.conversationId === String(api.conversationId));
     if (args.op === 'list') return records.slice(-100).map(record => storedObservation(record.observation, record.acceptance.job));
     const record = records.find(record => JSON.stringify(record.acceptance.job) === JSON.stringify(args.job));
-    if (!record) throw new Error('Job handle does not belong to this conversation');
+    if (!record) throw new Error(`Job handle does not belong to this conversation, or its job finished before the last ${MAX_FINISHED_JOBS} finished jobs`);
     const stored = storedObservation(record.observation, record.acceptance.job);
     // A finished job the agent reads here is its answer: the completion message would only repeat it as a later turn.
     const consumeCompletion = async (observation: RuntimeJobObservation) => {
       if (observation.status !== 'terminal' && observation.status !== 'not-started') return;
-      await api.commit(async tx => {
-        const pending = (await tx.doc(ConversationLifecycleDoc, api.conversationId)).events.find(item => item.event.requestId === `job-completion:${observation.job.jobId}`);
-        if (pending && !pending.delivered) pending.consumed = true;
-      }, context);
+      await api.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, api.conversationId), new Set([`job-completion:${observation.job.jobId}`])), context);
     };
     if (args.op === 'logs') return services.controlJob({ attemptId: record.attemptId, op: 'logs', lines: args.lines, head: args.head, cursor: args.cursor });
     if (args.op === 'cancel' && stored.status !== 'terminal' && stored.status !== 'not-started') {

@@ -2,6 +2,7 @@ import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { createSearchMatcher, searchMatchingLines, searchTrigramQuery, type SearchArguments } from '../../protocol-runtime/src/search.js';
 import { compileSearchIgnores, searchPathFilter, searchRoot, type SearchIgnoreRules } from '../../protocol-runtime/src/search-paths.js';
 import type { ArtifactsRepositoryReader } from './artifacts.js';
+import type { RunningStep } from './running-marks.js';
 
 /** The SQL surface the index uses: Durable Object storage, or a wrapper that observes each statement. */
 export type CodeSearchStorage = { sql: Pick<SqlStorage, 'exec'>; transactionSync<T>(closure: () => T): T };
@@ -78,6 +79,7 @@ const BINARY_PATH = /\.(png|jpe?g|gif|webp|avif|bmp|ico|icns|tiff?|heic|psd|mp3|
 /** Generated text no one searches by hand: never read, and reported as skipped. */
 const GENERATED_PATH = /(^|\/)node_modules\/|\.min\.(js|css)$|\.map$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|poetry\.lock|composer\.lock|go\.sum)$/u;
 
+const kibibytes = (count: number) => `${Math.round(count / 1024)} KiB`;
 /** Settles with `operation`, or rejects once `ms` pass: a read that never answers must not wedge indexing. */
 function bounded<T>(operation: Promise<T>, ms: number, what: string): Promise<T> {
   // Each timer is cleared as its read settles: Workers cap the timers one invocation may hold at 10,000.
@@ -132,7 +134,8 @@ export class CodeSearchIndex {
   private readonly blobFailures = new Map<number, number>();
   private readonly now: () => number;
 
-  constructor(private readonly options: { storage: CodeSearchStorage; source: CodeSearchSource; repository: string; snapshots: CodeSearchSnapshots; schedule(timestamp: number): Promise<void>; report(error: unknown): void; log?(event: CodeSearchEvent): void; limits?: Partial<CodeSearchLimits>; now?: () => number }) {
+  /** `mark` records each step that reads the repository while it runs (running marks), so a reset names it and its sizes. */
+  constructor(private readonly options: { storage: CodeSearchStorage; source: CodeSearchSource; repository: string; snapshots: CodeSearchSnapshots; schedule(timestamp: number): Promise<void>; report(error: unknown): void; log?(event: CodeSearchEvent): void; mark?(step: string, detail: string): RunningStep; limits?: Partial<CodeSearchLimits>; now?: () => number }) {
     const sql = options.storage.sql;
     this.limits = { ...CODE_SEARCH_LIMITS, ...options.limits };
     this.now = options.now ?? Date.now;
@@ -348,32 +351,36 @@ export class CodeSearchIndex {
     const { storage, source, repository } = this.options;
     const pairs = storage.sql.exec<{ prefix: string; old_tree: string | null; new_tree: string }>('SELECT prefix, old_tree, new_tree FROM code_search_tree LIMIT ?', this.limits.stepTrees).toArray();
     if (!pairs.length) return 0;
-    const reader = source.reader(repository);
-    const read = async (oid: string | null, prefix: string) => {
-      if (oid === null) return [];
-      const entries = await bounded(reader.readTree(oid), this.limits.readTimeoutMs, `Reading tree ${oid} (${prefix || '/'})`);
-      if (!entries) throw new Error(`Search tree ${oid} for ${prefix || '/'} is missing from the workspace repository`);
-      return entries;
-    };
-    const diffs: { prefix: string; new_tree: string; before: ArtifactsTreeEntry[]; after: ArtifactsTreeEntry[] }[] = [];
+    const mark = this.options.mark?.('code search', `listing ${pairs.length} changed directories, ${this.limits.readConcurrency} at a time`);
     try {
-      await pooled(pairs, this.limits.readConcurrency, async pair => {
-        const [before, after] = await Promise.all([read(pair.old_tree, pair.prefix), read(pair.new_tree, pair.prefix)]);
-        diffs.push({ prefix: pair.prefix, new_tree: pair.new_tree, before, after });
+      const reader = source.reader(repository);
+      const read = async (oid: string | null, prefix: string) => {
+        if (oid === null) return [];
+        const entries = await bounded(reader.readTree(oid), this.limits.readTimeoutMs, `Reading tree ${oid} (${prefix || '/'})`);
+        if (!entries) throw new Error(`Search tree ${oid} for ${prefix || '/'} is missing from the workspace repository`);
+        return entries;
+      };
+      const diffs: { prefix: string; new_tree: string; before: ArtifactsTreeEntry[]; after: ArtifactsTreeEntry[] }[] = [];
+      try {
+        await pooled(pairs, this.limits.readConcurrency, async pair => {
+          const [before, after] = await Promise.all([read(pair.old_tree, pair.prefix), read(pair.new_tree, pair.prefix)]);
+          diffs.push({ prefix: pair.prefix, new_tree: pair.new_tree, before, after });
+        });
+      } finally { await bounded(reader.close(), this.limits.readTimeoutMs, 'Closing the repository reader').catch(() => {}); }
+      mark?.update(`applying ${diffs.length} changed directories: ${diffs.reduce((sum, diff) => sum + diff.before.length + diff.after.length, 0)} tree entries`);
+      storage.transactionSync(() => {
+        let queued = 0;
+        for (const diff of diffs) {
+          // A pair another drive already applied is gone; applying it twice would double-count references.
+          if (!storage.sql.exec('DELETE FROM code_search_tree WHERE prefix=? AND new_tree=? RETURNING prefix', diff.prefix, diff.new_tree).toArray().length) continue;
+          const before = new Map(diff.before.map(entry => [entry.name, entry]));
+          for (const entry of diff.after) { if (this.applyEntry(diff.prefix + entry.name, before.get(entry.name), entry, next)) queued++; before.delete(entry.name); }
+          for (const [name, entry] of before) this.applyEntry(diff.prefix + name, entry, undefined, next);
+        }
+        if (queued) storage.sql.exec('UPDATE code_search_state SET build_queued=build_queued+? WHERE singleton=1', queued);
       });
-    } finally { await bounded(reader.close(), this.limits.readTimeoutMs, 'Closing the repository reader').catch(() => {}); }
-    storage.transactionSync(() => {
-      let queued = 0;
-      for (const diff of diffs) {
-        // A pair another drive already applied is gone; applying it twice would double-count references.
-        if (!storage.sql.exec('DELETE FROM code_search_tree WHERE prefix=? AND new_tree=? RETURNING prefix', diff.prefix, diff.new_tree).toArray().length) continue;
-        const before = new Map(diff.before.map(entry => [entry.name, entry]));
-        for (const entry of diff.after) { if (this.applyEntry(diff.prefix + entry.name, before.get(entry.name), entry, next)) queued++; before.delete(entry.name); }
-        for (const [name, entry] of before) this.applyEntry(diff.prefix + name, entry, undefined, next);
-      }
-      if (queued) storage.sql.exec('UPDATE code_search_state SET build_queued=build_queued+? WHERE singleton=1', queued);
-    });
-    return diffs.length;
+      return diffs.length;
+    } finally { mark?.end(); }
   }
 
   /** Records one changed entry for generation `next`; true when it queued a blob this build must index. */
@@ -407,52 +414,57 @@ export class CodeSearchIndex {
     const { storage, source, repository } = this.options;
     const pending = storage.sql.exec<{ id: number; oid: string }>(`SELECT id, oid FROM code_search_blob WHERE state=${PENDING} LIMIT ?`, this.limits.stepBlobs).toArray();
     if (!pending.length) return 0;
-    const indexed: IndexedBlob[] = [];
-    let bytes = 0, firstError: unknown;
-    const reader = source.reader(repository);
+    const mark = this.options.mark?.('code search', `reading ${pending.length} blobs, ${this.limits.readConcurrency} at a time, up to ${kibibytes(this.limits.stepBytes)}`);
     try {
-      await pooled(pending, this.limits.readConcurrency, async blob => {
-        try {
-          const value = await bounded(reader.readBlob(blob.oid), this.limits.readTimeoutMs, `Reading blob ${blob.oid}`);
-          if (!value) indexed.push({ id: blob.id, state: UNREADABLE, chunks: [] });
-          else if (value.size > this.limits.blobBytes) indexed.push({ id: blob.id, state: TOO_LARGE, chunks: [] });
-          else {
-            bytes += value.size;
-            indexed.push(splitChunks(blob.id, new Uint8Array(await bounded(value.arrayBuffer(), this.limits.readTimeoutMs, `Reading blob ${blob.oid}`)), this.limits.chunkBytes));
+      const indexed: IndexedBlob[] = [];
+      let bytes = 0, over = 0, largest = 0, firstError: unknown;
+      const reader = source.reader(repository);
+      try {
+        await pooled(pending, this.limits.readConcurrency, async blob => {
+          try {
+            const value = await bounded(reader.readBlob(blob.oid), this.limits.readTimeoutMs, `Reading blob ${blob.oid}`);
+            if (!value) indexed.push({ id: blob.id, state: UNREADABLE, chunks: [] });
+            // Settled from its size alone: the bytes of a blob over the limit are never read here.
+            else if (value.size > this.limits.blobBytes) { over++; largest = Math.max(largest, value.size); indexed.push({ id: blob.id, state: TOO_LARGE, chunks: [] }); }
+            else {
+              bytes += value.size;
+              indexed.push(splitChunks(blob.id, new Uint8Array(await bounded(value.arrayBuffer(), this.limits.readTimeoutMs, `Reading blob ${blob.oid}`)), this.limits.chunkBytes));
+            }
+          } catch (error) {
+            firstError ??= error;
+            // One unreadable object (e.g. too large for the repository service to buffer) must not stall every later build.
+            const failures = (this.blobFailures.get(blob.id) ?? 0) + 1;
+            this.blobFailures.set(blob.id, failures);
+            if (failures < BLOB_ATTEMPTS) return;
+            this.blobFailures.delete(blob.id);
+            indexed.push({ id: blob.id, state: UNREADABLE, chunks: [], skipped: { oid: blob.oid, message: error instanceof Error ? error.message : String(error) } });
           }
-        } catch (error) {
-          firstError ??= error;
-          // One unreadable object (e.g. too large for the repository service to buffer) must not stall every later build.
-          const failures = (this.blobFailures.get(blob.id) ?? 0) + 1;
-          this.blobFailures.set(blob.id, failures);
-          if (failures < BLOB_ATTEMPTS) return;
-          this.blobFailures.delete(blob.id);
-          indexed.push({ id: blob.id, state: UNREADABLE, chunks: [], skipped: { oid: blob.oid, message: error instanceof Error ? error.message : String(error) } });
-        }
-      }, () => bytes < this.limits.stepBytes);
-    } finally { await bounded(reader.close(), this.limits.readTimeoutMs, 'Closing the repository reader').catch(() => {}); }
-    if (!indexed.length) throw firstError ?? new Error('No pending blob could be read');
-    for (let start = 0; start < indexed.length;) {
-      let end = start, size = 0;
-      while (end < indexed.length && end - start < this.limits.txnBlobs && (end === start || size < this.limits.txnBytes)) size += indexed[end++]!.chunks.reduce((sum, chunk) => sum + chunk.content.length, 0);
-      const batch = indexed.slice(start, end);
-      start = end;
-      const settled = storage.transactionSync(() => {
-        const written = batch.filter(blob => {
-          // Settled by a concurrent drive already: its chunks are in place.
-          if (!storage.sql.exec(`UPDATE code_search_blob SET state=?, chunks=? WHERE id=? AND state=${PENDING} RETURNING id`, blob.state, blob.chunks.length, blob.id).toArray().length) return false;
-          blob.chunks.forEach((chunk, ordinal) => {
-            storage.sql.exec('INSERT INTO code_search_chunk(blob_id,ordinal,first_line,content) VALUES(?,?,?,?)', blob.id, ordinal, chunk.firstLine, chunk.content);
-            storage.sql.exec('INSERT INTO code_search_fts(rowid,body) VALUES(?,?)', blob.id * CHUNKS_PER_BLOB + ordinal, chunk.content);
+        }, () => bytes < this.limits.stepBytes);
+      } finally { await bounded(reader.close(), this.limits.readTimeoutMs, 'Closing the repository reader').catch(() => {}); }
+      if (!indexed.length) throw firstError ?? new Error('No pending blob could be read');
+      mark?.update(`indexing ${indexed.length} blobs: ${kibibytes(bytes)} read${over ? `, ${over} over ${kibibytes(this.limits.blobBytes)} skipped (largest ${kibibytes(largest)})` : ''}`);
+      for (let start = 0; start < indexed.length;) {
+        let end = start, size = 0;
+        while (end < indexed.length && end - start < this.limits.txnBlobs && (end === start || size < this.limits.txnBytes)) size += indexed[end++]!.chunks.reduce((sum, chunk) => sum + chunk.content.length, 0);
+        const batch = indexed.slice(start, end);
+        start = end;
+        const settled = storage.transactionSync(() => {
+          const written = batch.filter(blob => {
+            // Settled by a concurrent drive already: its chunks are in place.
+            if (!storage.sql.exec(`UPDATE code_search_blob SET state=?, chunks=? WHERE id=? AND state=${PENDING} RETURNING id`, blob.state, blob.chunks.length, blob.id).toArray().length) return false;
+            blob.chunks.forEach((chunk, ordinal) => {
+              storage.sql.exec('INSERT INTO code_search_chunk(blob_id,ordinal,first_line,content) VALUES(?,?,?,?)', blob.id, ordinal, chunk.firstLine, chunk.content);
+              storage.sql.exec('INSERT INTO code_search_fts(rowid,body) VALUES(?,?)', blob.id * CHUNKS_PER_BLOB + ordinal, chunk.content);
+            });
+            return true;
           });
-          return true;
+          if (written.length) storage.sql.exec('UPDATE code_search_state SET build_indexed=build_indexed+? WHERE singleton=1', written.length);
+          return written;
         });
-        if (written.length) storage.sql.exec('UPDATE code_search_state SET build_indexed=build_indexed+? WHERE singleton=1', written.length);
-        return written;
-      });
-      for (const blob of settled) if (blob.skipped) this.log({ event: 'code_search_blob_skipped', repository, ...blob.skipped });
-    }
-    return indexed.length;
+        for (const blob of settled) if (blob.skipped) this.log({ event: 'code_search_blob_skipped', repository, ...blob.skipped });
+      }
+      return indexed.length;
+    } finally { mark?.end(); }
   }
 
   /** Rows no generation can see any more, and the blobs they were the last reference to. Returns the rows collected. */

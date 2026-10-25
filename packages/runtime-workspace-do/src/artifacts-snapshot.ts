@@ -4,7 +4,7 @@ import { Result, TaggedError } from 'better-result';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { z } from 'zod';
 import { hasSnapshotConflictMarkers, isCleanSnapshotContent, isSnapshotTextEntry, readSnapshotText } from './artifacts-merge.js';
-import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
+import { collectBytes, sameGitLfsSnapshot, streamBytes } from '@gitspace/protocol-workspace';
 
 export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
@@ -515,7 +515,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     // A tool change is authored by the agent; GitSpace stays the committer of every checkpoint.
     const author = input.message === undefined ? identity : { ...identity, name: 'GitSpace Agent', email: 'agent@gitspace.invalid' };
     const indexTree = input.adopt?.indexTree ?? (input.indexMutations ? await editTree(previous.indexTree, input.indexMutations, false) : previous.indexTree);
-    if (!input.forcePublication && input.machine && worktreeTree === previous.worktreeTree && trackedTree === trackedParent.treeHash && indexTree === previous.indexTree && input.machine.headCommit === previous.headCommit && input.machine.branch === previous.branch && JSON.stringify(input.machine.lfs) === JSON.stringify(previous.lfs) && !conflictsChanged) return previous;
+    if (!input.forcePublication && input.machine && worktreeTree === previous.worktreeTree && trackedTree === trackedParent.treeHash && indexTree === previous.indexTree && input.machine.headCommit === previous.headCommit && input.machine.branch === previous.branch && sameGitLfsSnapshot(input.machine.lfs, previous.lfs) && !conflictsChanged) return previous;
     const indexCommit = input.machine && indexTree === input.machine.indexTree ? input.machine.indexCommit : indexTree === previous.indexTree ? previous.indexCommit : await git.writeCommit({ fs, dir, commit: { tree: indexTree, parent: [previous.indexCommit, ...(input.machine ? [input.machine.indexCommit] : [])], author: identity, committer: identity, message: 'GitSpace merged index snapshot\n' } });
     if (indexCommit !== previous.indexCommit && indexCommit !== input.machine?.indexCommit) oids.add(indexCommit);
     const trackedWorktreeCommit = await git.writeCommit({ fs, dir, commit: { tree: trackedTree, parent: [previous.trackedWorktreeCommit], author, committer: identity, message: input.message ?? 'GitSpace cloud tracked worktree snapshot\n' } });

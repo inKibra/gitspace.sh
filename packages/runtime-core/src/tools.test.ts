@@ -264,13 +264,13 @@ for (const mode of ['settled', 'timeout', 'cancelled'] as const) test(`bash wait
       if (mode === 'settled') await api.commit(async tx => {
         (await tx.doc(DurableJobsDoc, api.conversationId)).records.command.observation = RuntimeJobObservationSchema.parse({ status: 'not-started', job: acceptance.job, reason: 'cancelled', completedAt: new Date().toISOString() });
         // The job task delivers its completion as it settles; the wait that returns it makes that message redundant.
-        (await tx.doc(ConversationLifecycleDoc, api.conversationId)).events.push({ event: { conversationId: String(api.conversationId), requestId: 'job-completion:waiting-command', kind: 'command-completed', text: 'did not start' }, delivered: false, consumed: false });
+        (await tx.doc(ConversationLifecycleDoc, api.conversationId)).events.push({ event: { conversationId: String(api.conversationId), requestId: 'job-completion:waiting-command', kind: 'command-completed', text: 'did not start' } });
       }, context);
       if (mode === 'cancelled') {
         controller.abort(interrupted);
         await expect(pending).rejects.toThrow('Cancelled bounded command wait');
       } else expect(RuntimeJobObservationSchema.parse(await pending).status).toBe(mode === 'settled' ? 'not-started' : 'accepted');
-      if (mode === 'settled') expect((await api.snapshot(ConversationLifecycleDoc, api.conversationId, context))?.events).toMatchObject([{ consumed: true, delivered: false }]);
+      if (mode === 'settled') expect(await api.snapshot(ConversationLifecycleDoc, api.conversationId, context)).toMatchObject({ events: [], handled: ['job-completion:waiting-command'] });
       return { output: [{ type: 'text', text: mode }] };
     },
   });
@@ -308,6 +308,44 @@ test('a background command settles on its executor result and delivers its compl
     const jobs = Object.values((await harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT))?.records ?? {});
     expect(jobs.map(job => [job.observation.status, job.delivered])).toEqual([['terminal', true]]);
   } finally { resume = () => {}; await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('finished background commands are kept to the most recent while running and undelivered ones stay', async () => {
+  const seed = defineTool({
+    name: 'seed-jobs', description: 'Store earlier background commands.', parameters: Type.Object({}), replay: 'safe',
+    async execute(_input, api, context) {
+      await api.commit(async tx => {
+        const doc = await tx.doc(DurableJobsDoc, api.conversationId);
+        const store = (key: string, index: number, settled: boolean, delivered: boolean) => {
+          const job = { projectId: 'project', workspaceId: 'workspace', jobId: `job:${key}`, taskId: key, conversationId: String(api.conversationId), requestId: `task:${key}` };
+          const acceptance = RuntimeJobAcceptanceSchema.parse({ status: 'accepted', acceptedAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), job });
+          const observation = settled ? RuntimeJobObservationSchema.parse({ status: 'terminal', job, result: { status: 'completed', requestId: key, attemptId: key, content: [{ type: 'text', text: 'x'.repeat(1000) }] }, completedAt: new Date(Date.UTC(2026, 0, 1, 1, index)).toISOString() }) : acceptance;
+          doc.records[key] = { acceptance, observation, args: { command: 'true', background: true }, fingerprint: key, spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 10000).toISOString(), attemptId: key, cancelRequested: false, delivered };
+        };
+        store('running', 0, false, false);
+        store('undelivered', 1, true, false);
+        for (let index = 0; index < 100; index++) store(`finished-${index}`, index, true, true);
+      }, context);
+      return { output: [{ type: 'text', text: 'Seeded.' }] };
+    },
+  });
+  let finished: string | null = null;
+  const { harness, root } = await registered([[call('seed-jobs', {})], [call('bash', { command: 'make build', background: true }, 'start')]], completed, {
+    ...operations,
+    wakeAt: async () => {},
+    async execute(input) { finished = input.attemptId; return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: 'built' }] }; },
+    async reconcile(attemptId) { return finished === attemptId ? { status: 'completed', requestId: attemptId, attemptId, content: [{ type: 'text', text: 'built' }] } : null; },
+    async deliverConversationEvent() {},
+  }, [seed]);
+  try {
+    await root.submit({ type: 'input', content: 'Build in the background.' }, BACKGROUND_CONTEXT);
+    await harness.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const records = Object.entries((await harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT))?.records ?? {});
+    const started = records.find(([key]) => !['running', 'undelivered'].includes(key) && !key.startsWith('finished-'));
+    expect(started?.[1]).toMatchObject({ observation: { status: 'terminal' }, delivered: true });
+    // The 32 most recently finished stay beside the new command, which finished after the others were pruned.
+    expect(records.map(([key]) => key).filter(key => key !== started?.[0]).sort()).toEqual(['running', 'undelivered', ...Array.from({ length: 32 }, (_, index) => `finished-${68 + index}`)].sort());
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 5000);
 
 test('bash logs exposes executor failures as tool errors rather than successful text', async () => {

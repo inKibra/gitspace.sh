@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Message } from '@earendil-works/pi-ai';
+import type { Message, Models } from '@earendil-works/pi-ai';
 import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
@@ -21,35 +21,73 @@ const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stri
 export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, retrying: readonly string[]) {
   // A stub per call: this outlives any one, and one that saw an error stays broken.
   const vault = () => env.CREDENTIALS.getByName(env.ACCOUNT_ID);
-  const scopes = new WeakMap<AbortSignal, { admission: Admission; models: VaultModels }>();
+  const scopes = new WeakMap<AbortSignal, { admission: Admission; models: Models }>();
   /** Requests a hook stopped, by signal, and why: the request fails with that reason instead of running. */
   const refusals = new WeakMap<AbortSignal, string>();
-  const collections = new Map<string, Promise<VaultModels>>();
+  /** One catalog per profile revision; every admission on that revision shares it through a scoped view. */
+  const catalogs = new Map<string, Promise<VaultModels>>();
   const pinsFor = (profileId: string, conversationId: string): CredentialPins => ({
     async read(provider) { const stored = await ctx.storage.get<unknown>(key('pin', profileId, conversationId, provider)); return stored === undefined ? null : pinSchema.parse(stored); },
     async write(provider, pin) { await ctx.storage.put(key('pin', profileId, conversationId, provider), pinSchema.parse(pin)); },
   });
-  function collection(profile: InferenceProfile, conversationId: string, fastMode = false, admission?: Admission): Promise<VaultModels> {
-    const id = JSON.stringify([profile.id, profile.revision, conversationId, fastMode, admission?.requestId]);
-    let pending = collections.get(id);
+  function catalog(profile: InferenceProfile): Promise<VaultModels> {
+    const id = JSON.stringify([profile.id, profile.revision]);
+    let pending = catalogs.get(id);
     if (!pending) {
-      const catalog = createDurableModelsStore({
+      const store = createDurableModelsStore({
         read: name => ctx.storage.get<unknown>(key('catalog', name)),
         write: (name, value) => ctx.storage.put(key('catalog', name), value),
         delete: async name => { await ctx.storage.delete(key('catalog', name)); },
       });
-      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, fastMode, ...(admission ? { pinnedModels: [admission.model] } : {}), modelsStore: catalog, pins: pinsFor(profile.id, conversationId), vault: {
+      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: store, pins: pinsFor(profile.id, 'catalog'), vault: {
         list: (profileId, provider) => vault().cloudCredentialAccounts(profileId, provider),
         resolve: input => { input.signal?.throwIfAborted(); return vault().cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
         recordFailure: input => vault().cloudCredentialFailure(input),
       } });
-      collections.set(id, pending);
-      void pending.catch(() => { if (collections.get(id) === pending) collections.delete(id); });
+      catalogs.set(id, pending);
+      void pending.catch(() => { if (catalogs.get(id) === pending) catalogs.delete(id); });
     }
     return pending;
   }
+  /**
+   * The admitted views the router lists, by router key: each conversation's latest admission, whose model pi looks up
+   * before a hook binds its request, and every admission a running request is bound to until that request's signal
+   * ends. A view neither needs is dropped.
+   */
+  const admitted = new Map<string, { conversationId: string; models: Promise<Models>; requests: number }>();
+  const latest = new Map<string, string>();
+  /** The view a request of `admission` runs with, and its router key: bound to exactly the model it admitted, with the
+   * conversation's credential pins. */
+  function admittedView(conversationId: string, admission: Admission, fastMode: boolean): { id: string; models: Promise<Models> } {
+    const id = JSON.stringify(['admitted', conversationId, admission.profile.id, admission.profile.revision, admission.requestId, fastMode]);
+    return { id, models: admitted.get(id)?.models ?? catalog(admission.profile).then(models => models.scope({ pins: pinsFor(admission.profile.id, conversationId), pinnedModels: [admission.model], fastMode })) };
+  }
+  function retain(conversationId: string, admission: Admission, fastMode: boolean) {
+    const { id, models } = admittedView(conversationId, admission, fastMode);
+    const existing = admitted.get(id);
+    if (existing) return { id, entry: existing };
+    const entry = { conversationId, models, requests: 0 };
+    admitted.set(id, entry);
+    void models.catch(() => { if (admitted.get(id) === entry) admitted.delete(id); });
+    return { id, entry };
+  }
+  function release(id: string): void {
+    const entry = admitted.get(id);
+    if (!entry || entry.requests > 0 || latest.get(entry.conversationId) === id) return;
+    admitted.delete(id);
+    router.unregister(id);
+  }
+  /** Makes `admission` the conversation's latest, superseding the one before it. */
+  async function admit(conversationId: string, admission: Admission): Promise<void> {
+    const { id, entry } = retain(conversationId, admission, false);
+    const models = await entry.models;
+    const previous = latest.get(conversationId);
+    latest.set(conversationId, id);
+    router.register(models, id);
+    if (previous !== undefined && previous !== id) release(previous);
+  }
   // Opening history must neither migrate vault state nor choose a replacement provider.
-  // Real collections are registered only by explicit admission or catalog interaction.
+  // Catalogs and admitted views are registered only by explicit admission or catalog interaction.
   const router = createRunModelsRouter(null, async signal => {
     const refusal = signal ? refusals.get(signal) : undefined;
     if (refusal !== undefined) throw new Error(refusal);
@@ -60,14 +98,13 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     // remains bound to the exact chat model captured by its admission.
     return { ...scope.models, getModel: () => scope.models.getModel(scope.admission.model.provider, scope.admission.model.id) };
   });
-  // pi checks a retried request's model before any hook binds it, and the router knows only registered collections:
-  // after a reset every retried turn failed "Model … is not available". Those conversations get their admitted
-  // collection back now, before the runtime opens.
+  // pi checks a retried request's model before any hook binds it, and the router knows only registered views: after a
+  // reset every retried turn failed "Model … is not available". Those conversations get their admitted view back now,
+  // before the runtime opens.
   for (const conversationId of retrying) {
     const stored = await ctx.storage.get<unknown>(key('active', conversationId));
     if (stored === undefined) continue;
-    const admission = admissionSchema.parse(stored);
-    router.register(await collection(admission.profile, conversationId, false, admission));
+    await admit(conversationId, admissionSchema.parse(stored));
   }
   async function active(conversationId: string): Promise<Admission> {
     const value = await ctx.storage.get<unknown>(key('active', conversationId));
@@ -76,17 +113,29 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   }
   async function bindInferenceConversation(conversationId: string, signal: AbortSignal, _submissionIds: readonly string[], requestIds: readonly string[], serving: { fastMode: boolean }): Promise<void> {
     signal.throwIfAborted();
-    const admitted: Admission[] = [];
+    const admittedRequests: Admission[] = [];
     for (const requestId of requestIds) {
       const stored = await ctx.storage.get<unknown>(key('admission', conversationId, requestId));
-      admitted.push(admissionSchema.parse(stored));
+      admittedRequests.push(admissionSchema.parse(stored));
     }
-    const admission = admitted[0] ?? await active(conversationId);
-    if (admitted.some(candidate => candidate.profile.id !== admission.profile.id || candidate.profile.revision !== admission.profile.revision || candidate.model.provider !== admission.model.provider || candidate.model.id !== admission.model.id)) throw new Error('Queued messages span different inference admissions; submit them as separate runs');
-    const models = await collection(admission.profile, conversationId, serving.fastMode, admission);
-    signal.throwIfAborted();
+    const admission = admittedRequests[0] ?? await active(conversationId);
+    if (admittedRequests.some(candidate => candidate.profile.id !== admission.profile.id || candidate.profile.revision !== admission.profile.revision || candidate.model.provider !== admission.model.provider || candidate.model.id !== admission.model.id)) throw new Error('Queued messages span different inference admissions; submit them as separate runs');
+    const { id, entry } = retain(conversationId, admission, serving.fastMode);
+    entry.requests++;
+    const settle = () => { entry.requests--; release(id); };
+    let models: Models;
+    try {
+      models = await entry.models;
+      signal.throwIfAborted();
+    } catch (error) {
+      settle();
+      throw error;
+    }
+    // The invocation's signal aborts when it ends, the request with it.
+    signal.addEventListener('abort', settle, { once: true });
+    if (!latest.has(conversationId)) latest.set(conversationId, id);
     scopes.set(signal, { admission, models });
-    router.register(models);
+    router.register(models, id);
     await ctx.storage.put(key('active', conversationId), admission);
   }
   return {
@@ -101,7 +150,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const inherited = input.parentConversationId ? await active(input.parentConversationId) : null;
         const resolved = inherited ?? await vault().resolveCloudInference(identity.projectId);
         const selection = input.selection ?? inherited?.selection ?? { kind: 'default' };
-        const models = await collection(resolved.profile, 'catalog');
+        const models = await catalog(resolved.profile);
         // Published catalog refresh is credential-free data, not a provider request.
         if (!inherited) await models.refresh({ allowNetwork: true });
         // A configured default is authority, not permission to fall back to a
@@ -112,8 +161,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         admission = admissionSchema.parse({ requestId: input.requestId, conversationId: input.conversationId, profile: resolved.profile, assignmentRevision: resolved.assignmentRevision, selection, ...selected });
         await ctx.storage.put(admissionKey, admission);
       }
-      const models = await collection(admission.profile, input.conversationId, false, admission);
-      router.register(models);
+      await admit(input.conversationId, admission);
       return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }), ...(admission.role === undefined ? {} : { role: admission.role }) };
     },
     bindInferenceConversation,
@@ -129,12 +177,12 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     },
     async generateImage(input: { args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
-      const models = await collection(admission.profile, input.conversationId, false, admission);
+      const models = await admittedView(input.conversationId, admission, false).models;
       return generateProfileImage(models, input.args, input.signal, admission.profile.settings);
     },
     async modelHelper(input: RuntimeModelHelperInput) {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
-      const models = await collection(admission.profile, input.conversationId, false, admission);
+      const models = await admittedView(input.conversationId, admission, false).models;
       return runProfileModelHelper(models, input.operation, input.args, input.signal, admission.profile.settings);
     },
     session: {
@@ -159,7 +207,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const models = await currentModels.getAvailable();
         const roles: SessionControlView['roles'] = [];
         const configured = z.object({ modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional() }).parse(applyInferenceSettings({}, currentProfile.settings)).modelRoles;
-        const availableModels: VaultModels = { ...currentModels, getModels: provider => models.filter(model => provider === undefined || model.provider === provider) };
+        const availableModels: Models = { ...currentModels, getModels: provider => models.filter(model => provider === undefined || model.provider === provider) };
         for (const role of Object.keys(configured ?? {})) {
           try {
             const selected = resolveProfileModel(currentProfile.settings, availableModels, role);
@@ -175,7 +223,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
       },
       async reload(_kind: 'settings' | 'instructions' | 'inference') {
         const resolved = await vault().resolveCloudInference(identity.projectId);
-        const models = await collection(resolved.profile, 'catalog');
+        const models = await catalog(resolved.profile);
         const result = await models.refresh({ allowNetwork: true, force: true });
         if (result.errors.size) throw new AggregateError([...result.errors.values()], 'Provider catalog refresh failed');
         router.register(models);

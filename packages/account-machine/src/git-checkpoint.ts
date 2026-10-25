@@ -1,7 +1,7 @@
 import { copyFile, lstat, mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spaceGitCheckpointRef, spaceGitSnapshotRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { sameGitLfsSnapshot, spaceGitCheckpointRef, spaceGitSnapshotRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { z } from 'zod';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
 import { captureGitLfs, checkoutGitLfs, gitLfsRestoreReceipt, gitLfsWorktreeTree, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs, type MachineGitLfsPublication } from './git-lfs.js';
@@ -424,10 +424,11 @@ export class IncrementalGitSnapshots {
         break;
       }
     }
-    // The committed snapshot came back through the cloud's schema, which orders each LFS object's keys its own way;
-    // compared as captured, an unchanged checkout always looked changed and was published again, forever.
+    // The committed snapshot came back through the cloud, which keeps each LFS object's keys in its schema's order and
+    // its objects in the order its merges added them, while a capture sorts them by oid; compared as listed, an
+    // unchanged checkout always looked changed and was published again, forever.
     if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree
-      && JSON.stringify(RuntimeGitCheckpointSchema.shape.lfs.parse(committed.lfs)) === JSON.stringify(RuntimeGitCheckpointSchema.shape.lfs.parse(checkpoint.lfs))) {
+      && sameGitLfsSnapshot(committed.lfs, checkpoint.lfs)) {
       // A stored snapshot can match what was committed after it (a restore, an applied cloud version) and its ref may
       // be gone already: it is dropped, not replayed, or every later capture would fail on it.
       if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit], { allowMissingRef: true });
