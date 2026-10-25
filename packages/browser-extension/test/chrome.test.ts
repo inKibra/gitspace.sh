@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import type { RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { command, installed, settle } from './installed.js';
 
 describe('group reports', () => {
@@ -91,16 +92,17 @@ describe('turning GitSpace off and on in this Chrome', () => {
 });
 
 describe('the toolbar icon', () => {
-  it('shows connecting, on, the scripts running with their count, and off', async () => {
+  it('shows connecting as needing you, on, the workspaces an agent acts on with their count, and off', async () => {
     const chrome = await installed({ live: true });
-    expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace is connecting to account.gitspace.test', badge: '' });
+    expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace is connecting to account.gitspace.test', badge: '!' });
     const attention = chrome.toolbar.at(-1)?.icon;
     await chrome.relay();
     expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace is on · account.gitspace.test', badge: '' });
     const idle = chrome.toolbar.at(-1)?.icon;
     const first = await chrome.begin();
     await chrome.begin();
-    expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace is running 2 scripts in this Chrome', badge: '2' });
+    // Two scripts on one workspace group: one workspace acting.
+    expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace is running 2 scripts in this Chrome', badge: '1' });
     const working = chrome.toolbar.at(-1)?.icon;
     await chrome.execute({ operation: 'release', attemptId: first });
     expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace is running 1 script in this Chrome', badge: '1' });
@@ -115,7 +117,7 @@ describe('the toolbar icon', () => {
   it('asks for an update when the account refuses this extension', async () => {
     const chrome = await installed({ live: true });
     await chrome.relay(1);
-    expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace needs an update in this Chrome', badge: '' });
+    expect(chrome.toolbar.at(-1)).toMatchObject({ title: 'GitSpace needs an update in this Chrome', badge: '!' });
   });
 });
 
@@ -126,7 +128,7 @@ describe('the in-page overlay on a tab the agent uses', () => {
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     // The overlay draws after the tab is open, without holding up the script.
     await settle();
-    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', name: 'Checkout', color: expect.stringMatching(/^#[0-9a-f]{6}$/), binding: '__gitspaceStop', capture: 'none' } }]);
+    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Running a script', binding: '__gitspaceStop', capture: 'none', recording: null } }]);
     await chrome.execute(command(attemptId, 'target-1', 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 60, button: 'left', clickCount: 1 }));
     const methods = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? JSON.stringify(Array.isArray(params.arguments) ? params.arguments[0]?.value?.cursor : null) : method);
     expect(methods.slice(-2)).toEqual([JSON.stringify({ x: 40, y: 60, type: 'mousePressed' }), 'Input.dispatchMouseEvent']);
@@ -176,5 +178,56 @@ describe('the popup', () => {
     chrome.tabs.set(9, { id: 9, groupId: -1, url: 'https://elsewhere.example/', index: 9, windowId: 1 });
     expect(await chrome.popup({ ungroupTab: 9 })).toEqual({ error: 'This tab is not in a workspace group' });
     expect(chrome.ungrouped).toEqual([]);
+  });
+
+  it('names this Chrome, the projects that approved it and each group’s project as the account says', async () => {
+    const chrome = await installed({ live: true });
+    await chrome.relay();
+    // The hello says this extension takes the account's notices about this Chrome.
+    expect(chrome.sent.find(message => message.hello)).toMatchObject({ chromeInfo: true, extension: '5.7.0' });
+    await chrome.fromRelay({ operation: 'chromeInfo', name: 'Studio desktop', projects: ['GitSpace', 'ToneTempo'], groups: [{ groupId: chrome.grant.body.groupId, project: 'GitSpace' }] });
+    expect(await chrome.popup({ popupState: true })).toMatchObject({ chrome: 'Studio desktop', projects: ['GitSpace', 'ToneTempo'], groups: [{ groupId: chrome.grant.body.groupId, project: 'GitSpace' }] });
+    // A notice gets no answer.
+    expect(chrome.sent.some(message => 'error' in message || 'result' in message)).toBe(false);
+    const popup = await chrome.openPopup();
+    expect(popup.document.body.textContent).toContain('account.gitspace.test · Studio desktop');
+    expect(popup.document.body.textContent).toContain('Connected · approved in GitSpace and ToneTempo');
+    expect(popup.document.body.textContent).toContain('Checkout · GitSpace');
+    await popup.close();
+  });
+});
+
+describe('what the agent is doing', () => {
+  it('names the element a step clicks or fills by the name the agent read, and never says what it types', async () => {
+    const chrome = await installed();
+    chrome.answer(({ method }) => method === 'Accessibility.getFullAXTree' ? { nodes: [{ nodeId: '1', backendDOMNodeId: 12, name: { type: 'computedString', value: 'Medium' } }, { nodeId: '2', backendDOMNodeId: 13, name: { type: 'computedString', value: 'Customer name:' } }] } : undefined);
+    const step = async (args: RuntimeBrowserArguments) => {
+      await chrome.authorize({ type: 'execute', args, grant: chrome.grant }, 'browser');
+      await chrome.execute({ operation: 'open', grant: chrome.grant });
+    };
+    await step({ action: 'observe', source: 'relay', targetId: 'target-1', screenshot: false, offset: 0, limit: 400 });
+    await chrome.execute({ operation: 'command', targetId: 'target-1', method: 'Accessibility.getFullAXTree', params: { depth: 32 } });
+    await step({ action: 'act', source: 'relay', targetId: 'target-1', ref: '0:12', operation: 'click' });
+    expect((await chrome.popup({ popupState: true })).groups).toMatchObject([{ acting: { agent: 'main', doing: 'Clicking “Medium”' } }]);
+    await step({ action: 'act', source: 'relay', targetId: 'target-1', ref: '0:13', operation: 'fill', value: 'Ada Lovelace' });
+    const state = await chrome.popup({ popupState: true });
+    expect(state.groups).toMatchObject([{ acting: { agent: 'main', doing: 'Typing in “Customer name”' } }]);
+    expect(JSON.stringify(state)).not.toContain('Ada Lovelace');
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'step', agent: 'main', doing: 'Typing in “Customer name”' } });
+    // The toolbar counts the workspace while the step's authority lasts.
+    expect(chrome.toolbar.at(-1)).toMatchObject({ badge: '1' });
+  });
+
+  it('names a script’s click by what is at its point, and says only that it types', async () => {
+    const chrome = await installed();
+    chrome.answer(({ method }) => method === 'DOM.getNodeForLocation' ? { backendNodeId: 40 } : method === 'Accessibility.getPartialAXTree' ? { nodes: [{ nodeId: 'text', backendDOMNodeId: 40, ignored: true, parentId: 'button' }, { nodeId: 'button', backendDOMNodeId: 41, name: { type: 'computedString', value: 'Submit order' } }] } : undefined);
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    await chrome.execute(command(attemptId, 'target-1', 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 60, button: 'left', clickCount: 1 }));
+    expect((await chrome.popup({ popupState: true })).groups).toMatchObject([{ acting: { agent: 'main', doing: 'Clicking “Submit order”' } }]);
+    await chrome.execute(command(attemptId, 'target-1', 'Input.insertText', { text: 'hunter2' }));
+    const state = await chrome.popup({ popupState: true });
+    expect(state.groups).toMatchObject([{ acting: { doing: 'Typing' } }]);
+    expect(JSON.stringify(state)).not.toContain('hunter2');
   });
 });

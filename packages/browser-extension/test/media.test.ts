@@ -160,7 +160,7 @@ describe('Capture', () => {
     expect(start).toEqual({ event: 'start', captureId: expect.any(String), groupId, targetId: 'target-1', track: 'video', sound: true, page: { url: 'https://app.example/', title: 'Page' }, startedAt: expect.any(String) });
     const captureId = typeof start === 'object' && start !== null && 'captureId' in start ? start.captureId : '';
     expect(recording).toMatchObject({ activeTab: { capture: { recording: captureId } }, recordings: [{ captureId, track: 'video', saving: false }] });
-    expect(chrome.toolbar.at(-1)).toMatchObject({ badge: 'REC', badgeColor: '#d93025', title: 'GitSpace is recording a tab in this Chrome' });
+    expect(chrome.toolbar.at(-1)).toMatchObject({ badge: '1', badgeColor: '#1a73e8', title: 'GitSpace is recording a tab in this Chrome' });
 
     const PART = 32 * 1024 * 1024;
     chrome.recorders[0]?.emit(Uint8Array.from([1, 2, 3]));

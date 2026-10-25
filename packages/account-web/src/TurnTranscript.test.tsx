@@ -96,4 +96,15 @@ describe('TurnTranscript', () => {
     expect(html).toContain('Which checks? — Types, Browser');
     expect(html).toContain('Anything else? — Skipped');
   });
+  it('shows the tabs a sent message connected as chips of their site and Chrome, not as the text the agent reads', () => {
+    const turns: TurnBlock[] = [{
+      id: 'turn-tab', type: 'turn', status: 'done', sideAgents: [], items: [],
+      user: { id: 'turn-tab:user', type: 'message', role: 'user', text: '[Connected tab "Hacker News" (https://news.ycombinator.com/item?id=1) on Studio desktop, pairingId 00000000-0000-4000-8000-000000000001, targetId tab-a; use web_browser with source "relay" and this pairingId]\nCan you summarise the top comments?' },
+    }];
+    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
+    expect(html).toContain('news.ycombinator.com</strong>');
+    expect(html).toContain('· Studio desktop');
+    expect(html).toContain('Can you summarise the top comments?');
+    expect(html).not.toContain('Connected tab');
+  });
 });

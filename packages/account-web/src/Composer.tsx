@@ -1,10 +1,11 @@
 import type { SkillView } from '@gitspace/protocol';
-import { parseBrowserShareLink, RuntimeBrowserSharePreviewSchema, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import { parseBrowserShareLink, RuntimeBrowserSharePreviewSchema, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
-import { Attachment01, CpuChip01, DotsHorizontal, Zap } from '@untitledui/icons';
+import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { z } from 'zod';
+import { connectedTabText, TabChip } from './connected-tab.js';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -34,6 +35,14 @@ const SharePreviewResponseSchema = z.union([
   z.object({ status: z.literal('ok'), value: RuntimeBrowserSharePreviewSchema }),
   z.object({ status: z.literal('error'), error: z.object({ message: z.string() }) }),
 ]);
+const SHARE_ENDED: Record<NonNullable<RuntimeBrowserSharePreview['ended']>, string> = { revoked: 'Sharing stopped', expired: 'This share expired', closed: 'The shared tab was closed' };
+
+/** Why a pasted share can no longer connect: it ended or its time ran out. Null while it may. */
+function shareEnded(chip: ShareChip | undefined): string | null {
+  if (chip?.state !== 'ready') return null;
+  if (chip.preview.ended) return SHARE_ENDED[chip.preview.ended];
+  return Date.parse(chip.preview.expiresAt) <= Date.now() ? SHARE_ENDED.expired : null;
+}
 
 /** The share links of this account in `text` (whitespace-separated words), each once. */
 function shareLinksIn(text: string): ShareLink[] {
@@ -119,14 +128,13 @@ export interface ComposerProps {
   error?: string;
   controlsError?: string;
   onRetryControls?: () => void;
-  /** Runs a command of this workspace's session; with it, a share link of this account in the draft becomes a tab chip
-   * and its tab is connected to the workspace (`browserShareConnect`) before the message is sent. */
+  /** Runs a command of this workspace's session; with it, a share link of this account in the draft moves out of its
+   * text into a tab chip, and the tab is connected to the workspace (`browserShareConnect`) before the message is sent. */
   sessionCommand?: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>;
 }
 
 export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls, sessionCommand }: ComposerProps) {
   const icons = useIcons();
-  const shape = useShape();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
   const profile = inference?.state?.profiles.find((entry) => entry.id === assignment?.profileId);
@@ -142,36 +150,48 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [uploading, setUploading] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const sharing = sessionCommand !== undefined;
-  const shareLinks = useMemo(() => sharing ? shareLinksIn(message) : [], [message, sharing]);
+  // Share links pasted into the draft, swapped out of its text into tab chips.
+  const [tabs, setTabs] = useState<readonly ShareLink[]>([]);
   const [shareChips, setShareChips] = useState<ReadonlyMap<string, ShareChip>>(new Map());
-  // Greetings are read once per link and kept while the composer is shown, so editing around a link does not reread it.
+  // The tabs the last message connected, for the line confirming they joined.
+  const [joined, setJoined] = useState<readonly RuntimeBrowserConnectedTab[]>([]);
   useEffect(() => {
-    const unread = shareLinks.filter((link) => !shareChips.has(link.text));
+    if (!sharing) return;
+    const links = shareLinksIn(message);
+    if (!links.length) return;
+    const words = new Set(links.map((link) => link.text));
+    setTabs((current) => [...current, ...links.filter((link) => !current.some((tab) => tab.text === link.text))]);
+    setMessage(message.replace(/(\S+)\s*/gu, (match: string, word: string) => words.has(word) ? '' : match));
+  }, [message, sharing]);
+  // Greetings are read once per link and kept while the composer is shown, so removing and pasting a link again does not reread it.
+  useEffect(() => {
+    const unread = tabs.filter((link) => !shareChips.has(link.text));
     if (!unread.length) return;
     setShareChips((current) => new Map([...current, ...unread.map((link): [string, ShareChip] => [link.text, { state: 'reading' }])]));
     for (const link of unread) void readShareChip(link).then((chip) => setShareChips((current) => new Map(current).set(link.text, chip)));
-  }, [shareLinks]);
+  }, [tabs]);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
     if (!text || !onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting) return false;
     setSubmitError(null);
+    setJoined([]);
     const sentDraft = workspaceDraft?.capture();
     try {
-      // Each pasted share link's tab joins this workspace before the message naming it is sent.
-      const connected = new Map<string, string>();
-      const links = sessionCommand ? shareLinksIn(text) : [];
+      // Each pasted tab joins this workspace before the message naming it is sent; a share that ended is not connected.
+      const connected: RuntimeBrowserConnectedTab[] = [];
+      const links = sessionCommand ? tabs.filter((link) => shareEnded(shareChips.get(link.text)) === null) : [];
       if (sessionCommand && links.length) {
         setConnecting(true);
         try {
           for (const link of links) {
             const tab = (await sessionCommand({ type: 'browserShareConnect', shareId: link.shareId, secret: link.secret })).browserConnectedTab;
             if (!tab) throw new Error('The workspace did not connect the shared tab.');
-            // What the agent reads in place of the link.
-            connected.set(link.text, `[Connected tab "${tab.title}" (${tab.url}) on ${tab.browser}, pairingId ${tab.pairingId}, targetId ${tab.targetId}; use web_browser with source "relay" and this pairingId]`);
+            connected.push(tab);
           }
         } finally { setConnecting(false); }
       }
-      const prompt = connected.size ? text.replace(/\S+/gu, (word) => connected.get(word) ?? word) : text;
+      // What the agent reads in place of the links: the tabs, then the message.
+      const prompt = [...connected.map(connectedTabText), text].join('\n');
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
       const uploads = files.filter((file) => !file.type.startsWith('text/') || file.size > 256 * 1024);
       const uploaded = new Map<File, string>();
@@ -196,8 +216,11 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       }));
       await onSend([prompt, ...attached].join('\n\n'), behavior, images, sentDraft);
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
-      else setLocalMessage(current => current === draft ? '' : current);
+      // The input sends its text trimmed; a link swapped out of the draft can leave a space behind.
+      else setLocalMessage(current => current.trim() === text ? '' : current);
       setAttachments([]);
+      setTabs([]);
+      setJoined(connected);
       return true;
     } catch (failure) {
       setSubmitError(rpcErrorMessage(failure, 'Send message'));
@@ -281,15 +304,15 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
     {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} profileId={profile?.id} /> : null}
     {workspaceDraft?.error ? <p role="alert" className="text-caption text-destructive">{workspaceDraft.error}</p> : null}
-    {shareLinks.length ? <ul aria-label="Shared tabs" className="flex flex-wrap gap-2">{shareLinks.map((link) => {
+    {joined.map((tab) => <p key={`${tab.pairingId}:${tab.targetId}`} role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full bg-foreground/40" />Tab connected: {URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} joined this workspace&apos;s group in {tab.browser}. The agent may use it while it stays there.</p>)}
+    {tabs.length ? <ul aria-label="Shared tabs" className="flex flex-col gap-1.5">{tabs.map((link) => {
       const chip = shareChips.get(link.text);
+      const ended = shareEnded(chip);
       const title = chip?.state === 'ready' ? chip.preview.page.title || chip.preview.page.site : null;
-      return <li key={link.text} aria-label={`Tab ${title ?? 'from a share link'}`} title="Sending connects this tab to the workspace; the agent reads it as a tab, not the link." className={`${shape.container} flex min-w-0 max-w-full items-center gap-2 bg-surface-3 px-2 py-1 text-caption shadow-surface-1`}>
-        <span className="shrink-0 font-medium">Tab</span>
-        {chip?.state === 'ready' ? <>
-          <span className="min-w-0 truncate">{title}</span>
-          <span className="shrink-0 text-muted-foreground">{chip.preview.ended ? 'share ended' : chip.preview.page.site}</span>
-        </> : <span className={chip?.state === 'failed' ? 'min-w-0 truncate text-destructive' : 'min-w-0 truncate text-muted-foreground'}>{chip?.state === 'failed' ? chip.message : 'Reading the shared tab…'}</span>}
+      return <li key={link.text} aria-label={`Tab ${title ?? 'from a share link'}`} className="flex min-w-0 flex-wrap items-center gap-2">
+        <TabChip host={chip?.state === 'ready' ? chip.preview.page.site : 'Shared tab'} detail={chip?.state === 'ready' ? chip.preview.page.title || null : null} />
+        <span className={`min-w-0 text-caption ${chip?.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{ended ? `${ended} · it won't join this workspace` : chip?.state === 'failed' ? chip.message : chip?.state === 'ready' ? 'Pasted tab link · joins this workspace when you send' : 'Reading the shared tab…'}</span>
+        <Button variant="ghost" size="icon-compact" aria-label="Remove tab" disabled={connecting} onClick={() => setTabs((current) => current.filter((item) => item.text !== link.text))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}
     <InputMessage

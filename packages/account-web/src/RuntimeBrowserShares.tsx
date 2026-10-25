@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BROWSER_SHARE_EXPIRIES_MINUTES, RuntimeBrowserShareExpirySchema, type RuntimeBrowserPageCommentView, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { Badge, Button, useShape } from '@gitspace/ui';
+import { Link01 } from '@untitledui/icons';
 
 export type BrowserShareExpiry = (typeof BROWSER_SHARE_EXPIRIES_MINUTES)[number];
 export type BrowserShareOptions = { comment: boolean; expiresInMinutes: BrowserShareExpiry };
@@ -48,8 +49,8 @@ export function ShareTab({ label, pending, busy, onCreate }: { label: string; pe
   const [expiresInMinutes, setExpiresInMinutes] = useState<BrowserShareExpiry>(60);
   const [created, setCreated] = useState<RuntimeBrowserShare | null>(null);
   return <div className="relative">
-    <Button variant="ghost" size="compact" aria-label={`Share ${label}`} aria-expanded={open} onClick={() => { setOpen(!open); setCreated(null); }}>Share</Button>
-    {open ? <div role="dialog" aria-label={`Share link for ${label}`} className={`${shape.container} absolute left-0 top-full z-20 mt-1 flex w-72 max-w-[80vw] flex-col gap-3 bg-surface-1 p-3 shadow-surface-3`}>
+    <Button variant="ghost" size="icon-compact" aria-label={`Share ${label}`} title="Share" aria-expanded={open} onClick={() => { setOpen(!open); setCreated(null); }}><Link01 width={14} height={14} /></Button>
+    {open ? <div role="dialog" aria-label={`Share link for ${label}`} className={`${shape.container} absolute right-0 top-full z-20 mt-1 flex w-72 max-w-[80vw] flex-col gap-3 bg-surface-1 p-3 shadow-surface-3`}>
       {created ? <>
         <p className="text-caption">{created.comment ? 'View, point and comment' : 'View and point'} until <time dateTime={created.expiresAt}>{new Date(created.expiresAt).toLocaleTimeString()}</time>. People with the link never click or type.</p>
         <CopyLink link={created.link} label={label} />
@@ -72,25 +73,26 @@ export function ShareTab({ label, pending, busy, onCreate }: { label: string; pe
 /** This workspace's live and recently ended shares, newest first: link, who is watching, time left, Stop sharing, and
  * each share's activity folded. `shares` is null until first read. */
 export function BrowserShares({ shares, error, pending, onStop }: { shares: readonly RuntimeBrowserShare[] | null; error: string | null; pending: string | null; onStop(shareId: string): void }) {
-  const shape = useShape();
-  return <section aria-label="Shares" className={`${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`}>
-    <h4 className="text-caption font-semibold">Shares</h4>
+  return <section aria-label="Shares" className="flex flex-col gap-2">
+    <h3 className="text-body font-medium">Shares</h3>
     {error ? <p role="alert" className="text-caption text-destructive">{error}{shares ? ' Showing the last shares read.' : ''}</p> : null}
     {shares === null ? (error ? null : <p role="status" className="text-caption text-muted-foreground">Loading shares…</p>)
       : shares.length === 0 ? <p className="text-caption text-muted-foreground">No shares. Share a tab of your Chrome from its tile; people with the link can watch it and point.</p>
-        : <ul className="flex flex-col gap-2">{shares.map(share => {
+        : <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-1 text-caption">{shares.map(share => {
           const title = share.page.title || share.page.url;
           const live = share.endedAt === null;
-          return <li key={share.shareId} aria-label={`Share of ${title}`} className="flex min-w-0 flex-col gap-2 rounded-lg bg-surface-3 p-3">
+          return <li key={share.shareId} aria-label={`Share of ${title}`} className="flex min-w-0 flex-col gap-2 p-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <p className="min-w-0 flex-1 truncate text-caption font-medium" title={share.page.url}>{title}</p>
+              <p className="min-w-0 flex-1 truncate text-body" title={share.page.url}>{title}</p>
               <Badge size="compact" color={live ? 'green' : 'gray'}>{live ? 'Live' : END_LABEL[share.endReason ?? 'revoked']}</Badge>
             </div>
-            <p className="text-caption text-muted-foreground">{share.comment ? 'View, point and comment' : 'View and point'} · {share.browser}{live ? <> · <TimeLeft expiresAt={share.expiresAt} /></> : share.endedAt ? <> · ended <time dateTime={share.endedAt}>{new Date(share.endedAt).toLocaleString()}</time></> : null}</p>
+            <p className="text-muted-foreground">{share.comment ? 'View, point and comment' : 'View and point'} · {share.browser}{live ? <> · <TimeLeft expiresAt={share.expiresAt} /></> : share.endedAt ? <> · ended <time dateTime={share.endedAt}>{new Date(share.endedAt).toLocaleString()}</time></> : null}</p>
             {live ? <CopyLink link={share.link} label={title} /> : null}
-            {live ? <p className="text-caption">{share.viewers.length ? <>Watching: {share.viewers.map(viewer => `${viewer.name}${viewer.guest ? ' (guest)' : ''}`).join(', ')}</> : 'Nobody is watching.'}</p> : null}
-            {live ? <div><Button variant="secondary" size="compact" aria-label={`Stop sharing ${title}`} disabled={pending !== null} loading={pending === `unshare:${share.shareId}`} onClick={() => onStop(share.shareId)}>Stop sharing</Button></div> : null}
-            {share.audit.length ? <details className="text-caption">
+            {live ? <div className="flex flex-wrap items-center gap-2">
+              <p className="min-w-0 flex-1">{share.viewers.length ? <>Watching: {share.viewers.map(viewer => `${viewer.name}${viewer.guest ? ' (guest)' : ''}`).join(', ')}</> : 'Nobody is watching.'}</p>
+              <Button variant="secondary" size="compact" aria-label={`Stop sharing ${title}`} disabled={pending !== null} loading={pending === `unshare:${share.shareId}`} onClick={() => onStop(share.shareId)}>Stop sharing</Button>
+            </div> : null}
+            {share.audit.length ? <details>
               <summary className="cursor-pointer text-muted-foreground">Activity ({share.audit.length})</summary>
               <ul className="mt-1 flex flex-col gap-1">{share.audit.map((row, index) => <li key={`${row.at}:${index}`} className="break-words">
                 <time className="tabular-nums text-muted-foreground" dateTime={row.at}>{new Date(row.at).toLocaleTimeString()}</time> {row.by}{row.guest ? ' (guest)' : ''} {AUDIT_LABEL[row.event]}{row.detail ? `: ${row.detail}` : ''}
@@ -104,19 +106,18 @@ export function BrowserShares({ shares, error, pending, onStop }: { shares: read
 /** Comments people made on pages of this workspace's shares, newest first: where they pointed, who, what, on which
  * page. `comments` is null until first read. */
 export function BrowserPageComments({ comments, error }: { comments: readonly RuntimeBrowserPageCommentView[] | null; error: string | null }) {
-  const shape = useShape();
-  return <section aria-label="Page comments" className={`${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`}>
-    <h4 className="text-caption font-semibold">Page comments</h4>
+  return <section aria-label="Page comments" className="flex flex-col gap-2">
+    <h3 className="text-body font-medium">Page comments</h3>
     {error ? <p role="alert" className="text-caption text-destructive">{error}{comments ? ' Showing the last comments read.' : ''}</p> : null}
     {comments === null ? (error ? null : <p role="status" className="text-caption text-muted-foreground">Loading comments…</p>)
       : comments.length === 0 ? <p className="text-caption text-muted-foreground">No comments yet. People on a share link with comments can comment on the page; agents read them with web_browser.</p>
-        : <ul className="flex flex-col gap-2">{comments.map(({ comment, cropUrl }) => <li key={comment.commentId} aria-label={`Comment by ${comment.by.name}`} className="flex min-w-0 gap-3 rounded-lg bg-surface-3 p-3">
-          {cropUrl ? <img className="h-16 w-24 shrink-0 rounded-md bg-surface-2 object-contain" src={cropUrl} alt={`Where ${comment.by.name} commented`} /> : null}
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <p className="flex flex-wrap items-center gap-2 text-caption"><span className="font-medium">{comment.by.name}</span>{comment.by.guest ? <Badge size="compact" color="gray">guest</Badge> : null}<time className="tabular-nums text-muted-foreground" dateTime={comment.createdAt}>{new Date(comment.createdAt).toLocaleString()}</time></p>
-            <p className="whitespace-pre-wrap break-words text-caption">{comment.text}</p>
-            {comment.target ? <p className="truncate text-caption text-muted-foreground">On {comment.target.role}{comment.target.name ? ` “${comment.target.name}”` : ''}</p> : null}
-            <a className="truncate text-caption text-muted-foreground underline" href={comment.page.url} target="_blank" rel="noreferrer" title={comment.page.url}>{comment.page.title || comment.page.url}</a>
+        : <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-1 text-caption">{comments.map(({ comment, cropUrl }) => <li key={comment.commentId} aria-label={`Comment by ${comment.by.name}`} className="flex min-w-0 gap-3 p-2.5">
+          {cropUrl ? <img className="aspect-[16/10] w-24 shrink-0 rounded-md border border-border bg-surface-2 object-contain" src={cropUrl} alt={`Where ${comment.by.name} commented`} /> : null}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <p className="flex flex-wrap items-center gap-2"><span className="font-medium">{comment.by.name}</span>{comment.by.guest ? <Badge size="compact" color="gray">guest</Badge> : null}<time className="tabular-nums text-muted-foreground" dateTime={comment.createdAt}>{new Date(comment.createdAt).toLocaleString()}</time></p>
+            <p className="whitespace-pre-wrap break-words text-body">{comment.text}</p>
+            {comment.target ? <p className="truncate text-muted-foreground">On {comment.target.role}{comment.target.name ? ` “${comment.target.name}”` : ''}</p> : null}
+            <a className="truncate text-muted-foreground underline" href={comment.page.url} target="_blank" rel="noreferrer" title={comment.page.url}>{comment.page.title || comment.page.url}</a>
           </div>
         </li>)}</ul>}
   </section>;

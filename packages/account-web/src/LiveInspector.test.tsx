@@ -40,7 +40,7 @@ vi.mock('./SynchronizationProvider.js', async () => ({
 }));
 vi.mock('./useRepositoryTree.js', () => ({ useRepositoryTree: () => ({ state: 'pending', fetch: 'idle', refetch: async () => {} }) }));
 vi.mock('./environment/EnvironmentView.js', () => ({ EnvironmentView: () => <p>Environment ready</p> }));
-vi.mock('./inspector/index.js', () => ({ Inspector: ({ overview: shown, environment, usage }: Pick<InspectorProps, 'overview' | 'environment' | 'usage'>) => <><p>Inspector overview for {shown.spaceId}</p>{environment?.(() => {})}<button onClick={usage.load}>Load usage</button>{usage.report ? <p>Session cost: {usage.report.totalsDeep.costUsd}</p> : null}</> }));
+vi.mock('./inspector/index.js', () => ({ Inspector: ({ overview: shown, environment, usage }: Pick<InspectorProps, 'overview' | 'environment' | 'usage'>) => <><p>Inspector overview for {shown.spaceId}</p>{environment?.(() => {}, () => {})}<button onClick={usage.load}>Load usage</button>{usage.report ? <p>Session cost: {usage.report.totalsDeep.costUsd}</p> : null}</> }));
 
 const overview = (revision: number): InspectorView['overview'] => ({
   projectId: 'project', spaceId: 'workspace', revision,

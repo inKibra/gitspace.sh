@@ -198,6 +198,10 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             <span className="flex flex-col"><span className="text-caption font-medium">Agent setup</span><span className="text-caption text-muted-foreground">Agents, skills and rules this repository defines.</span></span>
             {props.onOpenAgentSetup ? <Button variant="ghost" size="compact" onClick={props.onOpenAgentSetup}>Open Agent setup</Button> : null}
           </div>
+          {props.onOpenBrowser ? <div aria-label="Setup step Browser" className="flex min-h-10 flex-wrap items-center justify-between gap-2">
+            <span className="flex flex-col"><span className="text-caption font-medium">Browser</span><span className="text-caption tabular-nums text-muted-foreground">{!props.browser ? 'Your Chromes and the cloud browser, with their tabs.' : props.browser.open ? `${props.browser.open} ${props.browser.open === 1 ? 'browser' : 'browsers'}${props.browser.running ? `, ${props.browser.running} running` : ''}` : 'No open tabs'}</span></span>
+            <Button variant="ghost" size="compact" onClick={props.onOpenBrowser}>Open Browser</Button>
+          </div> : null}
           {model.browserOrigins.length ? <div aria-label="Setup step Browser access" className="flex flex-col">
             <span className="flex min-h-10 items-center text-caption font-medium">Browser access</span>
             <ul className="flex flex-col">{model.browserOrigins.map(origin => <li key={origin.hash} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">

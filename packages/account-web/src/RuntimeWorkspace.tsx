@@ -33,6 +33,8 @@ export interface RuntimeInspectorContext {
   workspaces: GitSpaceShellProps['workspaces'];
   onClose(): void;
   onAskAgent(text: string): Promise<void>;
+  /** Adds `text` to the end of the chat composer's draft for you to finish and send; absent until the draft is loaded. */
+  onCompose?: (text: string) => void;
   onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations'];
   initialView?: 'environment';
   resourceRequest?: ResourceRequest;
@@ -211,7 +213,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         send: async (machineId, name, data) => { const result = await rpcClient.terminals.send({ spaceId, machineId, name, data }); if (result.status === 'error') throw result.error; },
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
       }}
-      renderInspector={(onClose, initialView, resourceRequest, openTerminal) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
+      renderInspector={(onClose, initialView, resourceRequest, openTerminal) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog commit={launchRequest.source.commit} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}

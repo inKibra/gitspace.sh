@@ -51,10 +51,10 @@ describe('a script on your Chrome', () => {
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '1' }));
     await expect(chrome.execute(command(attemptId, 'target-1', 'Storage.getCookies'))).rejects.toThrow();
-    expect(await chrome.popup({ popupState: true })).toMatchObject({ groups: [{ groupId: chrome.grant.body.groupId, name: 'Checkout', running: 1, tabs: 3 }], log: [] });
+    expect(await chrome.popup({ popupState: true })).toMatchObject({ groups: [{ groupId: chrome.grant.body.groupId, name: 'Checkout', acting: { agent: 'main', doing: 'Running a script' }, tabs: 3 }], log: [] });
 
     const stopped = await chrome.popup({ stopGroup: chrome.grant.body.groupId });
-    expect(stopped).toMatchObject({ groups: [{ running: 0 }], log: [expect.objectContaining({ attemptId, endReason: 'stopped', commands: 3, refused: 1 })] });
+    expect(stopped).toMatchObject({ groups: [{ acting: null }], log: [expect.objectContaining({ attemptId, endReason: 'stopped', commands: 3, refused: 1 })] });
     expect(chrome.group.title).toBe('Checkout');
     expect(chrome.detached).toEqual(['target-1']);
     expect(chrome.sent).toContainEqual({ targetId: 'target-1', fenced: true });

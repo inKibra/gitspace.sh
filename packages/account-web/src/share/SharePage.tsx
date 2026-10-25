@@ -3,8 +3,7 @@ import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import { ThinkingIndicator } from '@gitspace/ui';
 import { useEffect, useState } from 'react';
 import { currentDevice } from '../device-session.js';
-import { EmptyState } from '../GitSpaceShell.js';
-import { ShareGreeting } from './ShareGreeting.js';
+import { ShareGreeting, ShareNotice } from './ShareGreeting.js';
 import { ShareViewer } from './ShareViewer.js';
 import { joinShare, previewShare, ShareRequestError } from './share-client.js';
 import type { ShareJoined } from './share-client.js';
@@ -47,13 +46,12 @@ export function SharePage() {
     return () => { active = false; };
   }, [shareId, secret]);
 
-  if (stage.kind === 'loading') return <div className="flex h-dvh items-center justify-center"><ThinkingIndicator aria-label="Opening the share" /></div>;
-  if (stage.kind === 'unavailable') return <div className="mx-auto max-w-md p-8"><EmptyState title={stage.title} description={stage.description} /></div>;
+  if (stage.kind === 'loading') return <div className="flex h-dvh items-center justify-center bg-surface-2"><ThinkingIndicator aria-label="Opening the share" /></div>;
+  if (stage.kind === 'unavailable') return <ShareNotice title={stage.title}>{stage.description}</ShareNotice>;
   if (stage.kind === 'ended') {
-    return <div className="mx-auto max-w-md p-8"><EmptyState
-      title="This share has ended"
-      description={`${stage.reason ? SHARE_END_TEXT[stage.reason](stage.sharer) : 'The link no longer opens the tab.'} Ask ${stage.sharer || 'whoever sent it'} for a new link if you still need it.`}
-    /></div>;
+    return <ShareNotice title="This share has ended">
+      {stage.reason ? SHARE_END_TEXT[stage.reason](stage.sharer) : `${stage.sharer || 'The person sharing'} stopped sharing, the time ran out, or the tab was closed.`} Ask {stage.sharer || 'whoever sent it'} for a new link.
+    </ShareNotice>;
   }
   if (stage.kind === 'viewing') {
     const { preview } = stage;

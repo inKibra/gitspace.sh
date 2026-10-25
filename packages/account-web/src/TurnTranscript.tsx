@@ -4,6 +4,7 @@ import { RuntimeBrowserExecutionSchema } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { AskUserQuestions, Badge, badgeColors, Button, ChatMessage, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
 import { AlertCircle, ChevronDown, ChevronRight, GitBranch01, Link03, ShieldTick, Terminal, Users01 } from '@untitledui/icons';
+import { connectedTabsIn, TabChip } from './connected-tab.js';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceLink } from './ResourceNavigation.js';
 import { TranscriptImage } from './resource-media.js';
@@ -284,12 +285,18 @@ export function userMessageMarkdown(text: string): string {
 
 export function TranscriptItemView({ item, active, onAnswer, state, onStateChange, renderExecutionHistory }: { item: TranscriptItem; active: boolean; onAnswer?: TurnTranscriptProps['onAnswer']; renderExecutionHistory?: ExecutionHistoryRenderer } & ItemInteractionProps) {
   switch (item.type) {
-    case 'message':
+    case 'message': {
+      // A sent message names the tabs its pasted share links connected; they show as chips above its text.
+      const sent = item.role === 'user' ? connectedTabsIn(item.text) : null;
       return <ChatMessage
         attachments={item.images?.length ? <MessageAttachments images={item.images} /> : undefined}
         from={item.role}
         data-pending={item.pending || undefined}
-      >{item.role === 'assistant' ? <GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown> : <GitSpaceMarkdown>{userMessageMarkdown(item.text)}</GitSpaceMarkdown>}</ChatMessage>;
+      >{sent === null ? <GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown> : <>
+        {sent.tabs.length ? <span className="flex flex-wrap gap-1.5 pb-1.5">{sent.tabs.map((tab, index) => <TabChip key={`${tab.url}:${index}`} host={URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} detail={tab.browser} />)}</span> : null}
+        <GitSpaceMarkdown>{userMessageMarkdown(sent.text)}</GitSpaceMarkdown>
+      </>}</ChatMessage>;
+    }
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
     case 'tool-call':

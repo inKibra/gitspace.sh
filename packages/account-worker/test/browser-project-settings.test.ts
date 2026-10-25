@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { AccountBrowserRelay, type BrowserWorkspaces } from '../src/browser-relay.js';
@@ -9,7 +9,7 @@ import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-b
 import { workspaceDrive } from '../src/workspace-drive.js';
 
 type Identity = { key: CryptoKeyPair; publicKey: string };
-type Chrome = { pairingId: string; generation: number; socket: WebSocket; ready: unknown; operations: string[]; revoked: string[]; failRevoke: boolean; reconnect(): Promise<void>; pauseAuthorization(): { reached: Promise<void>; release(): void } };
+type Chrome = { pairingId: string; generation: number; socket: WebSocket; ready: unknown; operations: string[]; revoked: string[]; notices: unknown[]; failRevoke: boolean; reconnect(): Promise<void>; pauseAuthorization(): { reached: Promise<void>; release(): void } };
 async function keys() { const key = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']); return { key, publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', key.publicKey))) }; }
 function frame(socket: WebSocket) { return new Promise<unknown>(resolve => socket.addEventListener('message', event => resolve(JSON.parse(String(event.data))), { once: true })); }
 /** `restart` swaps in a relay object with no memory over the same storage and sockets; the live relay keeps serving
@@ -30,9 +30,9 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       const status = (await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId);
       if (!status || status.state !== 'pending-confirmation') throw new Error('Missing pending identity');
       await relay.confirm(pairing.pairingId, status.pairedKeyFingerprint);
-      const operations: string[] = [], revoked: string[] = [];
+      const operations: string[] = [], revoked: string[] = [], notices: unknown[] = [];
       let paused: { reached: () => void; resume: Promise<void> } | undefined;
-      const browser: Chrome = { pairingId: pairing.pairingId, generation: pairing.generation, socket, ready, operations, revoked, failRevoke: false, async reconnect() {
+      const browser: Chrome = { pairingId: pairing.pairingId, generation: pairing.generation, socket, ready, operations, revoked, notices, failRevoke: false, async reconnect() {
         if (browser.socket.readyState !== WebSocket.CLOSED) { const closed = new Promise<void>(resolve => browser.socket.addEventListener('close', () => resolve(), { once: true })); browser.socket.close(); await closed; }
         const issuedAt = Date.now(), nonce = crypto.randomUUID().replaceAll('-', '').repeat(2);
         const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:admission:${pairing.pairingId}:${pairing.generation}:${issuedAt}:${nonce}`))));
@@ -48,7 +48,10 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
         listen(browser.socket);
       }, pauseAuthorization() { const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>(); paused = { reached: () => reached.resolve(), resume: resume.promise }; return { reached: reached.promise, release: () => resume.resolve() }; } };
       function listen(active: WebSocket) { active.addEventListener('message', async event => {
-        const message = z.object({ id: z.number(), operation: z.string(), groupId: z.string().optional() }).parse(JSON.parse(String(event.data)));
+        const raw: unknown = JSON.parse(String(event.data));
+        // Notices about this Chrome (`chromeInfo`) carry no id and get no answer.
+        if (z.object({ operation: z.literal('chromeInfo') }).safeParse(raw).success) { notices.push(raw); return; }
+        const message = z.object({ id: z.number(), operation: z.string(), groupId: z.string().optional() }).parse(raw);
         operations.push(message.operation);
         if (message.operation === 'authorize' && paused) { paused.reached(); await paused.resume; }
         if (message.operation === 'revoke' && browser.failRevoke) { active.send(JSON.stringify({ id: message.id, error: { message: 'Chrome temporarily failed closure' } })); return; }
@@ -58,7 +61,7 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       listen(socket);
       return browser;
     }
-    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY }, identity => workspaceDrive(env, identity), browserShareAccount(env)); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
+    try { await run(relay, chrome, root, workspaces => { const restarted = new AccountBrowserRelay(state, { ACCOUNT_ID: env.ACCOUNT_ID, SPACE_AUTHORITY: workspaces ?? env.SPACE_AUTHORITY, USER_PROJECTS: env.USER_PROJECTS }, identity => workspaceDrive(env, identity), browserShareAccount(env)); relay = restarted; return restarted; }, () => state.getWebSockets('browser')); } finally { for (const socket of sockets) socket.close(); }
   });
 }
 async function authorization(root: Identity, pairing: { pairingId: string; generation: number; approvalId?: string }, workspaceId = 'workspace', projectId = 'project', manage?: Extract<RuntimeAccountBrowserAuthorizationBody['command'], { type: 'manage' }>, args: RuntimeBrowserArguments = { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }) {
@@ -333,3 +336,14 @@ test('LEGACY: a name stored on a project approval names its Chrome until the pro
     expect((await relay.browserRelayStatus()).pairings.map(pairing => pairing.name)).toEqual(['Work Chrome']);
   });
 });
+
+test('a Chrome whose extension takes them hears its name and approving projects once confirmed, and again when renamed; another never does', () => fixture(async (relay, chrome) => {
+  const informed = await chrome('Chrome/131.0.0.0', { chromeInfo: true });
+  const older = await chrome('Chrome/131.0.0.0');
+  await relay.rename(informed.pairingId, 'Studio');
+  await vi.waitFor(() => expect(informed.notices).toEqual([
+    { operation: 'chromeInfo', name: `Chrome ${informed.pairingId.slice(0, 8)}`, projects: [], groups: [] },
+    { operation: 'chromeInfo', name: 'Studio', projects: [], groups: [] },
+  ]));
+  expect(older.notices).toEqual([]);
+}));

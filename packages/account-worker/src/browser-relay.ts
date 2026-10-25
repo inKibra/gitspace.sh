@@ -35,7 +35,7 @@ const CaptureAnnouncement = z.discriminatedUnion('event', [
   z.object({ event: z.literal('start'), captureId: z.string().uuid(), groupId: z.string().uuid(), targetId: z.string().min(1).max(256), track: z.enum(['video', 'frames']), sound: z.boolean(), page: z.object({ url: z.string(), title: z.string() }), startedAt: z.iso.datetime() }),
   z.object({ event: z.literal('end'), captureId: z.string().uuid(), state: z.enum(['saved', 'failed']), reason: z.string().nullable(), endedAt: z.iso.datetime(), tracks: RuntimeBrowserCaptureSchema.shape.tracks }),
 ]);
-const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), group: RuntimeBrowserGroupReportSchema.optional(), capture: CaptureAnnouncement.optional(), shareFrame: BrowserShareFrameSchema.optional(), share: BrowserShareEventSchema.optional() });
+const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), chromeInfo: z.boolean().optional(), group: RuntimeBrowserGroupReportSchema.optional(), capture: CaptureAnnouncement.optional(), shareFrame: BrowserShareFrameSchema.optional(), share: BrowserShareEventSchema.optional() });
 /** A capture recording on a Chrome: the workspace it belongs to and the files that finished uploading (name → size). */
 const CaptureRow = z.object({ pairingId: z.string().uuid(), projectId: z.string(), workspaceId: z.string(), track: z.enum(['video', 'frames']), capture: RuntimeBrowserCaptureSchema, files: z.record(z.string(), z.number().int().nonnegative()) });
 type CaptureRow = z.infer<typeof CaptureRow>;
@@ -49,10 +49,14 @@ export type BrowserWorkspaces = { getByName(name: string): {
   browserGroupReported(identity: { projectId: string; workspaceId: string }, group: RuntimeBrowsersDocumentGroup): Promise<void>;
   pageCommentAdded(identity: { projectId: string; workspaceId: string }, comment: RuntimeBrowserPageComment): Promise<void>;
 } };
+/** The account's projects, whose names `chromeInfo` tells each Chrome. */
+export type BrowserProjects = { getByName(name: string): { list(): Promise<readonly { id: string; name: string }[]> } };
 /** Management actions a workspace sends through any Chrome confirmed on the account, online or not: they act on that
  * workspace's shares, and `shareConnect` checks the shared tab's own Chrome. */
 const SHARE_MANAGEMENT: Record<string, true> = { shares: true, shareRevoke: true, shareConnect: true };
-type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string> };
+/** `informed`: the groups whose project the extension was told (`chromeInfo`), or null for an extension that does not
+ * take those notices. */
+type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null };
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
  * once the script connects. */
 type ScriptRun = { authorization: RuntimeAccountBrowserAuthorization; grant: RuntimeAccountBrowserSignedGrant; pairingId: string; attemptId: string; deadline: number; connection: Connection; browser?: RelayBrowser; socket?: WebSocket };
@@ -82,6 +86,8 @@ const BrowserSocket = z.object({
   pairingId: z.string().uuid().optional(),
   /** Set by the extension's hello; until then the socket is a candidate. */
   product: z.string().optional(),
+  /** Set by a hello saying the extension takes `chromeInfo` notices. */
+  chromeInfo: z.boolean().optional(),
 });
 type BrowserSocketState = z.infer<typeof BrowserSocket>;
 async function fingerprint(publicKey: string) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', browserUnbase64(publicKey)))].map(byte => byte.toString(16).padStart(2, '0')).join(''); }
@@ -116,7 +122,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   private readonly shareLinks: BrowserShares;
   /** `drive` opens a workspace's drive, for capture records, comment crops and the files your Chrome uploads; `account`
    * names the account to share links' viewers. */
-  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces }, private readonly drive: (identity: { projectId: string; workspaceId: string }) => BrowserRelayDrive, account: BrowserShareAccount) {
+  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces; USER_PROJECTS: BrowserProjects }, private readonly drive: (identity: { projectId: string; workspaceId: string }) => BrowserRelayDrive, account: BrowserShareAccount) {
     this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this });
     this.uploads = new BrowserUploads(ctx.storage, {
       pairing: pairingId => this.signingKey(pairingId),
@@ -193,7 +199,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (cached?.socket === bound.socket) { cached.product = product; return cached; }
     if (cached) this.disconnect(pairingId);
     // Request ids continue past any reply still in flight from before the relay hibernated.
-    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set() };
+    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null };
     this.connections.set(pairingId, connection);
     return connection;
   }
@@ -256,6 +262,8 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (error) throw new Error(error);
     for (const groupId of ended) await this.shareLinks.endGroup(groupId);
     await this.retryRevocations();
+    // Approvals changed: each Chrome that takes them hears its approving projects again.
+    for (const pairing of (await this.registry()).pairings) this.ctx.waitUntil(this.inform(pairing.pairingId));
     return this.projectSettings(projectId);
   }
   private async approved(projectId: string, pairingId: string, generation: number) {
@@ -307,6 +315,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       return true;
     });
     if (!renamed) throw new Error('Unknown browser pairing');
+    this.ctx.waitUntil(this.inform(pairingId));
     return this.status();
   }
   async confirm(pairingId: string, expectedFingerprint: string) {
@@ -318,6 +327,8 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       return true;
     });
     if (!confirmed) throw new Error('Browser fingerprint mismatch');
+    // A Chrome confirmed while connected hears about itself now, not at its next hello.
+    this.ctx.waitUntil(this.inform(pairingId));
     return this.status();
   }
   /** The Chrome a relay call uses: `pairingId`, else the project default, else the only approved Chrome. Each refusal
@@ -484,10 +495,11 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
         return socket.close(1008, 'Extension update required');
       }
-      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100) } satisfies BrowserSocketState);
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}) } satisfies BrowserSocketState);
       socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL }));
       this.ctx.waitUntil(this.retryRevocations(state.pairingId));
       this.ctx.waitUntil(this.shareLinks.online(state.pairingId).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_online_failed', pairingId: state.pairingId, error: String(error) }))));
+      this.ctx.waitUntil(this.inform(state.pairingId));
       return;
     }
     if (!state.product) throw new Error('Browser hello required');
@@ -543,6 +555,29 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     for (const groupId of ended) await this.shareLinks.endGroup(groupId);
     await this.retryRevocations();
   }
+  /** Tells a Chrome whose extension takes `chromeInfo` (its hello said so; older ones never get it) its name, the
+   * names of the projects that approved it, and the project of each of its live workspace groups, for its popup. A
+   * project the account no longer lists is left out. */
+  private async inform(pairingId: string): Promise<void> {
+    const connection = this.connection(pairingId);
+    if (!connection?.informed) return;
+    try {
+      const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId && item.state === 'confirmed');
+      if (!pairing) return;
+      const [projects, settings, rows, revoked] = await Promise.all([this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list(), this.ctx.storage.list({ prefix: 'browser.relay.project:' }), this.ctx.storage.list({ prefix: 'browser.account.group:' }), this.ctx.storage.list({ prefix: 'browser.account.revoked:' })]);
+      const names = new Map(projects.map(project => [project.id, project.name]));
+      const approved = [...settings].filter(([, stored]) => ProjectSettings.parse(stored).approvals.some(item => item.pairingId === pairingId && item.generation === pairing.generation)).flatMap(([key]) => names.get(key.slice('browser.relay.project:'.length)) ?? []);
+      const live = [...rows.values()].map(stored => RuntimeAccountBrowserGroupRowSchema.parse(stored)).filter(group => group.placement.kind === 'account-relay' && group.placement.pairingId === pairingId && Date.parse(group.expiresAt) > Date.now() && !revoked.has(`browser.account.revoked:${group.groupId}`));
+      const groups = live.flatMap(group => { const project = names.get(group.projectId); return project ? [{ groupId: group.groupId, project }] : []; });
+      if (this.connection(pairingId) !== connection) return;
+      connection.informed = new Set(live.map(group => group.groupId));
+      connection.socket.send(JSON.stringify({ operation: 'chromeInfo', name: (await this.names([pairing]))(pairing), projects: approved, groups }));
+    } catch (error) { console.warn(JSON.stringify({ event: 'browser_chrome_info_failed', pairingId, error: String(error) })); }
+  }
+  /** A group the Chrome was not told about yet (a new one): it hears `chromeInfo` again before the group's authority. */
+  private async informGroup(pairingId: string, connection: Connection, groupId: string): Promise<void> {
+    if (connection.informed && !connection.informed.has(groupId)) await this.inform(pairingId);
+  }
   private disconnect(pairingId: string) {
     const connection = this.connections.get(pairingId); if (!connection) return; this.connections.delete(pairingId);
     for (const pending of connection.pending.values()) { pending.cancelTimer(); pending.reject(new Error('Browser extension disconnected; effect outcome uncertain')); }
@@ -577,7 +612,10 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     await this.dispatchApproval(authorization);
     const connection = this.connection(placement.pairingId);
     if (!connection) throw new Error('Account Chrome extension is not connected');
-    if (!connection.authorized.has(authorization.body.scope.attemptId)) { await this.request(placement.pairingId, { operation: 'authorize', authorization }); connection.authorized.add(authorization.body.scope.attemptId); }
+    if (!connection.authorized.has(authorization.body.scope.attemptId)) {
+      if (authorization.body.command.type === 'execute') await this.informGroup(placement.pairingId, connection, authorization.body.command.grant.body.groupId);
+      await this.request(placement.pairingId, { operation: 'authorize', authorization }); connection.authorized.add(authorization.body.scope.attemptId);
+    }
     // A single step's download uploads under its attempt while the step's authority lasts.
     const { body } = authorization, now = Date.now();
     if (body.command.type === 'execute' && body.command.args.action !== 'run') {
@@ -735,6 +773,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (await this.ctx.storage.get(claim)) throw new Error('Browser authorization already consumed');
     await this.ctx.storage.put(claim, body.expiresAt);
     await this.runtime.recordGroup(scope, RuntimeAccountBrowserGrantSchema.parse(command.grant.body));
+    await this.informGroup(placement.pairingId, connection, command.grant.body.groupId);
     await this.request(placement.pairingId, { operation: 'authorize', authorization });
     const token = [...crypto.getRandomValues(new Uint8Array(32))].map(byte => byte.toString(16).padStart(2, '0')).join('');
     this.scripts.set(token, { authorization, grant: command.grant, pairingId: placement.pairingId, attemptId: scope.attemptId, deadline: Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)), connection });

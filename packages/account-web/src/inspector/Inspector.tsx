@@ -152,10 +152,12 @@ export interface InspectorProps {
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: OverviewViewProps['onSetRelations'];
   stackStatus?: OverviewViewProps['stackStatus'];
-  /** The Environment tab; `openAgentSetup` switches to the Agent setup tab. */
-  environment?: (openAgentSetup: () => void) => ReactNode;
+  /** The Environment tab; `openAgentSetup` switches to the Agent setup tab, `openBrowser` to the Browser tab. */
+  environment?: (openAgentSetup: () => void, openBrowser: () => void) => ReactNode;
   /** The Browser tab: this workspace's browsers; `openEnvironment` switches to the Environment tab, where sites are approved. */
   browser?: (openEnvironment: () => void) => ReactNode;
+  /** Browsers of this workspace with open tabs, shown on the Browser tab's label when there are any. */
+  browserCount?: number;
   repositoryEntries: readonly RepositoryTreeEntry[];
   lfsHeldBack?: readonly GitLfsHeldBack[];
   repositoryMode: RepositoryMode;
@@ -1155,7 +1157,7 @@ export function Inspector(props: InspectorProps) {
     setActiveThreadId(created.id);
     setThreadSelection(null);
   };
-  const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
+  const counts: Partial<Record<InspectorPermanentView, number>> = { browser: props.browserCount || undefined, subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
   const threadOpen = !!(activeThread || threadSelection);
   const closeThread = (): void => { setActiveThread(null); setThreadSelection(null); };
@@ -1211,7 +1213,7 @@ export function Inspector(props: InspectorProps) {
     }
     switch (id) {
       case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
-      case 'environment': return props.environment?.(() => selectSurface('agents')) ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
+      case 'environment': return props.environment?.(() => selectSurface('agents'), () => selectSurface('browser')) ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'browser': return props.browser?.(() => selectSurface('environment')) ?? <Padded><EmptyState icon={ic(Globe01, 22)} title="Browsers unavailable" description="This view has no workspace browsers to show." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'agents': return null;

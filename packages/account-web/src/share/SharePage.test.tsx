@@ -121,9 +121,9 @@ it('greets with the preview fetched by the fragment secret and redeems nothing u
   expect(text).toContain('Ada is sharing a tab with you');
   expect(text).toContain('Checkout');
   expect(text).toContain('shop.example');
-  expect(text).toContain('Comment on what you point at');
-  expect(text).toContain('Click or type in the tab');
-  expect(text).toContain('in 60 minutes');
+  expect(text).toContain('Comment on anything on the page');
+  expect(text).toContain('Click or type in the page');
+  expect(text).toContain('Ends in 60 min');
   expect(FakeSocket.all).toEqual([]);
 
   await join('Grace');
@@ -185,7 +185,7 @@ it('after Join says hello, offers its size, sends its pointer at most 20 times a
   expect(sentOf('pointer')).toEqual([{ type: 'pointer', at: { x: 0.5, y: 0.5 } }, { type: 'pointer', at: { x: 0.1, y: 0.1 } }]);
 
   await socket.receive({ type: 'frame', data: 'AAAA', width: 1280, height: 800 });
-  expect(document.body.querySelector('img')?.getAttribute('src')).toBe('data:image/jpeg;base64,AAAA');
+  expect(document.body.querySelector('img[alt^="Live view"]')?.getAttribute('src')).toBe('data:image/jpeg;base64,AAAA');
 
   await socket.receive({ type: 'viewers', viewers: [
     { viewerId: grace, name: 'Grace', guest: true, joinedAt, at: { x: 0.1, y: 0.1 } },
@@ -213,14 +213,14 @@ it('in Comment mode outlines what the pointer hovers and comments on what is cli
   await pointer('pointermove', 400, 250);
   expect(sentOf('hit')).toEqual([{ type: 'hit', at: { x: 0.5, y: 0.5 } }]);
   await latest().receive({ type: 'hit', at: { x: 0.5, y: 0.5 }, target: { box: { x: 0.4, y: 0.45, width: 0.2, height: 0.1 }, role: 'button', name: 'Pay now', text: 'Pay now', selectors: ['#pay'] } });
-  const outline = byLabel('button Pay now');
+  const outline = byLabel('button “Pay now”');
   expect(outline?.style.left).toBe('40%');
   expect(outline?.style.width).toBe('20%');
 
   await pointer('pointerdown', 400, 250);
   await pointer('pointerup', 400, 250);
   const box = byLabel('New comment');
-  expect(box?.textContent).toContain('On button “Pay now”');
+  expect(box?.textContent).toContain('On button “Pay now” · as Grace (guest)');
   await typeInto(box!.querySelector('textarea'), 'This should say the total');
   await act(async () => button('Comment', box!).click());
   expect(sentOf('comment')).toEqual([{ type: 'comment', at: { x: 0.5, y: 0.5 }, text: 'This should say the total' }]);
@@ -246,7 +246,7 @@ it('comments on a dragged area', async () => {
   await pointer('pointermove', 400, 250);
   await pointer('pointerup', 400, 250);
   const box = byLabel('New comment')!;
-  expect(box.textContent).toContain('On this area');
+  expect(box.textContent).toContain('On an area of the page');
   await typeInto(box.querySelector('textarea'), 'Too crowded');
   await act(async () => button('Comment', box).click());
   expect(sentOf('comment')).toEqual([{ type: 'comment', region: { x: 0.1, y: 0.1, width: 0.4, height: 0.4 }, text: 'Too crowded' }]);

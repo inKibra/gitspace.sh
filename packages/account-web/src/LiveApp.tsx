@@ -49,7 +49,7 @@ import type { GitHubAppManifestForm, GitHubAppOwner } from '@gitspace/protocol/g
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
 import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
 import { RuntimeServices } from './RuntimeServices.js';
-import { RuntimeBrowserTab } from './RuntimeBrowserTab.js';
+import { browserActivity, RuntimeBrowserTab, useWorkspaceBrowsers } from './RuntimeBrowserTab.js';
 import { RuntimeSubagentHistory } from './RuntimeSubagentHistory.js';
 import { CloudCreationProgress } from './CloudCreationProgress.js';
 import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
@@ -104,6 +104,8 @@ export function LiveInspector({
   const serviceMachines = useAccountMachines();
   const serviceMachineValues = useRetainedQueryValue(serviceMachines, 'inspector-service-machines');
   const overview = useResultQuery(rpcClient.inspector.overview, request);
+  const browsers = useWorkspaceBrowsers(runtimeContext.snapshot, runtimeContext.conversationId);
+  const browsersActive = browsers.overview ? browserActivity(browsers.overview) : null;
   const artifactCatalog = useResultQuery(rpcClient.inspector.artifacts.list, request);
   const [secondaryQueries, setSecondaryQueries] = useState({ repository: false, journal: false, threads: false });
   const [repositoryMode, setRepositoryMode] = useState<RepositoryMode>('current');
@@ -230,8 +232,9 @@ export function LiveInspector({
     }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal)}
     scope={scope}
     workspaces={workspaces}
-    environment={openAgentSetup => <LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} onAskAgent={onAskAgent} onOpenAgent={() => selectInspection(projectId, spaceId !== projectId ? spaceId : null)} onOpenAgentSetup={openAgentSetup} runtimeContext={runtimeContext} />}
-    browser={openEnvironment => <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><RuntimeBrowserTab key={`${runtimeContext.snapshot.projectId}:${runtimeContext.snapshot.workspaceId}`} snapshot={runtimeContext.snapshot} conversationId={runtimeContext.conversationId} machines={(serviceMachineValues ?? []).map(machine => ({ id: machine.id, label: machine.label }))} onOpenEnvironment={openEnvironment} /></ScrollArea>}
+    environment={(openAgentSetup, openBrowser) => <LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} onAskAgent={onAskAgent} onOpenAgent={() => selectInspection(projectId, spaceId !== projectId ? spaceId : null)} onOpenAgentSetup={openAgentSetup} browser={browsersActive} onOpenBrowser={openBrowser} runtimeContext={runtimeContext} />}
+    browser={openEnvironment => <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><RuntimeBrowserTab key={`${runtimeContext.snapshot.projectId}:${runtimeContext.snapshot.workspaceId}`} snapshot={runtimeContext.snapshot} projectName={scope?.projectName ?? projectId} browsers={browsers} machines={(serviceMachineValues ?? []).map(machine => ({ id: machine.id, label: machine.label }))} onOpenEnvironment={openEnvironment} onCompose={runtimeContext.onCompose} /></ScrollArea>}
+    browserCount={browsersActive?.open}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackValue ?? null}

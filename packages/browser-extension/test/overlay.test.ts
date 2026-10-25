@@ -3,18 +3,20 @@ import { Window, type ShadowRoot } from 'happy-dom';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { browserOverlayFunction } from '../src/overlay.js';
 
-const show = { show: { mode: 'run', name: 'Checkout', color: '#1a73e8', binding: '__gitspaceStop', capture: 'ready' } };
+const show = { show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Clicking “Medium”', binding: '__gitspaceStop', capture: 'ready', recording: null } };
 const windows: Window[] = [];
 afterEach(async () => { for (const window of windows.splice(0)) await window.happyDOM.close(); });
 
 /** A page with the overlay function and the screenshot mask callable as the extension calls them; the overlay's
- * closed shadow root is kept for the test, which a page never gets. */
+ * closed shadow root is kept for the test, which a page never gets. happy-dom has no Web Animations, which the
+ * overlay's pulses and presses use, so they run as Chrome's would with no effect here. */
 function page() {
   const window = new Window();
   windows.push(window);
   const roots: ShadowRoot[] = [];
   const attach = window.HTMLElement.prototype.attachShadow;
   window.HTMLElement.prototype.attachShadow = function (init) { const root = attach.call(this, init); roots.push(root); return root; };
+  Object.assign(window.Element.prototype, { animate: () => ({ finished: Promise.resolve() }) });
   const call = (declaration: string, argument?: unknown): unknown => window.eval(`(${declaration})`)(argument);
   return { window, roots, call, host: () => window.document.querySelector('[data-gitspace-overlay]') };
 }
@@ -33,13 +35,15 @@ describe('the in-page overlay', () => {
     expect(window.getComputedStyle(element).visibility).not.toBe('hidden');
   });
 
-  it('Stop calls the binding of its own world, and the page never sees the click', () => {
+  it('says who acts on which workspace and what it is doing; Stop calls the binding of its own world, and the page never sees the click', () => {
     const { window, roots, call } = page();
     const stops: string[] = [];
     const clicks: string[] = [];
     Object.assign(window, { __gitspaceStop: (payload: string) => { stops.push(payload); } });
     window.document.addEventListener('click', event => { clicks.push(event.type); });
     call(browserOverlayFunction, show);
+    expect(roots[0]?.textContent).toContain('main · Checkout');
+    expect(roots[0]?.textContent).toContain('Clicking “Medium”…');
     const stop = [...roots[0]?.querySelectorAll('button') ?? []].find(button => button.textContent === 'Stop');
     if (!stop) throw new Error('No Stop');
     stop.click();
@@ -58,7 +62,7 @@ describe('the in-page overlay', () => {
     call(browserOverlayFunction, show);
     expect(shown()).toEqual(['Capture', 'Stop']);
     buttons().find(button => button.textContent === 'Capture')?.click();
-    call(browserOverlayFunction, { show: { ...show.show, mode: 'capture', capture: 'recording' } });
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'capture', agent: null, doing: null, capture: 'recording', recording: { startedAt: Date.now(), sound: true } } });
     expect(roots[0]?.textContent).toContain('REC');
     // Recording alone, the agent's Stop is not offered.
     expect(shown()).toEqual(['Stop capture']);

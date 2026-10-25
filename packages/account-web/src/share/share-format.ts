@@ -1,4 +1,4 @@
-import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import type { RuntimeBrowserSharePreview, RuntimeBrowserShareTarget } from '@gitspace/protocol-runtime';
 
 export type ShareEnd = NonNullable<RuntimeBrowserSharePreview['ended']>;
 
@@ -9,14 +9,16 @@ export const SHARE_END_TEXT: Record<ShareEnd, (sharer: string) => string> = {
   closed: () => 'The shared tab was closed.',
 };
 
-/** "3:45 PM, in 52 minutes": when a share ends, from `now`. */
-export function shareEndsText(expiresAt: string, now: number): string {
-  const end = new Date(expiresAt);
-  const minutes = Math.max(0, Math.round((end.getTime() - now) / 60_000));
-  const sameDay = end.toDateString() === new Date(now).toDateString();
-  const at = end.toLocaleString(undefined, sameDay ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-  const left = minutes < 1 ? 'in less than a minute'
-    : minutes < 90 ? `in ${minutes} minute${minutes === 1 ? '' : 's'}`
-      : `in about ${Math.round(minutes / 60)} hours`;
-  return `${at}, ${left}`;
+/** "52 min": how long a share has left, from `now`. */
+export function shareTimeLeft(expiresAt: string, now: number): string {
+  const minutes = Math.max(0, Math.round((new Date(expiresAt).getTime() - now) / 60_000));
+  if (minutes < 1) return 'less than a minute';
+  if (minutes < 90) return `${minutes} min`;
+  return `about ${Math.round(minutes / 60)} hours`;
+}
+
+/** `link “Pricing”`: what a comment is on, by the element's accessible role and name. */
+export function shareTargetLabel(target: Pick<RuntimeBrowserShareTarget, 'role' | 'name'>): string {
+  const role = target.role || 'element';
+  return target.name ? `${role} “${target.name}”` : role;
 }

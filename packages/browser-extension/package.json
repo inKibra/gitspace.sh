@@ -8,12 +8,23 @@
   },
   "scripts": {
     "build": "bun src/build.ts",
-    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",
+    "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.popup.json && tsgo --noEmit -p tsconfig.test.json",
     "test": "bun test test"
   },
   "dependencies": {
     "@gitspace/protocol-environment": "workspace:*",
     "@gitspace/protocol-runtime": "workspace:*",
     "@gitspace/runtime-machine": "workspace:*"
+  },
+  "devDependencies": {
+    "@gitspace/ui": "workspace:*",
+    "@tailwindcss/node": "^4.3.3",
+    "@tailwindcss/oxide": "^4.3.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@untitledui/icons": "^0.0.22",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwindcss": "^4.1.0"
   }
 }

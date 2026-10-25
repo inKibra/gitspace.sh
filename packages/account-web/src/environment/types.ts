@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { BrowserSiteLevel, LifecycleRunPhase } from '@gitspace/protocol-environment';
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import type { BrowserActivity } from '../RuntimeBrowserTab.js';
 import type { MachineStatus } from '../workspace-status.js';
 
 /** The result of one script or check on the machine the Setup section shows. */
@@ -90,4 +91,8 @@ export interface EnvironmentViewProps {
   onOpenSecrets(): void;
   onEditValue(name: string, value: string): void;
   onOpenAgentSetup?(): void;
+  /** The workspace's browsers with open tabs, for the Browser line; null until read. */
+  browser?: BrowserActivity | null;
+  /** Switches to the Browser tab; the Browser line shows only with it. */
+  onOpenBrowser?(): void;
 }

@@ -128,15 +128,16 @@ export async function installed(options: { local?: Record<string, unknown>; live
     send(value: string) { this.sent.push(value); sent.push(JSON.parse(value)); notify(); }
     close() { if (this.readyState === 3) return; this.readyState = 3; this.onclose?.(); }
   }
-  /** A canvas that keeps the colours drawn on it, as the icon's image. */
+  /** A canvas that keeps the colours drawn on it, gradient stops included, as the icon's image. */
   class OffscreenCanvas {
     constructor(readonly width: number, readonly height = width) {}
     getContext() {
       const colors: string[] = [];
       const width = this.width;
+      const gradient = { addColorStop: (_offset: number, color: string) => { colors.push(color); } };
       return new Proxy({}, {
-        get: (_target, property) => property === 'getImageData' ? () => ({ width, colors }) : () => {},
-        set: (_target, property, value) => { if (property === 'fillStyle' || property === 'strokeStyle') colors.push(String(value)); return true; },
+        get: (_target, property) => property === 'getImageData' ? () => ({ width, colors }) : property === 'createLinearGradient' ? () => gradient : () => {},
+        set: (_target, property, value) => { if ((property === 'fillStyle' || property === 'strokeStyle') && typeof value === 'string') colors.push(value); return true; },
       });
     }
     async convertToBlob() { return new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }); }
@@ -257,7 +258,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
 
   const chrome = {
     runtime: {
-      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.6.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
+      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.7.0' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
       getContexts: async () => offscreenOpen ? [{ contextType: 'OFFSCREEN_DOCUMENT' }] : [],
       sendMessage: (message: Record<string, unknown>) => deliver(offscreenListeners, message, workerSender),
     },
@@ -305,6 +306,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
       setIcon: async ({ imageData }: { imageData: Toolbar['icon'] }) => { current.icon = imageData; record(); },
       setBadgeText: async ({ text }: { text: string }) => { current.badge = text; },
       setBadgeBackgroundColor: async ({ color }: { color: string }) => { current.badgeColor = color; },
+      setBadgeTextColor: async () => {},
       setTitle: async ({ title }: { title: string }) => { current.title = title; record(); },
     },
     downloads: {
@@ -419,18 +421,21 @@ export async function installed(options: { local?: Record<string, unknown>; live
     for (const listener of debuggerDetached) listener({ targetId: `target-${tabId}` });
     await settle();
   };
-  /** The popup as Chrome shows it, on the tab in front: its page with `popup.js` running, asking this service worker.
-   * `copied` is what it put on the clipboard; `close` it after the test. */
+  /** The popup as Chrome shows it, on the tab in front: its page with `popup.js` (React) rendered, asking this service
+   * worker. `copied` is what it put on the clipboard; `rendered` resolves once what the worker answered shows (React
+   * renders on the page's timers); `close` it after the test. Its stylesheet is not loaded. */
   const openPopup = async () => {
-    const window = new Window({ url: 'chrome-extension://extension/popup.html' });
+    // The page's own timers (React's, and the copy button's "Copied") run at once.
+    const window = new Window({ url: 'chrome-extension://extension/popup.html', settings: { disableCSSFileLoading: true, handleDisabledFileLoadingAsSuccess: true, timer: { maxTimeout: 0 } } });
     const copied: string[] = [];
     const files = extensionFiles('https://account.gitspace.test');
     window.document.write((files['popup.html'] ?? '').replace('<script src="popup.js"></script>', ''));
     Object.assign(window, { chrome: { runtime: { sendMessage: (message: Record<string, unknown>) => deliver(listeners, message, { id: 'extension', url: chrome.runtime.getURL('popup.html') }) } }, setInterval: () => 0 });
     Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: async (text: string) => { copied.push(text); } } });
     window.eval(files['popup.js'] ?? '');
-    await settle();
-    return { window, document: window.document, copied, close: () => window.happyDOM.close() };
+    const rendered = async () => { await settle(); await window.happyDOM.waitUntilComplete(); await settle(); };
+    await rendered();
+    return { window, document: window.document, copied, rendered, close: () => window.happyDOM.close() };
   };
   /** The methods the extension sent to tabs for the agent, without those that draw the overlay. */
   const sentCommands = () => commands.filter(({ method, params }) => !OVERLAY_METHODS[method] && params.functionDeclaration !== browserOverlayFunction).map(({ method }) => method);

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { BROWSER_DRIVE_PREFIX, RuntimeBrowserFramesIndexSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView, type RuntimeBrowserFramesIndex } from '@gitspace/protocol-runtime';
-import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, useShape } from '@gitspace/ui';
+import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, TabsSubtle, TabsSubtleItem, useShape } from '@gitspace/ui';
 
 type Frames = RuntimeBrowserFramesIndex['frames'];
 type CaptureFilter = 'all' | 'screenshots' | 'video';
@@ -17,10 +17,10 @@ const FRAMES_BEHIND = 12;
 const THUMBNAIL_PATH = 'thumbnail.jpg';
 const CAPTURE_FILTERS: Record<CaptureFilter, { label: string; keep(capture: RuntimeBrowserCapture): boolean }> = {
   all: { label: 'All', keep: () => true },
-  screenshots: { label: 'Screenshots', keep: capture => capture.tracks.image !== undefined },
   video: { label: 'Video', keep: capture => capture.tracks.image === undefined },
+  screenshots: { label: 'Screenshots', keep: capture => capture.tracks.image !== undefined },
 };
-const CAPTURE_FILTER_ORDER: readonly CaptureFilter[] = ['all', 'screenshots', 'video'];
+const CAPTURE_FILTER_ORDER: readonly CaptureFilter[] = ['all', 'video', 'screenshots'];
 const CAPTURE_BY: Record<RuntimeBrowserCapture['by'], string> = { agent: 'By agent', you: 'By you' };
 
 /** `m:ss` of a duration in milliseconds. */
@@ -29,14 +29,14 @@ export function formatClock(ms: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-/** `REC m:ss` since `startedAt`, ticking every second. */
-export function RecordingClock({ startedAt }: { startedAt: string }) {
+/** `m:ss` since `since`, ticking every second. */
+export function Elapsed({ since }: { since: string }) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  return <>REC {formatClock(now - Date.parse(startedAt))}</>;
+  return <>{formatClock(now - Date.parse(since))}</>;
 }
 
 /** The sealed `/files/` link of a file in the capture's folder, when the account listed one. */
@@ -57,63 +57,66 @@ function playable(view: RuntimeBrowserCaptureView): Media | null {
   return null;
 }
 
-/** A row's length: a screenshot's size, a recording's duration. */
-function captureLength(capture: RuntimeBrowserCapture): string | null {
-  if (capture.tracks.image) return `${capture.tracks.image.width}×${capture.tracks.image.height}`;
-  if (capture.tracks.video) return formatClock(capture.tracks.video.durationMs);
-  if (capture.endedAt) return formatClock(Date.parse(capture.endedAt) - Date.parse(capture.startedAt));
-  return null;
+/** A saved capture's tracks as the list shows them: a screenshot's size, a recording's length (with sound when it has
+ * it) and its screencast frames. */
+function captureTracks(capture: RuntimeBrowserCapture): string[] {
+  const { image, video, frames } = capture.tracks;
+  const length = video ? video.durationMs : frames && capture.endedAt ? Date.parse(capture.endedAt) - Date.parse(capture.startedAt) : null;
+  return [
+    ...(image ? [`screenshot · ${image.width}×${image.height}`] : []),
+    ...(length === null ? [] : [`video ${formatClock(length)}${video?.sound ? ' · sound' : ''}`]),
+    ...(frames ? [`${frames.count} frames`] : []),
+  ];
 }
 
-/** The Browser tab's Captures: the workspace's screenshots and recordings, newest first, each to mention in the chat
- * (its drive folder) or open in the player. `captures` is null until first read. */
-export function BrowserCaptures({ captures, error }: { captures: readonly RuntimeBrowserCaptureView[] | null; error: string | null }) {
-  const shape = useShape();
+/** The Browser tab's Captures: the workspace's screenshots and recordings, newest first, filtered by kind, each to
+ * mention in the chat (`onMention` adds its drive folder to the composer) or play. `captures` is null until first read. */
+export function BrowserCaptures({ captures, error, onMention }: { captures: readonly RuntimeBrowserCaptureView[] | null; error: string | null; onMention?: (reference: string) => void }) {
   const [filter, setFilter] = useState<CaptureFilter>('all');
   const [open, setOpen] = useState<RuntimeBrowserCaptureView | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
-  const [copyError, setCopyError] = useState<string | null>(null);
+  const [mentioned, setMentioned] = useState<string | null>(null);
   const shown = (captures ?? []).filter(view => CAPTURE_FILTERS[filter].keep(view.capture)).sort((a, b) => Date.parse(b.capture.startedAt) - Date.parse(a.capture.startedAt));
-  const mention = async (captureId: string) => {
-    try {
-      await navigator.clipboard.writeText(`drive://workspace/${BROWSER_DRIVE_PREFIX.captures}${captureId}/`);
-      setCopied(captureId); setCopyError(null);
-    } catch { setCopyError('Copying to the clipboard failed. Allow clipboard access and try again.'); }
-  };
-  return <section aria-label="Captures" className={`${shape.container} flex flex-col gap-3 bg-surface-2 p-4 shadow-surface-1`}>
-    <div className="flex flex-wrap items-center gap-2">
-      <h4 className="min-w-0 flex-1 text-body font-medium">Captures</h4>
-      <div role="group" aria-label="Show captures" className="flex gap-1">
-        {CAPTURE_FILTER_ORDER.map(key => <Button key={key} variant={filter === key ? 'secondary' : 'ghost'} size="compact" aria-pressed={filter === key} onClick={() => setFilter(key)}>{CAPTURE_FILTERS[key].label}</Button>)}
-      </div>
+  const today = new Date().toDateString();
+  return <section aria-label="Captures" className="flex flex-col gap-2">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h3 className="text-body font-medium">Captures</h3>
+      <TabsSubtle size="compact" selectedIndex={CAPTURE_FILTER_ORDER.indexOf(filter)} onSelect={index => setFilter(CAPTURE_FILTER_ORDER[index] ?? 'all')} idPrefix="browser-captures" aria-label="Capture kind">
+        {CAPTURE_FILTER_ORDER.map((key, index) => <TabsSubtleItem key={key} index={index} label={`${CAPTURE_FILTERS[key].label} · ${(captures ?? []).filter(view => CAPTURE_FILTERS[key].keep(view.capture)).length}`} />)}
+      </TabsSubtle>
     </div>
     {error ? <p role="alert" className="text-caption text-destructive">{error}{captures ? ' Showing the last list read.' : ''}</p> : null}
-    {copyError ? <p role="alert" className="text-caption text-destructive">{copyError}</p> : null}
     {captures === null && !error ? <p role="status" className="text-caption text-muted-foreground">Loading captures…</p> : null}
     {captures !== null && !shown.length ? <p className="text-caption text-muted-foreground">{captures.length ? 'No captures of this kind.' : 'No captures yet. Capture a tab here or from Chrome; screenshots agents take in scripts appear here too.'}</p> : null}
-    {shown.length ? <ul className="flex flex-col gap-2">{shown.map(view => {
+    {shown.length ? <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-1 text-caption">{shown.map(view => {
       const { capture } = view;
       const thumbnail = fileUrl(view, THUMBNAIL_PATH) ?? fileUrl(view, capture.tracks.image?.path);
-      const length = captureLength(capture);
-      return <li key={capture.captureId} aria-label={capture.name} className="flex min-w-0 items-center gap-3 rounded-lg bg-surface-3 p-2">
-        <div className="flex aspect-video w-24 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-2">
-          {thumbnail ? <img className="h-full w-full object-cover object-top" src={thumbnail} alt="" loading="lazy" /> : <span className="text-caption text-muted-foreground">{capture.tracks.image ? 'Image' : 'Video'}</span>}
-        </div>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <p className="truncate text-caption font-medium" title={capture.name}>{capture.name}</p>
-          <p className="truncate text-caption text-muted-foreground">
-            {CAPTURE_BY[capture.by]} · {capture.browser} · <time dateTime={capture.startedAt}>{new Date(capture.startedAt).toLocaleString()}</time>
-            {capture.state === 'recording' ? null : length ? <> · <span className="tabular-nums">{length}</span></> : null}
+      const recording = capture.state === 'recording';
+      const verb = capture.tracks.image && !capture.tracks.video && !capture.tracks.frames ? 'View' : 'Play';
+      const started = new Date(capture.startedAt);
+      return <li key={capture.captureId} aria-label={capture.name} className="flex min-w-0 items-center gap-3 p-2.5">
+        <span className="relative flex aspect-[16/10] w-24 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-surface-2">
+          {thumbnail ? <img className="h-full w-full object-cover object-top" src={thumbnail} alt="" loading="lazy" /> : <span className="text-muted-foreground">{capture.tracks.image ? 'Image' : 'Video'}</span>}
+          {recording ? <span className="absolute left-1 top-1"><Badge size="compact" color="red">● live</Badge></span> : null}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-body" title={capture.name}>{capture.name}</p>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1">
+            {recording ? <span className="rounded-full bg-surface-3 px-1.5 py-px text-[11px] tabular-nums">recording <Elapsed since={capture.startedAt} /></span>
+              : captureTracks(capture).map(track => <span key={track} className="rounded-full bg-surface-3 px-1.5 py-px text-[11px] tabular-nums">{track}</span>)}
+            {capture.state === 'failed' ? <Badge size="compact" color="red">Failed</Badge> : null}
+          </div>
+          <p className="mt-0.5 truncate text-muted-foreground" title={capture.page.url}>
+            {CAPTURE_BY[capture.by]} · {capture.browser} · {capture.page.url.replace(/^https?:\/\//u, '')} · {recording ? 'capturing now' : <time dateTime={capture.startedAt}>{started.toLocaleString([], started.toDateString() === today ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>}
           </p>
-          {capture.state === 'recording' ? <div><Badge size="compact" color="red"><RecordingClock startedAt={capture.startedAt} /></Badge></div> : null}
-          {capture.state === 'failed' ? <p className="text-caption text-destructive"><Badge size="compact" color="red">Failed</Badge> {capture.reason ?? 'The capture was not saved.'}</p> : null}
+          {capture.state === 'failed' ? <p className="mt-0.5 text-destructive">{capture.reason ?? 'The capture was not saved.'}</p> : null}
         </div>
-        <div className="flex shrink-0 flex-col gap-1">
-          <Button variant="ghost" size="compact" aria-label={`Mention ${capture.name}`} onClick={() => void mention(capture.captureId)}>{copied === capture.captureId ? 'Copied' : 'Mention'}</Button>
-          <Button variant="secondary" size="compact" aria-label={`Open ${capture.name}`} disabled={capture.state === 'recording' || playable(view) === null} onClick={() => setOpen(view)}>Open</Button>
+        <div className="flex shrink-0 items-center gap-1">
+          {onMention ? <Button variant="ghost" size="compact" aria-label={`Mention ${capture.name}`} onClick={() => { onMention(`drive://workspace/${BROWSER_DRIVE_PREFIX.captures}${capture.captureId}/ `); setMentioned(capture.captureId); }}>{mentioned === capture.captureId ? 'Mentioned' : 'Mention'}</Button> : null}
+          <Button variant="ghost" size="compact" aria-label={`${verb} ${capture.name}`} disabled={recording || playable(view) === null} onClick={() => setOpen(view)}>{verb}</Button>
         </div>
       </li>;
     })}</ul> : null}
+    <p className="text-caption text-muted-foreground">Everything you or an agent captures, one list: recordings of a tab and screenshots. Nothing here is in the repository until the agent saves it there; mention one in the chat to use it.</p>
     {open ? <CapturePlayer key={open.capture.captureId} view={open} onClose={() => setOpen(null)} /> : null}
   </section>;
 }

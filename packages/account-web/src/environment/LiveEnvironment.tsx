@@ -15,17 +15,17 @@ import type { RuntimeInspectorContext } from '../RuntimeWorkspace.js';
 import { EnvironmentView } from './EnvironmentView.js';
 import { LifecycleLogDialog } from './LifecycleLogDialog.js';
 import { OPTIONAL_STEPS, SETUP_STEPS, STEP_LABEL } from './lifecycle.js';
-import type { EnvironmentMachine, EnvironmentScript, EnvironmentViewModel, ScriptRun } from './types.js';
+import type { EnvironmentMachine, EnvironmentScript, EnvironmentViewModel, EnvironmentViewProps, ScriptRun } from './types.js';
 
 const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
 const PLATFORM: Record<string, string> = { linux: 'Linux', darwin: 'macOS', win32: 'Windows' };
 
 /** The live Environment tab: the gitspace.status document for machines and sync, lifecycle run records for setup, and the
  * workspace's secrets and values. */
-export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, workspace, onAskAgent, onOpenAgent, onOpenAgentSetup, runtimeContext }: {
+export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId, workspace, onAskAgent, onOpenAgent, onOpenAgentSetup, browser, onOpenBrowser, runtimeContext }: {
   projectId: string; projectName: string; workspaceName: string; spaceId: string; workspace: boolean;
   onAskAgent?: (text: string) => Promise<void>; onOpenAgent(): void; onOpenAgentSetup?(): void; runtimeContext?: Pick<RuntimeInspectorContext, 'snapshot' | 'onOpenTerminal'>;
-}) {
+} & Pick<EnvironmentViewProps, 'browser' | 'onOpenBrowser'>) {
   const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId });
   const query = useResultQuery(rpcClient.environment.get, { spaceId });
   const machinesQuery = useAccountMachines();
@@ -208,6 +208,8 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
       onOpenSecrets={() => navigateProductUrl(setProductRoute(new URL(window.location.href), 'secrets'))}
       onEditValue={(name, value) => mutate(async () => { const result = await rpcClient.environment.putValue({ spaceId, scope: workspace ? 'workspace' : 'project', name, value }); if (result.status === 'error') throw result.error; })}
       onOpenAgentSetup={onOpenAgentSetup}
+      browser={browser}
+      onOpenBrowser={onOpenBrowser}
     />
     {lfsTransition.dialog}
     {selectedLogRun && logSelection ? <LifecycleLogDialog key={`${spaceId}:${selectedLogRun.id}:${logSelection.script.id}`} run={selectedLogRun} script={logSelection.script} revision={remote.lifecycle.revision} loadPage={async (runId, offset, signal) => { const result = await rpcClient.environment.runLog({ spaceId, runId, offset }, { signal }); if (result.status === 'error') throw result.error; return result.value; }} onClose={() => setLogSelection(null)} /> : null}

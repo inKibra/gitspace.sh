@@ -1,4 +1,4 @@
-import { Badge, Button, ThinkingIndicator } from '@gitspace/ui';
+import { Button, ThinkingIndicator } from '@gitspace/ui';
 import type {
   RuntimeBrowserPageComment,
   RuntimeBrowserShareBox,
@@ -8,13 +8,14 @@ import type {
   RuntimeBrowserShareViewer,
 } from '@gitspace/protocol-runtime';
 import { browserSharePointerColor } from '@gitspace/protocol-runtime';
-import { MessageTextSquare01 } from '@untitledui/icons';
+import { MessagePlusSquare } from '@untitledui/icons';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import { glyph } from '../glyph.js';
 import { ShareComments } from './ShareComments.js';
 import { joinShare, openShareLive, ShareRequestError } from './share-client.js';
 import type { ShareJoined, ShareLive } from './share-client.js';
-import { shareEndsText } from './share-format.js';
+import { shareTargetLabel, shareTimeLeft } from './share-format.js';
 import type { ShareEnd } from './share-format.js';
 
 type Point = { x: number; y: number };
@@ -32,6 +33,15 @@ const SIZE_INTERVAL_MS = 500;
 /** A press that moves farther than this (CSS px) drags an area instead of picking an element. */
 const DRAG_PX = 8;
 const RECONNECT_MAX_MS = 15_000;
+/** Chrome's purple tab-group colour, which marks comment mode: the frame's ring, the outlines and the Comment button. */
+const COMMENT_PURPLE = '#a142f4';
+const CommentGlyph = glyph(MessagePlusSquare);
+/** Watchers shown as avatars in the header; the rest are counted. */
+const WATCHER_AVATARS = 6;
+/** The comment box is `w-72`; it sits this far beside its target and needs about this much height. */
+const DRAFT_WIDTH_PX = 288;
+const DRAFT_GAP_PX = 12;
+const DRAFT_HEIGHT_PX = 150;
 
 /** Sends at most once per interval; the latest value waiting is sent when the interval ends. */
 class Throttle<T> {
@@ -312,90 +322,117 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const sharer = share.sharer || 'Someone';
   const aspect = page ?? frame ?? { width: 16, height: 10 };
   const fit = stage ? Math.min(stage.width, (stage.height * aspect.width) / aspect.height) : null;
-  const anchor = draft?.kind === 'point' ? draft.at : draft ? { x: draft.region.x + draft.region.width, y: draft.region.y + draft.region.height } : null;
   const title = page?.title || share.page.title || share.page.site;
+  const chosen = draft?.kind === 'region' ? draft.region : draft && hit ? hit.box : draft ? { ...draft.at, width: 0, height: 0 } : null;
+  const popover = chosen ? placeDraft(chosen, fit ?? 0, ((fit ?? 0) * aspect.height) / aspect.width) : null;
+  const draftLabel = draft?.kind === 'region' ? 'an area of the page' : hit ? shareTargetLabel(hit) : 'this spot';
+  const shownWatchers = watchers.slice(0, WATCHER_AVATARS);
   return <main className="flex h-dvh flex-col bg-background">
-    <header className="flex items-center gap-3 border-b border-border px-3 py-2">
-      <div className="flex min-w-0 flex-1 flex-col">
-        <h1 className="truncate text-body font-medium text-foreground">{title}</h1>
-        <span className="truncate text-caption text-muted-foreground">{page ? siteOf(page.url, share.page.site) : share.page.site} · shared by {sharer} · ends {shareEndsText(share.expiresAt, Date.now())}</span>
-      </div>
+    <header className="flex items-center gap-2.5 border-b border-border bg-surface-1 px-4 py-2.5">
+      <img src="/favicon.png" alt="" width={20} height={20} className="shrink-0 rounded-md" />
+      <p className="min-w-0 flex-1 truncate text-caption text-foreground">
+        <strong>{sharer}</strong> is sharing <span className="font-mono">{page ? siteOf(page.url, share.page.site) : share.page.site}</span> · {shareTimeLeft(share.expiresAt, Date.now())} left
+      </p>
+      <ul aria-label="Watching" className="flex shrink-0 -space-x-1.5">
+        {shownWatchers.map(watcher => {
+          const label = `${watcher.name}${watcher.viewerId === self.viewerId ? ' (you)' : ''}${watcher.guest ? ' · guest' : ''}`;
+          return <li key={watcher.viewerId} title={label} className="flex size-6 items-center justify-center rounded-full border-2 border-surface-1 text-[10px] font-bold text-white" style={{ background: browserSharePointerColor(watcher.viewerId) }}>
+            <span aria-hidden>{[...watcher.name.trim()][0]?.toUpperCase() ?? '?'}</span><span className="sr-only">{label}</span>
+          </li>;
+        })}
+        {watchers.length > shownWatchers.length ? <li title={`${watchers.length} watching`} className="flex h-6 min-w-6 items-center justify-center rounded-full border-2 border-surface-1 bg-surface-3 px-1 text-[10px] font-bold text-foreground">+{watchers.length - shownWatchers.length}</li> : null}
+      </ul>
       {share.comment
-        ? <Button type="button" size="compact" variant={commenting ? 'primary' : 'secondary'} aria-pressed={commenting} onClick={toggleCommenting}><MessageTextSquare01 aria-hidden className="size-4" />Comment</Button>
+        ? <Button type="button" size="compact" variant={commenting ? 'primary' : 'secondary'} aria-pressed={commenting} leadingIcon={CommentGlyph} onClick={toggleCommenting}>{commenting ? 'Commenting' : 'Comment'}</Button>
         : null}
     </header>
-    {!online ? <p role="status" className="border-b border-border bg-surface-2 px-3 py-1.5 text-caption text-foreground">{sharer}'s Chrome is offline. The tab comes back when it reconnects.</p> : null}
-    {!connected ? <p role="status" className="border-b border-border bg-surface-2 px-3 py-1.5 text-caption text-foreground">Connection lost. Reconnecting…</p> : null}
-    {notice ? <p role="alert" className="flex items-center gap-2 border-b border-border bg-surface-2 px-3 py-1.5 text-caption text-destructive">{notice}<Button type="button" size="compact" variant="ghost" className="ml-auto" onClick={() => setNotice(null)}>Dismiss</Button></p> : null}
-    {commenting ? <p className="border-b border-border px-3 py-1.5 text-caption text-muted-foreground">Click or tap what you want to comment on, or drag over an area.</p> : null}
+    {!online ? <p role="status" className="border-b border-border bg-surface-2 px-4 py-1.5 text-caption text-foreground">{sharer}'s Chrome is offline. The tab comes back when it reconnects.</p> : null}
+    {!connected ? <p role="status" className="border-b border-border bg-surface-2 px-4 py-1.5 text-caption text-foreground">Connection lost. Reconnecting…</p> : null}
+    {notice ? <p role="alert" className="flex items-center gap-2 border-b border-border bg-surface-2 px-4 py-1.5 text-caption text-destructive">{notice}<Button type="button" size="compact" variant="ghost" className="ml-auto" onClick={() => setNotice(null)}>Dismiss</Button></p> : null}
     <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-      <div className="flex min-h-0 flex-1 bg-surface-2 p-2 sm:p-4">
-        <div ref={stageRef} className="flex min-h-0 min-w-0 flex-1 items-center justify-center">
-          <div
-            ref={screenRef}
-            aria-label="Shared tab"
-            className={`relative touch-none select-none ${commenting ? 'cursor-crosshair' : 'cursor-default'}`}
-            style={{ aspectRatio: `${aspect.width} / ${aspect.height}`, width: fit === null ? '100%' : `${fit}px` }}
-            onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerLeave={onPointerLeave}
-          >
-            <div className="absolute inset-0 overflow-hidden rounded-lg bg-black/90 shadow-sm">
-              {frame
-                ? <img alt={`Live view of ${title}`} src={`data:image/jpeg;base64,${frame.data}`} draggable={false} className="size-full object-contain" />
-                : <div className="flex size-full flex-col items-center justify-center gap-2 text-caption text-white/70"><ThinkingIndicator aria-label="Waiting for the tab" />Waiting for the tab…</div>}
-            </div>
-            {commenting && hit ? <Outline box={hit.box} label={[hit.role, hit.name].filter(Boolean).join(' ')} /> : null}
-            {dragBox ? <Outline box={dragBox} label={null} /> : null}
-            {draft?.kind === 'region' ? <Outline box={draft.region} label={null} /> : null}
-            {/* Everyone's named pointer, yours included, is drawn on the tab itself and arrives in its frames. */}
-            {draft && anchor ? <form
-              aria-label="New comment"
-              onSubmit={event => { event.preventDefault(); submitDraft(); }}
-              onPointerDown={event => event.stopPropagation()} onPointerMove={event => event.stopPropagation()} onPointerUp={event => event.stopPropagation()}
-              className="absolute z-20 flex w-64 max-w-[80vw] cursor-auto flex-col gap-2 rounded-xl border border-border bg-card p-3 text-card-foreground shadow-lg"
-              style={{ left: `${anchor.x * 100}%`, top: `${anchor.y * 100}%`, transform: `translate(${anchor.x > 0.6 ? '-100%' : '0'}, ${anchor.y > 0.6 ? '-100%' : '0'})` }}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 bg-surface-2 p-2 sm:p-4">
+          <div ref={stageRef} className="flex min-h-0 min-w-0 flex-1 items-center justify-center">
+            <div
+              ref={screenRef}
+              aria-label="Shared tab"
+              className={`relative touch-none select-none ${commenting ? 'cursor-crosshair' : 'cursor-default'}`}
+              style={{ aspectRatio: `${aspect.width} / ${aspect.height}`, width: fit === null ? '100%' : `${fit}px` }}
+              onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerLeave={onPointerLeave}
             >
-              <span className="truncate text-caption text-muted-foreground">{draft.kind === 'region' ? 'On this area' : hit ? `On ${[hit.role, hit.name ? `“${hit.name}”` : ''].filter(Boolean).join(' ')}` : 'On this spot'}</span>
-              <textarea
-                aria-label="Your comment" rows={3} autoFocus value={draftText} disabled={sending} maxLength={4000}
-                className="w-full resize-none rounded-md border border-border bg-surface-2 p-2 text-body text-foreground"
-                onChange={event => setDraftText(event.currentTarget.value)}
-                onKeyDown={event => {
-                  if (event.key === 'Escape') cancelDraft();
-                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submitDraft(); }
-                }}
-              />
-              {draftError ? <p role="alert" className="text-caption text-destructive">{draftError}</p> : null}
-              <div className="flex justify-end gap-2">
-                <Button type="button" size="compact" variant="ghost" onClick={cancelDraft}>Cancel</Button>
-                <Button type="submit" size="compact" variant="primary" disabled={!draftText.trim() || sending}>{sending ? 'Sending…' : 'Comment'}</Button>
+              <div className="absolute inset-0 overflow-hidden rounded-md bg-black/90 shadow-sm">
+                {frame
+                  ? <img alt={`Live view of ${title}`} src={`data:image/jpeg;base64,${frame.data}`} draggable={false} className="size-full object-contain" />
+                  : <div className="flex size-full flex-col items-center justify-center gap-2 text-caption text-white/70"><ThinkingIndicator aria-label="Waiting for the tab" />Waiting for the tab…</div>}
               </div>
-            </form> : null}
+              {commenting ? <div aria-hidden className="pointer-events-none absolute inset-0 rounded-md" style={{ boxShadow: `inset 0 0 0 3px ${COMMENT_PURPLE}` }} /> : null}
+              {commenting && hit && !draft && !dragBox ? <Outline box={hit.box} label={shareTargetLabel(hit)} kind="hover" /> : null}
+              {dragBox ? <Outline box={dragBox} label="Selected area" kind="area" /> : null}
+              {draft?.kind === 'region' ? <Outline box={draft.region} label="Selected area" kind="chosenArea" /> : null}
+              {draft?.kind === 'point' && hit ? <Outline box={hit.box} label={shareTargetLabel(hit)} kind="chosen" /> : null}
+              {/* Everyone's named pointer, yours included, is drawn on the tab itself and arrives in its frames. */}
+              {draft && popover ? <form
+                aria-label="New comment"
+                onSubmit={event => { event.preventDefault(); submitDraft(); }}
+                onPointerDown={event => event.stopPropagation()} onPointerMove={event => event.stopPropagation()} onPointerUp={event => event.stopPropagation()}
+                className="absolute z-30 flex w-72 max-w-[80vw] cursor-auto flex-col gap-2 rounded-xl border border-neutral-200 bg-white p-3 text-[12px] text-neutral-800 shadow-2xl"
+                style={popover}
+              >
+                <p className="text-[11px] text-neutral-500">On {draftLabel} · as <strong className="text-neutral-700">{self.name}{self.guest ? ' (guest)' : ''}</strong></p>
+                <textarea
+                  aria-label="Your comment" rows={2} autoFocus value={draftText} disabled={sending} maxLength={4000} placeholder="Write a comment…"
+                  className="w-full resize-none rounded-lg border border-neutral-300 bg-white px-2 py-1.5 text-[12px] text-neutral-800 placeholder:text-neutral-400 focus:border-[#a142f4] focus:outline-none"
+                  onChange={event => setDraftText(event.currentTarget.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Escape') cancelDraft();
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submitDraft(); }
+                  }}
+                />
+                {draftError ? <p role="alert" className="text-[11px] text-red-600">{draftError}</p> : null}
+                <div className="flex items-center gap-2">
+                  <button type="button" className="text-[11px] text-neutral-500 hover:text-neutral-800" onClick={cancelDraft}>Cancel</button>
+                  <span className="flex-1" />
+                  <button type="submit" className="rounded-lg px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50" style={{ background: COMMENT_PURPLE }} disabled={!draftText.trim() || sending}>{sending ? 'Sending…' : 'Comment'}</button>
+                </div>
+              </form> : null}
+            </div>
           </div>
         </div>
+        <p className="border-t border-border bg-surface-1 px-4 py-2 text-[11px] text-muted-foreground">
+          {commenting
+            ? `Hover to see what a comment would attach to, click it, or drag across an area. ${sharer} sees your comment on the page in their Chrome and in their workspace.`
+            : 'Watching live · your pointer is visible to everyone here'}
+        </p>
       </div>
-      <aside className="flex max-h-[38dvh] flex-col gap-4 overflow-y-auto border-t border-border p-3 lg:max-h-none lg:w-80 lg:border-l lg:border-t-0">
-        <section aria-label="Watching" className="flex flex-col gap-2">
-          <h2 className="text-caption font-medium text-muted-foreground">Watching · {watchers.length}</h2>
-          <ul className="flex flex-col gap-1">
-            {watchers.map(watcher => <li key={watcher.viewerId} className="flex items-center gap-2 text-body text-foreground">
-              <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ background: browserSharePointerColor(watcher.viewerId) }} />
-              <span className="truncate">{watcher.name}{watcher.viewerId === self.viewerId ? ' (you)' : ''}</span>
-              {watcher.guest ? <Badge size="compact" color="gray">guest</Badge> : null}
-            </li>)}
-          </ul>
-        </section>
-        {share.comment ? <ShareComments comments={comments} /> : null}
-      </aside>
+      {share.comment ? <aside className="flex max-h-[38dvh] flex-col overflow-y-auto border-t border-border bg-surface-1 p-4 lg:max-h-none lg:w-80 lg:border-l lg:border-t-0">
+        <ShareComments comments={comments} />
+      </aside> : null}
     </div>
   </main>;
 }
 
-function Outline({ box, label }: { box: RuntimeBrowserShareBox; label: string | null }) {
+type OutlineKind = 'hover' | 'area' | 'chosen' | 'chosenArea';
+/** Hovered and dragged are dashed, chosen is solid; areas are filled. */
+const OUTLINE_STYLE: Record<OutlineKind, CSSProperties> = {
+  hover: { outline: `2px dashed ${COMMENT_PURPLE}`, outlineOffset: 2 },
+  area: { outline: `2px dashed ${COMMENT_PURPLE}`, background: `${COMMENT_PURPLE}14` },
+  chosen: { outline: `2px solid ${COMMENT_PURPLE}`, outlineOffset: 2 },
+  chosenArea: { outline: `2px solid ${COMMENT_PURPLE}`, background: `${COMMENT_PURPLE}14` },
+};
+
+function Outline({ box, label, kind }: { box: RuntimeBrowserShareBox; label: string; kind: OutlineKind }) {
   return <div
-    aria-label={label ?? 'Selected area'}
-    className="pointer-events-none absolute z-10 rounded-sm border-2 border-blue-500 bg-blue-500/10"
-    style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
+    aria-label={label}
+    className="pointer-events-none absolute z-10 rounded"
+    style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%`, ...OUTLINE_STYLE[kind] }}
   >
-    {label ? <span className="absolute -top-6 left-0 max-w-64 truncate rounded bg-blue-600 px-1.5 py-0.5 text-[11px] text-white">{label}</span> : null}
+    {kind === 'hover' ? <span className="absolute -top-6 -left-[3px] max-w-64 truncate rounded px-1.5 py-0.5 text-[10px] text-white" style={{ background: COMMENT_PURPLE }}>{label}</span> : null}
   </div>;
+}
+
+/** Where the comment box goes in the frame (`width` × `height` px): beside the target, on the side with room. */
+function placeDraft(target: RuntimeBrowserShareBox, width: number, height: number): CSSProperties {
+  const right = (target.x + target.width) * width + DRAFT_GAP_PX;
+  const left = right + DRAFT_WIDTH_PX <= width ? right : Math.max(0, Math.min(width - DRAFT_WIDTH_PX, target.x * width - DRAFT_GAP_PX - DRAFT_WIDTH_PX));
+  return { left, top: Math.max(8, Math.min(target.y * height - 8, height - DRAFT_HEIGHT_PX)) };
 }

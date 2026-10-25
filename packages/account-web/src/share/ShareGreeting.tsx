@@ -1,9 +1,8 @@
 import { Button, InputField, InputGroup } from '@gitspace/ui';
 import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
-import { Check, XClose } from '@untitledui/icons';
 import { useState } from 'react';
-import type { FormEvent } from 'react';
-import { shareEndsText } from './share-format.js';
+import type { FormEvent, ReactNode } from 'react';
+import { shareTimeLeft } from './share-format.js';
 
 export interface ShareGreetingProps {
   preview: RuntimeBrowserSharePreview;
@@ -14,6 +13,17 @@ export interface ShareGreetingProps {
   notice: string | null;
   /** Joins; answers why it could not (the greeting stays), or null once joined. */
   onJoin(name: string): Promise<string | null>;
+}
+
+/** A share page that offers nothing to join (ended, or a link that opens no share): the faded logo, a title and why. */
+export function ShareNotice({ title, children }: { title: string; children: ReactNode }) {
+  return <main className="flex h-dvh items-center justify-center overflow-y-auto bg-surface-2 px-4 py-8">
+    <div className="flex w-full max-w-[420px] flex-col items-center gap-3 rounded-2xl border border-border bg-surface-1 p-8 text-center shadow-xl">
+      <img src="/favicon.png" alt="" width={36} height={36} className="rounded-lg opacity-60" />
+      <h1 className="text-subtitle font-semibold text-foreground">{title}</h1>
+      <p className="text-body text-muted-foreground">{children}</p>
+    </div>
+  </main>;
 }
 
 /** What a visitor sees before joining a share: who shares which page, what they may and may not do, and when it ends. */
@@ -31,44 +41,32 @@ export function ShareGreeting({ preview, asAccount, initialName, notice, onJoin 
     const failure = await onJoin(name.trim());
     if (failure !== null) { setError(failure); setJoining(false); }
   };
-  const may = [
-    'Watch the tab live',
-    'Point at things: everyone watching sees your pointer and name',
-    ...(preview.comment ? [`Comment on what you point at: ${sharer} gets your comments`] : []),
-  ];
-  const mayNot = [`Click or type in the tab: it stays in ${sharer}'s hands`, ...(preview.comment ? [] : ['Comment: this share is view only'])];
-  return <main className="flex h-dvh overflow-y-auto bg-background px-4 py-8 sm:items-center sm:justify-center">
-    <form onSubmit={(event) => { void submit(event); }} className="mx-auto flex w-full max-w-md flex-col gap-6">
+  return <main className="flex h-dvh overflow-y-auto bg-surface-2 px-4 py-8 sm:items-center sm:justify-center">
+    <form onSubmit={(event) => { void submit(event); }} className="mx-auto flex h-fit w-full max-w-[420px] flex-col gap-5 rounded-2xl border border-border bg-surface-1 p-7 shadow-xl">
+      <div className="flex items-center gap-2.5"><img src="/favicon.png" alt="" width={28} height={28} className="rounded-lg" /><span className="text-body font-semibold text-foreground">GitSpace</span></div>
       <header className="flex flex-col gap-1">
-        <span className="text-caption text-muted-foreground">Shared tab · GitSpace</span>
-        <h1 className="text-title font-semibold text-foreground">{sharer} is sharing a tab with you</h1>
+        <h1 className="text-title font-semibold tracking-tight text-foreground">{sharer} is sharing a tab with you</h1>
+        <p className="text-body text-muted-foreground">Live, as it happens in {sharer}&apos;s Chrome.</p>
       </header>
-      <section aria-label="Shared page" className="flex flex-col gap-0.5 rounded-xl border border-border bg-card px-4 py-3">
+      <section aria-label="Shared page" className="flex min-w-0 flex-col rounded-xl border border-border bg-surface-2 p-3">
         <span className="truncate text-body font-medium text-foreground">{preview.page.title || preview.page.site}</span>
-        <span className="truncate text-caption text-muted-foreground">{preview.page.site}</span>
+        <span className="truncate font-mono text-caption text-muted-foreground">{preview.page.site}</span>
       </section>
-      <section aria-label="What you can do" className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
-          <h2 className="text-caption font-medium text-muted-foreground">You can</h2>
-          <ul className="flex flex-col gap-1.5">
-            {may.map(text => <li key={text} className="flex gap-2 text-body text-foreground"><Check aria-hidden className="mt-0.5 size-4 shrink-0 text-green-600" />{text}</li>)}
-          </ul>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <h2 className="text-caption font-medium text-muted-foreground">You can't</h2>
-          <ul className="flex flex-col gap-1.5">
-            {mayNot.map(text => <li key={text} className="flex gap-2 text-body text-muted-foreground"><XClose aria-hidden className="mt-0.5 size-4 shrink-0" />{text}</li>)}
-          </ul>
-        </div>
-        <p className="text-caption text-muted-foreground">Ends {shareEndsText(preview.expiresAt, Date.now())}.</p>
-      </section>
-      <section className="flex flex-col gap-3">
-        {asAccount
-          ? <p className="text-body text-foreground">Joining as {sharer}</p>
-          : <InputGroup className="w-full"><InputField index={0} label="Your name" value={name} onChange={setName} placeholder="Shown on your pointer" maxLength={60} autoComplete="name" disabled={joining} /></InputGroup>}
-        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-        <Button type="submit" variant="primary" disabled={!ready || joining}>{joining ? 'Joining…' : 'Join'}</Button>
-      </section>
+      <ul aria-label="What you can do" className="flex flex-col gap-1.5 text-body text-foreground">
+        <li>✓ Watch the tab live</li>
+        <li>✓ Point: everyone sees your pointer with your name</li>
+        {preview.comment ? <li>✓ Comment on anything on the page</li> : null}
+        <li className="text-muted-foreground">✕ Click or type in the page; only {sharer} and their agent can</li>
+        {preview.comment ? null : <li className="text-muted-foreground">✕ Comment: this share is view only</li>}
+      </ul>
+      {asAccount
+        ? <p className="rounded-lg bg-surface-2 px-3 py-2 text-caption text-foreground">Joining as <strong>{sharer}</strong> (signed in to GitSpace)</p>
+        : <InputGroup className="w-full"><InputField index={0} label="Your name" value={name} onChange={setName} placeholder={preview.comment ? 'Shown on your pointer and comments' : 'Shown on your pointer'} maxLength={60} autoComplete="name" disabled={joining} /></InputGroup>}
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+      <Button type="submit" variant="primary" disabled={!ready || joining}>{joining ? 'Joining…' : 'Join'}</Button>
+      <p className="text-caption text-muted-foreground">
+        {sharer} sees that you joined. Ends in {shareTimeLeft(preview.expiresAt, Date.now())} or when {sharer} stops sharing.{asAccount ? '' : ' No account needed.'}
+      </p>
     </form>
   </main>;
 }

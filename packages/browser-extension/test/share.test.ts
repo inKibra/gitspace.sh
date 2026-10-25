@@ -176,60 +176,57 @@ describe('a share link pasted into a workspace', () => {
 });
 
 describe('Share this tab in the popup', () => {
-  it('Copy link makes the share with a signed request and copies its link; it shows who is watching, and Stop sharing ends it', async () => {
+  it('copying the link makes the share with a signed request and copies its link; it shows who is watching, and Stop sharing ends it', async () => {
     const chrome = await sharing();
-    /** The popup's element with this id. */
-    const element = ({ window }: { window: Window }, id: string) => {
-      const found = window.document.getElementById(id);
-      if (!(found instanceof window.HTMLElement)) throw new Error(`No #${id}`);
+    /** The popup's button with this text or label. */
+    const button = ({ window }: { window: Window }, name: string) => {
+      const found = [...window.document.querySelectorAll('button')].find(node => node.textContent === name || node.getAttribute('aria-label') === name);
+      if (!(found instanceof window.HTMLElement)) throw new Error(`No ${name} button`);
       return found;
     };
     // Comments land in a workspace, so only a tab in a workspace group offers them.
     const grouped = await chrome.openPopup();
     closing.push(grouped.close);
-    expect(element(grouped, 'share-comment')).toMatchObject({ disabled: false });
-    expect(element(grouped, 'share-comment-hint').hidden).toBe(true);
+    expect(button(grouped, '✓ comment')).toMatchObject({ disabled: false });
 
     chrome.activate(9);
     const popup = await chrome.openPopup();
     closing.push(popup.close);
-    const $ = (id: string) => element(popup, id);
-    expect($('share').hidden).toBe(false);
-    expect($('share-comment')).toMatchObject({ disabled: true });
-    expect($('share-comment-hint').textContent).toBe('Comments need the tab in a workspace group');
-    Object.assign($('share-expiry'), { value: '480' });
-    $('share-copy').click();
+    expect(button(popup, 'comment')).toMatchObject({ disabled: true, title: 'Comments need the tab in a workspace group' });
+    expect(popup.document.body.textContent).toContain('This tab · elsewhere.example');
+    // There is no Share button: copying the link makes the share, then copies it.
+    button(popup, 'Copy to clipboard').click();
     await chrome.waitFor(() => chrome.requests.length === 1);
+    await popup.rendered();
     const [made] = chrome.requests;
     if (!made) throw new Error('No share request');
-    expect(JSON.parse(new TextDecoder().decode(made.body))).toEqual({ op: 'create', targetId: 'target-9', comment: false, expiresInMinutes: 480 });
+    expect(JSON.parse(new TextDecoder().decode(made.body))).toEqual({ op: 'create', targetId: 'target-9', comment: false, expiresInMinutes: 60 });
     expect(await chrome.authorizedAsRequired(made)).toBe(true);
     const [share] = chrome.shares.values();
     if (!share) throw new Error('No share made');
     expect(popup.copied).toEqual([share.link]);
-    expect($('share-new').hidden).toBe(true);
-    expect($('shares').querySelector('input')).toMatchObject({ value: share.link, readOnly: true });
-    expect($('shares').textContent).toContain('View and point; never click or type · 8 h');
-    expect($('shares').textContent).toContain('No one is watching yet');
+    expect(popup.document.body.textContent).toContain(`account.gitspace.test/s/${share.shareId.slice(0, 8)}…`);
+    expect(popup.document.body.textContent).toContain('No one is watching yet · 1 h left');
+    // Copying a link that exists copies it again and makes no other share.
+    button(popup, 'Copy to clipboard').click();
+    await popup.rendered();
+    expect(popup.copied).toEqual([share.link, share.link]);
+    expect(chrome.requests.length).toBe(1);
 
     // Someone joins: the account tells this Chrome, and the popup shows them.
     await chrome.fromRelay({ operation: 'shares', shares: [{ ...share, viewers: [{ viewerId: crypto.randomUUID(), name: 'Ann', guest: true, joinedAt: new Date().toISOString() }, { viewerId: crypto.randomUUID(), name: 'Bradley', guest: false, joinedAt: new Date().toISOString() }] }] });
     const reopened = await chrome.openPopup();
     closing.push(reopened.close);
-    const viewers = reopened.document.querySelector('#shares .viewers');
-    expect(viewers?.textContent).toBe('Watching: Annguest, Bradley');
-    expect([...viewers?.querySelectorAll('.guest') ?? []].map(mark => mark.previousSibling?.textContent)).toEqual(['Ann']);
+    expect(reopened.document.body.textContent).toContain('Ann (guest) and Bradley are watching');
 
-    const stop = [...reopened.document.querySelectorAll('#shares button')].find(button => button.textContent === 'Stop sharing');
-    if (!(stop instanceof reopened.window.HTMLElement)) throw new Error('No Stop sharing');
-    stop.click();
+    button(reopened, 'Stop sharing').click();
     await chrome.waitFor(() => chrome.requests.length === 2);
+    await reopened.rendered();
     const stopped = chrome.requests[1];
     if (!stopped) throw new Error('No revoke request');
     expect(JSON.parse(new TextDecoder().decode(stopped.body))).toEqual({ op: 'revoke', shareId: share.shareId });
     expect(await chrome.authorizedAsRequired(stopped)).toBe(true);
     expect(share.endReason).toBe('revoked');
-    expect(reopened.document.getElementById('shares')?.children.length).toBe(0);
-    expect(element(reopened, 'share-new').hidden).toBe(false);
+    expect([...reopened.document.querySelectorAll('button')].some(node => node.textContent === 'Stop sharing')).toBe(false);
   });
 });

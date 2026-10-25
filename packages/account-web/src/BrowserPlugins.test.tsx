@@ -3,7 +3,7 @@ import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { RuntimeAccountBrowserRelayStatus, RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
-import { accountBrowserStatus, confirmAccountBrowser, pairAccountBrowser, projectBrowserSettings, renameAccountBrowser, updateProjectBrowserSettings } from './browser-relay-client.js';
+import { accountBrowserStatus, confirmAccountBrowser, pairAccountBrowser, projectBrowserSettings, renameAccountBrowser, unpairAccountBrowser, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { BrowserPlugins, PairChromeDialog, useBrowserPlugins, type PairChromeRequest } from './BrowserPlugins.js';
 
 vi.mock('./browser-relay-client.js', () => ({
@@ -84,17 +84,33 @@ it('lists confirmed Chromes with where they are approved, and pairings in progre
   expect(button('Resume')).toBeTruthy();
 });
 
-it('warns when a Chrome is approved nowhere', async () => {
+it('warns when a Chrome is approved nowhere and offers to approve it for projects', async () => {
   await render();
-  expect(container.textContent).toContain('Approved in 0 projects');
-  expect(container.textContent).toContain('Not approved in any project');
+  expect(container.textContent).toContain('Paired, but not approved for any project, so no agent can use it.');
+  expect(container.textContent).not.toContain('Approved in 0 projects');
+  await act(() => button('Approve for projects').click());
+  expect(byLabel('Approved in Alpha')).toBeTruthy();
+});
+
+it('forgets a Chrome from its card only after you confirm', async () => {
+  const confirm = vi.fn(() => false);
+  vi.stubGlobal('confirm', confirm);
+  vi.mocked(unpairAccountBrowser).mockImplementation(async () => ({ pairings: [] }));
+  await render();
+  await act(async () => byLabel('Forget Work Chrome').click());
+  expect(confirm).toHaveBeenCalledOnce();
+  expect(unpairAccountBrowser).not.toHaveBeenCalled();
+  confirm.mockReturnValue(true);
+  await act(async () => byLabel('Forget Work Chrome').click());
+  expect(unpairAccountBrowser).toHaveBeenCalledWith(work);
+  expect(container.textContent).toContain('No Chrome paired yet');
 });
 
 it('makes a Chrome approved in a project without a default that project’s default, and keeps an existing default', async () => {
   const other = '00000000-0000-4000-8000-000000000003';
   settings.beta = { ...settings.beta!, defaultPairingId: other, browsers: [...settings.beta!.browsers, { pairingId: other, name: 'Home Chrome', note: 'personal', generation: 1, connected: false, approved: true }] };
   await render();
-  await act(() => button('Manage Chrome').click());
+  await act(() => button('Approve for projects').click());
   await act(async () => byLabel('Approved in Alpha').click());
   expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('alpha', 3, { defaultPairingId: work, approvals: [{ pairingId: work, note: '' }] });
   expect(document.body.textContent).toContain('Project default');
@@ -102,19 +118,24 @@ it('makes a Chrome approved in a project without a default that project’s defa
   expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('beta', 5, { defaultPairingId: other, approvals: [{ pairingId: other, note: 'personal' }, { pairingId: work, note: '' }] });
 });
 
-it('renames a Chrome for every project', async () => {
+it('renames a Chrome for every project when you are done', async () => {
   vi.mocked(renameAccountBrowser).mockImplementation(async (pairingId, name) => ({ pairings: [{ ...confirmed(pairingId, name) }] }));
   await render();
-  await act(() => button('Manage Chrome').click());
-  await type('Chrome name', 'Staging Chrome');
-  await act(async () => button('Rename').click());
+  await act(() => button('Approve for projects').click());
+  await type('Name', 'Staging Chrome');
+  await act(async () => button('Done').click());
   expect(renameAccountBrowser).toHaveBeenCalledWith(work, 'Staging Chrome');
   expect(container.textContent).toContain('Staging Chrome');
+  expect(document.body.querySelector('[aria-label="Projects"]')).toBeNull();
 });
 
-it('pairs a Chrome: pairing JSON, fingerprint confirmation, then its name and the project it was opened for', async () => {
+it('pairs a Chrome in one stepper: a pairing code with its countdown, the fingerprint to confirm, then its name and the project it was opened for', async () => {
   vi.useFakeTimers();
-  vi.mocked(pairAccountBrowser).mockResolvedValue({ code: 'one-time-code', pairingId: fresh, generation: 1, endpoint: 'https://account.gitspace.test', expiresAt: '2026-10-23T12:10:00.000Z', trust: { algorithm: 'Ed25519', accountId: 'account', publicKey: 'root' } });
+  vi.setSystemTime(new Date('2026-10-23T12:00:00.000Z'));
+  vi.mocked(pairAccountBrowser).mockImplementation(async () => {
+    relay = { pairings: [...relay.pairings, { ...confirmed(fresh, 'Chrome 00000000'), state: 'awaiting-key', pairedKeyFingerprint: null, expiresAt: '2026-10-23T12:10:00.000Z' }] };
+    return { code: 'one-time-code', pairingId: fresh, generation: 1, endpoint: 'https://account.gitspace.test', expiresAt: '2026-10-23T12:10:00.000Z', trust: { algorithm: 'Ed25519', accountId: 'account', publicKey: 'root' } };
+  });
   vi.mocked(confirmAccountBrowser).mockImplementation(async () => {
     relay = { pairings: [confirmed(work, 'Work Chrome'), confirmed(fresh, 'Chrome 00000000')] };
     for (const value of Object.values(settings)) value.browsers.push({ pairingId: fresh, name: 'Chrome 00000000', note: '', generation: 1, connected: true, approved: false });
@@ -122,18 +143,43 @@ it('pairs a Chrome: pairing JSON, fingerprint confirmation, then its name and th
   });
   vi.mocked(renameAccountBrowser).mockImplementation(async () => relay);
   await render({ projectId: 'beta' });
-  await act(async () => button('Next').click());
-  expect(document.body.textContent).toContain('one-time-code');
-  expect(document.body.textContent).toContain('Waiting for the extension');
-  relay = { pairings: [...relay.pairings, { ...confirmed(fresh, 'Chrome 00000000'), state: 'pending-confirmation' }] };
+  expect(document.body.textContent).toContain('Opened from a workspace, its project is ticked already.');
+  expect(button('Finish').disabled).toBe(true);
+  await act(async () => button('Get pairing code').click());
+  expect(byLabel('Step 1: Install the GitSpace extension, done')).toBeTruthy();
+  expect(document.body.querySelector('[title*="one-time-code"]')).not.toBeNull();
+  expect(document.body.textContent).toContain('Pairing code · expires in 10:00');
+  expect(document.body.textContent).toContain('Waiting for a Chrome to answer');
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+  expect(document.body.textContent).toContain('Pairing code · expires in 9:59');
+  relay = { pairings: [...relay.pairings.filter(item => item.pairingId !== fresh), { ...confirmed(fresh, 'Chrome 00000000'), state: 'pending-confirmation' }] };
   await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
-  expect(document.body.textContent).toContain(`SHA-256 ${'a'.repeat(64)}`);
+  expect(document.body.textContent).toContain('Its popup should show AAAA AAAA AAAA AAAA');
   await act(async () => button('It matches').click());
   expect(confirmAccountBrowser).toHaveBeenCalledWith(fresh, 'a'.repeat(64));
-  await type('Chrome name', 'Laptop Chrome');
+  expect(button('Confirmed').disabled).toBe(true);
+  await type('Name this Chrome', 'Laptop Chrome');
   await act(async () => button('Finish').click());
   expect(renameAccountBrowser).toHaveBeenCalledWith(fresh, 'Laptop Chrome');
   expect(updateProjectBrowserSettings).toHaveBeenCalledTimes(1);
   expect(updateProjectBrowserSettings).toHaveBeenCalledWith('beta', 5, { defaultPairingId: fresh, approvals: [{ pairingId: fresh, note: '' }] });
-  expect(document.body.textContent).not.toContain('Step 4 of 4');
+  expect(document.body.textContent).not.toContain('Use it in projects');
+});
+
+it('replaces an expired pairing code with a new one, forgetting the old pairing', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-23T12:09:58.000Z'));
+  const second = '00000000-0000-4000-8000-000000000003';
+  vi.mocked(pairAccountBrowser).mockResolvedValueOnce({ code: 'first-code', pairingId: fresh, generation: 1, endpoint: 'https://account.gitspace.test', expiresAt: '2026-10-23T12:10:00.000Z', trust: { algorithm: 'Ed25519', accountId: 'account', publicKey: 'root' } })
+    .mockResolvedValueOnce({ code: 'second-code', pairingId: second, generation: 1, endpoint: 'https://account.gitspace.test', expiresAt: '2026-10-23T12:20:00.000Z', trust: { algorithm: 'Ed25519', accountId: 'account', publicKey: 'root' } });
+  vi.mocked(unpairAccountBrowser).mockImplementation(async () => relay);
+  await render({ projectId: null });
+  await act(async () => button('Get pairing code').click());
+  expect(document.body.textContent).toContain('Pairing code · expires in 0:02');
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+  expect(document.body.textContent).toContain('Pairing code · expired');
+  await act(async () => button('Get a new code').click());
+  expect(unpairAccountBrowser).toHaveBeenCalledWith(fresh);
+  expect(document.body.querySelector('[title*="second-code"]')).not.toBeNull();
+  expect(document.body.textContent).toContain('Pairing code · expires in 10:00');
 });

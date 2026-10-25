@@ -8,7 +8,7 @@ import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-c
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { liveNotices } from './live-notices.js';
 import { FRAMES_AHEAD } from './RuntimeBrowserCaptures.js';
-import { BROWSER_REFRESH_MS, RuntimeBrowserTab } from './RuntimeBrowserTab.js';
+import { BROWSER_REFRESH_MS, browserActivity, RuntimeBrowserTab, useWorkspaceBrowsers, WATCH_REFRESH_MS } from './RuntimeBrowserTab.js';
 
 const rpc = vi.hoisted(() => ({ session: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { runtime: rpc } }));
@@ -37,7 +37,16 @@ function labelled(label: string): HTMLElement {
   if (!element) throw new Error(`Missing ${label}`);
   return element;
 }
-async function render(machines: readonly { id: string; label: string }[] = []) { await act(async () => root.render(<RuntimeBrowserTab snapshot={snapshot} machines={machines} onOpenEnvironment={() => {}} />)); }
+function filter(label: string): HTMLElement {
+  const element = [...document.body.querySelectorAll<HTMLElement>('[role="tab"]')].find(candidate => candidate.textContent?.includes(label));
+  if (!element) throw new Error(`Missing filter ${label}`);
+  return element;
+}
+function Tab({ machines, onCompose }: { machines: readonly { id: string; label: string }[]; onCompose?: (text: string) => void }) {
+  const browsers = useWorkspaceBrowsers(snapshot, undefined);
+  return <RuntimeBrowserTab snapshot={snapshot} projectName="Golconda" browsers={browsers} machines={machines} onOpenEnvironment={() => {}} onCompose={onCompose} />;
+}
+async function render(machines: readonly { id: string; label: string }[] = [], onCompose?: (text: string) => void) { await act(async () => root.render(<Tab machines={machines} onCompose={onCompose} />)); }
 /** Lets fetches, their bodies and the renders they cause finish. */
 async function settle() { for (let round = 0; round < 5; round += 1) await act(async () => { await vi.advanceTimersByTimeAsync(0); }); }
 function share(id: number, fields: Partial<RuntimeBrowserShare> = {}): RuntimeBrowserShare {
@@ -98,8 +107,8 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 it('shows approved sites with their level', async () => {
   await render();
   const sites = container.querySelector('[aria-label="Approved sites"]')!;
-  expect(sites.textContent).toContain('https://app.example.comscripts');
-  expect(sites.textContent).toContain('https://bank.example.comsingle steps');
+  expect(sites.textContent).toContain('https://app.example.com· scripts');
+  expect(sites.textContent).toContain('https://bank.example.com· single steps');
 });
 
 it('offers to approve a confirmed Chrome when none is approved here, making it the default', async () => {
@@ -108,7 +117,8 @@ it('offers to approve a confirmed Chrome when none is approved here, making it t
   vi.mocked(updateProjectBrowserSettings).mockImplementation(async () => { overview = { ...overview, chromes: overview.chromes.map(chrome => ({ ...chrome, approved: true, isDefault: true })) }; return settings; });
   await render();
   expect(container.textContent).toContain("Agents here can't use your Chrome yet");
-  await act(async () => button('Approve Work Chrome for this project').click());
+  expect(container.textContent).toContain('Work Chrome is paired and online, but not approved for Golconda');
+  await act(async () => button('Approve Work Chrome for Golconda').click());
   expect(updateProjectBrowserSettings).toHaveBeenCalledWith('project', 4, { defaultPairingId: work, approvals: [{ pairingId: work, note: 'staging admin' }] });
   expect(container.textContent).not.toContain("Agents here can't use your Chrome yet");
   expect(container.querySelector(`[aria-label="Work Chrome"]`)?.textContent).toContain('Project default');
@@ -134,7 +144,8 @@ it('shows each tab with who opened it and its preview, or why there is none, and
   await render();
   const chrome = container.querySelector('[aria-label="Work Chrome"]')!;
   expect(chrome.textContent).toContain('feature-login');
-  expect(chrome.textContent).toContain('▶ running 2');
+  expect(chrome.textContent).toContain('▶ feature-login');
+  expect(chrome.textContent).toContain('2 scripts running');
   expect(chrome.textContent).toContain('Opened by agent');
   expect(chrome.textContent).toContain('You added it');
   expect(chrome.querySelector('img[alt="Preview of Login"]')?.getAttribute('src')).toBe('data:image/jpeg;base64,aW1hZ2U=');
@@ -143,6 +154,34 @@ it('shows each tab with who opened it and its preview, or why there is none, and
   expect(commands('browserPreview').map(([input]) => input.command)).toEqual([{ type: 'browserPreview', groupId: group, targetId: 'tab-a' }, { type: 'browserPreview', groupId: group, targetId: 'tab-b' }]);
   expect(container.querySelector('[aria-label="Browser recovery"]')).toBeNull();
   expect(container.textContent).not.toContain('No browser groups');
+});
+
+it('opens a tab in the Watch dialog from its preview, reading its preview every few seconds and showing how old it is', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(started));
+  overview = { ...overview, chromes: chromeWithTab() };
+  previews = { 'tab-a': { targetId: 'tab-a', capturedAt: new Date(Date.parse(started) - 3000).toISOString(), image: { mediaType: 'image/jpeg', data: 'aW1hZ2U=' }, reason: null } };
+  await render();
+  await settle();
+  expect(labelled('Tab Login').textContent).toContain('3 s ago');
+  const reads = commands('browserPreview').length;
+  await act(async () => labelled('Preview of Login').click());
+  await settle();
+  const dialog = document.body.querySelector('[role="dialog"]')!;
+  expect(dialog.textContent).toContain('Work Chrome · feature-login group');
+  expect(dialog.querySelector('img[alt="Live view of Login"]')?.getAttribute('src')).toBe('data:image/jpeg;base64,aW1hZ2U=');
+  await act(async () => { await vi.advanceTimersByTimeAsync(WATCH_REFRESH_MS); });
+  // The dialog reads once when it opens and again after WATCH_REFRESH_MS; the tile waits for its own ten seconds.
+  expect(commands('browserPreview')).toHaveLength(reads + 2);
+  expect(dialog.textContent).toContain(`${3 + WATCH_REFRESH_MS / 1000} s ago`);
+  await act(async () => button('Done').click());
+  expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+});
+
+it('counts the browsers with open tabs, and those running scripts, for the tab label and Environment', () => {
+  const tab = { targetId: 'tab-a', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true };
+  expect(browserActivity({ ...overview, chromes: [{ ...chromeWithTab()[0]!, running: 1 }, { ...chromeWithTab()[0]!, pairingId: '00000000-0000-4000-8000-000000000009', approved: false }], cloud: { groupId: group, running: 0, tabs: [tab] }, machines: [{ machineId: 'darktop', groupId: null, tabs: [], error: null }] })).toEqual({ open: 2, running: 1 });
+  expect(browserActivity(overview)).toEqual({ open: 0, running: 0 });
 });
 
 it('rereads the overview and visible previews every ten seconds', async () => {
@@ -187,7 +226,7 @@ it('shows each attached machine\'s headless browser with its tabs and previews, 
   expect(commands('browserPreview').map(([input]) => input.command)).toEqual([{ type: 'browserPreview', groupId: machineGroup, targetId: 'tab-m' }]);
   const old = container.querySelector('[aria-label="Headless browser on old-box"]')!;
   expect(old.textContent).toContain('Update GitSpace on this machine to see its browser');
-  expect(old.textContent).toContain('No tabs open.');
+  expect(old.textContent).toContain('No open tabs.');
   await act(async () => button('Revoke access').click());
   expect(commands('browserRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserRevoke', machineId: 'darktop', groupId: machineGroup }]);
 });
@@ -204,28 +243,31 @@ it('lists captures newest first with who made them, their browser, size or lengt
   expect(rows()).toEqual(['Checkout run', 'Lost run', 'Login screenshot']);
   expect(labelled('Checkout run').textContent).toContain('By you · Work Chrome');
   // A length, not the start time's clock (`1:05:00`).
-  expect(labelled('Checkout run').textContent).toMatch(/· 1:05(?!:)/u);
+  expect(labelled('Checkout run').textContent).toMatch(/video 1:05(?!:)/u);
+  expect(labelled('Checkout run').textContent).toContain('65 frames');
   expect(labelled('Checkout run').querySelector('img')?.getAttribute('src')).toBe('/files/checkout-thumbnail');
   expect(labelled('Login screenshot').textContent).toContain('By agent · Cloud browser');
-  expect(labelled('Login screenshot').textContent).toContain('1280×720');
+  expect(labelled('Login screenshot').textContent).toContain('screenshot · 1280×720');
   expect(labelled('Login screenshot').querySelector('img')?.getAttribute('src')).toBe('/files/login');
   expect(labelled('Lost run').textContent).toContain('Work Chrome went offline while recording');
-  expect(labelled('Open Lost run').hasAttribute('disabled')).toBe(true);
-  await act(async () => button('Screenshots').click());
+  expect(labelled('Play Lost run').hasAttribute('disabled')).toBe(true);
+  expect(filter('All').textContent).toContain('All · 3');
+  await act(async () => filter('Screenshots · 1').click());
   expect(rows()).toEqual(['Login screenshot']);
-  await act(async () => button('Video').click());
+  await act(async () => filter('Video · 2').click());
   expect(rows()).toEqual(['Checkout run', 'Lost run']);
-  await act(async () => button('All').click());
+  await act(async () => filter('All · 3').click());
   expect(rows()).toHaveLength(3);
 });
 
-it('copies a capture\'s drive folder to mention it in the chat', async () => {
-  const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+it('mentions a capture in the chat composer by its drive folder, and asks the agent for a site there', async () => {
+  const compose = vi.fn<(text: string) => void>();
   captures = [capture(1, { name: 'Login screenshot', tracks: { image: { path: 'image.jpg', width: 1280, height: 720 } } }, { 'image.jpg': '/files/login' })];
-  await render();
+  await render([], compose);
   await act(async () => labelled('Mention Login screenshot').click());
-  expect(writeText).toHaveBeenCalledExactlyOnceWith('drive://workspace/browser/captures/00000000-0000-4000-8000-0000000000c1/');
-  expect(labelled('Mention Login screenshot').textContent).toBe('Copied');
+  expect(compose).toHaveBeenLastCalledWith('drive://workspace/browser/captures/00000000-0000-4000-8000-0000000000c1/ ');
+  await act(async () => button('Ask agent to add a site').click());
+  expect(compose).toHaveBeenLastCalledWith(expect.stringContaining('browser.origins in .gitspace/bundle.json'));
 });
 
 it('opens a screenshot as its image and a Chrome recording with sound as a video, without reading its frames', async () => {
@@ -236,11 +278,11 @@ it('opens a screenshot as its image and a Chrome recording with sound as a video
     capture(2, { name: 'Demo with sound', by: 'you', source: 'relay', browser: 'Work Chrome', startedAt: '2026-10-24T12:05:00.000Z', tracks: { video: { path: 'video.webm', mediaType: 'video/webm', sound: true, durationMs: 42_000 }, frames: { path: 'frames.bin', index: 'frames.json', count: 3, width: 1280, height: 720 } } }, { 'video.webm': '/files/demo', 'frames.bin': '/files/bin', 'frames.json': '/files/json', 'thumbnail.jpg': '/files/demo-thumbnail' }),
   ];
   await render();
-  expect(labelled('Demo with sound').textContent).toMatch(/· 0:42(?!:)/u);
-  await act(async () => labelled('Open Login screenshot').click());
+  expect(labelled('Demo with sound').textContent).toContain('video 0:42 · sound');
+  await act(async () => labelled('View Login screenshot').click());
   expect(document.body.querySelector('img[alt="Login screenshot"]')?.getAttribute('src')).toBe('/files/login');
   expect(document.body.querySelector('video')).toBeNull();
-  await act(async () => labelled('Open Demo with sound').click());
+  await act(async () => labelled('Play Demo with sound').click());
   const video = document.body.querySelector('video[aria-label="Video of Demo with sound"]');
   expect(video?.getAttribute('src')).toBe('/files/demo');
   expect(video?.hasAttribute('controls')).toBe(true);
@@ -269,12 +311,13 @@ it('plays a screencast recording at its recorded times, reading frames.bin by by
     return { at: image?.getAttribute('alt'), bytes: [...new Uint8Array(await blobs.get(image?.getAttribute('src') ?? '')!.arrayBuffer())] };
   };
   await render();
-  await act(async () => labelled('Open Checkout run').click());
+  await act(async () => labelled('Play Checkout run').click());
   await settle();
   expect(ranges).toEqual([`bytes=0-${FRAMES_AHEAD * 4 - 1}`]);
   expect(await shown()).toEqual({ at: 'Checkout run at 0:00', bytes: [0, 0, 0, 0] });
 
-  await act(async () => button('Play').click());
+  // The player's Play, not the list's.
+  await act(async () => [...document.body.querySelector('[role="dialog"]')!.querySelectorAll('button')].find(candidate => candidate.textContent === 'Play')!.click());
   await act(async () => { await vi.advanceTimersByTimeAsync(999); });
   expect((await shown()).at).toBe('Checkout run at 0:00');
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
@@ -310,8 +353,8 @@ it('captures a tab from its tile, shows REC with the time recorded on every reco
   await render();
   expect(labelled('Cloud browser').textContent).not.toContain('video with sound');
   expect(labelled('Tab Docs').textContent).toContain('REC 0:30');
-  expect(labelled('Agent recording').textContent).toContain('REC 0:30');
-  expect(labelled('Open Agent recording').hasAttribute('disabled')).toBe(true);
+  expect(labelled('Agent recording').textContent).toContain('recording 0:30');
+  expect(labelled('Play Agent recording').hasAttribute('disabled')).toBe(true);
 
   await act(async () => labelled('Capture App').click());
   await settle();
@@ -325,8 +368,8 @@ it('captures a tab from its tile, shows REC with the time recorded on every reco
   await settle();
   expect(commands('browserCaptureStop').map(([input]) => input.command)).toEqual([{ type: 'browserCaptureStop', captureId: '00000000-0000-4000-8000-0000000000c9' }]);
   expect(labelled('Tab App').textContent).not.toContain('REC');
-  expect(labelled('Capture App').textContent).toBe('Capture');
-  expect(labelled('Recording of App').textContent).toMatch(/· 1:05(?!:)/u);
+  expect(container.querySelector('[aria-label="Capture App"]')).not.toBeNull();
+  expect(labelled('Recording of App').textContent).toMatch(/video 1:05(?!:)/u);
   expect(labelled('Tab Docs').textContent).toContain('REC 1:35');
 });
 
