@@ -10,10 +10,11 @@ export function permitted(grant: { origins: string[] }, url: string): boolean {
 export type TabUrls = { tabUrl?: string; pendingUrl?: string; targetUrl?: string };
 
 /** Whether a tab is on the grant's origins: its committed URL, the URL it is navigating to, and the URL its debugger
- * target reports must all be. Chrome reports the target's URL as empty for a moment during a navigation; that reads as
- * not known yet, not as outside, while the tab's own URLs still decide. */
+ * target reports must all be. A tab Chrome just created with a URL has committed nothing yet (its URL is empty and its
+ * pending URL is the destination): the pending URL decides. Chrome reports the target's URL as empty for a moment during
+ * a navigation; that reads as not known yet, not as outside, while the tab's own URLs still decide. */
 export function tabWithinGrant(grant: { origins: string[] }, urls: TabUrls): boolean {
-  if (!urls.tabUrl || !permitted(grant, urls.tabUrl)) return false;
+  if (urls.tabUrl ? !permitted(grant, urls.tabUrl) : !urls.pendingUrl) return false;
   if (urls.pendingUrl && !permitted(grant, urls.pendingUrl)) return false;
   return !urls.targetUrl || permitted(grant, urls.targetUrl);
 }

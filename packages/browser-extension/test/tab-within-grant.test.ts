@@ -15,4 +15,9 @@ describe('a tab inside its workspace grant', () => {
     expect(tabWithinGrant(grant, { tabUrl: 'https://app.example/', targetUrl: 'https://elsewhere.example/' })).toBe(false);
     expect(tabWithinGrant(grant, { tabUrl: '', targetUrl: 'https://app.example/' })).toBe(false);
   });
+  it('is inside while a tab opened on a granted page has not committed it yet, and outside when it opens elsewhere', () => {
+    expect(tabWithinGrant(grant, { tabUrl: '', pendingUrl: 'https://app.example/form', targetUrl: 'https://app.example/form' })).toBe(true);
+    expect(tabWithinGrant(grant, { tabUrl: '', pendingUrl: 'https://app.example/form', targetUrl: '' })).toBe(true);
+    expect(tabWithinGrant(grant, { tabUrl: '', pendingUrl: 'https://elsewhere.example/' })).toBe(false);
+  });
 });
