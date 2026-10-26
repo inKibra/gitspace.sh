@@ -377,6 +377,8 @@ Phase 3 built 2026-10-25 (extension 5.10.0; APERTURE-DESIGN §7.2): one holder p
 
 **Later, if objects still come close to 128 MB.** An isolate id logged by every workspace object, to measure how often objects share an isolate (Cloudflare: objects of one class "may run in the same isolate … and share the 128 MB"). An inference Worker in a separate script that builds, serializes and sends model requests from a streamed context, so the request's copies never sit in the workspace object and an out-of-memory failure loses one request, not the object.
 
+**Later.** A wait tool for agents, so they stop waiting with `bash sleep N` (which holds a machine command, sees nothing that happens meanwhile, and guesses at durations). One durable `wait` that ends on the first of: a time, a process's output matching or its exit, a job finishing, a file or service changing, a browser tab handed back, a subagent or workspace message, or the user; it returns what happened. It is a pi task that sleeps (no invocation held, no polling), and replaces the ad hoc waits in `agents wait`, `ask_takeover` and job waits where they fit.
+
 **Batch 17 — tenant storage on R2 SSE-C (built; the release ships with the migration, run by hand).** Machines held the tenant's storage key and sealed every drive file, LFS object and checkpoint themselves; R2 held only ciphertext named by its hash.
 1. **Worker tenant store, scope keys, plain data protocol:** built (item 83).
 2. **Machines hold no key:** built (item 81).

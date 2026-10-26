@@ -6,7 +6,7 @@ import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-r
 import type { BrowserChannel } from './browser-cdp.js';
 import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
 import { RelayBrowser } from './relay-browser.js';
-import { extensionFiles } from '@gitspace/browser-extension';
+import { extensionFiles, SCRIPT_TAKEN_REFUSAL } from '@gitspace/browser-extension';
 import { zipSync, strToU8 } from 'fflate';
 import { captureName, readCapture, writeCapture, type CaptureDrive } from './browser-capture.js';
 import { BROWSER_DOWNLOAD, BrowserDownloadSchema, BrowserUploads, browserRequestSigner, type BrowserRequestFailure, type BrowserSignedRequest, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
@@ -95,6 +95,11 @@ export const BROWSER_SCRIPT_PATH = '/browser-relay/script/';
 const BROWSER_SOCKET_TAG = 'browser';
 /** An admitted socket must finish pairing, through the extension's hello, within this long. */
 const PAIRING_DEADLINE_MS = 5000;
+/** What the relay's `ready` offers and its socket attachment records, as of this release; bumped whenever either
+ * grows (2: `takeover`). A Chrome's socket survives a release, keeping the `ready` an older relay sent and the hello
+ * flags it kept, so the relay closes one whose hello was answered by another release, and the extension says hello
+ * again on its next connect. */
+const BROWSER_SOCKET_RELEASE = 2;
 const BrowserSocket = z.object({
   /** The server challenge the pairing proof signs. */
   nonce: z.string(),
@@ -115,6 +120,8 @@ const BrowserSocket = z.object({
   siteLevels: z.boolean().optional(),
   /** Set by a hello saying the extension takes `takeOver` and `resume` and reports the tabs you hold. */
   takeover: z.boolean().optional(),
+  /** The `BROWSER_SOCKET_RELEASE` that answered the hello. */
+  release: z.number().int().optional(),
 });
 type BrowserSocketState = z.infer<typeof BrowserSocket>;
 async function fingerprint(publicKey: string) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', browserUnbase64(publicKey)))].map(byte => byte.toString(16).padStart(2, '0')).join(''); }
@@ -165,6 +172,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   /** Scripts running on a Chrome, by token: each lives in memory until its run ends, its deadline passes or its Chrome
    * disconnects. */
   private readonly scripts = new Map<string, ScriptRun>();
+  /** Scripts the extension stopped because you took one of their tabs over (docs/APERTURE-DESIGN.md §7.2), by token,
+   * until the browser session ends them (`scriptEnd`), which reports why: their attempt for their downloads. */
+  private readonly takenScripts = new Map<string, { attemptId: string }>();
   /** Single steps on a Chrome by attempt, while their authority lasts: a download one starts uploads under it. */
   private readonly steps = new Map<string, { pairingId: string; groupId: string; deadline: number }>();
   /** When this object last heard from each Chrome, so its messages renew `seenAt` only now and then (`seen`). */
@@ -255,10 +265,11 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   }
   /** The socket bound to a pairing, ready or still saying hello. */
   private bound(pairingId: string) { return this.sockets().find(({ state }) => state.pairingId === pairingId); }
-  /** The ready Chrome for a pairing. */
+  /** The ready Chrome for a pairing. One whose hello an older release answered is closed, to say hello again. */
   private connection(pairingId: string): Connection | undefined {
     const bound = this.bound(pairingId), product = bound?.state.product;
     if (!bound || !product) return undefined;
+    if (bound.state.release !== BROWSER_SOCKET_RELEASE) { bound.socket.close(1012, 'GitSpace was updated: connect again'); return undefined; }
     const cached = this.connections.get(pairingId);
     if (cached?.socket === bound.socket) { cached.product = product; return cached; }
     if (cached) this.disconnect(pairingId);
@@ -647,7 +658,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
         return socket.close(1008, 'Extension update required');
       }
-      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}) } satisfies BrowserSocketState);
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
       // `groupActivity`: this relay takes each group's colour and agents in the extension's reports; `takeover`: the tabs
       // you hold (`held`) and each agent's tab (`targetId`) too.
       socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true }));
@@ -1010,17 +1021,19 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   }
   /** Ends a script: its CDP connection closes and the extension refuses its attempt from now on, having finished
    * uploading the run's downloads, which are returned (workspace-relative drive paths). */
-  async scriptEnd(token: string): Promise<{ downloads: { path: string; size: number; mediaType: string }[] }> {
-    const run = this.scripts.get(token);
-    if (!run) return { downloads: [] };
-    await this.endScript(token, run, 'Script ended');
+  async scriptEnd(token: string): Promise<{ downloads: { path: string; size: number; mediaType: string }[]; stopped: string | null }> {
+    const run = this.scripts.get(token), taken = this.takenScripts.get(token);
+    this.takenScripts.delete(token);
+    if (run) await this.endScript(token, run, 'Script ended');
+    const attemptId = run?.attemptId ?? taken?.attemptId;
+    if (!attemptId) return { downloads: [], stopped: null };
     const downloads: { path: string; size: number; mediaType: string }[] = [];
-    for (const [key, stored] of await this.ctx.storage.list({ prefix: `${BROWSER_DOWNLOAD}${run.attemptId}:` })) {
+    for (const [key, stored] of await this.ctx.storage.list({ prefix: `${BROWSER_DOWNLOAD}${attemptId}:` })) {
       const { path, size, mediaType } = BrowserDownloadSchema.parse(stored);
       downloads.push({ path, size, mediaType });
       await this.ctx.storage.delete(key);
     }
-    return { downloads };
+    return { downloads, stopped: taken ? SCRIPT_TAKEN_REFUSAL : null };
   }
   /** A script's CDP connection, from its sandbox through `BrowserSessionCdp`: `BROWSER_SCRIPT_PATH<token>/<cursor
    * label>`. Public requests never reach this path (index.ts forwards only `/ws` and `/tunnel/` to the relay object);
@@ -1036,7 +1049,16 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       request: async message => {
         if (this.liveScript(token) !== run) throw new Error('The script run ended');
         await this.dispatchApproval(run.authorization);
-        return this.request(run.pairingId, message);
+        try { return await this.request(run.pairingId, message); }
+        catch (error) {
+          // You took one of its tabs over: the script ends now, its connection closing with why, rather than its
+          // Playwright retrying the refused command until it times out.
+          if (error instanceof Error && error.message === SCRIPT_TAKEN_REFUSAL && this.scripts.get(token) === run) {
+            this.takenScripts.set(token, { attemptId: run.attemptId });
+            await this.endScript(token, run, SCRIPT_TAKEN_REFUSAL);
+          }
+          throw error;
+        }
       },
       listen: (targetId, listener) => {
         let listeners = run.connection.listeners.get(targetId);

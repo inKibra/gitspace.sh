@@ -365,8 +365,10 @@ async function activeRun(attemptId) {
   return run;
 }
 /** Ends a script for `reason` and logs it. Its tabs stay in the group; the debugger leaves those no other script
- * drives, which drops whatever the script set on them (overrides, interception, bindings), and unless the session
- * released the script itself, the session hears that those tabs are gone. A later single step attaches again. */
+ * drives, which drops whatever the script set on them (overrides, interception, bindings). The session hears that
+ * those tabs are gone, unless it released the script itself, or you took one of them over: then the command that
+ * stopped it, and each later one, says why (`ENDED_REFUSALS`), where a vanished tab would only say it closed. A later
+ * single step attaches again. */
 async function endRun(attemptId, reason) {
   const run = runs.get(attemptId);
   runs.delete(attemptId);
@@ -381,10 +383,10 @@ async function endRun(attemptId, reason) {
     if ([...captures.values()].some(capture => capture.channel === channel)) {
       if (channel.painting) { void channel.screencast.remove(channel.painting).catch(() => {}); channel.painting = null; }
       channel.heldForCapture = true;
-      if (reason !== 'released') send({ targetId, fenced: true });
+      if (reason !== 'released' && reason !== 'taken') send({ targetId, fenced: true });
       continue;
     }
-    await (reason === 'released' ? revoke(targetId) : fence(targetId));
+    await (reason === 'released' || reason === 'taken' ? revoke(targetId) : fence(targetId));
   }
   // A tab a single step still uses keeps its overlay, without the script's glow.
   for (const targetId of run.targets) if (channels.has(targetId)) void overlay(targetId);
@@ -434,6 +436,9 @@ const OVERLAY_WORLD = 'gitspace-overlay';
 const OVERLAY_BINDING = '__gitspaceStop';
 /** The longest one overlay step may take: a page held by a dialog never answers, and the agent never waits on it. */
 const OVERLAY_STEP_MS = 1000;
+/** An overlay not refreshed for 75 s removes itself (`overlay.ts`); a script whose commands change nothing it shows (a
+ * key every few seconds) refreshes it at least this often, so its toolbar, and your click that takes the tab, stay. */
+const OVERLAY_REFRESH_MS = 30_000;
 /** What a tab's overlay shows for the agent's channel: a script running on it, a single step using it now, a capture
  * recording it, or nothing. A tab you hold shows `you` instead (`overlay`). */
 function overlayMode(channel) {
@@ -495,6 +500,7 @@ function overlay(targetId, extra = {}) {
     debuggee.pointed = pointers.length > 0;
     debuggee.reporting = reporting;
     await overlayCall(debuggee, command);
+    debuggee.shownAt = Date.now();
   });
 }
 /** A tab as one script sees it: the script's sites, the site you dragged the tab in on when the script named none, and
@@ -723,6 +729,7 @@ async function runCommand(message) {
       if ('refused' in verdict) throw new Error(verdict.refused);
     } catch (error) { run.refused++; throw error; }
     lastUsed.set(lease.grant.groupId, Date.now());
+    if (Date.now() - (debuggees.get(targetId)?.shownAt ?? 0) >= OVERLAY_REFRESH_MS) void overlay(targetId);
     if ('noop' in verdict) return {};
     if (method === 'Target.closeTarget' || method === 'Page.close') { await closeTab(lease); return method === 'Page.close' ? {} : { success: true }; }
     // What the script is doing now: the overlay calls of the cursor and of a screenshot carry it, and any other change

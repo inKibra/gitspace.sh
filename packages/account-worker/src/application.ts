@@ -80,7 +80,7 @@ import {
 } from '@gitspace/protocol/inference';
 import { HostedIngressRegistrationSchema, LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, executionHash, parseServiceIngressContent, type LifecycleState } from '@gitspace/protocol-environment';
 import { LiveChanges } from './live-changes.js';
-import { tenantNamespace, tenantStore, TenantObjectIntegrityError, type TenantNamespace } from './tenant-store.js';
+import { sendSized, tenantNamespace, tenantStore, TenantObjectIntegrityError, verifying, type TenantNamespace } from './tenant-store.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { migratedRoleSettings } from './inference-role-migration.js';
@@ -2514,6 +2514,8 @@ interface SyncRequestDiagnostics {
   cfRay?: string;
   stage: 'received' | 'parse' | 'validate' | 'authorize' | 'rollout' | 'processing' | 'r2.head' | 'r2.put' | 'r2.get';
   caughtError: boolean;
+  /** Name and message of the error a route caught; never its request body or headers. */
+  error?: { name: string; message: string };
 }
 
 const syncAttemptIdSchema = z.uuid();
@@ -2554,6 +2556,7 @@ function logSyncRequest(
       outcome,
       status,
       cfRay: diagnostics.cfRay,
+      error: diagnostics.error,
     }));
   } catch {
     // Diagnostics must not change request processing or response delivery.
@@ -2569,17 +2572,56 @@ function recordSyncRequestParsed(diagnostics: SyncRequestDiagnostics | undefined
 }
 
 
+/** A data request the client must change before it can succeed: answered with `status` and `code`, never retried. */
+class DataRequestError extends Error {
+  override readonly name = 'DataRequestError';
+  constructor(readonly status: number, readonly code: string, message: string) {
+    super(message);
+  }
+}
+
 function decodeSignedHeader(value: string | null): SignedControlRequest {
-  if (!value || value.length > DATA_REQUEST_HEADER_MAX_BYTES) throw new Error('Signed data request is missing or too large');
+  if (!value || value.length > DATA_REQUEST_HEADER_MAX_BYTES) throw new DataRequestError(400, 'INVALID_SIGNED_REQUEST', 'Signed data request is missing or too large');
   const base64 = value.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-  return signedControlRequestSchema.parse(JSON.parse(atob(base64)) as unknown);
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(atob(base64));
+  } catch {
+    throw new DataRequestError(400, 'INVALID_SIGNED_REQUEST', 'Signed data request is not base64url-encoded JSON');
+  }
+  const parsed = signedControlRequestSchema.safeParse(decoded);
+  if (!parsed.success) throw new DataRequestError(400, 'INVALID_SIGNED_REQUEST', 'Signed data request is malformed');
+  return parsed.data;
+}
+
+/** The object key a `/v1/data/` path names, each segment URI-decoded. */
+function dataKeyFromPath(encoded: string): string {
+  try {
+    return encoded.split('/').map(decodeURIComponent).join('/');
+  } catch {
+    throw new DataRequestError(400, 'INVALID_OBJECT_KEY', 'Application object key is not URI-encoded');
+  }
 }
 
 function dataObjectKey(userId: string, key: unknown): string {
   if (typeof key !== 'string' || !key || key.startsWith('/') || key.includes('..') || key.length > 1_024) {
-    throw new Error('Application object key is invalid');
+    throw new DataRequestError(400, 'INVALID_OBJECT_KEY', 'Application object key is invalid');
   }
   return `users/${userId}/${key}`;
+}
+
+/** The answer to a data request that threw. What the request carried decides a 4xx; any other failure (R2, Durable
+ * Object RPC, network, internal) is 503 so the uploader retries it. */
+function dataFailureResponse(error: unknown): Response {
+  if (error instanceof DataRequestError) return dataError(error.status, error.code, error.message);
+  return dataError(503, 'DATA_STORAGE_FAILED', 'Storing the object failed; try again');
+}
+
+const CAUGHT_ERROR_MESSAGE_MAX_CHARS = 512;
+
+function caughtErrorSummary(error: unknown): { name: string; message: string } {
+  if (error instanceof Error) return { name: error.name, message: error.message.slice(0, CAUGHT_ERROR_MESSAGE_MAX_CHARS) };
+  return { name: typeof error, message: '' };
 }
 
 /** Which signed operations each method of the data endpoint carries. */
@@ -2616,7 +2658,7 @@ function dataUploadBody(request: Request, size: number, maxBytes: number): Reada
 async function dataObjectResponse(request: Request, env: Env, keyFromPath: string, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
   const signed = decodeSignedHeader(request.headers.get('x-gitspace-control'));
   recordSyncRequestParsed(diagnostics, signed);
-  if (!DATA_OPERATIONS[request.method]?.includes(signed.operation) || signed.payload.key !== keyFromPath) throw new Error('Signed data request does not match the request');
+  if (!DATA_OPERATIONS[request.method]?.includes(signed.operation) || signed.payload.key !== keyFromPath) throw new DataRequestError(400, 'SIGNED_REQUEST_MISMATCH', 'Signed data request does not match the request');
   const objectKey = dataObjectKey(signed.userId, keyFromPath);
   if (diagnostics) diagnostics.stage = 'authorize';
   const authorized = await authorizeControl(env, signed, 'storage.access', DATA_UPLOAD_OPERATIONS[signed.operation] ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
@@ -2750,7 +2792,7 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
       await store.abortMultipart(name, scope, abort.data.uploadId);
       return new Response(null, { status: 204 });
     }
-    default: throw new Error('Application object operation is invalid');
+    default: throw new DataRequestError(400, 'INVALID_OPERATION', 'Application object operation is invalid');
   }
 }
 
@@ -2773,10 +2815,15 @@ async function releaseDataObjectResponse(request: Request, env: Env, signed: Sig
         : dataError(409, 'OBJECT_CONFLICT', 'Application object key already has different content');
     }
     if (diagnostics) diagnostics.stage = 'r2.put';
-    const stored = await env.DATA.put(objectKey, body, {
+    // The bytes are checked against the signed digest and size as they pass, so a mismatch is reported as the
+    // request's fault rather than as the R2 failure it causes; R2 checks the digest again.
+    const stored = await sendSized(body.pipeThrough(verifying({ sha256: hash, size })), size, verified => env.DATA.put(objectKey, verified, {
       onlyIf: { etagDoesNotMatch: '*' },
       customMetadata: { sha256: hash },
       sha256: hash.slice('sha256:'.length),
+    })).catch((error: unknown) => {
+      if (error instanceof TenantObjectIntegrityError) throw new DataRequestError(400, 'OBJECT_DIGEST_MISMATCH', 'Application object bytes do not match the signed SHA-256 and size');
+      throw error;
     });
     if (!stored) {
       if (diagnostics) diagnostics.stage = 'r2.head';
@@ -3565,11 +3612,13 @@ const worker = {
     if (dataMatch) {
       try {
         if (diagnostics) diagnostics.stage = 'parse';
-        const key = dataMatch[1]!.split('/').map(decodeURIComponent).join('/');
-        return await dataObjectResponse(request, env, key, diagnostics);
-      } catch {
-        if (diagnostics) diagnostics.caughtError = true;
-        return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: 'Application object request is invalid' } }, { status: 400 });
+        return await dataObjectResponse(request, env, dataKeyFromPath(dataMatch[1]!), diagnostics);
+      } catch (error) {
+        if (diagnostics) {
+          diagnostics.caughtError = true;
+          diagnostics.error = caughtErrorSummary(error);
+        }
+        return dataFailureResponse(error);
       }
     }
     // The settings object admits the socket; its signed proof rides in `Sec-WebSocket-Protocol`.
@@ -3981,7 +4030,10 @@ const worker = {
         }
         throw new Error('Unsupported control operation');
       } catch (error) {
-        if (diagnostics) diagnostics.caughtError = true;
+        if (diagnostics) {
+          diagnostics.caughtError = true;
+          diagnostics.error = caughtErrorSummary(error);
+        }
         if (error instanceof MachineDiscardRequired) return Response.json({ status: 'error', error: {
           _tag: error._tag, message: error.message, confirmation: error.confirmation, workspaces: error.workspaces,
         } }, { status: 409, headers: { 'cache-control': 'no-store' } });
@@ -4010,6 +4062,12 @@ const worker = {
         }
         if (error instanceof McpConnectionValidationError) {
           return Response.json({ status: 'error', error: { code: 'MCP_INVALID', message: error.message, field: error.field } }, { status: 400 });
+        }
+        // The Workers runtime marks Durable Object failures it caused (reset, overload, broken connection) with
+        // `retryable` or `overloaded`; the request itself was valid, so the caller may repeat it.
+        if (error instanceof Error && (('retryable' in error && error.retryable === true) || ('overloaded' in error && error.overloaded === true))) {
+          console.error(JSON.stringify({ event: 'control_request_failed', operation: signedControl?.operation ?? null, machineId: signedControl?.machineId ?? null, ...caughtErrorSummary(error) }));
+          return Response.json({ status: 'error', error: { code: 'CONTROL_UNAVAILABLE', message: 'The control request failed; try again' } }, { status: 503 });
         }
         const message = error instanceof Error ? error.message : 'Control request is invalid';
         console.error(JSON.stringify({ event: 'control_request_failed', operation: signedControl?.operation ?? null, machineId: signedControl?.machineId ?? null, message }));

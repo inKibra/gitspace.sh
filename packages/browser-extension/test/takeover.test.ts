@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, setSystemTime } from 'bun:test';
 import { RuntimeBrowserGroupReportSchema, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { SCRIPT_TAKEN_REFUSAL, TAB_HELD_REFUSAL } from '../src/index.js';
 import { command, installed, settle } from './installed.js';
@@ -107,8 +107,27 @@ describe('taking over a tab the agent uses', () => {
     await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '2' }))).rejects.toThrow(SCRIPT_TAKEN_REFUSAL);
     await expect(chrome.execute(command(attemptId, 'target-2', 'Runtime.evaluate', { expression: '3' }))).rejects.toThrow(SCRIPT_TAKEN_REFUSAL);
     expect((await chrome.popup({ popupState: true })).log).toEqual([expect.objectContaining({ attemptId, endReason: 'taken' })]);
+    // The script's session never hears its tabs went away (Playwright would say "Target page … has been closed"
+    // instead of why it stopped): its next command says it.
+    expect(chrome.sent.filter(message => 'fenced' in message)).toEqual([]);
     // The tab you hold keeps its debugger for Resume agent; the script's other tab is let go.
     expect(chrome.detached).toEqual(['target-2']);
+  });
+
+  it('keeps the toolbar of a long script whose commands change nothing it shows, so your click still takes the tab', async () => {
+    const { chrome } = await chromeWith({ takeover: true });
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    await chrome.execute(command(attemptId, 'target-1', 'Input.insertText', { text: 'x' }));
+    await settle();
+    const shown = chrome.overlays('target-1').filter(call => call.show).length;
+    // The overlay removes itself 75 s after its last refresh; a key every few seconds changes nothing it shows.
+    const start = Date.now();
+    try {
+      for (const seconds of [10, 20, 31]) { setSystemTime(new Date(start + seconds * 1000)); await chrome.execute(command(attemptId, 'target-1', 'Input.insertText', { text: 'x' })); await settle(); }
+    } finally { setSystemTime(); }
+    expect(chrome.overlays('target-1').filter(call => call.show).length).toBe(shown + 1);
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'run' } });
   });
 
   it('from GitSpace needs the signed take over or resume of that tab, and moves the device of a tab you hold', async () => {

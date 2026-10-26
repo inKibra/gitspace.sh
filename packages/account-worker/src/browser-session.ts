@@ -375,15 +375,19 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     let text: string;
     // Downloads your Chrome's extension saved for this run, which it finishes uploading before the run ends.
     let chromeDownloads: { path: string; size: number; mediaType: string }[] = [];
+    // Why your Chrome stopped the script (you took one of its tabs over), which its result says instead of the error
+    // its Playwright saw as its connection closed.
+    let takenOver: string | null = null;
     try { text = await Promise.race([sandbox.getEntrypoint<Runner>().run({ label: scope.conversationKind === 'main' ? 'Agent' : 'Subagent', state: await this.ctx.storage.get(stateKey) ?? {} }), stopped.promise]); }
     finally {
       clearTimeout(timer);
       this.runFiles.delete(run);
       this.stopped.delete(run);
       // Cuts the script off your Chrome; a lost end still lapses at the run's deadline.
-      if (relay && relayToken) chromeDownloads = (await relay.browserRelayScriptEnd(relayToken).catch((error: unknown) => { console.warn(JSON.stringify({ event: 'browser_relay_script_end_failed', error: String(error) })); return { downloads: [] }; })).downloads;
+      if (relay && relayToken) ({ downloads: chromeDownloads, stopped: takenOver } = await relay.browserRelayScriptEnd(relayToken).catch((error: unknown) => { console.warn(JSON.stringify({ event: 'browser_relay_script_end_failed', error: String(error) })); return { downloads: [], stopped: null }; }));
     }
-    const result = RunResult.parse(JSON.parse(text));
+    const ran = RunResult.parse(JSON.parse(text));
+    const result = takenOver ? { ...ran, ok: false, value: undefined, error: takenOver } : ran;
     if (!result.stateError) await this.ctx.storage.put(stateKey, result.state);
     const { state: _state, view, ...reply } = result;
     const { downloads, content } = await files.report(chromeDownloads);

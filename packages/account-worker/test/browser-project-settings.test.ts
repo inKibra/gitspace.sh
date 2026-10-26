@@ -328,6 +328,20 @@ test('Stop, Close tab and Focus in Chrome reach a Chrome whose hello takes them,
   expect(older.operations).not.toContain('stopGroup');
 }));
 
+test('a Chrome whose hello an older release answered is asked to connect again, so this release hears what its extension can do', () => fixture(async (relay, chrome, root, restart, sockets) => {
+  const browser = await chrome('Current', { controls: true, takeover: true });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: browser.pairingId, approvals: [{ pairingId: browser.pairingId }] });
+  const [socket] = sockets();
+  if (!socket) throw new Error('Missing extension socket');
+  // The attachment as a release before take over wrote it: the hello's `takeover` was not kept, and no release mark.
+  const { takeover: _takeover, release: _release, ...older } = z.object({ takeover: z.boolean().optional(), release: z.number().optional() }).passthrough().parse(socket.deserializeAttachment());
+  socket.serializeAttachment(older);
+  const closed = new Promise<void>(resolve => browser.socket.addEventListener('close', () => resolve(), { once: true }));
+  const reader = restart();
+  expect((await reader.projectSettings('project')).browsers).toMatchObject([{ pairingId: browser.pairingId, connected: false, takeover: false }]);
+  await closed;
+}));
+
 test('Take over and Resume agent reach a Chrome whose hello takes them, for the device that asked, and its reports of the tabs you hold reach the workspace; an older extension is never offered take over', () => fixture(async (relay, chrome, root, restart, sockets) => {
   const current = await chrome('Current', { controls: true, takeover: true }), older = await chrome('Older', { controls: true });
   expect(current.ready).toMatchObject({ ready: true, takeover: true });

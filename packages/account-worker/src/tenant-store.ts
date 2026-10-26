@@ -74,7 +74,7 @@ function storedMetadata(object: R2Object, scope: string, expected?: TenantExpect
 
 /** Passes bytes through while hashing them, holding back the newest chunk until the next arrives: the last bytes are
  * released only after the whole stream matched `expected`, so a consumer never completes a mismatched read. */
-function verifying(expected: { sha256: Sha256; size: number }): TransformStream<Uint8Array, Uint8Array> {
+export function verifying(expected: { sha256: Sha256; size: number }): TransformStream<Uint8Array, Uint8Array> {
   const hash: Hash = createHash('sha256');
   let size = 0;
   let pending: Uint8Array | null = null;
@@ -94,10 +94,18 @@ function verifying(expected: { sha256: Sha256; size: number }): TransformStream<
 }
 
 /** Sends `stream` to R2 as a body of exactly `size` bytes. When the source fails (a digest or size mismatch included),
- * that failure is the one reported, not the aborted R2 request it caused. */
-async function sendSized<T>(stream: ReadableStream<Uint8Array>, size: number, send: (body: ReadableStream<Uint8Array>) => Promise<T>): Promise<T> {
+ * that failure is the one reported, not the aborted R2 request it caused. A send that fails without draining the body
+ * aborts the pipe, which would otherwise wait on the undrained body indefinitely. */
+export async function sendSized<T>(stream: ReadableStream<Uint8Array>, size: number, send: (body: ReadableStream<Uint8Array>) => Promise<T>): Promise<T> {
   const fixed = new FixedLengthStream(size);
-  const [sent, piped] = await Promise.allSettled([send(fixed.readable), stream.pipeTo(fixed.writable)]);
+  const piping = new AbortController();
+  const [sent, piped] = await Promise.allSettled([
+    send(fixed.readable).catch((error: unknown) => {
+      piping.abort(error);
+      throw error;
+    }),
+    stream.pipeTo(fixed.writable, { signal: piping.signal }),
+  ]);
   if (piped.status === 'rejected' && (piped.reason instanceof TenantObjectIntegrityError || sent.status === 'fulfilled')) throw piped.reason;
   if (sent.status === 'rejected') throw sent.reason;
   return sent.value;

@@ -287,8 +287,11 @@ export function serveCdpSocket(shim: CdpBrowserShim, options: CdpShimOptions, cl
   server.addEventListener('message', event => {
     void (async () => {
       const message = CdpRequest.parse(JSON.parse(typeof event.data === 'string' ? event.data : ''));
-      try { server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), result: await view.send(message.method, message.params ?? {}, message.sessionId) })); }
-      catch (error) { server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), error: { code: -32000, message: error instanceof Error ? error.message : String(error) } })); }
+      // A reply to a connection that closed meanwhile (its run ended) goes nowhere.
+      let reply: Record<string, unknown>;
+      try { reply = { result: await view.send(message.method, message.params ?? {}, message.sessionId) }; }
+      catch (error) { reply = { error: { code: -32000, message: error instanceof Error ? error.message : String(error) } }; }
+      if (server.readyState === WebSocket.OPEN) server.send(JSON.stringify({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), ...reply }));
     })().catch(() => server.close(1008, 'Invalid CDP message'));
   });
   server.addEventListener('close', () => { void view.close(); closed(); });

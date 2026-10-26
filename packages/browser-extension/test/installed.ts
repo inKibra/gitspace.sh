@@ -354,7 +354,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const start = async () => {
     for (const registered of [listeners, tabUpdated, tabRemoved, debuggerDetached, timers]) registered.length = 0;
     const started = createContext({
-      chrome, crypto, TextEncoder, URL, atob, btoa, console, Uint8Array, WebSocket, OffscreenCanvas, fetch,
+      // The host's Date, so a test's setSystemTime moves the extension's clock too.
+      chrome, crypto, TextEncoder, URL, atob, btoa, console, Uint8Array, WebSocket, OffscreenCanvas, fetch, Date,
       navigator: { userAgent: 'Chrome/140.0.0.0' },
       setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run }); return timerId; },
       clearTimeout: (id: number) => { const index = timers.findIndex(timer => timer.id === id); if (index >= 0) timers.splice(index, 1); },

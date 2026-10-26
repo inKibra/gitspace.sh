@@ -2,6 +2,7 @@ import { env, exports } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { z } from 'zod';
+import { SCRIPT_TAKEN_REFUSAL } from '@gitspace/browser-extension';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeAccountBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeBrowserAuthorityCertificate, type RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 import type { UserRelayDO } from '../src/index.js';
 
@@ -47,6 +48,8 @@ async function chrome(relay: UserRelayDO, root: Identity, protocol: number) {
       // As the extension's run allowlist: the browser's own commands and scripts for new documents are refused.
       if (typeof message.method === 'string' && message.method.startsWith('Browser.') || message.method === 'Page.addScriptToEvaluateOnNewDocument' && source) { socket.send(JSON.stringify({ id, error: { message: 'Command outside browser grant' } })); return; }
       if (message.method === 'Runtime.evaluate' && expression === '6 * 7') result = { result: { type: 'number', value: 42 } };
+      // You took this tab over: the extension stops the script at this command.
+      if (message.method === 'Runtime.evaluate' && expression === 'yours') { socket.send(JSON.stringify({ id, error: { message: SCRIPT_TAKEN_REFUSAL } })); return; }
       const url = tabs.find(tab => tab.targetId === message.targetId)?.url ?? 'about:blank';
       // Enough of a page for Playwright to adopt it: its main frame, whose id is the tab's, as in Chrome.
       if (message.method === 'Page.getFrameTree') result = { frameTree: { frame: { id: String(message.targetId), loaderId: 'loader', url, domainAndRegistry: '', securityOrigin: new URL(url).origin, mimeType: 'text/html', secureContextType: 'Secure', crossOriginIsolatedContextType: 'NotIsolated', gatedAPIFeatures: [] }, childFrames: [] } };
@@ -130,6 +133,27 @@ test('a script sees the workspace group as one browser over the extension, until
       expect(browser.operations.at(-1)).toEqual({ operation: 'release', attemptId });
       await closed;
       expect((await relay.fetch(upgrade(`https://relay/browser-relay/script/${token}/Agent`))).status).toBe(404);
+    } finally { browser.socket.close(); }
+  });
+});
+
+test('a script your Chrome stops because you took its tab over ends at once, and its end says why', async () => {
+  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (relay: UserRelayDO) => {
+    const root = await keys(), browser = await chrome(relay, root, BROWSER_EXTENSION_PROTOCOL);
+    try {
+      const authorization = await runAuthorization(root, browser.placement), { attemptId } = authorization.body.scope;
+      const { token } = await relay.browserRelayScriptBegin(authorization);
+      const socket = (await relay.fetch(upgrade(`https://relay/browser-relay/script/${token}/Agent`))).webSocket;
+      if (!socket) throw new Error('Missing script socket');
+      socket.accept();
+      const client = cdp(socket);
+      const closed = new Promise<CloseEvent>(resolve => socket.addEventListener('close', resolve, { once: true }));
+      await client.send('Target.setAutoAttach', { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+      // Its Playwright does not retry the refused command until it times out: the connection closes with why.
+      void client.send('Runtime.evaluate', { expression: 'yours' }, 'lease-your-tab');
+      expect((await closed).reason).toBe(SCRIPT_TAKEN_REFUSAL);
+      await expect.poll(() => browser.operations).toContainEqual({ operation: 'release', attemptId });
+      expect(await relay.browserRelayScriptEnd(token)).toEqual({ downloads: [], stopped: SCRIPT_TAKEN_REFUSAL });
     } finally { browser.socket.close(); }
   });
 });
