@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { BrowserChannel } from '../src/browser-cdp.js';
 import { CdpBrowserShim, type CdpEvent } from '../src/browser-shim.js';
 
 type Params = Record<string, unknown>;
-/** A browser-level CDP connection with pages, attaches and events, as the shim sees a real browser. */
-function fakeBrowser() {
+/** A browser-level CDP connection with pages, attaches and events, as the shim sees a real browser. `newestFirst`: it
+ * lists its pages newest first, as Chrome does. */
+function fakeBrowser(newestFirst = false) {
   const targets: { targetId: string; type: string; url: string; attached: boolean }[] = [{ targetId: 'existing', type: 'page', url: 'about:blank', attached: false }];
   const listeners = new Set<Parameters<BrowserChannel['subscribe']>[0]>();
   const calls: { method: string; params: Params; sessionId?: string }[] = [];
@@ -15,7 +17,7 @@ function fakeBrowser() {
   const channel: BrowserChannel = {
     async send(method, params = {}, sessionId) {
       calls.push({ method, params, ...(sessionId ? { sessionId } : {}) });
-      if (method === 'Target.getTargets') return { targetInfos: targets.map(target => ({ ...target })) };
+      if (method === 'Target.getTargets') return { targetInfos: (newestFirst ? targets.toReversed() : targets).map(target => ({ ...target })) };
       if (method === 'Target.attachToTarget') {
         const sessionId = `session-${++sessions}`;
         const target = targets.find(candidate => candidate.targetId === params.targetId)!;
@@ -79,6 +81,19 @@ describe('CdpBrowserShim', () => {
     await client.send('Runtime.evaluate', { expression: 'document.title' }, 'session-1');
     browser.emit({ method: 'Page.loadEventFired', params: {}, sessionId: 'session-1' });
     expect(events.at(-1)).toEqual({ method: 'Page.loadEventFired', params: {}, sessionId: 'session-1' });
+  });
+
+  it('a new client sees the browser’s pages in the order they were made, so a script’s newest page is the one opened last', async () => {
+    const browser = fakeBrowser(true);
+    const shim = await CdpBrowserShim.open(browser.channel);
+    const first = shim.client(() => {});
+    await first.send('Target.createTarget', { url: 'https://example.com/a' });
+    await first.send('Target.createTarget', { url: 'https://example.com/b' });
+    browser.flush();
+    const events: CdpEvent[] = [];
+    const next = shim.client(event => events.push(event));
+    await next.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    expect(events.filter(event => event.method === 'Target.attachedToTarget').map(event => z.object({ targetInfo: z.object({ targetId: z.string() }) }).parse(event.params).targetInfo.targetId)).toEqual(['existing', 'page-2', 'page-3']);
   });
 
   it('a second CDP session on a page a client already drives is its own, through the page session (newCDPSession)', async () => {

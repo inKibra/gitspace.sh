@@ -42,7 +42,17 @@ function hideServiceCookie(value: unknown): unknown {
  * so each client gets its own virtual browser on it: its own sessions, contexts and auto-attach, and only its own
  * sessions' events. Requires an upstream with target discovery on (`open`). */
 export class CdpBrowserShim {
-  private constructor(private readonly upstream: BrowserChannel, private readonly options: CdpShimOptions) {}
+  /** The browser's pages in the order they were made while this shim watched, oldest first. A client's auto-attach
+   * announces existing pages in this order, so a script's newest page (Playwright's last) is the one made last, not
+   * the browser's own listing order (Chrome lists the newest first). */
+  private readonly created: string[] = [];
+  private constructor(private readonly upstream: BrowserChannel, private readonly options: CdpShimOptions) {
+    upstream.subscribe(({ method, params }) => {
+      const info = params?.targetInfo;
+      if (method === 'Target.targetCreated' && isPage(info)) this.created.push(info.targetId);
+      if (method === 'Target.targetDestroyed' && typeof params?.targetId === 'string') { const index = this.created.indexOf(params.targetId); if (index >= 0) this.created.splice(index, 1); }
+    });
+  }
 
   static async open(upstream: BrowserChannel, options: CdpShimOptions = {}): Promise<CdpBrowserShim> {
     await upstream.send('Target.setDiscoverTargets', { discover: true });
@@ -51,7 +61,7 @@ export class CdpBrowserShim {
 
   /** A client that receives its events through `emit`; `options` override the shim's (another cursor label). */
   client(emit: (event: CdpEvent) => void, options: CdpShimOptions = {}): CdpShimClient {
-    return new CdpShimClient(this.upstream, emit, { ...this.options, ...options });
+    return new CdpShimClient(this.upstream, emit, { ...this.options, ...options }, this.created);
   }
 }
 
@@ -74,7 +84,7 @@ export class CdpShimClient {
   private readonly pages = new Map<string, string>();
   private readonly unsubscribe: () => void;
 
-  constructor(private readonly upstream: BrowserChannel, private readonly emit: (event: CdpEvent) => void, private readonly options: CdpShimOptions) {
+  constructor(private readonly upstream: BrowserChannel, private readonly emit: (event: CdpEvent) => void, private readonly options: CdpShimOptions, private readonly created: readonly string[] = []) {
     this.unsubscribe = upstream.subscribe(event => { void this.route(event).catch(() => {}); });
   }
 
@@ -194,7 +204,8 @@ export class CdpShimClient {
         this.autoAttach = params.autoAttach === true;
         // Attached by this client, not by anyone: other clients' attachments share the connection.
         const attached = new Set(this.sessions.values());
-        if (this.autoAttach) for (const info of targetsOf(await this.upstream.send('Target.getTargets', {}))) if (isPage(info) && !attached.has(info.targetId) && !this.options.hold?.holds(info.targetId)) await this.attachOnce(info);
+        const order = (info: { targetId: string }) => this.created.indexOf(info.targetId);
+        if (this.autoAttach) for (const info of targetsOf(await this.upstream.send('Target.getTargets', {})).toSorted((a, b) => order(a) - order(b))) if (isPage(info) && !attached.has(info.targetId) && !this.options.hold?.holds(info.targetId)) await this.attachOnce(info);
         return {};
       }
       case 'Target.attachToTarget': return { sessionId: await this.attachOnce(await this.target(params.targetId)) };

@@ -25,9 +25,9 @@ const SCRIPT_TAKEN = 'The user took over this tab; the script stopped at its nex
  * (which ends its browser) still hands them back. */
 const HOLDERS_KEY = 'browser.holders';
 const StoredHolders = z.object({ projectId: z.string(), workspaceId: z.string(), holders: z.array(RuntimeBrowserHolderSchema) });
-/** A take over or Resume agent on a cloud tab: the tabs you held before and after, whether the agent was acting in the
- * cloud browser then (a script ran or a single step was in flight), and the tab's page (null once it is gone). */
-export type BrowserHoldChange = { before: RuntimeBrowserHolder[]; after: RuntimeBrowserHolder[]; acting: boolean; page: { url: string; title: string } | null };
+/** A take over or Resume agent on a cloud tab: the tabs you held before and after, and the tab's page (null once it
+ * is gone). */
+export type BrowserHoldChange = { before: RuntimeBrowserHolder[]; after: RuntimeBrowserHolder[]; page: { url: string; title: string } | null };
 /** A service session lasts 15 minutes from each mint; a request that finds it older than this mints again. */
 const SERVICE_RENEW_MS = 10 * 60_000;
 const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), view: z.string().optional(), viewError: z.string().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
@@ -120,8 +120,6 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   private readonly held = new Map<string, RuntimeBrowserHolder>();
   /** Scripts that reached a tab you hold: each later command of theirs is refused too. */
   private readonly stopped = new Set<string>();
-  /** The agent's single steps in flight. */
-  private stepping = 0;
   /** The Watch dialog's sockets on cloud tabs (`browser-watch.ts`): your input there counts as use; watching alone does not. */
   private readonly watch = new CloudWatch(this.ctx, {
     browser: () => this.browser,
@@ -262,7 +260,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     await this.keepHolders(input);
     await this.used();
     this.holderChanged(input.targetId);
-    return { before, after: [...this.held.values()], acting: this.scripts.size > 0 || this.stepping > 0, page: { url: page.url, title: page.title } };
+    return { before, after: [...this.held.values()], page: { url: page.url, title: page.title } };
   }
 
   /** Resume agent on a cloud tab you hold: the agent's commands reach it again, and its earlier refs on it are stale. */
@@ -275,7 +273,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       if (this.browser) await this.used();
     }
     const page = this.browser ? (await browserPages(await this.browser)).find(tab => tab.targetId === input.targetId) : undefined;
-    return { before, after: [...this.held.values()], acting: false, page: page ? { url: page.url, title: page.title } : null };
+    return { before, after: [...this.held.values()], page: page ? { url: page.url, title: page.title } : null };
   }
 
   /** One cloud tab's preview; none while no browser is open. */
@@ -331,9 +329,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
         },
       },
     });
-    this.stepping++;
-    try { return await this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(authorization.body.expiresAt) - Date.now()))); }
-    finally { this.stepping--; }
+    return this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(authorization.body.expiresAt) - Date.now())));
   }
 
   /** Runs one agent-written Playwright script in a sandbox whose only way out is a CDP connection to the cloud browser

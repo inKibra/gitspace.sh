@@ -117,6 +117,25 @@ describe('the in-page overlay', () => {
     expect(presses).toEqual(['resume']);
   });
 
+  it('while you hold the tab, the agent’s ghost cursor leaves the page; while the agent acts, it stays', () => {
+    const { window, call } = page();
+    window.document.documentElement.appendChild(window.document.createElement('gitspace-cursor'));
+    call(browserOverlayFunction, show);
+    expect(window.document.querySelectorAll('gitspace-cursor')).toHaveLength(1);
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'you', doing: null } });
+    expect(window.document.querySelectorAll('gitspace-cursor')).toHaveLength(0);
+  });
+
+  it('removed from a world that has none of its own, still clears the toolbar an earlier session’s world left', () => {
+    const { window, call, host } = page();
+    // The toolbar an earlier session's world made, which this world never did.
+    const stale = window.document.createElement('div');
+    stale.setAttribute('data-gitspace-overlay', '');
+    window.document.documentElement.appendChild(stale);
+    call(browserOverlayFunction, { remove: true });
+    expect(host()).toBeNull();
+  });
+
   it('replaces one a previous debugger session left and leaves when removed', () => {
     const { window, call } = page();
     const stale = window.document.createElement('div');

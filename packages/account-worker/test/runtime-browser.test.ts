@@ -107,8 +107,8 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   const cloudHeld = new Map<string, { targetId: string; holder: 'you'; since: string; by: 'gitspace'; device: string | null }>();
   const cloudTab = { targetId: 'cloud-tab', url: 'https://example.com/', title: 'Example' };
   const BROWSER_SESSION = { getByName: (name: string) => ({ async overview() { return { tabs: [cloudTab], running: 1, held: [...cloudHeld.values()] }; }, async holders() { return [...cloudHeld.values()]; },
-    async takeOver(input: { targetId: string; device: string | null }) { const before = [...cloudHeld.values()]; cloudHeld.set(input.targetId, { targetId: input.targetId, holder: 'you', since: cloudHeld.get(input.targetId)?.since ?? new Date().toISOString(), by: 'gitspace', device: input.device }); return { before, after: [...cloudHeld.values()], acting: true, page: cloudTab }; },
-    async resume(input: { targetId: string }) { const before = [...cloudHeld.values()]; cloudHeld.delete(input.targetId); return { before, after: [...cloudHeld.values()], acting: false, page: cloudTab }; },
+    async takeOver(input: { targetId: string; device: string | null }) { const before = [...cloudHeld.values()]; cloudHeld.set(input.targetId, { targetId: input.targetId, holder: 'you', since: cloudHeld.get(input.targetId)?.since ?? new Date().toISOString(), by: 'gitspace', device: input.device }); return { before, after: [...cloudHeld.values()], page: cloudTab }; },
+    async resume(input: { targetId: string }) { const before = [...cloudHeld.values()]; cloudHeld.delete(input.targetId); return { before, after: [...cloudHeld.values()], page: cloudTab }; },
     async preview(targetId: string): Promise<RuntimeBrowserPreview> { return { targetId, capturedAt: new Date().toISOString(), image: { mediaType: 'image/jpeg', data: 'cloud-jpeg' }, reason: null }; }, async closeTab(targetId: string) { closedCloudTabs.push(targetId); }, async execute(authorization: RuntimeAccountBrowserAuthorization): Promise<RuntimeToolResult> {
     sessions.push({ name, authorization });
     const text = authorization.body.command.type === 'manage' ? JSON.stringify(RuntimeBrowserStatusSchema.parse({ groups: [], records: [] })) : '{"ok":true,"value":1}';
@@ -731,7 +731,7 @@ test('a single step on a tab you hold waits until you hand it back, then runs; o
   expect(f.dispatches).toHaveLength(2);
 });
 
-test('Take over and Resume agent from GitSpace: your Chrome’s extension does them for the device that asked; the cloud browser’s session holds the tab, and the agent hears both while it acts', async () => {
+test('Take over and Resume agent from GitSpace: your Chrome’s extension does them for the device that asked; the cloud browser’s session holds the tab, and the agent hears both whether or not it acts there now', async () => {
   const f = await fixture('physical', true); f.attachments.splice(0);
   f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay' });
   const group = await f.authority.prepare(f.input); await f.authority.execute(f.input);

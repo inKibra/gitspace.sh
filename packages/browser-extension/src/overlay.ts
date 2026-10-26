@@ -32,7 +32,9 @@
  */
 export const browserOverlayFunction = `function(command) {
   const key = '__gitspaceOverlay';
-  if (command.remove) { if (globalThis[key]) globalThis[key].dispose(); return true; }
+  // Removing also clears a toolbar another world left on the page (an earlier debugger session's, which Chrome took
+  // away or whose removal did not finish): the page keeps it after its world's session ends.
+  if (command.remove) { if (globalThis[key]) globalThis[key].dispose(); for (const stale of document.querySelectorAll('[data-gitspace-overlay]')) stale.remove(); return true; }
   let overlay = globalThis[key];
   if (!overlay && !command.show && !command.pointers?.length && !command.report) return false;
   if (!overlay) {
@@ -235,6 +237,9 @@ export const browserOverlayFunction = `function(command) {
         where.textContent = '';
         what.textContent = (next.agent ?? 'main') + ' is paused · it sees your changes when it resumes';
         cursor.style.opacity = '0';
+        // The agent's ghost cursor of a script (\`gitspace-cursor\`, in the page's own world) goes too; its next draw,
+        // once you hand the tab back, brings it back.
+        for (const ghost of document.querySelectorAll('gitspace-cursor')) ghost.remove();
       } else {
         who.textContent = next.agent ?? next.workspace;
         where.textContent = next.agent ? ' · ' + next.workspace : '';

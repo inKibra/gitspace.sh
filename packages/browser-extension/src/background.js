@@ -316,7 +316,7 @@ function debuggeeOf(target) {
   let debuggee = debuggees.get(target.id);
   if (!debuggee) {
     const source = { targetId: target.id };
-    const created = { targetId: target.id, tabId: target.tabId, source, screencast: new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)), overlay: undefined, overlayQueue: undefined, pointed: false, reporting: false, world: null, viewport: '' };
+    const created = { targetId: target.id, tabId: target.tabId, source, screencast: new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)), overlay: undefined, swept: false, overlayQueue: undefined, pointed: false, reporting: false, world: null, viewport: '' };
     created.attached = (async () => { await releases.get(target.id); await chrome.debugger.attach(source, '1.3'); return created; })();
     void created.attached.catch(() => { if (debuggees.get(target.id) === created) debuggees.delete(target.id); });
     debuggees.set(target.id, created);
@@ -488,7 +488,8 @@ function overlay(targetId, extra = {}) {
     const watches = watchesOn(debuggee);
     const pointers = watches.flatMap(watch => watch.pointers);
     const reporting = watches.some(watch => watch.reportPointer);
-    if (!mode && !pointers.length && !reporting) { if (debuggee.overlay) { try { await overlayCall(debuggee, { remove: true }); } finally { delete debuggee.overlay; debuggee.pointed = false; debuggee.reporting = false; } } return; }
+    // With nothing to show, the toolbar leaves; a new session removes, once, one an earlier session left (`overlay.ts`).
+    if (!mode && !pointers.length && !reporting) { if (debuggee.overlay || !debuggee.swept) { debuggee.overlay ??= { contextId: null }; debuggee.swept = true; try { await overlayCall(debuggee, { remove: true }); } finally { delete debuggee.overlay; debuggee.pointed = false; debuggee.reporting = false; } } return; }
     debuggee.overlay ??= { contextId: null };
     const recording = mode ? captureOn(debuggee.tabId) : undefined;
     // While you hold the tab, the agent that acted on its group is the one paused (the main agent when none did).
@@ -1267,6 +1268,9 @@ async function watchShare({ shareId, targetId, maxWidth, maxHeight, reportPointe
   if (!watch) {
     watch = { shareId, debuggee: await debuggeeOf(await targetInfo(targetId)), consumer: { quality: SHARE_FRAME_QUALITY, maxWidth: 1, maxHeight: 1, frame: frame => shareFrame(shareId, frame) }, pending: null, timer: undefined, pointers: [], reportPointer: false };
     watching.set(shareId, watch);
+    // What the tab shows now: none of the agent's toolbar unless the agent uses it, which also clears one an earlier
+    // debugger session left on the page (the watch shows the page as it is).
+    void overlay(targetId);
   }
   watch.consumer.maxWidth = Math.min(maxWidth, SHARE_FRAME_SIDE);
   watch.consumer.maxHeight = Math.min(maxHeight, SHARE_FRAME_SIDE);

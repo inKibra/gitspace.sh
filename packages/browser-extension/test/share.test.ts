@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { Window } from 'happy-dom';
 import { browserBase64, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { shareTargetFunction } from '../src/share.js';
-import { command, FRAME, installed, png, screencasts } from './installed.js';
+import { command, FRAME, installed, png, screencasts, settle } from './installed.js';
 
 const closing: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of closing.splice(0)) await close(); });
@@ -25,6 +25,13 @@ function shareOf(shareId: string, viewers: RuntimeBrowserShare['viewers'] = []):
 }
 
 describe('a share of a tab on your Chrome', () => {
+  it('watching a tab nobody uses clears a toolbar an earlier debugger session left on it, and shows none', async () => {
+    const chrome = await sharing();
+    await chrome.ask({ operation: 'shareWatch', shareId: crypto.randomUUID(), targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
+    await settle();
+    expect(chrome.overlays('target-9')).toEqual([{ remove: true }]);
+  });
+
   it('streams the tab while someone watches: at most four frames a second, the newest when they come faster, none while the connection is backed up', async () => {
     const chrome = await sharing();
     const shareId = crypto.randomUUID();
@@ -140,7 +147,8 @@ describe('a share of a tab on your Chrome', () => {
     const pointer = (payload: string, executionContextId: number) => chrome.pageEvent('target-9', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload, executionContextId });
     // An account that does not draw it (before extension 5.8) never asks, and nothing reports it.
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
-    expect(chrome.overlays('target-9')).toEqual([]);
+    // Only the new session's sweep of an earlier toolbar: no pointer report.
+    expect(chrome.overlays('target-9')).toEqual([{ remove: true }]);
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600, reportPointer: true });
     expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, report: '__gitspaceStop' });
     await pointer('pointer {"x":0.5,"y":0.25}', 50);

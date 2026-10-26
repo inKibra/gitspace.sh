@@ -154,7 +154,9 @@ export function createAccountBrowserAuthority(options: RuntimeBrowserAuthorityOp
         const target = { ...identity, targetId: command.targetId };
         const change = command.action === 'takeOver' ? await session.takeOver({ ...target, device: command.device ?? null }) : await session.resume(target);
         await holdersChanged({ storage, workspaceId: identity.workspaceId, runtime: async () => options.runtime(), browser: { source: 'cloud', pairingId: null, groupId: command.groupId, name: 'Cloud browser' },
-          before: change.before, after: change.after, acting: () => change.acting, page: () => change.page ?? undefined });
+          // Only agents open the cloud browser's tabs, so the agent hears of every one you take and hand back, acting there
+          // now or not: its next command on the tab would otherwise wait unexplained.
+          before: change.before, after: change.after, acting: () => true, page: () => change.page ?? undefined });
         return;
       }
       if (command.action !== 'closeTab' || !command.targetId) throw new Error('Only your Chrome’s group can be stopped or focused from here');
