@@ -250,7 +250,10 @@ function WorkspacePicker({ tabId, act }: { tabId: number; act: Act }) {
   // The rows as they show, by project, so the arrow keys go down the list.
   const rows = projects.flatMap(projectId => shown.filter(item => item.projectId === projectId));
   const choosable = rows.filter(item => item.approved);
-  const choose = (item: Choice) => { setOpen(false); void act({ addTab: { tabId, projectId: item.projectId, workspaceId: item.workspaceId } }, ''); };
+  const [adding, setAdding] = useState('');
+  // The workspace signs its group's grant for this Chrome first, which takes a few seconds.
+  const choose = (item: Choice) => { setOpen(false); setAdding(item.name); void act({ addTab: { tabId, projectId: item.projectId, workspaceId: item.workspaceId } }, '').finally(() => setAdding('')); };
+  if (adding) return <p role="status" className="flex h-8 items-center gap-2 text-caption text-muted-foreground"><span className="size-2 animate-pulse rounded-full" style={{ background: BLUE }} />Adding this tab to {adding}…</p>;
   return <div className="flex flex-col gap-1.5">
     <label className="flex h-8 items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 text-caption focus-within:border-[#1a73e8]">
       <span className="text-muted-foreground">⌕</span>
