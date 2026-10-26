@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, setSystemTime } from 'bun:test';
 import { browserBase64, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { command, installed, settle } from './installed.js';
+
+afterEach(() => { setSystemTime(); });
 
 describe('group reports', () => {
   it('count the scripts running on the group, again when one starts and when it ends', async () => {
@@ -243,7 +245,7 @@ describe('what the agent is doing', () => {
     expect(state.groups).toMatchObject([{ acting: { agent: 'main', doing: 'Typing in “Customer name”' } }]);
     expect(JSON.stringify(state)).not.toContain('Ada Lovelace');
     expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'step', agent: 'main', doing: 'Typing in “Customer name”' } });
-    // The toolbar counts the workspace while the step's authority lasts.
+    // The toolbar counts the workspace while the step acts.
     expect(chrome.toolbar.at(-1)).toMatchObject({ badge: '1' });
   });
 
@@ -258,6 +260,56 @@ describe('what the agent is doing', () => {
     const state = await chrome.popup({ popupState: true });
     expect(state.groups).toMatchObject([{ acting: { doing: 'Typing' } }]);
     expect(JSON.stringify(state)).not.toContain('hunter2');
+  });
+
+  it('stops showing a single step once the account says it ended: the tab’s toolbar goes idle at once, and the popup, the toolbar icon and the account count no agent', async () => {
+    const chrome = await installed({ live: true });
+    await chrome.relay(undefined, { groupActivity: true, comments: true });
+    // The hello says this extension hears when a step ended.
+    expect(chrome.sent.find(message => message.hello)).toMatchObject({ stepEnded: true });
+    const reports = () => chrome.sent.flatMap(message => 'group' in message ? [message.group] : []);
+    const attemptId = await chrome.authorize({ type: 'execute', args: { action: 'evaluate', source: 'relay', targetId: 'target-1', expression: 'document.title' }, grant: chrome.grant }, 'browser');
+    await chrome.execute({ operation: 'open', grant: chrome.grant });
+    await chrome.execute({ operation: 'command', targetId: 'target-1', method: 'Runtime.evaluate', params: { expression: 'document.title', returnByValue: true, awaitPromise: true } });
+    await settle();
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'step', doing: 'Running a script' } });
+    // Another attempt's end changes nothing.
+    await chrome.fromRelay({ operation: 'stepEnded', attemptId: crypto.randomUUID() });
+    expect((await chrome.popup({ popupState: true })).groups).toMatchObject([{ acting: { doing: 'Running a script' } }]);
+    await chrome.fromRelay({ operation: 'stepEnded', attemptId });
+    await settle();
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'idle', agent: null, doing: null } });
+    expect((await chrome.popup({ popupState: true })).groups).toMatchObject([{ acting: null }]);
+    expect(chrome.toolbar.at(-1)).toMatchObject({ badge: '' });
+    await chrome.advance(300);
+    expect(reports().at(-1)).toMatchObject({ agents: [] });
+    // A notice gets no answer.
+    expect(chrome.sent.some(message => 'error' in message || 'result' in message)).toBe(false);
+  });
+
+  it('stops showing a single step when its authority ends, if the account never says it ended', async () => {
+    const chrome = await installed({ comments: true });
+    await chrome.authorize({ type: 'execute', args: { action: 'observe', source: 'relay', targetId: 'target-1', screenshot: false, offset: 0, limit: 400 }, grant: chrome.grant }, 'browser');
+    await chrome.execute({ operation: 'open', grant: chrome.grant });
+    await settle();
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'step', doing: 'Reading the page' } });
+    setSystemTime(new Date(Date.now() + 60_000));
+    await chrome.advance(60_100);
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'idle', doing: null } });
+    expect(chrome.toolbar.at(-1)).toMatchObject({ badge: '' });
+  });
+
+  it('says what still acts on the group once a script ends, not the script', async () => {
+    const chrome = await installed();
+    await chrome.authorize({ type: 'execute', args: { action: 'observe', source: 'relay', targetId: 'target-1', screenshot: false, offset: 0, limit: 400 }, grant: chrome.grant }, 'browser');
+    await chrome.execute({ operation: 'open', grant: chrome.grant });
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-2' });
+    expect((await chrome.popup({ popupState: true })).groups).toMatchObject([{ acting: { doing: 'Running a script' } }]);
+    await chrome.execute({ operation: 'release', attemptId });
+    await settle();
+    expect((await chrome.popup({ popupState: true })).groups).toMatchObject([{ acting: { doing: 'Reading the page' } }]);
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'step', doing: 'Reading the page' } });
   });
 });
 

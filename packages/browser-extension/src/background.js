@@ -36,7 +36,8 @@ let managingIdentity = false;
 let identityOperations = Promise.resolve();
 const authorizations = new Map();
 /** What the agent is doing on each workspace group (`activity.ts`), by group id: `{ agent, doing }`, set by each step
- * and script command that changes it. The popup and the in-page toolbar show it while the agent acts there. */
+ * and script command that changes it, and set again from what still acts there when a script or step ends
+ * (`actingEnded`). The popup and the in-page toolbar show it while the agent acts there. */
 const activity = new Map();
 /** Scripts (`browser.run`) by attempt id, apart from each group's single-step authorization: a single step during a
  * script does not end it. `targets` are the tabs the script opened or attached to; `sites` the sites it may use
@@ -113,8 +114,8 @@ async function authorize(authorization) {
     activity.set(id, { agent: body.scope.conversationKind, doing });
     updateToolbar();
     scheduleReport(id);
-    // The toolbar stops counting the step once its authority ends, and the account hears it ended.
-    setTimeout(() => { updateToolbar(); scheduleReport(id); }, Math.max(0, Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)) - Date.now()) + 100);
+    // The step stops acting once its authority ends, should the relay never say it ended (`stepEnded`).
+    setTimeout(() => actingEnded(id), Math.max(0, Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)) - Date.now()) + 100);
   }
   return {};
 }
@@ -302,8 +303,8 @@ function scheduleReport(groupId) { clearTimeout(reportTimers.get(groupId)); repo
 function reportActivity(groupId) { if (accountActivity && !activityReports.has(groupId)) activityReports.set(groupId, setTimeout(() => { activityReports.delete(groupId); scheduleReport(groupId); }, ACTIVITY_REPORT_MS)); }
 /** Tells the account which tabs are in a workspace group now, and how many scripts run on it; a group that is gone
  * reports none. An account that takes them (`groupActivity`) also hears the group's colour and the agents acting there
- * now (`RuntimeBrowserGroupAgent`): each script inside its deadline, and the single step whose authority lasts, with
- * what each is doing, never what is typed (`activity.ts`). */
+ * now (`RuntimeBrowserGroupAgent`): each script inside its deadline, and the single step running now (`stepActs`),
+ * with what each is doing, never what is typed (`activity.ts`). */
 async function report(groupId) {
   const found = (await groupRecords()).find(({ record }) => record.groupId === groupId);
   const tabs = found ? await chrome.tabs.query({ groupId: found.record.chromeGroupId }) : [];
@@ -314,9 +315,9 @@ async function report(groupId) {
   }), running: [...runs.values()].filter(run => run.body.command.grant.body.groupId === groupId).length };
   if (accountActivity) {
     const color = found ? (await chrome.tabGroups.get(found.record.chromeGroupId).catch(() => null))?.color : undefined;
-    const now = Date.now(), step = authorizations.get(groupId);
+    const step = authorizations.get(groupId);
     const acting = [...[...runs.values()].filter(run => run.body.command.grant.body.groupId === groupId && live(run)).map(run => [run.body, 'run', run]),
-      ...(step?.body.command.type === 'execute' && Date.parse(step.body.expiresAt) > now && Date.parse(step.body.dispatch.deadlineAt) > now ? [[step.body, step.body.command.args.action, step]] : [])];
+      ...(stepActs(step) ? [[step.body, step.body.command.args.action, step]] : [])];
     Object.assign(group, Object.hasOwn(GROUP_HEX, color ?? '') ? { color } : {}, { agents: acting.slice(0, 32).map(([body, tool, entry]) => ({ agent: body.scope.conversationKind, tool, commands: entry.commands, startedAt: entry.startedAt, doing: entry.doing?.slice(0, 120) ?? null, ...(accountTakeover ? { targetId: entry.targetId ?? null } : {}) })) });
   }
   if (accountTakeover) group.held = [...holders.values()].filter(held => held.groupId === groupId).slice(0, 200).map(({ targetId, holder, since, by, device }) => ({ targetId, holder, since, by, device }));
@@ -391,6 +392,26 @@ async function check(id, expected = channels.get(id)) {
 }
 /** Whether a script is inside its signed deadline. */
 function live(run) { const now = Date.now(); return Date.parse(run.body.expiresAt) > now && Date.parse(run.body.dispatch.deadlineAt) > now; }
+/** Whether a group's single step (its `authorizations` entry) acts now: from its authorization until the relay says it
+ * ended (`stepEnded`), and never past its authority. */
+function stepActs(step) { const now = Date.now(); return step?.body.command.type === 'execute' && !step.ended && Date.parse(step.body.expiresAt) > now && Date.parse(step.body.dispatch.deadlineAt) > now; }
+/** The relay's `stepEnded`: the single step of that attempt finished, so it no longer acts on its group. */
+function stepEnded(attemptId) {
+  for (const [groupId, step] of authorizations) if (step.body.command.type === 'execute' && step.body.scope.attemptId === attemptId && !step.ended) { step.ended = true; actingEnded(groupId); }
+}
+/** A script or single step on a workspace group ended: the group's activity is that of the step still acting there,
+ * else of the latest script still running, else none; the toolbar, the account and each of the group's tabs hear it,
+ * so a tab's toolbar goes idle (or leaves) at once. */
+function actingEnded(groupId) {
+  const step = authorizations.get(groupId);
+  const run = [...runs.values()].filter(other => other.body.command.grant.body.groupId === groupId && live(other)).at(-1);
+  if (stepActs(step)) activity.set(groupId, { agent: step.body.scope.conversationKind, doing: step.doing });
+  else if (run) activity.set(groupId, { agent: run.body.scope.conversationKind, doing: run.doing });
+  else activity.delete(groupId);
+  updateToolbar();
+  scheduleReport(groupId);
+  for (const channel of channels.values()) if (channel.grant.groupId === groupId) void overlay(channel.targetId);
+}
 async function activeRun(attemptId) {
   const run = runs.get(attemptId);
   if (!run) throw new Error(ENDED_REFUSALS[ended.get(attemptId)] ?? 'Signed browser script required');
@@ -421,10 +442,9 @@ async function endRun(attemptId, reason) {
     }
     await (reason === 'released' || reason === 'taken' ? revoke(targetId) : fence(targetId));
   }
-  // A tab a single step still uses keeps its overlay, without the script's glow.
-  for (const targetId of run.targets) if (channels.has(targetId)) void overlay(targetId);
-  updateToolbar();
-  scheduleReport(run.body.command.grant.body.groupId);
+  // Each tab of the group shows what still acts there; a tab a single step still uses keeps its overlay, without the
+  // script's glow.
+  actingEnded(run.body.command.grant.body.groupId);
   await logRun(runLogEntry(run, reason, new Date().toISOString())).catch(() => {});
   await markRunning(run.body.command.grant.body.groupId);
 }
@@ -477,7 +497,7 @@ const OVERLAY_REFRESH_MS = 30_000;
 function overlayMode(channel) {
   if ([...runs.values()].some(run => run.targets.has(channel.targetId) && live(run))) return 'run';
   const step = authorizations.get(channel.grant.groupId);
-  if (step?.body.command.type === 'execute' && step.targetId === channel.targetId && Date.parse(step.body.expiresAt) > Date.now() && Date.parse(step.body.dispatch.deadlineAt) > Date.now()) return 'step';
+  if (step?.targetId === channel.targetId && stepActs(step)) return 'step';
   return captureOn(channel.tabId) ? 'capture' : null;
 }
 /** Overlay steps of one tab run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing else. */
@@ -1979,11 +1999,11 @@ function setEnabled(on, minutes) {
 /** The toolbar icon, badge and tooltip last set, so they are set again only when what they show changes. */
 let toolbar = '';
 const toolbarIcons = new Map();
-/** The workspace groups the agent acts on now: a script runs there, or a single step's authority lasts. */
+/** The workspace groups the agent acts on now: a script runs there, or a single step acts there (`stepActs`). */
 function actingGroups() {
-  const now = Date.now(), acting = new Set();
+  const acting = new Set();
   for (const run of runs.values()) if (live(run)) acting.add(run.body.command.grant.body.groupId);
-  for (const [groupId, step] of authorizations) if (step.body.command.type === 'execute' && Date.parse(step.body.expiresAt) > now && Date.parse(step.body.dispatch.deadlineAt) > now) acting.add(groupId);
+  for (const [groupId, step] of authorizations) if (stepActs(step)) acting.add(groupId);
   return acting;
 }
 /** Shows on the toolbar whether GitSpace is off, on and idle, working (agents acting and captures recording: their
@@ -2064,8 +2084,8 @@ async function connect() {
           // `closeTab`, `focusTab`); `siteLevels`: it enforces a grant's sites at read; `takeover`: it takes `takeOver`
           // and `resume`, and refuses the agent's commands on a tab you hold; `comments`: it has the in-page comment
           // tool, takes the account's `comments` notices and Show on page (`showComment`); `captureTracks`: its captures
-          // record steps and layout (`capture-tracks.ts`).
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true, comments: true, captureTracks: true, powers: true }));
+          // record steps and layout (`capture-tracks.ts`); `stepEnded`: it takes the account's `stepEnded` notices.
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true, comments: true, captureTracks: true, powers: true, stepEnded: true }));
           return;
         } finally { authenticating = false; }
       }
@@ -2099,6 +2119,7 @@ async function connect() {
     if (SHARE_NOTICES[message.operation]) { void shareNotice(message).catch(() => {}); return; }
     if (message.operation === 'comments') { if (typeof message.groupId === 'string') comments.changed(message.groupId); return; }
     if (message.operation === 'everything') { void everything.notice(message).catch(() => {}); return; }
+    if (message.operation === 'stepEnded') { if (typeof message.attemptId === 'string') stepEnded(message.attemptId); return; }
     if (message.operation === 'chromeInfo') {
       if (typeof message.name === 'string' && Array.isArray(message.projects) && Array.isArray(message.groups)) chromeInfo = {
         name: message.name.slice(0, 128),

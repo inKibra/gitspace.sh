@@ -62,6 +62,8 @@ const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional
   /** A hello saying the extension enforces a grant's `powers` and `everything` and takes `everything` notices (5.11
    * and later); `everything`: you allowed or ended Everything on a group from its popup or in-page toolbar. */
   powers: z.boolean().optional(), everything: BrowserEverythingRequestSchema.optional(),
+  /** A hello saying the extension takes `stepEnded` notices (5.11.1 and later). */
+  stepEnded: z.boolean().optional(),
   /** Replay steps on the extension's saved-capture card: the capture, and the workspace group its tab is in. */
   captureReplay: z.object({ captureId: z.string().uuid(), groupId: z.string().uuid() }).optional(),
   /** A name you gave a saved capture on the extension's saved-capture card, with the workspace group its tab is in. */
@@ -101,8 +103,9 @@ const CONTROL_OPERATION: Record<string, 'stopGroup' | 'closeTab' | 'focusTab' | 
  * its hello said it takes Take over and Resume agent and reports the tabs you hold (from 5.10). `agents`: how many
  * agents act on each of its groups, by group id, as its reports last said (an extension from 5.8 reports them); null
  * until one does. `comments`: its hello said its in-page comment tool takes `comments` notices (from 5.11). `powers`:
- * its hello said it enforces a grant's `powers` and `everything` (from 5.11); an older one never gets a grant with either. */
-type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; agents: Map<string, number> | null };
+ * its hello said it enforces a grant's `powers` and `everything` (from 5.11); an older one never gets a grant with either.
+ * `stepEnded`: its hello said it takes `stepEnded` notices (from 5.11.1). */
+type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; stepEnded: boolean; agents: Map<string, number> | null };
 /** Why a grant with sites approved read-only is not sent to an extension before 5.9: it would let agents click and type there. */
 const READ_SITES_UPDATE = 'Update the GitSpace extension in this Chrome to 5.9 or later: this version cannot keep agents from clicking or typing on the sites this workspace approved read-only:';
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
@@ -151,6 +154,8 @@ const BrowserSocket = z.object({
   comments: z.boolean().optional(),
   /** Set by a hello saying the extension enforces a grant's `powers` and `everything`. */
   powers: z.boolean().optional(),
+  /** Set by a hello saying the extension takes `stepEnded` notices. */
+  stepEnded: z.boolean().optional(),
   /** The `BROWSER_SOCKET_RELEASE` that answered the hello. */
   release: z.number().int().optional(),
 });
@@ -331,7 +336,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (cached?.socket === bound.socket) { cached.product = product; return cached; }
     if (cached) this.disconnect(pairingId);
     // Request ids continue past any reply still in flight from before the relay hibernated.
-    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, agents: null };
+    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, stepEnded: bound.state.stepEnded === true, agents: null };
     this.connections.set(pairingId, connection);
     return connection;
   }
@@ -724,7 +729,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
         return socket.close(1008, 'Extension update required');
       }
-      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), ...(message.stepEnded ? { stepEnded: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
       // `groupActivity`: this relay takes each group's colour and agents in the extension's reports; `takeover`: the tabs
       // you hold (`held`) and each agent's tab (`targetId`) too; `comments`: the in-page comment tool's requests
       // (`BROWSER_COMMENT_PATH`); `powers`: this relay takes `everything` requests and sends `everything` notices;
@@ -959,8 +964,12 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (!anyChrome) await this.dispatchApproval(authorization);
     const name = (await this.names([pairing]))(pairing);
     if (!anyChrome && !this.connection(placement.pairingId)) throw this.offline(pairing, () => name, []);
-    const result = await this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(body.expiresAt) - Date.now())));
-    return { ...result, browser: { pairingId: placement.pairingId, name } };
+    // The extension shows a single step acting until it hears the step ended, however it ended.
+    try { return { ...await this.runtime.execute(authorization, AbortSignal.timeout(Math.max(1, Date.parse(body.expiresAt) - Date.now()))), browser: { pairingId: placement.pairingId, name } }; }
+    finally {
+      const connection = this.connection(placement.pairingId);
+      if (body.command.type === 'execute' && connection?.stepEnded) connection.socket.send(JSON.stringify({ operation: 'stepEnded', attemptId: body.scope.attemptId }));
+    }
   }
   private async authorize(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal) {
     signal.throwIfAborted(); const placement = authorization.body.scope.placement;

@@ -172,6 +172,42 @@ test('powers and Everything reach only an extension whose hello says powers; the
   await expect(current.execute({ everything: again })).rejects.toThrow('Everything ended for this workspace on this Chrome');
   expect(current.notices.at(-1)).toEqual({ operation: 'everything', groupId: current.groupId, expiresAt: null });
 }));
+test('a single step on a Chrome ends with a `stepEnded` notice, however it ended, only to an extension whose hello says it takes them', () => fixture(async relay => {
+  const root = await keys(), workspace = await keys();
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId: 'project', workspaceId: 'workspace', publicKey: workspace.publicKey, issuedAt: new Date().toISOString(), expiresAt }, root.key.privateKey);
+  const chrome = async (ip: string, hello: object) => {
+    const pairing = await relay.pair({ ...trust, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+    const connection = await connect(relay, ip);
+    await prove(connection, await keys(), pairing, pairing.code, hello);
+    const identity = (await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId);
+    if (!identity || identity.state !== 'pending-confirmation') throw new Error('Expected unconfirmed identity');
+    await relay.confirm(pairing.pairingId, identity.pairedKeyFingerprint);
+    const settings = await relay.projectSettings('project');
+    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId }) => ({ pairingId })), { pairingId: pairing.pairingId }] });
+    const placement = await relay.placement('project', pairing.pairingId);
+    const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt }, workspace.key.privateKey, authority);
+    const notices: unknown[] = [];
+    let refuse = false;
+    connection.socket.addEventListener('message', event => {
+      const message = z.object({ id: z.number().optional(), operation: z.string() }).loose().parse(JSON.parse(String(event.data)));
+      if (message.id === undefined) { notices.push(message); return; }
+      connection.socket.send(JSON.stringify(message.operation === 'tabs' && refuse ? { id: message.id, error: { message: 'Signed group discovery required' } } : { id: message.id, result: message.operation === 'tabs' ? [] : {} }));
+    });
+    const step = async (refused: boolean) => {
+      refuse = refused;
+      const attemptId = crypto.randomUUID();
+      await relay.execute(await signRuntimeAccountBrowserAuthorization({ scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt: new Date().toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority)).catch(() => {});
+      return attemptId;
+    };
+    return { notices, step };
+  };
+  const old = await chrome('192.0.2.50', {}), current = await chrome('192.0.2.51', { stepEnded: true });
+  const done = await current.step(false), failed = await current.step(true);
+  await old.step(false);
+  expect(current.notices).toEqual([{ operation: 'stepEnded', attemptId: done }, { operation: 'stepEnded', attemptId: failed }]);
+  expect(old.notices).toEqual([]);
+}));
 test('a candidate past its pairing deadline is closed and frees its budget on the next admission', () => fixture(async relay => {
   await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
   const idle = [];

@@ -536,6 +536,48 @@ it('plays a screencast recording at its recorded times, reading frames.bin by by
   expect((await shown()).at).toBe('Checkout run at 0:30');
 });
 
+it('spans the whole capture when its screencast sent its last frame early: the last frame holds until the end, and markers sit at their moments', async () => {
+  vi.useFakeTimers();
+  // A still page repaints rarely: three frames in the first 2 s of a 23 s capture.
+  const index = { version: 1, frames: [0, 1000, 2000].map((t, frame) => ({ t, offset: frame * 4, length: 4 })) };
+  vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async (input, init) => {
+    if (input === '/files/json') return Response.json(index);
+    const [, start, end] = /^bytes=(\d+)-(\d+)$/u.exec(new Headers(init?.headers).get('Range') ?? '') ?? [];
+    return new Response(Uint8Array.from({ length: 12 }, (_, offset) => Math.floor(offset / 4)).slice(Number(start), Number(end) + 1), { status: 206 });
+  }));
+  captures = [capture(1, { name: 'Quiet page', by: 'you', source: 'relay', browser: 'Work Chrome', endedAt: '2026-10-24T12:00:23.000Z', tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: 3, width: 1280, height: 720 } } }, { 'frames.bin': '/files/bin', 'frames.json': '/files/json' })];
+  comments = [thread(1, 'Still says loading', ana, { source: { kind: 'capture', captureId: captureId(1), atMs: 20_000 } })];
+  await render();
+  await act(async () => labelled('Play Quiet page').click());
+  await settle();
+  const player = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(player.textContent).toContain('0:00 / 0:23');
+  expect(labelled('Comment 1 on the timeline').style.left).toBe(`${20_000 / 23_000 * 100}%`);
+
+  await act(async () => labelled('Play').click());
+  for (const step of [1000, 1000]) await act(async () => { await vi.advanceTimersByTimeAsync(step); });
+  await settle();
+  expect(player.querySelector('img[alt^="Quiet page at"]')?.getAttribute('alt')).toBe('Quiet page at 0:02');
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_999); });
+  expect(player.textContent).toContain('0:02 / 0:23');
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  await settle();
+  expect(player.textContent).toContain('0:23 / 0:23');
+  expect(player.querySelector('img[alt^="Quiet page at"]')?.getAttribute('alt')).toBe('Quiet page at 0:02');
+  expect(labelled('Play')).not.toBeNull();
+});
+
+it('spans the whole capture when its video names a shorter length', async () => {
+  captures = [capture(2, { name: 'Short video', by: 'you', source: 'relay', browser: 'Work Chrome', endedAt: '2026-10-24T12:00:23.000Z', tracks: { video: { path: 'video.webm', mediaType: 'video/webm', sound: false, durationMs: 23_000 } } }, { 'video.webm': '/files/short' })];
+  await render();
+  await act(async () => labelled('Play Short video').click());
+  const player = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+  const video = player.querySelector('video')!;
+  Object.defineProperty(video, 'duration', { value: 13 });
+  await act(async () => { video.dispatchEvent(new Event('loadedmetadata')); });
+  expect(player.textContent).toContain('0:00 / 0:23');
+});
+
 it('plays a capture with its steps and numbered comments on the timeline; a comment seeks there and opens its thread; Comment at m:ss anchors to the element the layout track kept then', async () => {
   vi.useFakeTimers();
   const url = 'https://httpbin.org/forms/post';

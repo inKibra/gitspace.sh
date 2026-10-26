@@ -154,7 +154,10 @@ export function CapturePlayer({ capture, files, threads, threadsError, as, canCo
   }).toSorted((a, b) => a.atMs - b.atMs));
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [length, setLength] = useState(() => captureLength(capture));
+  // The media's own length (the video's metadata, the last frame's time) never shortens the capture's: a screencast
+  // sends frames only when the page repaints, so a still page's last frame can come long before the capture ended.
+  const [mediaLength, setMediaLength] = useState(0);
+  const length = Math.max(captureLength(capture), mediaLength);
   const [videoSize, setVideoSize] = useState<{ w: number; h: number } | null>(null);
   const [sidebar, setSidebar] = useState<Sidebar>('comments');
   const [selected, setSelected] = useState<string | null>(null);
@@ -273,11 +276,11 @@ export function CapturePlayer({ capture, files, threads, threadsError, as, canCo
               const element = event.currentTarget;
               if (element.videoWidth && element.videoHeight) setVideoSize({ w: element.videoWidth, h: element.videoHeight });
               // Chrome's recordings often name no length; the capture's own stands then.
-              if (Number.isFinite(element.duration) && element.duration > 0) setLength(Math.round(element.duration * 1000));
+              if (Number.isFinite(element.duration) && element.duration > 0) setMediaLength(Math.round(element.duration * 1000));
             }}
             onTimeUpdate={event => setTime(Math.round(event.currentTarget.currentTime * 1000))}
             onPlay={() => { setPlaying(true); setSelected(null); }} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)}
-          /> : media?.kind === 'frames' ? <FramesPlayer indexUrl={media.index} dataUrl={media.data} label={capture.name} time={time} playing={playing} onTime={setTime} onLength={setLength} onEnded={() => setPlaying(false)} />
+          /> : media?.kind === 'frames' ? <FramesPlayer indexUrl={media.index} dataUrl={media.data} label={capture.name} time={time} length={length} playing={playing} onTime={setTime} onLength={setMediaLength} onEnded={() => setPlaying(false)} />
             : media?.kind === 'image' ? <img className="block h-full w-full object-contain" src={media.url} alt={capture.name} />
               : null}
           {visible.map(item => item.thread.root.anchor ? <CommentPin key={item.thread.root.id} n={item.n} box={item.thread.root.anchor.box} resolved={item.thread.root.resolved !== null} highlighted={popover?.thread.root.id === item.thread.root.id} onClick={commenting ? undefined : () => show(item)} /> : null)}
@@ -372,8 +375,9 @@ function CommentDraft({ draft, as, style, onCancel, onSend }: { draft: Draft; as
 }
 
 /** Screencast frames from `frames.bin` at the player's playhead (`time`), read with byte ranges a few frames ahead of it;
- * while `playing`, each frame shows until the next one's recorded time (`onTime`) and the last ends playback. */
-function FramesPlayer({ indexUrl, dataUrl, label, time, playing, onTime, onLength, onEnded }: { indexUrl: string; dataUrl: string; label: string; time: number; playing: boolean; onTime(ms: number): void; onLength(ms: number): void; onEnded(): void }) {
+ * while `playing`, each frame shows until the next one's recorded time (`onTime`), the last one until `length`, where
+ * playback ends. */
+function FramesPlayer({ indexUrl, dataUrl, label, time, length, playing, onTime, onLength, onEnded }: { indexUrl: string; dataUrl: string; label: string; time: number; length: number; playing: boolean; onTime(ms: number): void; onLength(ms: number): void; onEnded(): void }) {
   const [frames, setFrames] = useState<Frames | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, setLoaded] = useState(0);
@@ -448,11 +452,12 @@ function FramesPlayer({ indexUrl, dataUrl, label, time, playing, onTime, onLengt
   useEffect(() => {
     if (!playing || !frames) return;
     const next = frames[position + 1];
-    if (!next) { reported.current.onEnded(); return; }
-    if (!nextReady) return;
-    const timer = setTimeout(() => reported.current.onTime(next.t), Math.max(0, next.t - time));
+    if (!next && time >= length) { reported.current.onEnded(); return; }
+    if (next && !nextReady) return;
+    const at = next ? next.t : length;
+    const timer = setTimeout(() => reported.current.onTime(at), Math.max(0, at - time));
     return () => clearTimeout(timer);
-  }, [playing, frames, position, nextReady, time]);
+  }, [playing, frames, position, nextReady, time, length]);
 
   if (error) return <p role="alert" className="flex h-full items-center justify-center p-4 text-caption text-red-300">{error}</p>;
   if (!frames) return <p role="status" className="flex h-full items-center justify-center text-caption text-white/70">Loading recording…</p>;
