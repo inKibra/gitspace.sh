@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { RuntimeAccountBrowserPairingCode, RuntimeAccountBrowserRelayStatus, RuntimeProjectBrowserPreferences, RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
+import { BROWSER_POWER_LABELS, BROWSER_POWERS, type RuntimeAccountBrowserPairingCode, type RuntimeAccountBrowserRelayStatus, type RuntimeProjectBrowserPreferences, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
 import { Badge, Button, Card, CardDescription, CardFooter, CardGroup, CardHeader, CardMedia, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Switch } from '@gitspace/ui';
 import { Cloud01, Monitor01, Plus, Trash01 } from '@untitledui/icons';
 import { accountBrowserStatus, confirmAccountBrowser, downloadAccountBrowserExtension, pairAccountBrowser, projectBrowserSettings, unpairAccountBrowser, updateAccountBrowser, updateProjectBrowserSettings } from './browser-relay-client.js';
-import { approveChrome, projectApprovals } from './browser-approvals.js';
+import { approveChrome, projectApprovals, withPower } from './browser-approvals.js';
 import { EmptyState, StatusDot } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
-import { formatClock } from './RuntimeBrowserCaptures.js';
+import { formatClock } from './capture/CapturePlayer.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 type Pairing = RuntimeAccountBrowserRelayStatus['pairings'][number];
@@ -191,16 +191,21 @@ function ManageChromeDialog({ pairing, projects, browsers, onClose }: { pairing:
     if (change.name !== undefined || change.note !== undefined) await browsers.updateChrome(id, change);
   };
   const seen = pairing.connected ? 'online now' : pairing.seenAt ? `seen ${ago(pairing.seenAt, Date.now())}` : 'offline';
+  // Every project reports the same extension for this Chrome; powers are stored either way and enforced from 5.11.
+  const powersSupported = projects.some(project => browsers.settings[project.id]?.browsers.some(browser => browser.pairingId === id && browser.powersSupported));
   return <Dialog open onOpenChange={open => { if (!open && pending === null) onClose(); }}><DialogContent size="lg">
     <DialogHeader><DialogTitle>{pairing.name}</DialogTitle><DialogDescription>{pairing.pairedAt ? `Paired ${day(pairing.pairedAt)} · fingerprint ` : 'Fingerprint '}<span className="font-mono" title={`SHA-256 ${pairing.pairedKeyFingerprint}`}>{shortFingerprint(pairing.pairedKeyFingerprint)}</span> · {seen}</DialogDescription></DialogHeader>
     <div className="flex max-h-[60dvh] flex-col gap-5 overflow-y-auto">
       <InputGroup><InputField index={0} label="Name" value={name} onChange={setName} disabled={pending !== null} /><InputField index={1} label="Note for agents" value={note} onChange={setNote} placeholder="The account it is signed in to, say" disabled={pending !== null} /></InputGroup>
-      {pairing.extension?.updateRequired ? <p className="text-caption text-destructive">This GitSpace release refuses the extension as too old. Download it again and reload it in chrome://extensions.</p> : null}
+      {pairing.extension?.updateRequired ? <p className="text-caption text-destructive">This GitSpace release refuses the extension as too old. Download it again and reload it in chrome://extensions.</p>
+        : pairing.connected && !powersSupported ? <p className="text-caption text-[#b45309]">Update the extension in this Chrome to 5.11 for powers to work: the ones you turn on are kept, but this version cannot enforce them. Download it again and reload it in chrome://extensions.</p> : null}
       <section className="flex flex-col gap-2" aria-label="Projects">
-        <div><h3 className="text-body font-medium text-foreground">Projects</h3><p className="text-caption text-muted-foreground">Approving is your personal permission, not a repository setting. Each workspace gets its own tab group; the project&apos;s approved sites still apply. The default answers requests that don&apos;t name a Chrome.</p></div>
+        <div><h3 className="text-body font-medium text-foreground">Projects</h3><p className="text-caption text-muted-foreground">Approving is your personal permission, not a repository setting. Each workspace gets its own tab group; the project&apos;s approved sites still apply. The default answers requests that don&apos;t name a Chrome. Powers give agents in that project more on this Chrome.</p></div>
         {projects.length === 0 ? <p className="text-caption text-muted-foreground">Create a project first.</p> : <div className="flex flex-col divide-y divide-border rounded-xl border border-border">{projects.map(project => {
           const settings = browsers.settings[project.id];
-          const approved = settings?.browsers.some(browser => browser.pairingId === id && browser.approved) ?? false;
+          const browser = settings?.browsers.find(item => item.pairingId === id);
+          const approved = browser?.approved ?? false;
+          const powers = browser?.powers ?? [];
           const isDefault = settings?.defaultPairingId === id;
           return <div key={project.id} className="flex flex-wrap items-center gap-3 px-3 py-2">
             <span className="min-w-0 flex-1 break-words text-body">{project.name}</span>
@@ -208,6 +213,10 @@ function ManageChromeDialog({ pairing, projects, browsers, onClose }: { pairing:
             <Switch aria-label={`Approved in ${project.name}`} label={approved ? 'Approved' : 'Not approved'} checked={approved} disabled={pending !== null || !settings} onToggle={() => update(project.id, `approve:${project.id}`, current => approved
               ? { defaultPairingId: current.defaultPairingId === id ? null : current.defaultPairingId, approvals: projectApprovals(current).filter(item => item.pairingId !== id) }
               : approveChrome(current, id))} />
+            {approved ? <div role="group" aria-label={`Powers in ${project.name}`} className="flex w-full flex-col border-l-2 border-border pl-2">
+              {BROWSER_POWERS.map(power => <Switch key={power} size="compact" aria-label={`${BROWSER_POWER_LABELS[power]} in ${project.name}`} label={BROWSER_POWER_LABELS[power]} checked={powers.includes(power)} disabled={pending !== null}
+                onToggle={() => update(project.id, `power:${project.id}`, current => withPower(current, id, power, !powers.includes(power)))} />)}
+            </div> : null}
           </div>;
         })}</div>}
       </section>

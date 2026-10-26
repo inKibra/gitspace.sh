@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { NAMED_KEYS } from '@gitspace/browser-extension';
-import { BROWSER_RUNS_DAYS, BROWSER_RUNS_KEPT, RuntimeBrowserRunSchema, type RuntimeBrowserArguments, type RuntimeBrowserRun, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { BROWSER_DEBUG_DURATION_MS, BROWSER_RUNS_DAYS, BROWSER_RUNS_KEPT, RuntimeBrowserRunSchema, type RuntimeBrowserArguments, type RuntimeBrowserRun, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { BROWSER_RUN_PREFACE } from './runtime-browser-account.js';
+/** How a storage step's operation reads in the recent runs. */
+const STORAGE_OPS: Record<'get' | 'set' | 'clear', string> = { get: 'read', set: 'set', clear: 'clear' };
 
 /** Prefix of a workspace's recent browser runs, `runtime.browser.run:<at>:<attemptId>` (the Browser tab's Recent runs). */
 export const BROWSER_RUN_ROWS = 'runtime.browser.run:';
@@ -57,6 +59,9 @@ export function browserRunSummary(args: RuntimeBrowserArguments, end: BrowserRun
     case 'act': call = `act ${args.operation} ${args.operation === 'press' ? `${args.value && Object.hasOwn(NAMED_KEYS, args.value) ? args.value : 'a key'} on ` : ''}${element}`; break;
     case 'run': call = args.source === 'relay' && args.sites?.length ? `run on ${args.sites.join(', ')}` : 'run'; break;
     case 'close': call = 'close tab'; break;
+    // Powers (`browser-powers.ts`): what was recorded or which storage, never a value.
+    case 'debug': call = args.kind === 'heap' ? 'heap snapshot' : `${args.kind === 'profile' ? 'CPU profile' : 'trace'} ${Math.round((args.durationMs ?? BROWSER_DEBUG_DURATION_MS.default) / 1000)} s`; break;
+    case 'storage': call = `${STORAGE_OPS[args.op]} ${args.kind}${args.name ? ` ${args.name.slice(0, 40)}` : ''} ${args.op === 'set' ? 'on' : 'of'} ${args.site}`; break;
     default: call = args.action;
   }
   if ('error' in end || end.result.status !== 'completed') {

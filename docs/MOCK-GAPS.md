@@ -173,21 +173,21 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 ### Captures (M:209-215, 273-289)
 | Mock element | Status | Shipped |
 |---|---|---|
-| Section not a card: h3 "Captures" + compact TabsSubtle filter | DIFFERENT: card section with h4 + button group (ghost/secondary toggles) | RuntimeBrowserCaptures.tsx:83-89 |
-| Filters with counts "All · 4 / Steps · 2 / Comments · 2 / Video · 3 / Screenshots · 1" | DIFFERENT: "All / Screenshots / Video", no counts. Steps & Comments filters MISSING [BACKEND]: no steps/comments tracks (browser.ts:202-205, 214-218; D §11 l.258-263, B3 l.323) | :18-23, 87-89 |
-| List: one bordered rounded-xl bg-surface-1 container with dividers | DIFFERENT: separate surface-3 rounded rows | :94, 98 |
-| Thumbnail w-24 16:10 | DIFFERENT: aspect-video (16:9), placeholder text "Image"/"Video" | :99-101 |
-| Red "● live" badge on thumbnail while capturing, live preview | DIFFERENT: REC clock badge under the title; no live thumbnail | :108 |
-| Name in text-body | DIFFERENT: text-caption font-medium | :103 |
-| Track pills (rounded-full surface-3 11px): "2 comments", "video 4:12", "layout", "5 steps", "video 0:14 · sound", "9 steps", "screenshot · 1440×900" | MISSING as pills. Shipped puts one length (size or duration) in the meta line. Video duration, `sound`, image size are available (frontend); steps/comments/layout counts [BACKEND] (no such tracks) | :61-66, 104-107 |
-| Status badge "Not in repo" (gray) / "Saved as skill" (green) | MISSING. [BACKEND] capture schema has no repo/skill link (browser.ts:206-219; D §11 l.268) | — |
-| Meta "Bradley · Studio desktop · httpbin.org/forms/post · capturing now" / "main saved it to .gitspace/skills/staging-sign-in in a3f9c21 after you asked" / "main · capture() in a run · cloud browser · 19:12" | DIFFERENT: "By agent/By you · {browser} · {full locale date-time} · {length}". Person/agent name ("Bradley", "main"), page URL, "capture() in a run" origin, saved-as-skill path+commit MISSING; agent name/origin/skill [BACKEND] (`by: 'agent'|'you'`, browser.ts:208) | :104-107, 24 |
-| Ghost "Mention" (puts the capture into the chat) | DIFFERENT: copies `drive://workspace/browser/captures/<id>/` to clipboard, label "Copied" | :77-82, 112 |
-| Ghost "Play" / "View" (screenshot) | DIFFERENT: secondary "Open" (one label), disabled while recording | :113 |
-| Secondary "Share" per capture | MISSING. [BACKEND] capture share links not built (D §8 l.217, §11 l.269, B3 l.323) | — |
-| Buttons in a row at the right | DIFFERENT: stacked vertically | :111 |
-| Caption "Everything you or an agent captures, one list. A capture is tracks: steps, comments, video, page layout; a screenshot is one frame. Nothing here is in the repository until the agent saves it there; mention one in the chat to use it." | MISSING (only empty-state text) | :93 |
-| — | EXTRA: Failed badge + reason; loading/error states; CapturePlayer dialog (video / frames scrubber / image) | :109, 122-217 |
+| Section not a card: h3 "Captures" + compact TabsSubtle filter | MATCH | RuntimeBrowserCaptures.tsx (`BrowserCaptures`) |
+| Filters with counts "All · 4 / Steps · 2 / Comments · 2 / Video · 3 / Screenshots · 1" | MATCH (Batch 19 phase 5): Steps = captures with steps, Comments = captures with threads (counted from the workspace's threads), Video includes recordings still running or failed | `CAPTURE_FILTER_ORDER`, `keep` |
+| List: one bordered rounded-xl bg-surface-1 container with dividers | MATCH | |
+| Thumbnail w-24 16:10 | MATCH | |
+| Red "● live" badge on thumbnail while capturing, live preview | MATCH for the badge (the thumbnail is the capture's, not live) | |
+| Name in text-body | MATCH | |
+| Track pills (rounded-full surface-3 11px): "2 comments", "video 4:12", "layout", "5 steps", "video 0:14 · sound", "9 steps", "screenshot · 1440×900" | MATCH: steps, comments, video (length, sound), layout, screenshot size; a recording shows "recording m:ss" | `trackPills` |
+| Status badge "Not in repo" (gray) / "Saved as skill" (green) | MATCH: green from `capture.json` `skill`; gray for a saved capture with steps and no skill | |
+| Meta "Bradley · Studio desktop · httpbin.org/forms/post · capturing now" / "main saved it to .gitspace/skills/staging-sign-in in a3f9c21 after you asked" / "main · capture() in a run · cloud browser · 19:12" | DIFFERENT: "You/Agent" for the person (the capture records `by: you/agent`, not a name), "Agent saved it to {path} in {commit}" (no "after you asked"), "Agent · capture() in a run · {browser} · {page} · {time}" | |
+| Ghost "Mention" (puts the capture into the chat) | MATCH: puts `capture://<id>` into the composer (a chip) | |
+| Ghost "Play" / "View" (screenshot) | MATCH (disabled while recording or with no media) | |
+| Secondary "Share" per capture | MATCH: a popover with Comments and expiry (1 hour, 1 day, 7 days, 30 days), Create link, then the link with Copy, time left, Stop sharing and its activity | `ShareCapture` |
+| Buttons in a row at the right | MATCH | |
+| Caption "Everything you or an agent captures, one list. …" | MATCH | |
+| — | EXTRA: Failed badge + reason; loading/error states | |
 
 ### Recent runs (M:291-300)
 | Mock element | Status | Shipped |
@@ -199,7 +199,7 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 
 ### Sections shipped but absent from mock view 2
 - EXTRA: "Shares" card (live/ended shares, link + Copy, Watching list, time left, Stop sharing, Activity audit) — RuntimeBrowserShares.tsx:74-102, RuntimeBrowserTab.tsx:215.
-- EXTRA: "Page comments" card (crop, name, guest badge, time, text, target, page link) — RuntimeBrowserShares.tsx:106-123, RuntimeBrowserTab.tsx:216.
+- EXTRA: "Page comments" card, now threads (Batch 19 phase 4): Open/Resolved filter, numbered purple pin badge, crop, who (guest/agent badge), age, text, "On role “name”", where it was made, page link, replies, Reply, Resolve/Reopen and Show on page (your Chrome: the extension brings the tab forward in comment mode with the thread open, `browserCommentShow`; a share's or the cloud browser's tab: the Watch dialog with the pin highlighted); no composer — RuntimeBrowserComments.tsx, RuntimeBrowserTab.tsx.
 
 ### Pasted tab link in the composer (M:190-207 vs Composer.tsx)
 | Mock element | Status | Shipped |
@@ -251,12 +251,7 @@ Legend: **MATCH** · **DIFFERENT** (how) · **MISSING** · **EXTRA** (shipped, n
 | Another GitSpace user (Ana Ruiz) recognised: box "Joining as **Ana Ruiz** (signed in to GitSpace)" on surface-2, no name field, Join enabled, footer without "No account needed." | NOT BUILT [BACKEND, needs a decision]: no identity spans accounts (each account's devices live in its own vault and IndexedDB on its own host; the apex `gitspace.sh` has no session; sealing and signing keys are per account), so another account's user cannot be verified without new infrastructure (a platform-brokered or per-account-issued assertion). The account's **own** device is recognised, in the mock's box ("Joining as {sharer} (signed in to GitSpace)") | ShareGreeting.tsx:70-72; SharePage.tsx:37-40 |
 
 ### Greeting · Shared capture (MS:28-39)
-Whole state MISSING. [BACKEND] capture share links don't exist (D §8 l.217 "Not built yet: … capture shares (§11)", D §11 l.269, milestone B3 l.323). Elements:
-- logo row; h2 "Bradley shared a capture with you"; subtitle "A recording of a browsing session, with comments. Bradley's browser doesn't need to be on."
-- tile with purple comment icon, "Pizza form review", "httpbin.org/forms/post · 4:12 · 2 comments";
-- list "✓ Watch the whole session and scrub through it", "✓ Reply, and comment at any moment on anything", "✕ The live page: this is a recording";
-- "Your name" field (placeholder "Shown on your comments"), primary "Open" (disabled until a name);
-- caption "Contains a recording of everything visible in the tab during the session. Ends in 7 days or when Bradley stops sharing."
+MATCH (Batch 19 phase 5, share/CaptureSharePage.tsx, `/c/<id>#secret`): logo row; "{sharer} shared a capture with you" and "A recording of a browsing session, with comments. {sharer}'s browser doesn't need to be on."; the purple tile with name and "{page} · m:ss · N comments"; the three ✓/✕ lines (a view-only share says "✕ Comment: this capture is shared view only"); "Your name" ("Shown on your comments") and Open, disabled until a name; "Contains a recording of everything visible in the tab during the session. Ends in {time left} or when {sharer} stops sharing." EXTRA: opened from one of the account's devices, "Opening as {sharer} (signed in to GitSpace)" and no name field.
 
 ### Greeting · Ended (MS:22-26)
 | Mock element | Status | Shipped |
@@ -282,21 +277,21 @@ Whole state MISSING. [BACKEND] capture share links don't exist (D §8 l.217 "Not
 | Field placeholder "Write a comment…" | MISSING (textarea has no placeholder) | :359 |
 | Cancel as a text link (left) · purple "Comment" (right) | DIFFERENT: ghost "Cancel" + primary "Comment", both right; EXTRA "Sending…", error text, Ctrl/⌘+Enter, Esc | :363-371 |
 | Named pointers overlaid: "main · agent" (blue), "Bradley" (gray), "You (Ana)" (purple) | MATCH (phase 2) for "Bradley": the sharer's Chrome reports their pointer over the tab and each viewer draws it in gray with their name (`sharer` message; account-worker/src/browser-share.ts:535); it is never drawn on the tab, under the sharer's own cursor. The agent's cursor and the viewers' pointers arrive drawn into the frames by the overlay (its labels are the overlay's: "main", "Ana · watching") | share/ShareViewer.tsx:383-385, 428-441 |
-| Numbered comment pin on the page ("1") | MISSING. Comments show only in the sidebar; pins on the live frame would need the page's scroll offset (page message has none, browser-share.ts:140) | — |
-| — | EXTRA: Comments sidebar list (ShareComments: name, guest badge, time, text, "On …") | ShareComments.tsx:5-24, ShareViewer.tsx:387 |
+| Numbered comment pin on the page ("1") | MATCH (Batch 19 phase 4): purple `rounded-bl-none` pins at the top-right of each open thread's anchor box on this page (box fractions of the tab's viewport, page matched by URL without the fragment); a pin or the list opens the thread popover (the mock's Thread look: "On …", avatars, `AI` in blue for agents, "Reply as Ana (guest)…", Resolve for the account's owner only, purple Reply); others' comments and replies arrive live (`thread` messages). Pins keep the box from when the comment was made: after the sharer scrolls they point where the element was | share/ShareViewer.tsx, comment-threads.tsx |
+| — | EXTRA: Comments sidebar list of threads (pin number, text, who, guest badge, time, replies, resolved, "On …"); choosing one opens it | ShareComments.tsx |
 | — | EXTRA: banners "{sharer}'s Chrome is offline…", "Connection lost. Reconnecting…", notice+Dismiss; "Waiting for the tab…" | :327-329, 344 |
 | Guest comments carry the given name, marked guest | MATCH | ShareComments.tsx:13-14; account-worker/src/browser-share.ts:464 |
 
-### Shared capture, browser offline (MS:130-175) — entire section MISSING
-No share route plays a capture; the only player is the owner's CapturePlayer in the Browser tab (RuntimeBrowserCaptures.tsx:122-217: Play/Pause, `<input type=range>`, "m:ss / m:ss"). Every element below needs backend:
-- Header: favicon · "**Pizza form review** · capture from Bradley · 4:12 · whole recording" · pill "Bradley's Chrome is offline · recording". [BACKEND] capture shares (D §8 l.217; §11 l.269 "works while your Chrome is offline").
-- Left sidebar of timed comments: numbered pin (purple; gray for "added later"), text, "{who} · at m:ss · added later", click seeks, active row highlighted. [BACKEND] comments track on captures (D §9 l.229-230; §11 l.262; B2 l.322, B3 l.323; schema note browser.ts:205).
-- Frame: hover outline from the recorded layout, label "textbox “E-mail address:” · from the recording" (approximate anchor). [BACKEND] layout track (D §11 l.261; §9 l.230).
-- Pins on the frame for comments made up to the playhead.
-- Active comment popover (top-right): "On {anchor} · at m:ss", "**who** · text", reply field "Reply as Ana (guest)…". [BACKEND] threads/replies (D §9 l.221, B2 l.322; "Threads, resolving … are B2", D §8 l.213).
-- Transport: round dark ▶ button, "m:ss / m:ss", custom scrubber (track, progress, thumb), step tick marks, numbered comment markers on the timeline. Steps [BACKEND] (D §11 l.259; §11 l.269 "steps and comments as timeline markers").
-- Secondary "Comment at m:ss" with comment icon. [BACKEND] comments on a recording's timeline (D §9 l.230; §11 l.269).
-- Note: anchors re-matched to real elements when the live page opens again (D §9 l.230) — not built.
+### Shared capture, browser offline (MS:130-175)
+Built (Batch 19 phase 5): the same player as the Browser tab (capture/CapturePlayer.tsx) on `/c/<id>`, its files served from the drive through the share, so no Chrome needs to be on.
+- Header: favicon · "**Pizza form review** · capture from Bradley · 4:12 · whole recording" · pill: DIFFERENT "{sharer}'s Chrome can be off · recording" (the share page does not ask whether the Chrome is online).
+- Left sidebar of timed comments: MATCH (numbered pin, purple, gray once resolved; "{who} · at m:ss · added later"; click seeks and opens the thread; active row highlighted). EXTRA: a Steps tab (time, kind, locator, value with secrets masked, data-changing requests marked).
+- Frame: hover outline from the recorded layout, "textbox “E-mail address:” · from the recording": MATCH while commenting (after "Comment at m:ss").
+- Pins on the frame for comments made up to the playhead: MATCH.
+- Active comment popover: DIFFERENT position (beside its pin, the in-page tool's popover from comment-threads.tsx) with "On {anchor}", the thread, "Reply as Ana (guest)…"; Resolve only for the account's owner.
+- Transport: MATCH (round dark ▶, "m:ss / m:ss", custom scrubber with progress and thumb, step ticks, numbered comment markers).
+- Secondary "Comment at m:ss" with comment icon: MATCH; while pointing it reads "Commenting" with the purple inset ring.
+- Note: anchors re-matched to real elements when the live page opens again (D §9) — not built.
 
 ---
 
@@ -304,11 +299,11 @@ No share route plays a capture; the only player is the owner's CapturePlayer in 
 | Feature | Where in mock | Design source | Current state |
 |---|---|---|---|
 | Signed-in (other account) greeting / non-guest identity | V4 greeting "Signed in" | D §8 l.200 | Only owner device recognised (browser-share.ts:36; account-worker browser-share.ts:141) |
-| Shared captures playable while Chrome offline (capture share links, "Shared capture" greeting, saved-session player) | V4 greeting + saved session; V2 capture "Share" | D §8 l.217, §11 l.269, B3 l.323 | Not built ("Not built yet: … capture shares") |
+| Shared captures playable while Chrome offline (capture share links, "Shared capture" greeting, saved-session player) | V4 greeting + saved session; V2 capture "Share" | D §8, §11 | Built (Batch 19 phase 5, D §11 "Capture share links") |
 | Comment threads / replies / resolve | V4 "Reply as…", saved-session popover | D §9 l.221, 228; §8 l.213; B2 l.322 | Not built; comment schema has no thread/resolution (browser-share.ts:103-118) |
-| Comments on a recording's timeline, "Comment at m:ss", approximate anchors | V4 saved session | D §9 l.230; §11 l.269 | Not built |
-| Steps / layout / comments capture tracks, Steps & Comments filters, track pills | V2 Captures, V4 timeline ticks | D §11 l.258-265; B3 l.323 | Schema has image/frames/video only (browser.ts:202-218) |
-| Saved-as-skill status / "Not in repo" / commit | V2 Captures | D §11 l.268 | No field in capture schema |
+| Comments on a recording's timeline, "Comment at m:ss", approximate anchors | V4 saved session | D §9 l.230; §11 | Built (D §11 "Built (B3)"); re-matching to the live page not built |
+| Steps / layout / comments capture tracks, Steps & Comments filters, track pills | V2 Captures, V4 timeline ticks | D §11; B3 | Built (capture.json v2; Captures list and player) |
+| Saved-as-skill status / "Not in repo" / commit | V2 Captures | D §11 | Built (`capture.json` `skill`) |
 | Take over / lease, "Agent acting" | V2 Watch dialog, tiles | D §7.2 l.183-189; §4.2 l.91; B1 l.321 | Not built (D §8 l.217) |
 | Focus in Chrome, Close tab, Stop run from UI | V2 Watch dialog, tiles, group strip | (no section; extension popup has Stop) | No management actions (browser.ts:60) |
 | Run activity (agent, tool, command count, elapsed) and Recent runs / refusals | V2 group strip, Recent runs | D §6.1 (scripts), §4.1 | Only `running` count; log is extension-local (runs.ts:45) |

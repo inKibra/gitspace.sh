@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
-import { RuntimeIdentitySchema, type RuntimeBrowserCaptureView, type RuntimeBrowserGroupColor, type RuntimeBrowserOverview, type RuntimeBrowserPageCommentView, type RuntimeBrowserPreview, type RuntimeBrowserRun, type RuntimeBrowserShare, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, type BrowserPower, type RuntimeBrowserCaptureView, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentThreadView, type RuntimeBrowserGroupColor, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserRun, type RuntimeBrowserShare, type RuntimeBrowserStatus, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, useShape } from '@gitspace/ui';
 import { Cloud01, Eye, Monitor01, Plus, Server01, StopCircle, VideoRecorder, XClose } from '@untitledui/icons';
-import { approveChrome } from './browser-approvals.js';
+import { approveChrome, withPower } from './browser-approvals.js';
 import { projectBrowserSettings, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { glyph } from './glyph.js';
 import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { BrowserCaptures, Elapsed } from './RuntimeBrowserCaptures.js';
-import { BrowserPageComments, BrowserShares, ShareTab, type BrowserShareOptions } from './RuntimeBrowserShares.js';
+import { BrowserComments, commentShowTarget, type CommentFilter, type CommentShowTarget } from './RuntimeBrowserComments.js';
+import { BrowserShares, ShareTab, type BrowserShareOptions } from './RuntimeBrowserShares.js';
+import { ChromePowerBadges, ChromePowers } from './RuntimeBrowserPowers.js';
+import type { ThreadActions } from './comment-threads.js';
 import { useLiveChanges } from './live-notices.js';
 import { browserPluginsUrl, navigateProductUrl } from './routes.js';
 import { rpcClient } from './rpc-client.js';
@@ -40,6 +43,8 @@ export interface BrowserActivity { open: number; running: number }
 export const BROWSER_REFRESH_MS = 10_000;
 /** How often the Watch dialog reads its tab's preview. */
 export const WATCH_REFRESH_MS = 3_000;
+/** Comment threads the Browser tab lists, newest first. */
+const COMMENTS_SHOWN = 100;
 /** On your Chrome, Capture here records screencast frames; video with sound needs your click in Chrome itself. */
 const CHROME_CAPTURE_HINT = 'Capture here records the tab without sound. For video with sound, click Capture on the tab in Chrome (the GitSpace toolbar on the page or the extension’s popup).';
 const TAB_ORIGIN: Record<NonNullable<Tab['addedBy']>, string> = { agent: 'Opened by agent', you: 'You added it', page: 'Opened by a page' };
@@ -116,8 +121,13 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
   const [capturesError, setCapturesError] = useState<string | null>(null);
   const [shares, setShares] = useState<readonly RuntimeBrowserShare[] | null>(null);
   const [sharesError, setSharesError] = useState<string | null>(null);
-  const [comments, setComments] = useState<readonly RuntimeBrowserPageCommentView[] | null>(null);
+  const [comments, setComments] = useState<readonly RuntimeBrowserCommentThreadView[] | null>(null);
   const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [commentFilter, setCommentFilter] = useState<CommentFilter>('open');
+  /** Show on page in the Watch dialog: the thread's tab, with its pin. */
+  const [commentWatch, setCommentWatch] = useState<{ thread: RuntimeBrowserCommentThread; n: number; target: Extract<CommentShowTarget, { kind: 'watch' }> } | null>(null);
+  // Bumped by each reply and resolve, so a list read that began before one does not overwrite what it returned.
+  const commentChanges = useRef(0);
   const busy = useRef(false);
   // Bumped by each start and stop, so a list read that began before one does not overwrite what it returned.
   const captureChanges = useRef(0);
@@ -152,22 +162,30 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
     } catch (cause) { if (!signal?.aborted) setSharesError(rpcErrorMessage(cause, 'Read browser shares')); }
   }, [request]);
   const readComments = useCallback(async (signal?: AbortSignal) => {
+    const changes = commentChanges.current;
     try {
-      const result = await request({ type: 'browserPageComments' }, signal);
-      if (!result.browserPageComments) throw new Error('The workspace did not return its page comments.');
-      if (!signal?.aborted) { setComments(result.browserPageComments); setCommentsError(null); }
+      // Resolved threads are among all of them; open ones are asked for alone, so older open ones are not crowded out.
+      const result = await request({ type: 'browserComments', status: commentFilter === 'open' ? 'open' : 'all', limit: COMMENTS_SHOWN }, signal);
+      if (!result.browserComments) throw new Error('The workspace did not return its page comments.');
+      if (!signal?.aborted && changes === commentChanges.current) { setComments(result.browserComments); setCommentsError(null); }
     } catch (cause) { if (!signal?.aborted) setCommentsError(rpcErrorMessage(cause, 'Read page comments')); }
-  }, [request]);
+  }, [request, commentFilter]);
   useEffect(() => {
-    setRecords([]); setCaptures(null); setShares(null); setComments(null);
+    setRecords([]); setCaptures(null); setShares(null);
     const controller = new AbortController();
     if (overviewRead.current) void readOverview(controller.signal);
     overviewRead.current = true;
-    void readRecords(controller.signal); void readCaptures(controller.signal); void readShares(controller.signal); void readComments(controller.signal);
+    void readRecords(controller.signal); void readCaptures(controller.signal); void readShares(controller.signal);
     return () => controller.abort();
-  }, [readOverview, readRecords, readCaptures, readShares, readComments]);
+  }, [readOverview, readRecords, readCaptures, readShares]);
+  useEffect(() => {
+    setComments(null);
+    const controller = new AbortController();
+    void readComments(controller.signal);
+    return () => controller.abort();
+  }, [readComments]);
   useVisibleInterval(() => { void readOverview(); void readCaptures(); void readShares(); }, BROWSER_REFRESH_MS);
-  // A comment made on a share of this workspace's tabs is announced; the list is read again.
+  // Each new comment, reply, resolve or reopen in this workspace is announced; the list is read again.
   const commentNotices = useLiveChanges(workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId));
   useEffect(() => { if (commentNotices !== null) void readComments(); }, [commentNotices, readComments]);
   // Each report of a Chrome group (its tabs, colour and who acts there) is announced; the overview is read again.
@@ -183,6 +201,13 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
     await updateProjectBrowserSettings(identity.projectId, settings.revision, approveChrome(settings, chrome.pairingId));
     await readOverview();
   });
+  // Browser powers: each turns on or off on this project's approval of the Chrome; Everything is this workspace's.
+  const setPower = (chrome: Chrome, power: BrowserPower, on: boolean) => void act(`power:${chrome.pairingId}`, async () => {
+    const settings = await projectBrowserSettings(identity.projectId);
+    await updateProjectBrowserSettings(identity.projectId, settings.revision, withPower(settings, chrome.pairingId, power, on));
+    await readOverview();
+  });
+  const everything = (chrome: Chrome, on: boolean) => void act(`everything:${chrome.pairingId}`, async () => { await request({ type: 'browserEverything', pairingId: chrome.pairingId, on }); await readOverview(); });
   /** `machineId` names the attached machine whose headless browser holds the group; omitted for the cloud browser and Chromes. */
   const revoke = (groupId: string, machineId?: string) => {
     if (window.confirm('Revoke access? This ends this workspace’s tab group on that browser and stops its agents using it; the next use starts a new group.')) void act(`revoke:${groupId}`, async () => { await request({ type: 'browserRevoke', ...(machineId === undefined ? {} : { machineId }), groupId }); await readOverview(); });
@@ -209,6 +234,26 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
     recordings: captures?.filter(view => view.capture.state === 'recording' && view.capture.target !== null) ?? [],
     start: (groupId, targetId) => void act(`capture:${groupId}:${targetId}`, async () => keepCapture((await request({ type: 'browserCaptureStart', groupId, targetId })).browserCapture)),
     stop: captureId => void act(`stop:${captureId}`, async () => keepCapture((await request({ type: 'browserCaptureStop', captureId })).browserCapture)),
+  };
+  /** Shows the thread a reply or resolve returned in place of its listed state. */
+  const keepThread = (thread: RuntimeBrowserCommentThread | undefined) => {
+    if (!thread) throw new Error('The workspace did not return the thread.');
+    commentChanges.current += 1;
+    setComments(previous => previous?.map(view => view.thread.root.id === thread.root.id ? { ...view, thread } : view) ?? previous);
+  };
+  const threadActions: ThreadActions = {
+    reply: async (threadId, text) => {
+      try { keepThread((await request({ type: 'browserCommentReply', threadId, text })).browserComment); } catch (cause) { throw new Error(rpcErrorMessage(cause, 'Reply')); }
+    },
+    resolve: async (threadId, reopen) => {
+      try { keepThread((await request({ type: 'browserCommentResolve', threadId, ...(reopen ? { reopen } : {}) })).browserComment); } catch (cause) { throw new Error(rpcErrorMessage(cause, reopen ? 'Reopen' : 'Resolve')); }
+    },
+  };
+  /** Show on page: your Chrome brings the tab forward in comment mode with the thread open; elsewhere the Watch dialog
+   * opens on the tab with the thread's pin. */
+  const showComment = (thread: RuntimeBrowserCommentThread, n: number, target: CommentShowTarget) => {
+    if (target.kind === 'watch') { setCommentWatch({ thread, n, target }); return; }
+    void act(`show:${thread.root.id}`, async () => { await request({ type: 'browserCommentShow', groupId: target.groupId, targetId: target.targetId, threadId: thread.root.id }); });
   };
   const machineLabel = (machineId: string) => machines.find(machine => machine.id === machineId)?.label ?? machineId;
   const recovery = records.filter(row => row.records.length > 0 || row.error !== null);
@@ -244,8 +289,9 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
         // Remove the fallback once every paired extension reports `targetId`.
         const targeted = chrome.agents.some(agent => agent.targetId !== undefined);
         const acting = (targetId: string) => targeted ? chrome.agents.some(agent => agent.targetId === targetId) : active && chrome.tabs.length === 1;
-        return <BrowserCard key={chrome.pairingId} label={chrome.name} icon={<Monitor01 width={18} height={18} />} title={chrome.name} meta={`Your Chrome · ${chrome.connected ? 'online' : 'offline'}`} badges={chrome.isDefault ? <Badge size="compact" color="gray">Project default</Badge> : null}>
+        return <BrowserCard key={chrome.pairingId} label={chrome.name} icon={<Monitor01 width={18} height={18} />} title={chrome.name} meta={`Your Chrome · ${chrome.connected ? 'online' : 'offline'}`} badges={<>{chrome.isDefault ? <Badge size="compact" color="gray">Project default</Badge> : null}<ChromePowerBadges powers={chrome.powers} /></>}>
           {chrome.note ? <p className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{chrome.note}</p> : null}
+          <ChromePowers chrome={chrome} pending={pending} onPower={(power, on) => setPower(chrome, power, on)} onEverything={on => everything(chrome, on)} onExpire={() => void readOverview()} />
           {groupId === null ? <p className="text-caption text-muted-foreground">No tab group yet. It appears in this Chrome when an agent first uses it; drag tabs into it to share them.</p> : <>
             <div className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-3 px-2.5 py-2">
               {chrome.groupColor ? <span className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-caption font-medium text-white" style={{ background: GROUP_COLORS[chrome.groupColor] }}>{active ? '▶ ' : ''}{chrome.groupName ?? 'This workspace’s group'}</span>
@@ -274,10 +320,14 @@ export function RuntimeBrowserTab({ snapshot, projectName, browsers, machines, o
         {machine.groupId ? <TabTiles {...tiles} groupId={machine.groupId} tabs={machine.tabs} watchLabel={`Headless browser on ${machineLabel(machine.machineId)}`} live={null} acting={() => false} onShare={null} onCloseTab={null} focusInChrome={false} /> : <p className="text-caption text-muted-foreground">No open tabs.</p>}
       </BrowserCard>)}
     </> : null}
-    <BrowserCaptures captures={captures} error={capturesError} onMention={onCompose} />
+    <BrowserCaptures identity={identity} request={request} captures={captures} error={capturesError} onMention={onCompose} />
     {overview ? <RecentRuns runs={overview.runs} machineLabel={machineLabel} /> : null}
     <BrowserShares shares={shares} error={sharesError} pending={pending} onStop={stopShare} />
-    <BrowserPageComments comments={comments} error={commentsError} />
+    <BrowserComments threads={comments} error={commentsError} filter={commentFilter} onFilter={setCommentFilter} actions={threadActions} showTarget={root => commentShowTarget(root, overview, shares)} onShow={showComment} pending={pending} />
+    {commentWatch?.thread.root.anchor ? <BrowserWatchDialog
+      key={commentWatch.thread.root.id} identity={identity} request={request} target={commentWatch.target.target} focusInChrome={commentWatch.target.focusInChrome} takeover={commentWatch.target.takeover}
+      pin={{ n: commentWatch.n, box: commentWatch.thread.root.anchor.box }} onClose={() => setCommentWatch(null)}
+    /> : null}
     {recovery.length ? <section aria-label="Browser recovery" className="flex flex-col gap-2">
       <h3 className="text-body font-medium">Recovery</h3>
       <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-1 text-caption">

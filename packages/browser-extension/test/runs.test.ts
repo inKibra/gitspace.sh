@@ -8,6 +8,10 @@ describe('a workspace group title while scripts run', () => {
     expect(groupTitle('▶ Checkout', true)).toBe('▶ Checkout');
     expect(groupTitle('▶ Checkout', false)).toBe('Checkout');
     expect(groupTitle('Checkout', false)).toBe('Checkout');
+    // Everything is marked too, and a group restored with either mark reads as its name.
+    expect(groupTitle('▶ Checkout', true, true)).toBe('▶ ⚡ Checkout');
+    expect(groupTitle('▶ ⚡ Checkout', false, false)).toBe('Checkout');
+    expect(groupTitle('⚡ Checkout', true, false)).toBe('▶ Checkout');
   });
 
   it('still names its group after Chrome restored it marked', () => {

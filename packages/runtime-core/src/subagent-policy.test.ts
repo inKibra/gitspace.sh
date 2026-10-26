@@ -23,3 +23,11 @@ test('a child uses only its own tools, the headless browser and the list of Chro
   expect(isSubagentToolCallAllowed('agents', { op: 'send', to: 'parent', message: 'Result' }, readOnly)).toBe(true);
   expect(isSubagentToolCallAllowed('agents', { op: 'spawn', role: 'review', task: 'Nested' }, readOnly)).toBe(false);
 });
+test('a child reads captures and replays one on the headless browser, but never on the user’s Chrome and never saves one as a skill', () => {
+  const readOnly = [...SUBAGENT_READONLY_TOOLS], capture = '6f0c2a7e-1b2c-4d3e-8f90-a1b2c3d4e5f6';
+  expect(isSubagentToolCallAllowed('browser', { action: 'captures' }, readOnly)).toBe(true);
+  expect(isSubagentToolCallAllowed('browser', { action: 'capture', capture }, readOnly)).toBe(true);
+  expect(isSubagentToolCallAllowed('browser', { action: 'replay', capture }, readOnly)).toBe(true);
+  expect(isSubagentToolCallAllowed('browser', { action: 'replay', capture, source: 'relay' }, readOnly)).toBe(false);
+  expect(isSubagentToolCallAllowed('browser', { action: 'captureSaved', capture, path: '.gitspace/skills/sign-in' }, readOnly)).toBe(false);
+});

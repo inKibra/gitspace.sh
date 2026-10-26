@@ -95,7 +95,7 @@ export function LiveInspector({
   onGenerateChangeGuide?: () => Promise<void>;
   runtimeAvailable: boolean;
   onAskAgent?: (text: string) => Promise<void>;
-  initialView?: 'environment';
+  initialView?: 'environment' | 'browser';
   resourceRequest?: ResourceRequest;
   runtimeContext: RuntimeInspectorContext;
 }) {

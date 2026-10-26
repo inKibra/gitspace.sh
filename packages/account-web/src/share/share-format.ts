@@ -9,12 +9,13 @@ export const SHARE_END_TEXT: Record<ShareEnd, (sharer: string) => string> = {
   closed: () => 'The shared tab was closed.',
 };
 
-/** "52 min": how long a share has left, from `now`. */
+/** "52 min": how long a share has left, from `now`; days once it is two days or more (capture shares last up to 30). */
 export function shareTimeLeft(expiresAt: string, now: number): string {
   const minutes = Math.max(0, Math.round((new Date(expiresAt).getTime() - now) / 60_000));
   if (minutes < 1) return 'less than a minute';
   if (minutes < 90) return `${minutes} min`;
-  return `about ${Math.round(minutes / 60)} hours`;
+  if (minutes < 2 * 1440) return `about ${Math.round(minutes / 60)} hours`;
+  return `${Math.round(minutes / 1440)} days`;
 }
 
 /** `link “Pricing”`: what a comment is on, by the element's accessible role and name. */

@@ -18,7 +18,7 @@ const PART_BYTES = 32 * 1024 * 1024;
 /** What one upload stores: a download of a live script or step on the group, or one file of a capture. */
 export type UploadTarget =
   | { kind: 'download'; groupId: string; attemptId: string; name: string; mediaType: string }
-  | { kind: 'capture'; groupId: string; captureId: string; file: 'video.webm' | 'frames.bin' | 'frames.json' | 'thumbnail.jpg'; mediaType: string };
+  | { kind: 'capture'; groupId: string; captureId: string; file: 'video.webm' | 'frames.bin' | 'frames.json' | 'thumbnail.jpg' | 'steps.json' | 'layout.jsonl'; mediaType: string };
 /** Signs one request: the header value for `method` on `pathname` with a body of this SHA-256 (lowercase hex). An
  * upload signs only its begin request, `POST /api/browser-relay/uploads`. */
 export type UploadSigner = (method: string, pathname: string, bodySha256: string) => Promise<string>;
@@ -32,8 +32,9 @@ const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
 export async function sha256Hex(body: Uint8Array<ArrayBuffer>): Promise<string> { return hex(await crypto.subtle.digest('SHA-256', body)); }
 
 /** The signature header for one request, made with the pairing key (in the service worker, which holds it): `label`
- * names what the request does, `upload` for an upload's begin and `share` for a share request. */
-export async function relaySignature(identity: SigningIdentity, label: 'upload' | 'share', method: string, pathname: string, bodySha256: string): Promise<string> {
+ * names what the request does, `upload` for an upload's begin, `share` for a share request and `comment` for one of
+ * the in-page comment tool (`comments.ts`). */
+export async function relaySignature(identity: SigningIdentity, label: 'upload' | 'share' | 'comment', method: string, pathname: string, bodySha256: string): Promise<string> {
   const issuedAt = Date.now();
   const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
   const message = `gitspace-browser-relay-v2:${label}:${identity.pairingId}:${identity.generation}:${method}:${pathname}:${bodySha256}:${issuedAt}:${nonce}`;

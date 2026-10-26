@@ -1,6 +1,8 @@
 import { browserOriginMatches } from '@gitspace/protocol-environment/browser-origin';
 import { readSiteRefusal } from '@gitspace/protocol-environment/browser-site-level';
 import { groupTitle } from './runs.js';
+// Browser powers and Everything (`powers.ts`).
+import { everythingRefusal } from './powers.js';
 
 /** Whether a page at `url` is inside the grant: about:blank, or http(s) on one of its origins. */
 export function permitted(grant: { origins: string[] }, url: string): boolean {
@@ -51,8 +53,10 @@ export function restoredMembers(tabs: { id?: number; url?: string }[]): Record<n
 }
 
 /** The DevTools commands a grant allows on its tab; enforced inside the installed extension. */
-export function relayCommandAllowed(grant: { origins: string[] }, targetId: string, session: string, method: string, params: Record<string, unknown>, sessionId?: string): boolean {
+export function relayCommandAllowed(grant: { origins: string[] }, targetId: string, session: string, method: string, params: Record<string, unknown>, sessionId?: string, powerMethods: Record<string, true> = {}): boolean {
   if (sessionId && sessionId !== session) return false;
+  // A debug or storage step's own commands, while its grant has that power (`stepReach` in powers.ts).
+  if (powerMethods[method]) return true;
   if (['Target.attachToTarget', 'Target.getTargetInfo', 'Target.closeTarget'].includes(method)) return params.targetId === targetId;
   if (method === 'Page.navigate') { try { const url = new URL(String(params.url)); return typeof params.url === 'string' && ['http:', 'https:'].includes(url.protocol) && grant.origins.some(pattern => browserOriginMatches(pattern, url.hostname)) && !params.frameId; } catch { return false; } }
   if (method === 'Runtime.evaluate') return typeof params.expression === 'string' && !params.contextId && !params.uniqueContextId;
@@ -150,6 +154,9 @@ export type RelayRunTab = {
   addedBy: string;
   /** The account's origin: the only one whose sealed `/files/` links go into file inputs. */
   account: string;
+  /** Everything is on (`powers.ts`): `grant` then holds every http(s) site, there are no levels, and only the hard
+   * limits (`everythingRefusal`) refuse a command. */
+  everything?: boolean;
 };
 /** What the extension does with one script command: send it (with these parameters), answer `{}` without effect, or refuse it. */
 export type RelayRunVerdict = { send: Record<string, unknown> } | { noop: true } | { refused: string };
@@ -231,7 +238,7 @@ export function relayRunCommand(method: string, params: Record<string, unknown>,
   const outside = method === 'Target.getTargetInfo' ? null : runTabRefusal(tab);
   if (outside) return { refused: outside };
   if (RUN_NOOPS[method]) return { noop: true };
-  const refusal = REFUSED_METHODS[method] ?? REFUSED_DOMAINS[method.split('.')[0] ?? ''];
+  const refusal = tab.everything ? everythingRefusal(method, params, tab.targetId) : REFUSED_METHODS[method] ?? REFUSED_DOMAINS[method.split('.')[0] ?? ''];
   if (refusal) return { refused: `${method} ${refusal}` };
   if (method === 'Target.attachToTarget' || method === 'Target.getTargetInfo') return params.targetId === undefined || params.targetId === tab.targetId ? { send: params } : { refused: `${method} names another tab` };
   if (method === 'Target.closeTarget' || method === 'Page.close') {
@@ -242,6 +249,8 @@ export function relayRunCommand(method: string, params: Record<string, unknown>,
     const refused = runDestinationRefusal(tab, params.url);
     return refused ? { refused } : { send: params };
   }
+  // Under Everything a page script may run on any page of the tab: every page it can show is http(s) or about:blank.
+  if (tab.everything && (method === 'Page.reload' || method === 'Page.addScriptToEvaluateOnNewDocument')) return { send: params };
   if (method === 'Page.reload' && params.scriptToEvaluateOnLoad !== undefined) return { refused: 'Page.reload scripts would run on sites outside the workspace origins; use page.evaluate' };
   // An init script runs in every later document of the tab, including one outside the workspace origins before the
   // extension sees it leave them. Playwright's own utility world (empty source) is all a script gets.
@@ -249,7 +258,7 @@ export function relayRunCommand(method: string, params: Record<string, unknown>,
   // Universal access would let the world reach other origins' frames.
   if (method === 'Page.createIsolatedWorld') return { send: { ...params, grantUniveralAccess: false } };
   if (method === 'GitSpace.setInputFilesFromUrls') { const refused = inputFilesRefusal(params, tab.account); return refused ? { refused } : { send: params }; }
-  if (RUN_METHODS[method] || RUN_DOMAINS[method.split('.')[0] ?? '']) return { send: params };
+  if (tab.everything || RUN_METHODS[method] || RUN_DOMAINS[method.split('.')[0] ?? '']) return { send: params };
   return { refused: `${method} is not available to scripts on your Chrome` };
 }
 

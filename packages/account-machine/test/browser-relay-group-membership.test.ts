@@ -20,7 +20,9 @@ it('a tab dragged into the workspace group is usable on its site; a tab a group 
     queueMicrotask(() => tx.oncomplete()); return tx;
   } };
   const tabs = new Map<number, Tab>([[1, { id: 1, groupId: 7, url: 'https://approved.example/' }], [2, { id: 2, groupId: -1, url: 'https://news.example/story' }]]);
-  let updated: Updated = () => {};
+  // Chrome calls every onUpdated listener the extension adds, not only the last.
+  const updatedListeners: Updated[] = [];
+  const updated: Updated = (...args) => { for (const listener of updatedListeners) listener(...args); };
   let created: (tab: Tab) => void = () => {};
   const sent: unknown[] = [];
   const timers: Array<() => void> = [];
@@ -38,7 +40,8 @@ it('a tab dragged into the workspace group is usable on its site; a tab a group 
       tabs: {
         get: async (id: number) => tabs.get(id),
         query: async ({ groupId }: { groupId: number }) => [...tabs.values()].filter(tab => tab.groupId === groupId).map(tab => ({ ...tab, title: 'Page' })),
-        onUpdated: { addListener: (listener: Updated) => { updated = listener; } },
+        onActivated: { addListener() {} },
+        onUpdated: { addListener: (listener: Updated) => { updatedListeners.push(listener); } },
         onCreated: { addListener: (listener: (tab: Tab) => void) => { created = listener; } },
         onRemoved: { addListener() {} },
       },

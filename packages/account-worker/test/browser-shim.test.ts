@@ -168,4 +168,18 @@ describe('CdpBrowserShim', () => {
       associatedCookies: [{ cookie: { name: '__Host-gitspace-service', value: '' } }, { cookie: { name: 'app', value: '1' } }],
     });
   });
+
+  it('a client with site cookies (the agent’s storage steps) reads and sets a site’s cookies on its tab, never the service session cookie; every other client is refused them', async () => {
+    const browser = fakeBrowser();
+    const answer = browser.channel.send;
+    browser.channel.send = async (method, params = {}, sessionId) => method === 'Network.getCookies' ? { cookies: [{ name: '__Host-gitspace-service', value: 'secret-token' }, { name: 'app', value: '1' }] } : answer(method, params, sessionId);
+    const shim = await CdpBrowserShim.open(browser.channel);
+    const agent = shim.client(() => {}, { siteCookies: true }), script = shim.client(() => {});
+    for (const client of [agent, script]) await client.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    expect(await agent.send('Network.getCookies', { urls: ['https://app.example/'] }, 'session-1')).toEqual({ cookies: [{ name: 'app', value: '1' }] });
+    await agent.send('Network.setCookie', { name: 'flag', value: 'on', url: 'https://app.example/' }, 'session-1');
+    await expect(agent.send('Network.deleteCookies', { name: '__Host-gitspace-service', url: 'https://app.example/' }, 'session-1')).rejects.toThrow('service session cookie');
+    await expect(agent.send('Network.getAllCookies', {}, 'session-1')).rejects.toThrow('reaches the whole browser');
+    await expect(script.send('Network.getCookies', { urls: ['https://app.example/'] }, 'session-2')).rejects.toThrow('reads or sets cookies');
+  });
 });

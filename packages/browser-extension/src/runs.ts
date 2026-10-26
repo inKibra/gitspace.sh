@@ -2,11 +2,15 @@
  * while they run, and a local log of each one. */
 
 const RUNNING = '▶ ';
+/** The mark of a group whose workspace's agent has Everything (`powers.ts`). */
+const EVERYTHING = '⚡ ';
 
-/** A workspace group's Chrome title: marked with "▶ " while at least one script runs on it, unmarked otherwise. */
-export function groupTitle(title: string, running: boolean): string {
-  const plain = title.startsWith(RUNNING) ? title.slice(RUNNING.length) : title;
-  return running ? RUNNING + plain : plain;
+/** A workspace group's Chrome title: marked with "▶ " while at least one script runs on it and with "⚡ " while its
+ * agent has Everything (`everything`), unmarked otherwise. */
+export function groupTitle(title: string, running: boolean, everything = false): string {
+  let plain = title;
+  while (plain.startsWith(RUNNING) || plain.startsWith(EVERYTHING)) plain = plain.slice((plain.startsWith(RUNNING) ? RUNNING : EVERYTHING).length);
+  return (running ? RUNNING : '') + (everything ? EVERYTHING : '') + plain;
 }
 
 /** Why a script ended: its session released it, you stopped it, its deadline passed, or the relay connection went. */

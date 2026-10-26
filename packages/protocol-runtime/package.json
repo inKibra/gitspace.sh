@@ -15,7 +15,9 @@
     "./search": "./src/search.ts",
     "./search-paths": "./src/search-paths.ts",
     "./search-ripgrep": "./src/search-ripgrep.ts",
-    "./machine-controls": "./src/machine-controls.ts"
+    "./machine-controls": "./src/machine-controls.ts",
+    "./browser-power-rules": "./src/browser-power-rules.ts",
+    "./browser-capture-rules": "./src/browser-capture-rules.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

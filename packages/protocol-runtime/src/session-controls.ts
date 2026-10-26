@@ -5,7 +5,9 @@ import { SessionHistoryPageSchema, SessionHistoryPageRequestSchema } from '@gits
 import { transcriptPageRequestSchema, transcriptContentRequestSchema, transcriptPageSchema, transcriptContentPageSchema } from '@gitspace/blocks';
 import { SessionUsageReportSchema } from './usage.js';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema } from './browser.js';
-import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentViewSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareSchema } from './browser-share.js';
+import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareSchema } from './browser-share.js';
+import { RuntimeBrowserCommentAnchorSchema, RuntimeBrowserCommentPageSchema, RuntimeBrowserCommentSourceSchema, RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema } from './browser-comments.js';
+import { RuntimeBrowserCaptureShareExpirySchema, RuntimeBrowserCaptureShareSchema } from './browser-capture-share.js';
 export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -47,23 +49,39 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserCaptures') }),
   z.object({ type: z.literal('browserCaptureStart'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserCaptureStop'), captureId: z.string().uuid() }),
+  /** Capture share links (`browser-capture-share.ts`): the workspace's capture shares; share a saved capture; end one. */
+  z.object({ type: z.literal('browserCaptureShares') }),
+  z.object({ type: z.literal('browserCaptureShareCreate'), captureId: z.string().uuid(), comment: z.boolean(), expiresInMinutes: RuntimeBrowserCaptureShareExpirySchema }),
+  z.object({ type: z.literal('browserCaptureShareRevoke'), captureShareId: z.string().uuid() }),
   /** Share links (`browser-share.ts`): the workspace's shares; share a tab of its Chrome group; end a share; connect the
-   * tab of a share link you pasted to this workspace; the workspace's page comments. */
+   * tab of a share link you pasted to this workspace. */
   z.object({ type: z.literal('browserShares') }),
   z.object({ type: z.literal('browserShareCreate'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256), comment: z.boolean(), expiresInMinutes: RuntimeBrowserShareExpirySchema }),
   z.object({ type: z.literal('browserShareRevoke'), shareId: z.string().uuid() }),
   z.object({ type: z.literal('browserShareConnect'), shareId: z.string().uuid(), secret: z.string().min(16).max(128) }),
-  z.object({ type: z.literal('browserPageComments') }),
+  /** Comments (`browser-comments.ts`), as you: the workspace's threads (open ones unless `status` is `all`; one
+   * capture's with `captureId`), newest first; a reply in a thread; resolving (or reopening) one; a new thread, from
+   * the capture player. */
+  z.object({ type: z.literal('browserComments'), status: RuntimeBrowserCommentStatusSchema.optional(), captureId: z.string().uuid().optional(), limit: z.number().int().min(1).max(500).optional() }),
+  z.object({ type: z.literal('browserCommentReply'), threadId: z.string().uuid(), text: RuntimeBrowserCommentTextSchema }),
+  z.object({ type: z.literal('browserCommentResolve'), threadId: z.string().uuid(), reopen: z.boolean().optional() }),
+  z.object({ type: z.literal('browserCommentAdd'), source: RuntimeBrowserCommentSourceSchema, page: RuntimeBrowserCommentPageSchema, anchor: RuntimeBrowserCommentAnchorSchema, text: RuntimeBrowserCommentTextSchema }),
   /** Your Chrome's workspace group from the Browser tab: end its scripts and its single step (Stop); close one of its
    * tabs (also a cloud browser tab); bring one of its tabs to the front in Chrome (Focus in Chrome). */
   z.object({ type: z.literal('browserStop'), groupId: z.string().uuid() }),
   z.object({ type: z.literal('browserCloseTab'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserFocusTab'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
+  /** Show on page: brings a tab of your Chrome's workspace group to the front with comment mode on and the thread
+   * (`threadId`, its root comment's id) open. */
+  z.object({ type: z.literal('browserCommentShow'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256), threadId: z.string().uuid() }),
   /** Take over (docs/APERTURE-DESIGN.md §7.2) one tab of the workspace's group on your Chrome or the cloud browser
    * (`groupId` names the browser): you hold it from the device that asked, and none of the agent's commands reach it
    * until Resume agent (`browserResume`) hands it back. */
   z.object({ type: z.literal('browserTakeOver'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
   z.object({ type: z.literal('browserResume'), groupId: z.string().uuid(), targetId: z.string().min(1).max(256) }),
+  /** Everything (`browser-powers.ts`) on the workspace's group on your Chrome `pairingId`: allowed for an hour (`on`),
+   * or ended now. */
+  z.object({ type: z.literal('browserEverything'), pairingId: z.string().uuid(), on: z.boolean() }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
@@ -85,7 +103,9 @@ export const RuntimeSessionCommandSchema = z.union([
 ]);
 export const RuntimeSessionInputSchema = RuntimeIdentitySchema.extend({ conversationId: z.string().optional(), command: RuntimeSessionCommandSchema });
 export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), browserOverview: RuntimeBrowserOverviewSchema.optional(), browserPreview: RuntimeBrowserPreviewSchema.optional(), browserCaptures: z.array(RuntimeBrowserCaptureViewSchema).max(500).optional(), browserCapture: RuntimeBrowserCaptureViewSchema.optional(),
-  browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(), browserPageComments: z.array(RuntimeBrowserPageCommentViewSchema).max(500).optional(),
+  browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(),
+  browserComments: z.array(RuntimeBrowserCommentThreadViewSchema).max(500).optional(), browserComment: RuntimeBrowserCommentThreadSchema.optional(),
+  browserCaptureShares: z.array(RuntimeBrowserCaptureShareSchema).max(100).optional(), browserCaptureShare: RuntimeBrowserCaptureShareSchema.optional(),
   setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;

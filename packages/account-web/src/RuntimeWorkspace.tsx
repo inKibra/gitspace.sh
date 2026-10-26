@@ -39,7 +39,7 @@ export interface RuntimeInspectorContext {
   /** Adds `text` to the end of the chat composer's draft for you to finish and send; absent until the draft is loaded. */
   onCompose?: (text: string) => void;
   onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations'];
-  initialView?: 'environment';
+  initialView?: 'environment' | 'browser';
   resourceRequest?: ResourceRequest;
   /** Opens the terminal panel on `machineId` and selects the named terminal, such as an interactive setup run. */
   onOpenTerminal(machineId: string, name: string): void;

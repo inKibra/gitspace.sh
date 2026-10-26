@@ -22,6 +22,10 @@ import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
 import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './runtime-browser.js';
+import { announceComment } from './browser-comments.js';
+import { browserShareAccount } from './browser-share.js';
+import { notifyBrowsers } from './live-notices.js';
+import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
@@ -264,6 +268,22 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const text = result.content.find(item => item.type === 'text');
       if (result.status !== 'completed' || text?.type !== 'text') throw new Error('The machine did not report the file it stored');
       await drive.record(target.path, mediaType, RuntimeDriveTransferStoredSchema.parse(JSON.parse(text.text)));
+    },
+    // Comments the agent or you make here: tabs showing the Browser tab, the main conversation (a person's comment) and
+    // the relay (the thread's share viewers and the workspace's Chromes) hear of each.
+    comments: {
+      ownerName: () => browserShareAccount(env).name(),
+      announce: written => announceComment({
+        live: () => { ctx.waitUntil(notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId), version: Date.now() }])); },
+        event: event => options.runtime().browserEvent(event),
+        relay: thread => env.RELAY.getByName(env.RELAY_NAME).browserRelayCommentChanged(identity, thread),
+      }, written),
+    },
+    // A capture's skill (`captureSaved`) is saved at the cloud working copy's commit, where the agent's file tools wrote it.
+    skillCommit: async file => {
+      const cloud = await options.runtime().cloudFiles.initializeSnapshot();
+      if (!cloud) throw new Error('Cloud working copy is unavailable');
+      return await new ArtifactsCodeStore(env.ARTIFACTS).readFile(artifactsWorkspaceRepository(identity.workspaceId), cloud.worktreeCommit, file) ? cloud.worktreeCommit : null;
     },
   });
   const active = new Map<string, AbortController>();

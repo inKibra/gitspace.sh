@@ -18,7 +18,7 @@ import { applyTextEdits, RuntimeSnapshotSchema, RuntimeSessionResultSchema, type
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
 import { tenantStore, type TenantStore } from './tenant-store.js';
 import { DriveFiles, DriveUploadSchema, type DriveFile, type DriveFileRef } from './drive-files.js';
-import { mintArtifactFileUrl } from './artifact-file-url.js';
+import { mintArtifactFileUrl, type ArtifactFileGrant } from './artifact-file-url.js';
 import { mintUploadLink } from './upload-link.js';
 import { ARTIFACT_UPLOAD_CHUNK_BYTES } from '@gitspace/protocol/rpc-contract';
 
@@ -199,14 +199,19 @@ export class InspectorCloudArtifacts {
     return { bytes, mediaType };
   }
 
-  /** A short-lived URL serving a drive file's bytes over HTTP, for media elements and downloads. */
-  async file(url: string, hash?: string | null) {
+  /** What a short-lived file URL grants for a drive file: one stored version of it. */
+  async grant(url: string, hash?: string | null): Promise<ArtifactFileGrant> {
     const { scope, path, entry, mediaType } = await this.version(url, hash);
     const size = entry.size ?? (await this.files.head(scope.id, entry))?.size;
     if (size === undefined) throw new Error('Artifact object is unavailable');
     const object = 'object' in entry ? entry.object : undefined;
-    const minted = await mintArtifactFileUrl(this.env, { scopeId: scope.id, hash: entry.blobHash, ...(object ? { object } : {}), size, mediaType, name: (path.split('/').at(-1) || 'file').slice(0, 255) });
-    return { ...minted, size, mediaType };
+    return { scopeId: scope.id, hash: entry.blobHash, ...(object ? { object } : {}), size, mediaType, name: (path.split('/').at(-1) || 'file').slice(0, 255) };
+  }
+
+  /** A short-lived URL serving a drive file's bytes over HTTP, for media elements and downloads. */
+  async file(url: string, hash?: string | null) {
+    const grant = await this.grant(url, hash);
+    return { ...await mintArtifactFileUrl(this.env, grant), size: grant.size, mediaType: grant.mediaType };
   }
 
   /** The stored object a drive URL names and the scope whose key opens it, for a machine to fetch itself. */

@@ -9,8 +9,10 @@ import { QuestionsDoc } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
 import { noteTakeoverEvent } from './takeover.js';
 
-/** `browser-taken` and `browser-handback`: you took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2). */
-export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
+/** `browser-taken` and `browser-handback`: you took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2).
+ * `capture-replay`: you asked from your Chrome's saved-capture card for a capture's steps to be replayed (§11).
+ * `page-comment`: a person commented on a page or replied in one of the workspace's comment threads (§9). */
+export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback', 'capture-replay', 'page-comment']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
 /** How the transcript labels each delivered event. */
 const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent) => string> = {
@@ -21,6 +23,8 @@ const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent)
   workspace: event => event.sender?.name ?? 'Workspace',
   'browser-taken': event => event.sender?.name ?? 'Browser',
   'browser-handback': event => event.sender?.name ?? 'Browser',
+  'capture-replay': event => event.sender?.name ?? 'Browser',
+  'page-comment': event => event.sender ? `Comment by ${event.sender.name}` : 'Page comment',
 };
 /** An event the conversation has not had yet: neither placed as its input nor returned by a wait. */
 type StoredEvent = {

@@ -5,10 +5,12 @@ import { BrowserOutputStore } from '@gitspace/runtime-machine/browser-output';
 import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
 import type { BrowserChannel } from './browser-cdp.js';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
+import { performBrowserPower } from './browser-powers.js';
+import type { WorkspaceDrive } from './workspace-drive.js';
 
-/** Management actions from the Browser tab on your Chrome's workspace group: Stop, Close tab, Focus in Chrome, Take over
- * and Resume agent. */
-const CONTROLS: Record<string, true | undefined> = { stop: true, closeTab: true, focusTab: true, takeOver: true, resume: true };
+/** Management actions from the Browser tab on your Chrome's workspace group: Stop, Close tab, Focus in Chrome, Take over,
+ * Resume agent and Show on page. */
+const CONTROLS: Record<string, true | undefined> = { stop: true, closeTab: true, focusTab: true, takeOver: true, resume: true, commentShow: true };
 type Tab = BrowserSemanticTab & { grant: RuntimeAccountBrowserGrant; channel: BrowserChannel; sessionId: string; stale: boolean; servicePolicy?: BrowserServicePolicy; unsubscribeServices?: () => void; unsubscribe(): void };
 export type AccountBrowserTransport = {
   open(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<{ channel: BrowserChannel; targetId: string }>;
@@ -38,8 +40,9 @@ export class AccountBrowserRuntime {
   private queues = new Map<string, Promise<void>>();
   private outputs = new BrowserOutputStore();
   private cloud = new Map<string, Promise<BrowserChannel>>();
-  /** `cloud` opens this workspace's view of its cloud browser (a client of the browser session object). */
-  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices }) {}
+  /** `cloud` opens this workspace's view of its cloud browser (a client of the browser session object);
+   * `drive`: the workspace's drive, where debug files go (`browser-powers.ts`). */
+  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices; drive?: (workspace: { projectId: string; workspaceId: string }) => Pick<WorkspaceDrive, 'write'> }) {}
   async execute(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization;
     // Stop never waits behind the step it stops, nor Close tab and Focus in Chrome behind the workspace's step.
@@ -185,6 +188,13 @@ export class AccountBrowserRuntime {
     } else if (grant.source === 'relay' && this.options.relay) await this.options.relay.open(authorization, signal);
     if (!tab || tab.stale) throw new Error('Browser target stale or unavailable');
     const active = tab;
+    // Debug and storage steps (`browser-powers.ts`), on the tab's own session, for both browsers.
+    if (args.action === 'debug' || args.action === 'storage') {
+      return result(await performBrowserPower({ grant, args, signal, drive: this.options.drive?.({ projectId: scope.projectId, workspaceId: scope.workspaceId }), tab: {
+        send: async (method, params) => { if (active.stale) throw new Error('Browser disconnected'); return active.channel.send(method, params, active.sessionId); },
+        subscribe: listener => active.channel.subscribe(event => { if (event.sessionId === active.sessionId) listener(event); }),
+      } }));
+    }
     const frame = z.object({ frameTree: z.object({ frame: z.object({ id: z.string(), url: z.string() }) }) }).parse(await active.channel.send('Page.getFrameTree', {}, active.sessionId)).frameTree.frame;
     const effect = ['act', 'evaluate', 'navigate'].includes(args.action);
     try {

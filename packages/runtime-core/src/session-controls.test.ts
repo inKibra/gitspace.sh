@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
-import type { RuntimeBrowserConnectedTab, RuntimeBrowserManagement, RuntimeBrowserPageCommentView, RuntimeBrowserShare } from '@gitspace/protocol-runtime';
+import type { RuntimeBrowserCommentThread, RuntimeBrowserCommentThreadView, RuntimeBrowserConnectedTab, RuntimeBrowserManagement, RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { createSessionControls, sessionControlsExtension, SessionControlsDoc, type SessionControlServices } from './session-controls.js';
 import { createConversationLifecycle } from './conversation-lifecycle.js';
 
@@ -44,14 +44,16 @@ test('before its first message a conversation shows the model and effort its rol
   } finally { await harness.close(context); }
 });
 
-test('share links and page comments are a person’s: each command asks the workspace’s browser management and answers its result', async () => {
+test('share links and comments are a person’s: each command asks the workspace’s browser management and answers its result', async () => {
   const groupId = '00000000-0000-4000-8000-00000000000a', shareId = '00000000-0000-4000-8000-00000000000b', pairingId = '00000000-0000-4000-8000-00000000000c';
   const share: RuntimeBrowserShare = { shareId, link: `https://account.test/s/${shareId}#${'s'.repeat(43)}`, pairingId, browser: 'Work Chrome', targetId: 'tab', workspace: { projectId: 'project', workspaceId: 'workspace', groupId }, page: { url: 'https://example.com/', title: 'Example' }, comment: true, createdAt: '2026-10-24T09:00:00.000Z', expiresAt: '2026-10-24T10:00:00.000Z', endedAt: null, endReason: null, viewers: [], audit: [] };
   const ended: RuntimeBrowserShare = { ...share, endedAt: '2026-10-24T09:30:00.000Z', endReason: 'revoked' };
   const connected: RuntimeBrowserConnectedTab = { pairingId, browser: 'Work Chrome', groupId, targetId: 'tab', url: 'https://example.com/', title: 'Example' };
-  const comments: RuntimeBrowserPageCommentView[] = [{ cropUrl: 'https://account.test/files/crop', comment: { version: 1, commentId: '00000000-0000-4000-8000-00000000000d', shareId, by: { name: 'Dana', guest: true }, text: 'This price is wrong', page: { url: 'https://example.com/', title: 'Example' }, target: null, region: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }, viewport: { width: 1280, height: 720 }, scroll: { x: 0, y: 0 }, crop: 'browser/comments/crop.jpg', createdAt: '2026-10-24T09:10:00.000Z' } }];
+  const threadId = '00000000-0000-4000-8000-00000000000d';
+  const thread: RuntimeBrowserCommentThread = { root: { id: threadId, threadId, parentId: null, source: { kind: 'share', shareId }, page: { url: 'https://example.com/', title: 'Example' }, anchor: { role: '', name: '', selector: '', box: { x: 0.1, y: 0.1, w: 0.2, h: 0.1 }, area: true }, by: { kind: 'person', name: 'Dana', guest: true }, text: 'This price is wrong', createdAt: '2026-10-24T09:10:00.000Z', resolved: null }, replies: [] };
+  const comments: RuntimeBrowserCommentThreadView[] = [{ cropUrl: 'https://account.test/files/crop', thread }];
   const asked: RuntimeBrowserManagement[] = [];
-  const answers: Partial<Record<RuntimeBrowserManagement['action'], RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserPageCommentView[]>> = { shares: [share], shareCreate: share, shareRevoke: ended, shareConnect: connected, pageComments: comments };
+  const answers: Partial<Record<RuntimeBrowserManagement['action'], RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread>> = { shares: [share], shareCreate: share, shareRevoke: ended, shareConnect: connected, comments, commentWrite: thread };
   const { harness, root, controls } = await open(async (_conversationId, _machineId, command) => {
     asked.push(command);
     const answer = answers[command.action];
@@ -66,13 +68,15 @@ test('share links and page comments are a person’s: each command asks the work
     expect((await controls.execute(id, { type: 'browserShareCreate', groupId, targetId: 'tab', comment: true, expiresInMinutes: 60 }, true)).browserShare).toEqual(share);
     expect((await controls.execute(id, { type: 'browserShareRevoke', shareId }, true)).browserShare).toEqual(ended);
     expect((await controls.execute(id, { type: 'browserShareConnect', shareId, secret: 's'.repeat(43) }, true)).browserConnectedTab).toEqual(connected);
-    expect((await controls.execute(id, { type: 'browserPageComments' }, true)).browserPageComments).toEqual(comments);
+    expect((await controls.execute(id, { type: 'browserComments', status: 'all' }, true)).browserComments).toEqual(comments);
+    expect((await controls.execute(id, { type: 'browserCommentResolve', threadId }, true)).browserComment).toEqual(thread);
     expect(asked).toEqual([
       { action: 'shares' },
       { action: 'shareCreate', groupId, targetId: 'tab', comment: true, expiresInMinutes: 60 },
       { action: 'shareRevoke', shareId },
       { action: 'shareConnect', shareId, secret: 's'.repeat(43) },
-      { action: 'pageComments' },
+      { action: 'comments', status: 'all' },
+      { action: 'commentWrite', write: { op: 'resolve', threadId } },
     ]);
   } finally { await harness.close(context); }
 });

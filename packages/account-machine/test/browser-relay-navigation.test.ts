@@ -8,7 +8,9 @@ type EventListener = (source: { targetId: string; sessionId?: string }, method: 
 function harness(timeout = 60_000, sameDocument = false, destination = 'https://approved.example/next') {
   const listeners = new Set<EventListener>();
   type Updated = (tabId: number, change: { groupId?: number }, tab: { id: number; groupId: number; url: string }) => void;
-  let updated: Updated = () => {};
+  // Chrome calls every onUpdated listener the extension adds, not only the last.
+  const updatedListeners: Updated[] = [];
+  const updated: Updated = (...args) => { for (const listener of updatedListeners) listener(...args); };
   let groupId = 7;
   let url = 'https://approved.example/start';
   let detached = 0;
@@ -33,7 +35,7 @@ function harness(timeout = 60_000, sameDocument = false, destination = 'https://
         sendCommand: async (_source: object, method: string) => { if (method === 'Page.navigate') { navigation.resolve(); return { frameId: 'main', ...(sameDocument ? {} : { loaderId: 'new' }) }; } return {}; },
         onEvent: { addListener: (listener: EventListener) => listeners.add(listener), removeListener: (listener: EventListener) => listeners.delete(listener) }, onDetach: { addListener() {} },
       },
-      tabs: { onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get: async () => ({ groupId, url }), onUpdated: { addListener: (listener: Updated) => { updated = listener; } } },
+      tabs: { onActivated: { addListener() {} }, onCreated: { addListener() {} }, onRemoved: { addListener() {} }, get: async () => ({ groupId, url }), onUpdated: { addListener: (listener: Updated) => { updatedListeners.push(listener); } } },
       tabGroups: { onRemoved: { addListener() {} } }, downloads: { onCreated: { addListener() {} } }, alarms: { create() {}, onAlarm: { addListener() {} } },
     },
   });

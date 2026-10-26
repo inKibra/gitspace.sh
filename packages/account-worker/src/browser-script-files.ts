@@ -87,7 +87,7 @@ export class ScriptRunFiles {
     await this.drive.write(`${folder}image.jpg`, 'image/jpeg', image);
     if (jpegSize(thumbnail)) await this.drive.write(`${folder}thumbnail.jpg`, 'image/jpeg', thumbnail);
     await writeCapture(this.drive, {
-      version: 1, captureId, name: shot.name?.trim().slice(0, 200) || captureName(shot.page.title, at), by: 'agent', source: this.browser.source, browser,
+      version: 2, captureId, name: shot.name?.trim().slice(0, 200) || captureName(shot.page.title, at), by: 'agent', source: this.browser.source, browser,
       page: { url: shot.page.url.slice(0, 8192), title: shot.page.title.slice(0, 500) }, target: { groupId: this.browser.groupId, targetId: shot.targetId },
       startedAt: at, endedAt: at, state: 'saved', reason: null, tracks: { image: { path: 'image.jpg', ...size } },
     });

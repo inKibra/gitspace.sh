@@ -48,9 +48,12 @@ import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostna
 import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
-import { BROWSER_UPLOAD_PATH, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
+import { BROWSER_UPLOAD_PATH, browserRouteReply, readBrowserSignedRequest, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
+import { BROWSER_COMMENT_PATH, type RuntimeBrowserCommentThread } from '@gitspace/protocol-runtime';
 import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './browser-share.js';
 import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, serveBrowserWatch } from './browser-watch.js';
+import { serveBrowserCaptureShare } from './browser-capture-share.js';
+import { BROWSER_CAPTURE_SHARE_PATH, type RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
 import { BROWSER_WATCH_PATH } from '@gitspace/protocol-runtime';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
@@ -436,6 +439,10 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayPlacement(projectId: string, pairingId?: string) { return this.browserRelay.placement(projectId, pairingId); }
   browserRelayProjectSettings(projectId: string) { return this.browserRelay.projectSettings(projectId); }
   browserRelaySetProjectSettings(projectId: string, expectedRevision: number, preferences: RuntimeProjectBrowserPreferences) { return this.browserRelay.setProjectSettings(projectId, expectedRevision, preferences); }
+  /** Browser powers (`browser-powers.ts`): what a workspace's agents may do beyond its sites on each approved Chrome,
+   * and Everything for the workspace on one Chrome, allowed for an hour or ended. */
+  browserRelayPowers(projectId: string, workspaceId: string) { return this.browserRelay.powers(projectId, workspaceId); }
+  browserRelayEverything(projectId: string, workspaceId: string, pairingId: string, on: boolean) { return this.browserRelay.everything(projectId, workspaceId, pairingId, on); }
   browserRelayUnpair(pairingId: string) { return this.browserRelay.unpair(pairingId); }
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
   browserRelaySetChrome(pairingId: string, change: { name?: string; note?: string }) { return this.browserRelay.setChrome(pairingId, change); }
@@ -456,6 +463,20 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayShare(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.shareRequest(request, body); }
   browserSharePreview(shareId: string, secret: string, owner: boolean) { return this.browserRelay.sharePreview(shareId, secret, owner); }
   browserShareJoin(shareId: string, secret: string) { return this.browserRelay.shareJoin(shareId, secret); }
+  /** Comments (`browser-comments.ts`): a request your Chrome's in-page comment tool signed, and a thread a workspace
+   * changed (the agent's or the Browser tab's), for its share's viewers and the workspace's Chromes. */
+  browserRelayComment(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.commentRequest(request, body); }
+  browserRelayCommentChanged(workspace: { projectId: string; workspaceId: string }, thread: RuntimeBrowserCommentThread) { return this.browserRelay.commentChanged(workspace, thread); }
+  /** Capture share links (`browser-capture-share.ts`): a workspace's from its Browser tab, a request your Chrome signed,
+   * and a link's greeting, open, file check and comments. */
+  browserCaptureShares(workspace: { projectId: string; workspaceId: string }) { return this.browserRelay.captureShareList(workspace); }
+  browserCaptureShareCreate(workspace: { projectId: string; workspaceId: string }, input: { captureId: string; comment: boolean; expiresInMinutes: number }) { return this.browserRelay.captureShareCreate(workspace, input); }
+  browserCaptureShareRevoke(workspace: { projectId: string; workspaceId: string }, captureShareId: string) { return this.browserRelay.captureShareRevoke(workspace, captureShareId); }
+  browserCaptureShareChrome(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.captureShareRequest(request, body); }
+  browserCaptureSharePreview(captureShareId: string, secret: string) { return this.browserRelay.captureSharePreview(captureShareId, secret); }
+  browserCaptureShareOpen(captureShareId: string, secret: string, viewer: { name: string; guest: boolean }) { return this.browserRelay.captureShareOpen(captureShareId, secret, viewer); }
+  browserCaptureShareLive(captureShareId: string) { return this.browserRelay.captureShareLive(captureShareId); }
+  browserCaptureShareComment(captureShareId: string, viewer: { name: string; guest: boolean }, request: RuntimeBrowserCaptureShareComment) { return this.browserRelay.captureShareComment(captureShareId, viewer, request); }
 
   private presenceLine: Promise<void> = Promise.resolve();
   private alarmLine: Promise<void> = Promise.resolve();
@@ -1183,6 +1204,13 @@ export default {
     if (url.pathname === BROWSER_UPLOAD_PATH) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), link: target => mintUploadLink(env, { kind: 'browser', ...target }) });
     // Share links: public, before device authority (a join signed by one of the account's devices is checked there).
     if (url.pathname === BROWSER_SHARE_PATH || url.pathname.startsWith('/api/shares/')) return serveBrowserShare(request, env);
+    // Your Chrome's in-page comment tool, signed by its pairing key.
+    if (url.pathname === BROWSER_COMMENT_PATH) {
+      const read = await readBrowserSignedRequest(request, 'comment');
+      return browserRouteReply(read.ok ? await env.RELAY.getByName(env.RELAY_NAME).browserRelayComment(read.request, read.body) : read);
+    }
+    // Capture share links: public, before device authority (an open signed by one of the account's devices is checked there).
+    if (url.pathname === BROWSER_CAPTURE_SHARE_PATH || url.pathname.startsWith('/api/capture-shares/')) return serveBrowserCaptureShare(request, env);
     // The Watch dialog's socket: a tab's live frames and, while you hold it from this device, your input.
     if (url.pathname === BROWSER_WATCH_PATH) return serveBrowserWatch(request, env);
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|chrome|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {

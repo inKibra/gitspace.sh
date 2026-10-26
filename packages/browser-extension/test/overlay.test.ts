@@ -20,6 +20,11 @@ function page() {
   const call = (declaration: string, argument?: unknown): unknown => window.eval(`(${declaration})`)(argument);
   return { window, roots, call, host: () => window.document.querySelector('[data-gitspace-overlay]') };
 }
+/** Whether an element of the overlay shows: neither it nor anything holding it is `display: none`. */
+function visible(element: Element): boolean {
+  for (let node: Element | null = element; node; node = node.parentElement) if (/(^|;)\s*display:\s*none/.test(node.getAttribute('style') ?? '')) return false;
+  return true;
+}
 
 describe('the in-page overlay', () => {
   it('stays out of the accessibility tree and the focus order, and the screenshot mask hides it', () => {
@@ -28,7 +33,7 @@ describe('the in-page overlay', () => {
     const element = host();
     if (!element) throw new Error('No overlay');
     expect(element.getAttribute('aria-hidden')).toBe('true');
-    expect([...roots[0]?.querySelectorAll('button, a, input, [tabindex]') ?? []].map(node => node.getAttribute('tabindex'))).toEqual(['-1', '-1', '-1', '-1']);
+    expect([...roots[0]?.querySelectorAll('button, a, input, textarea, [tabindex]') ?? []].filter(node => node.getAttribute('tabindex') !== '-1')).toEqual([]);
     call(browserScreenshotPrepareFunction, []);
     expect(window.getComputedStyle(element).visibility).toBe('hidden');
     call(browserScreenshotRestoreFunction);
@@ -56,7 +61,7 @@ describe('the in-page overlay', () => {
     const presses: string[] = [];
     Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
     const buttons = () => [...roots[0]?.querySelectorAll('button') ?? []];
-    const shown = () => buttons().filter(button => button.style.display !== 'none').map(button => button.textContent);
+    const shown = () => buttons().filter(visible).map(button => button.textContent);
     call(browserOverlayFunction, { show: { ...show.show, capture: 'none' } });
     expect(shown()).toEqual(['Take over', 'Stop']);
     call(browserOverlayFunction, show);
@@ -109,7 +114,7 @@ describe('the in-page overlay', () => {
     expect(roots[0]?.textContent).toContain("You're in control");
     expect(roots[0]?.textContent).toContain('main is paused · it sees your changes when it resumes');
     expect(roots[0]?.textContent).not.toContain('Clicking');
-    const shown = [...roots[0]?.querySelectorAll('button') ?? []].filter(button => button.style.display !== 'none');
+    const shown = [...roots[0]?.querySelectorAll('button') ?? []].filter(visible);
     expect(shown.map(button => button.textContent)).toEqual(['Capture', 'Resume agent']);
     expect(shown.at(-1)?.style.background).toBe('#1a73e8');
     expect([...roots[0]?.children ?? []].some(element => element instanceof window.HTMLElement && element.style.boxShadow === 'inset 0 0 0 2px #a3a3a3' && element.style.opacity === '1')).toBe(true);

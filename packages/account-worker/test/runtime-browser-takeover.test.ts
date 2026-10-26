@@ -33,7 +33,7 @@ async function fixture(chrome: Partial<RuntimeProjectBrowserSettings['browsers']
       async overview() { return { tabs: [{ targetId: 'checkout', url: 'https://shop.example/pay', title: 'Pay' }, { targetId: 'captcha', url: 'https://example.com/', title: 'Check' }], running: 0, held: [held('captcha')] }; } }) },
   };
   const conversation = { root: true };
-  const authority = createRuntimeBrowserAuthority({ storage, env, identity, selectExecution: unused, approvedSites: async () => ({ sites: [], revision: null }), groupName: async () => 'Workspace', drive: () => { throw new Error('No drive'); }, fromMachine: unused, services: async () => [],
+  const authority = createRuntimeBrowserAuthority({ storage, env, identity, selectExecution: unused, approvedSites: async () => ({ sites: [], revision: null }), groupName: async () => 'Workspace', drive: () => { throw new Error('No drive'); }, fromMachine: unused, services: async () => [], comments: { ownerName: unused, announce: unused },
     runtime: () => ({ harness: { snapshot: unused }, browserConversation: async () => ({ id: 'main', root: conversation.root, tools: null }), attachments: { list: () => attachments, execute: unused } }) });
   const ask = (args: object) => authority.takeoverTab({ conversationId: 'main', args: RuntimeAskTakeoverArgumentsSchema.parse({ reason: 'Sign in', ...args }) });
   return { ask, conversation };

@@ -30,6 +30,10 @@ export async function verifyRelayAuthorization(authorization: RuntimeBrowserAuth
       // `stepsOnly`: the grant's sites at interact (single steps, no scripts); `read`: those at read (looking only).
       if (!Array.isArray(grant.stepsOnly) || !grant.stepsOnly.every(pattern => grant.origins.includes(pattern))) throw new Error('Invalid relay group grant');
       if (grant.read !== undefined && (!Array.isArray(grant.read) || !grant.read.length || !grant.read.every(pattern => grant.origins.includes(pattern) && !grant.stepsOnly.includes(pattern)))) throw new Error('Invalid relay group grant');
+      // `powers`: some of record, debug and storage, each once, in that order; `everything`: its signed expiry.
+      const known = ['record', 'debug', 'storage'];
+      if (grant.powers !== undefined && (!Array.isArray(grant.powers) || !grant.powers.length || !grant.powers.every((power, index) => known.includes(power) && (index === 0 || known.indexOf(grant.powers?.[index - 1] ?? '') < known.indexOf(power))))) throw new Error('Invalid relay group grant powers');
+      if (grant.everything !== undefined && (typeof grant.everything !== 'object' || grant.everything === null || Object.keys(grant.everything).join() !== 'expiresAt' || typeof grant.everything.expiresAt !== 'string' || !Number.isFinite(Date.parse(grant.everything.expiresAt)))) throw new Error('Invalid relay group grant Everything');
     } else if ('machineId' in grant && 'machineId' in body.scope) {
       for (const key of ['machineId', 'attachmentId', 'generation'] as const) if (grant[key] !== body.scope[key]) throw new Error('Grant machine scope mismatch');
     } else throw new Error('Grant placement kind mismatch');

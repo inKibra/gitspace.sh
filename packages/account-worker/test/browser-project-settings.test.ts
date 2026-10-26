@@ -49,8 +49,8 @@ async function fixture(run: (relay: HostedBrowserRelay, chrome: (name: string, h
       }, pauseAuthorization() { const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>(); paused = { reached: () => reached.resolve(), resume: resume.promise }; return { reached: reached.promise, release: () => resume.resolve() }; } };
       function listen(active: WebSocket) { active.addEventListener('message', async event => {
         const raw: unknown = JSON.parse(String(event.data));
-        // Notices about this Chrome (`chromeInfo`) carry no id and get no answer.
-        if (z.object({ operation: z.literal('chromeInfo') }).safeParse(raw).success) { notices.push(raw); return; }
+        // Notices (`chromeInfo`, `shares`, `comments`) carry no id and get no answer.
+        if (!z.object({ id: z.number() }).safeParse(raw).success) { notices.push(raw); return; }
         const message = z.object({ id: z.number(), operation: z.string(), groupId: z.string().optional() }).parse(raw);
         operations.push(message.operation); messages.push(raw);
         if (message.operation === 'authorize' && paused) { paused.reached(); await paused.resume; }
@@ -104,7 +104,7 @@ test('offline approved Chrome remains discoverable and refuses dispatch without 
   await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId }, { pairingId: b.pairingId }] });
   const pending = await authorization(root, await relay.placement('project', a.pairingId));
   const closed = new Promise<void>(resolve => a.socket.addEventListener('close', () => resolve(), { once: true })); a.socket.close(); await closed;
-  expect((await relay.projectSettings('project')).browsers).toContainEqual({ pairingId: a.pairingId, generation: a.generation, name: 'Work', note: 'Local Chrome', connected: false, approved: true, takeover: false });
+  expect((await relay.projectSettings('project')).browsers).toContainEqual({ pairingId: a.pairingId, generation: a.generation, name: 'Work', note: 'Local Chrome', connected: false, approved: true, takeover: false, powers: [], powersSupported: false });
   const other = `"Chrome ${b.pairingId.slice(0, 8)}" (${b.pairingId}, online)`;
   await expect(relay.placement('project')).rejects.toThrow(`"Work" (${a.pairingId}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome, or pass another approved pairingId: ${other}.`);
   await expect(relay.execute(pending)).rejects.toThrow(`"Work" (${a.pairingId}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome.`); expect(b.operations).toEqual([]);
@@ -202,8 +202,8 @@ test('the relay records the extension version and protocol each browser reports,
   const previous = await chrome('Chrome/129', { protocol: BROWSER_EXTENSION_PROTOCOL - 1 });
   const current = await chrome('Chrome/130', { protocol: BROWSER_EXTENSION_PROTOCOL, extension: '5.1.0' });
   expect(unversioned.ready).toEqual({ updateRequired: { protocol: 0, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } });
-  expect(previous.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true });
-  expect(current.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true });
+  expect(previous.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true });
+  expect(current.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true });
   const extensions = Object.fromEntries((await relay.status()).pairings.map(pairing => [pairing.pairingId, pairing.extension]));
   expect(extensions[unversioned.pairingId]).toEqual({ version: null, protocol: 0, updateRequired: true });
   expect(extensions[previous.pairingId]).toEqual({ version: null, protocol: BROWSER_EXTENSION_PROTOCOL - 1, updateRequired: false });
@@ -250,7 +250,7 @@ test('a Chrome group report reaches its workspace with each tab marked usable or
   if (value.body.command.type !== 'execute') throw new Error('Expected execution');
   const groupId = value.body.command.grant.body.groupId;
   const reports: unknown[] = [];
-  const reader = restart({ getByName: name => ({ browserGroupReported: async (identity, group) => { reports.push({ name, identity, group }); }, pageCommentAdded: async () => {} }) });
+  const reader = restart({ getByName: name => ({ browserGroupReported: async (identity, group) => { reports.push({ name, identity, group }); }, browserCommentWrite: async () => { throw new Error('This fixture keeps no comments'); }, browserComments: async () => [], captureReplayAsked: async () => {} }) });
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');
   const tab = (targetId: string, url: string, addedBy: 'agent' | 'page' | 'you', site: string | null) => ({ targetId, url, title: 'Page', addedBy, site });
@@ -275,7 +275,7 @@ test('a script run on your Chrome records its group, so the Chrome’s reports o
   const groupId = value.body.command.grant.body.groupId;
   await relay.scriptBegin(value);
   const reports: unknown[] = [];
-  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); }, pageCommentAdded: async () => {} }) });
+  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); }, browserCommentWrite: async () => { throw new Error('This fixture keeps no comments'); }, browserComments: async () => [], captureReplayAsked: async () => {} }) });
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');
   await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId, tabs: [{ targetId: 'agent-tab', url: 'https://example.com/', title: 'Example', addedBy: 'agent', site: null }], running: 1 } }));
@@ -291,7 +291,7 @@ test('a Chrome group report carries the group’s colour and who acts there to t
   if (value.body.command.type !== 'execute') throw new Error('Expected execution');
   const groupId = value.body.command.grant.body.groupId, startedAt = new Date().toISOString();
   const reports: unknown[] = [];
-  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); }, pageCommentAdded: async () => {} }) });
+  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, group) => { reports.push(group); }, browserCommentWrite: async () => { throw new Error('This fixture keeps no comments'); }, browserComments: async () => [], captureReplayAsked: async () => {} }) });
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');
   await reader.webSocketMessage(socket, JSON.stringify({ group: { groupId, tabs: [], running: 0 } }));
@@ -326,6 +326,25 @@ test('Stop, Close tab and Focus in Chrome reach a Chrome whose hello takes them,
   const olderGroup = await group(older.pairingId);
   await expect(control(older.pairingId, { type: 'manage', action: 'stop', groupId: olderGroup })).rejects.toThrow('Update the GitSpace extension in this Chrome');
   expect(older.operations).not.toContain('stopGroup');
+}));
+
+test('Show on page reaches a Chrome whose hello takes comments, with the thread, signed for the workspace’s group; one without comments is asked to update', () => fixture(async (relay, chrome, root) => {
+  const current = await chrome('Current', { controls: true, comments: true }), older = await chrome('Older', { controls: true });
+  await relay.setProjectSettings('project', 0, { defaultPairingId: current.pairingId, approvals: [{ pairingId: current.pairingId }, { pairingId: older.pairingId }] });
+  const group = async (pairingId: string) => {
+    const value = await authorization(root, await relay.placement('project', pairingId));
+    await relay.execute(value);
+    if (value.body.command.type !== 'execute') throw new Error('Expected execution');
+    return value.body.command.grant.body.groupId;
+  };
+  const threadId = '00000000-0000-4000-8000-0000000000f1';
+  const show = async (pairingId: string, groupId: string) => relay.execute(await authorization(root, await relay.placement('project', pairingId), 'workspace', 'project', { type: 'manage', action: 'commentShow', groupId, targetId: 'tab-2', threadId }));
+  const groupId = await group(current.pairingId);
+  await show(current.pairingId, groupId);
+  expect(current.messages.filter(message => z.object({ operation: z.literal('showComment') }).safeParse(message).success)).toMatchObject([{ operation: 'showComment', groupId, targetId: 'tab-2', threadId }]);
+  const olderGroup = await group(older.pairingId);
+  await expect(show(older.pairingId, olderGroup)).rejects.toThrow('to show comments on its pages');
+  expect(older.operations).not.toContain('showComment');
 }));
 
 test('a Chrome whose hello an older release answered is asked to connect again, so this release hears what its extension can do', () => fixture(async (relay, chrome, root, restart, sockets) => {
@@ -367,7 +386,7 @@ test('Take over and Resume agent reach a Chrome whose hello takes them, for the 
   expect(older.operations).not.toContain('takeOver');
   // The Chrome reports the tab you hold at once; the workspace gets it with the group.
   const reports: unknown[] = [];
-  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, row) => { reports.push(row); }, pageCommentAdded: async () => {} }) });
+  const reader = restart({ getByName: () => ({ browserGroupReported: async (_identity, row) => { reports.push(row); }, browserCommentWrite: async () => { throw new Error('This fixture keeps no comments'); }, browserComments: async () => [], captureReplayAsked: async () => {} }) });
   // The relay's end of the first Chrome's connection.
   const [socket] = sockets();
   if (!socket) throw new Error('Missing extension socket');

@@ -2,7 +2,7 @@ import type { RuntimeAccountBrowserPairing, RuntimeBrowserTrust } from '@gitspac
 import type { AccountBrowserRelay } from '../../src/browser-relay.js';
 import type { UserRelayDO } from '../../src/index.js';
 
-type Driven = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 'redeemPairingCode' | 'status' | 'confirm' | 'setChrome' | 'placement' | 'unpair' | 'execute' | 'scriptBegin' | 'projectSettings' | 'setProjectSettings' | 'retireWorkspace'>;
+type Driven = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 'redeemPairingCode' | 'status' | 'confirm' | 'setChrome' | 'placement' | 'unpair' | 'execute' | 'scriptBegin' | 'projectSettings' | 'setProjectSettings' | 'retireWorkspace' | 'powers' | 'everything'>;
 
 /** `pair` starts a pairing and redeems its short code, as GitSpace and then the extension do, answering the pairing's
  * details; `start` and `redeem` are those two steps apart. */
@@ -34,6 +34,8 @@ export function drivenBrowserRelay(relay: Driven): HostedBrowserRelay {
     projectSettings: projectId => relay.projectSettings(projectId),
     setProjectSettings: (projectId, expectedRevision, preferences) => relay.setProjectSettings(projectId, expectedRevision, preferences),
     retireWorkspace: (projectId, workspaceId) => relay.retireWorkspace(projectId, workspaceId),
+    powers: (projectId, workspaceId) => relay.powers(projectId, workspaceId),
+    everything: (projectId, workspaceId, pairingId, on) => relay.everything(projectId, workspaceId, pairingId, on),
   };
 }
 
@@ -54,5 +56,7 @@ export function hostedBrowserRelay(relay: UserRelayDO): HostedBrowserRelay {
     projectSettings: projectId => relay.browserRelayProjectSettings(projectId),
     setProjectSettings: (projectId, expectedRevision, preferences) => relay.browserRelaySetProjectSettings(projectId, expectedRevision, preferences),
     retireWorkspace: (projectId, workspaceId) => relay.browserRelayRetireWorkspace(projectId, workspaceId),
+    powers: (projectId, workspaceId) => relay.browserRelayPowers(projectId, workspaceId),
+    everything: (projectId, workspaceId, pairingId, on) => relay.browserRelayEverything(projectId, workspaceId, pairingId, on),
   });
 }

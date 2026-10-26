@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { BrowserOriginPatternSchema, BrowserSiteLevelSchema, browserOriginMatches } from '@gitspace/protocol-environment';
 import { RuntimeDispatchSelectionSchema } from './scheduling.js';
+import { RuntimeBrowserCaptureSchema } from './browser-capture-tracks.js';
+import { RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentWriteSchema } from './browser-comments.js';
+import { BROWSER_DEBUG_DURATION_MS, BROWSER_DEBUG_KINDS, BROWSER_STORAGE_KINDS, BROWSER_STORAGE_OPS, BrowserEverythingSchema, BrowserPowersSchema, BrowserStorageSiteSchema, browserPowerGrantShape } from './browser-powers.js';
 
 const id = z.string().min(1).max(256);
 const source = z.enum(['relay', 'headless']).default('headless');
@@ -20,21 +23,46 @@ export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
    * On your Chrome `sites` names the granted sites (exact patterns) the script may use; omitted, every granted site
    * that allows scripts. The cloud browser ignores it. */
   z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536), sites: z.array(BrowserOriginPatternSchema).max(32).optional() }),
+  // Browser powers (`browser-powers.ts`): on your Chrome each needs its power in the grant, or Everything; the cloud
+  // browser needs no approval. Neither runs on a machine's headless browser.
+  /** `debug`: a CPU profile, a performance trace or a heap snapshot of the tab, saved to the drive with a summary. */
+  z.strictObject({ action: z.literal('debug'), ...tab, kind: z.enum(BROWSER_DEBUG_KINDS), durationMs: z.number().int().min(BROWSER_DEBUG_DURATION_MS.min).max(BROWSER_DEBUG_DURATION_MS.max).optional() }),
+  /** `storage`: reads (`get`), sets or clears one approved site's cookies, localStorage, sessionStorage or IndexedDB,
+   * through a tab of the workspace group (on `site`, except for cookies). `name`: the cookie, the storage key, or the
+   * IndexedDB database; `store` and `key`: the IndexedDB object store and record key; `value`: what `set` writes. */
+  z.strictObject({ action: z.literal('storage'), ...tab, op: z.enum(BROWSER_STORAGE_OPS), kind: z.enum(BROWSER_STORAGE_KINDS), site: BrowserStorageSiteSchema, name: z.string().min(1).max(4096).optional(), store: z.string().min(1).max(1024).optional(), key: z.string().max(4096).optional(), value: z.string().max(16_384).optional() }),
 ]);
 export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSchema>;
 /** `chromes` touches no browser: it lists the project's Chromes (names, pairing ids, online, approved, default) for the
  * agent to choose from. */
 export const RuntimeBrowserChromesArgumentsSchema = z.strictObject({ action: z.literal('chromes') });
-/** `comments` touches no browser: the workspace's page comments (`gitspace.page-comments`), newest first; people
- * watching a share link make them (docs/APERTURE-DESIGN.md §8, §9). */
-export const RuntimeBrowserCommentsArgumentsSchema = z.strictObject({ action: z.literal('comments'), limit: z.number().int().min(1).max(100).default(20) });
-/** The browser tool as agents call it: every browser action, plus `chromes` and `comments`. */
-export const RuntimeBrowserToolArgumentsSchema = z.discriminatedUnion('action', [...RuntimeBrowserArgumentsSchema.options, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema]);
+// Comments for the agent (docs/APERTURE-DESIGN.md §9, `browser-comments.ts`). None touches a browser.
+/** `comments`: the workspace's comment threads (`gitspace.page-comments`), newest first; `open` (the default) leaves
+ * resolved ones out. Subagents read them too. */
+export const RuntimeBrowserCommentsArgumentsSchema = z.strictObject({ action: z.literal('comments'), status: RuntimeBrowserCommentStatusSchema.default('open'), limit: z.number().int().min(1).max(100).default(20) });
+/** `commentReply` (main agent only): a reply in a thread, shown as the agent on the page and to the thread's viewers. */
+export const RuntimeBrowserCommentReplyArgumentsSchema = z.strictObject({ action: z.literal('commentReply'), threadId: z.string().uuid(), text: RuntimeBrowserCommentTextSchema });
+/** `commentResolve` (main agent only): resolves a thread, or with `reopen` reopens it. */
+export const RuntimeBrowserCommentResolveArgumentsSchema = z.strictObject({ action: z.literal('commentResolve'), threadId: z.string().uuid(), reopen: z.boolean().optional() });
+// Captures for the agent (docs/APERTURE-DESIGN.md §11, `browser-capture-agent.ts`).
+/** `captures` touches no browser: the workspace's captures, newest first. */
+export const RuntimeBrowserCapturesArgumentsSchema = z.strictObject({ action: z.literal('captures'), limit: z.number().int().min(1).max(100).default(20) });
+/** `capture` touches no browser: one capture as a mention of it reads (`captureSummary`). */
+export const RuntimeBrowserCaptureArgumentsSchema = z.strictObject({ action: z.literal('capture'), capture: z.string().uuid() });
+/** `replay` runs a capture's steps as a `run` script (`captureReplayScript`) where `run` would: `args` holds the value
+ * of each parameter the capture's steps need (its secrets, its upload files). */
+export const RuntimeBrowserReplayArgumentsSchema = z.strictObject({ action: z.literal('replay'), ...selection, capture: z.string().uuid(), sites: z.array(BrowserOriginPatternSchema).max(32).optional(), args: z.record(z.string().min(1).max(64), z.string().max(16_384)).optional() });
+/** `captureSaved` (main agent only) records the repository skill made from a capture, `path` its folder
+ * (`.gitspace/skills/<slug>`), at the working copy's commit holding its `SKILL.md`. */
+export const RuntimeBrowserCaptureSavedArgumentsSchema = z.strictObject({ action: z.literal('captureSaved'), capture: z.string().uuid(), path: z.string().min(1).max(1024) });
+/** The browser tool as agents call it: every browser action, plus `chromes`, `comments` and the capture actions. */
+export const RuntimeBrowserToolArgumentsSchema = z.discriminatedUnion('action', [...RuntimeBrowserArgumentsSchema.options, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema, RuntimeBrowserCommentReplyArgumentsSchema, RuntimeBrowserCommentResolveArgumentsSchema,
+  RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema, RuntimeBrowserCaptureSavedArgumentsSchema]);
 export type RuntimeBrowserToolArguments = z.infer<typeof RuntimeBrowserToolArgumentsSchema>;
 const executionScope = { projectId: id, workspaceId: id, machineId: id, attachmentId: id, generation: z.number().int().nonnegative() };
 export const RuntimeBrowserGrantSchema = z.strictObject({ ...executionScope, groupId: z.string().uuid(), groupName: id, source: z.enum(['relay', 'headless']), origins: z.array(BrowserOriginPatternSchema), expiresAt: z.iso.datetime() });
 export type RuntimeBrowserGrant = z.infer<typeof RuntimeBrowserGrantSchema>;
-export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close', 'run']) });
+export const RuntimeBrowserPreparationSchema = RuntimeBrowserGrantSchema.extend({ id, action: z.enum(['open', 'tabs', 'navigate', 'observe', 'act', 'evaluate', 'screenshot', 'close', 'run', 'debug', 'storage']) });
 export type RuntimeBrowserPreparation = z.infer<typeof RuntimeBrowserPreparationSchema>;
 export const RuntimeAccountBrowserPlacementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('cloud'), accountId: id }),
@@ -45,8 +73,10 @@ export type RuntimeAccountBrowserPlacement = z.infer<typeof RuntimeAccountBrowse
  * the patterns at `interact` (single steps, no scripts); `read`: those at `read` (looking only, no scripts), omitted
  * when there are none, so an extension before 5.9, which verifies `stepsOnly` and knows no `read`, gets the grant shape
  * it knows; any other pattern is at `full`. Both are empty for the cloud browser, which has no levels. The relay sends
- * a grant with `read` only to an extension whose hello says `siteLevels`. */
-export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema, stepsOnly: z.array(BrowserOriginPatternSchema), read: z.array(BrowserOriginPatternSchema).min(1).optional() });
+ * a grant with `read` only to an extension whose hello says `siteLevels`. `powers` and `everything`
+ * (`browser-powers.ts`) are omitted when none is on; the relay sends a grant with either only to an extension whose
+ * hello says `powers`. */
+export const RuntimeAccountBrowserGrantSchema = RuntimeBrowserGrantSchema.omit({ machineId: true, attachmentId: true, generation: true }).extend({ placement: RuntimeAccountBrowserPlacementSchema, stepsOnly: z.array(BrowserOriginPatternSchema), read: z.array(BrowserOriginPatternSchema).min(1).optional(), ...browserPowerGrantShape });
 export type RuntimeAccountBrowserGrant = z.infer<typeof RuntimeAccountBrowserGrantSchema>;
 /** A group grant as the relay, the browser session and the workspace store it: rows stored before site levels have no
  * `stepsOnly`, because none of their sites was at `interact`. */
@@ -60,14 +90,28 @@ export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCa
  * Share links (`browser-share.ts`): `shares` lists the workspace's shares; `shareCreate` (`groupId`, `targetId`,
  * `comment`, `expiresInMinutes`) shares a tab of the workspace's Chrome group; `shareRevoke` (`shareId`) ends one;
  * `shareConnect` (`shareId`, `secret`, `groupId`) moves a pasted share's tab into the workspace's group on its Chrome;
- * `pageComments`: the workspace's page comments, newest first. Your Chrome's workspace group from the Browser tab:
+ * Comments (`browser-comments.ts`): `comments` (`status`, `captureId`, `limit`) lists the workspace's threads, newest
+ * first; `commentWrite` (`write`) makes a thread, replies in one or resolves one, as you. Your Chrome's workspace
+ * group from the Browser tab:
  * `stop` (`groupId`) ends its scripts and its single step, as Stop in Chrome does; `closeTab` (`groupId`, `targetId`)
  * closes a tab of the group (on the cloud browser, one of its tabs); `focusTab` (`groupId`, `targetId`) brings a tab of
  * the group to the front of its window. Take over (docs/APERTURE-DESIGN.md §7.2), on your Chrome's group or the cloud
  * browser's (`groupId` names the browser, as for `closeTab`): `takeOver` (`groupId`, `targetId`, `device`: the signed-in
- * device taking it) makes you the tab's holder, so none of the agent's commands reach it; `resume` hands it back. */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'pageComments', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
-  shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(1440).optional(), device: z.string().min(1).max(256).nullable().optional() });
+ * device taking it) makes you the tab's holder, so none of the agent's commands reach it; `resume` hands it back.
+ * Comments: `commentShow` (`groupId`, `targetId`, `threadId`) brings your Chrome's tab to the front with
+ * comment mode on and that thread open. Everything (`browser-powers.ts`): `everything` (`pairingId`, `on`) allows it
+ * on the workspace's group on that Chrome for an hour, or ends it. */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'captureShares', 'captureShareCreate', 'captureShareRevoke', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'comments', 'commentWrite', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume', 'commentShow', 'everything']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
+  shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(43_200).optional(), device: z.string().min(1).max(256).nullable().optional(),
+  /** Capture share links (`browser-capture-share.ts`): `captureShares` lists the workspace's; `captureShareCreate`
+   * (`captureId`, `comment`, `expiresInMinutes`) shares a saved capture; `captureShareRevoke` (`captureShareId`) ends one. */
+  captureShareId: z.string().uuid().optional(),
+  /** A comment thread (`browser-comments.ts`, the root comment's id). */
+  threadId: z.string().uuid().optional(),
+  /** `comments`: open threads only (the default) or every one; `commentWrite`: the change. */
+  status: RuntimeBrowserCommentStatusSchema.optional(), write: RuntimeBrowserCommentWriteSchema.optional(),
+  /** `everything`: the Chrome, and whether Everything begins (true) or ends. */
+  pairingId: z.string().uuid().optional(), on: z.boolean().optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
   accountId: id, projectId: id, workspaceId: id,
@@ -138,7 +182,8 @@ export type RuntimeAccountBrowserPairingCode = z.infer<typeof RuntimeAccountBrow
  * `/api/browser-relay/shares` requests. Within protocol 6, an extension from 5.9 says `siteLevels` in its hello: it
  * enforces a grant's `read` sites (`RuntimeAccountBrowserGrantSchema`). Within protocol 6, an extension from 5.10 says
  * `takeover` in its hello: it takes `takeOver`/`resume`, reports `held`, and refuses the agent's commands on a tab you
- * hold.
+ * hold. Within protocol 6, an extension from 5.11 says `powers` in its hello: it enforces a grant's `powers` and
+ * `everything` (`browser-powers.ts`) and takes `everything` notices; an older one never gets a grant with either.
  */
 export const BROWSER_EXTENSION_PROTOCOL = 6;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
@@ -179,16 +224,17 @@ export const RuntimeAccountBrowserIdentitySchema = z.discriminatedUnion('state',
  * cloud browser open now. */
 export const RuntimeAccountBrowserRelayStatusSchema = z.strictObject({ pairings: z.array(RuntimeAccountBrowserIdentitySchema), cloudWorkspaces: z.number().int().nonnegative() });
 export type RuntimeAccountBrowserRelayStatus = z.infer<typeof RuntimeAccountBrowserRelayStatusSchema>;
-/** A project's approval of one Chrome. Its name and note belong to the Chrome. */
-const projectBrowserApproval = z.strictObject({ pairingId: z.string().uuid() });
+/** A project's approval of one Chrome, with the powers it gives agents there (`browser-powers.ts`). Its name and note
+ * belong to the Chrome. */
+const projectBrowserApproval = z.strictObject({ pairingId: z.string().uuid(), powers: BrowserPowersSchema.default([]) });
 export const RuntimeProjectBrowserPreferencesSchema = z.strictObject({ defaultPairingId: z.string().uuid().nullable(), approvals: z.array(projectBrowserApproval).max(32) }).superRefine((value, ctx) => {
   if (new Set(value.approvals.map(item => item.pairingId)).size !== value.approvals.length) ctx.addIssue({ code: 'custom', message: 'Browser approvals must be unique', path: ['approvals'] });
   if (value.defaultPairingId && !value.approvals.some(item => item.pairingId === value.defaultPairingId)) ctx.addIssue({ code: 'custom', message: 'Default Chrome must be approved for this project', path: ['defaultPairingId'] });
 });
 export type RuntimeProjectBrowserPreferences = z.infer<typeof RuntimeProjectBrowserPreferencesSchema>;
 /** A project's Chromes. `takeover`: the Chrome is online with an extension whose hello said it can be taken over
- * (`takeover`, from 5.10). */
-export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean(), takeover: z.boolean().default(false) })).max(32) });
+ * (`takeover`, from 5.10); `powersSupported`: online with one whose hello said `powers` (from 5.11). */
+export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean(), takeover: z.boolean().default(false), powersSupported: z.boolean().default(false) })).max(32) });
 export type RuntimeProjectBrowserSettings = z.infer<typeof RuntimeProjectBrowserSettingsSchema>;
 export const RuntimeBrowserArtifactSchema = z.strictObject({ id, url: z.string().max(8192), mediaType: z.string().max(128), bytes: z.number().int().nonnegative(), expiresAt: z.iso.datetime() });
 export const RuntimeBrowserArtifactPageSchema = z.strictObject({ artifact: RuntimeBrowserArtifactSchema, offset: z.number().int().nonnegative(), data: z.string().max(90000), nextOffset: z.number().int().nonnegative().nullable() });
@@ -284,7 +330,9 @@ export const BROWSER_RUNS_DAYS = 7;
  * workspace's recent runs. `groupId` is the workspace's group on that browser, null until one exists; on a Chrome,
  * `groupColor` is its colour in Chrome's tab strip (null until its extension reports it) and `agents` who acts there
  * now (empty while it is offline). `held`: the tabs you hold (§7.2); `takeover`: the Chrome's extension can be taken over
- * from GitSpace (from 5.10; offer "Update the extension" instead where it cannot). The cloud browser always can. */
+ * from GitSpace (from 5.10; offer "Update the extension" instead where it cannot). The cloud browser always can.
+ * `powers`: what this project's approval gives agents on that Chrome; `powersSupported`: its extension enforces powers
+ * (from 5.11); `everything`: Everything is on for this workspace there until `expiresAt`, else null. */
 export const RuntimeBrowserOverviewSchema = z.strictObject({
   sites: z.strictObject({ origins: z.array(z.strictObject({ pattern: BrowserOriginPatternSchema, level: BrowserSiteLevelSchema })), revision: z.string().max(64).nullable() }),
   cloud: z.strictObject({ groupId: z.string().uuid().nullable(), running: z.number().int().nonnegative(), tabs: z.array(RuntimeBrowserTabViewSchema).max(200), held: z.array(RuntimeBrowserHolderSchema).max(200).default([]) }),
@@ -292,6 +340,7 @@ export const RuntimeBrowserOverviewSchema = z.strictObject({
     pairingId: z.string().uuid(), name: RuntimeBrowserNameSchema, note: z.string().max(2048), connected: z.boolean(), approved: z.boolean(), isDefault: z.boolean(),
     groupId: z.string().uuid().nullable(), groupName: id.nullable(), groupColor: RuntimeBrowserGroupColorSchema.nullable(), running: z.number().int().nonnegative(), agents: z.array(RuntimeBrowserGroupAgentSchema).max(32), tabs: z.array(RuntimeBrowserTabViewSchema).max(200),
     held: z.array(RuntimeBrowserHolderSchema).max(200).default([]), takeover: z.boolean().default(false),
+    powers: BrowserPowersSchema.default([]), powersSupported: z.boolean().default(false), everything: BrowserEverythingSchema.nullable().default(null),
   })).max(32),
   /** Headless browsers on the workspace's attached machines (agents' headless steps run there when one is ready);
    * `error` when that machine could not answer. */
@@ -301,25 +350,6 @@ export const RuntimeBrowserOverviewSchema = z.strictObject({
 export type RuntimeBrowserOverview = z.infer<typeof RuntimeBrowserOverviewSchema>;
 /** Where browser files live in the workspace's drive (`drive://workspace/<path>`). */
 export const BROWSER_DRIVE_PREFIX = { captures: 'browser/captures/', downloads: 'browser/downloads/' } as const;
-/** A capture (docs/APERTURE-DESIGN.md §11), stored as `browser/captures/<captureId>/capture.json` beside its media.
- * Part 1 tracks: `image` (a screenshot: one JPEG), `frames` (screencast JPEGs in one container: `frames.bin` holds
- * the images back to back, `frames.json` is `RuntimeBrowserFramesIndex`), `video` (WebM from `chrome.tabCapture`).
- * Steps, comments and layout tracks come later (B2/B3). Paths are relative to the capture's folder. */
-export const RuntimeBrowserCaptureSchema = z.strictObject({
-  version: z.literal(1), captureId: z.string().uuid(), name: z.string().trim().min(1).max(200),
-  by: z.enum(['agent', 'you']), source: z.enum(['headless', 'relay', 'machine']), browser: z.string().max(128),
-  page: z.strictObject({ url: z.string().max(8192), title: z.string().max(500) }),
-  /** The tab it records: its workspace group and target; null when not known. */
-  target: z.strictObject({ groupId: z.string().uuid(), targetId: id }).nullable(),
-  startedAt: z.iso.datetime(), endedAt: z.iso.datetime().nullable(),
-  state: z.enum(['recording', 'saved', 'failed']), reason: z.string().max(1024).nullable(),
-  tracks: z.strictObject({
-    image: z.strictObject({ path: z.string().max(256), width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
-    frames: z.strictObject({ path: z.string().max(256), index: z.string().max(256), count: z.number().int().nonnegative(), width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
-    video: z.strictObject({ path: z.string().max(256), mediaType: z.string().max(128), sound: z.boolean(), durationMs: z.number().int().nonnegative() }).optional(),
-  }),
-});
-export type RuntimeBrowserCapture = z.infer<typeof RuntimeBrowserCaptureSchema>;
 /** `frames.json`: each frame's time since the capture started and its bytes in `frames.bin`. */
 export const RuntimeBrowserFramesIndexSchema = z.strictObject({ version: z.literal(1), frames: z.array(z.strictObject({ t: z.number().int().nonnegative(), offset: z.number().int().nonnegative(), length: z.number().int().positive() })).max(100_000) });
 export type RuntimeBrowserFramesIndex = z.infer<typeof RuntimeBrowserFramesIndexSchema>;

@@ -107,4 +107,16 @@ describe('TurnTranscript', () => {
     expect(html).toContain('Can you summarise the top comments?');
     expect(html).not.toContain('Connected tab');
   });
+  it('shows the captures a sent message mentions as chips, not the summaries the workspace added for the agent', () => {
+    const captureId = '6f0c2a7e-1b2c-4d3e-8f90-a1b2c3d4e5f6';
+    const turns: TurnBlock[] = [{
+      id: 'turn-capture', type: 'turn', status: 'done', sideAgents: [], items: [],
+      user: { id: 'turn-capture:user', type: 'message', role: 'user', text: `capture://${captureId}\nMake a skill of it\n\n<capture-summary id="${captureId}" name="Order a &quot;large&quot; pizza">\nSteps (number, time on the capture, what):\n3. 0:02 fill getByLabel('Password') «secret»\n</capture-summary>` },
+    }];
+    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
+    expect(html).toContain('Order a &quot;large&quot; pizza</strong>');
+    expect(html).toContain('Make a skill of it');
+    expect(html).not.toContain('getByLabel');
+    expect(html).not.toContain('capture://');
+  });
 });

@@ -8,8 +8,10 @@ import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRe
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentViewSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab, type RuntimeBrowserPageCommentView } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentThreadView, type RuntimeBrowserCommentWrite } from '@gitspace/protocol-runtime';
 import { isSubagentTool, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -96,7 +98,7 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
   /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null). */
-  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserPageCommentView[] | null>;
+  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | null>;
 };
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
@@ -209,17 +211,36 @@ export function createSessionControls(services: SessionControlServices) {
         const management: RuntimeBrowserManagement = command.type === 'browserCaptureStart' ? { action: 'captureStart', groupId: command.groupId, targetId: command.targetId } : { action: 'captureStop', captureId: command.captureId };
         return { control: await control(target), browserCapture: RuntimeBrowserCaptureViewSchema.parse(await services.browser(String(target.id), undefined, management)) };
       }
+      // Capture share links (docs/APERTURE-DESIGN.md §11): the workspace's capture shares, sharing a saved capture, ending one.
+      case 'browserCaptureShares': case 'browserCaptureShareCreate': case 'browserCaptureShareRevoke': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        if (command.type === 'browserCaptureShares') return { control: await control(target), browserCaptureShares: RuntimeBrowserCaptureShareSchema.array().parse(await services.browser(String(target.id), undefined, { action: 'captureShares' })) };
+        const management: RuntimeBrowserManagement = command.type === 'browserCaptureShareCreate' ? { action: 'captureShareCreate', captureId: command.captureId, comment: command.comment, expiresInMinutes: command.expiresInMinutes } : { action: 'captureShareRevoke', captureShareId: command.captureShareId };
+        return { control: await control(target), browserCaptureShare: RuntimeBrowserCaptureShareSchema.parse(await services.browser(String(target.id), undefined, management)) };
+      }
       // Share links (docs/APERTURE-DESIGN.md §8): the workspace's shares, sharing a tab of its Chrome group, ending a
-      // share, connecting the tab of a share link you pasted, and the comments people watching shares made.
-      case 'browserShares': case 'browserShareCreate': case 'browserShareRevoke': case 'browserShareConnect': case 'browserPageComments': {
+      // share, connecting the tab of a share link you pasted.
+      case 'browserShares': case 'browserShareCreate': case 'browserShareRevoke': case 'browserShareConnect': {
         if (!canApprove) throw new Error('Browser management requires human capability');
         if (!services.browser) throw new Error('Browser management unavailable');
         const id = String(target.id);
         if (command.type === 'browserShares') return { control: await control(target), browserShares: RuntimeBrowserShareSchema.array().parse(await services.browser(id, undefined, { action: 'shares' })) };
-        if (command.type === 'browserPageComments') return { control: await control(target), browserPageComments: RuntimeBrowserPageCommentViewSchema.array().parse(await services.browser(id, undefined, { action: 'pageComments' })) };
         if (command.type === 'browserShareConnect') return { control: await control(target), browserConnectedTab: RuntimeBrowserConnectedTabSchema.parse(await services.browser(id, undefined, { action: 'shareConnect', shareId: command.shareId, secret: command.secret })) };
         const management: RuntimeBrowserManagement = command.type === 'browserShareCreate' ? { action: 'shareCreate', groupId: command.groupId, targetId: command.targetId, comment: command.comment, expiresInMinutes: command.expiresInMinutes } : { action: 'shareRevoke', shareId: command.shareId };
         return { control: await control(target), browserShare: RuntimeBrowserShareSchema.parse(await services.browser(id, undefined, management)) };
+      }
+      // Comments (docs/APERTURE-DESIGN.md §9), as you: the workspace's threads, a reply, resolving or reopening one, and
+      // a new thread from the capture player.
+      case 'browserComments': case 'browserCommentReply': case 'browserCommentResolve': case 'browserCommentAdd': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        const id = String(target.id);
+        if (command.type === 'browserComments') return { control: await control(target), browserComments: RuntimeBrowserCommentThreadViewSchema.array().parse(await services.browser(id, undefined, { action: 'comments', ...(command.status ? { status: command.status } : {}), ...(command.captureId ? { captureId: command.captureId } : {}), ...(command.limit ? { limit: command.limit } : {}) })) };
+        const write: RuntimeBrowserCommentWrite = command.type === 'browserCommentReply' ? { op: 'reply', threadId: command.threadId, text: command.text }
+          : command.type === 'browserCommentResolve' ? { op: 'resolve', threadId: command.threadId, ...(command.reopen === undefined ? {} : { reopen: command.reopen }) }
+            : { op: 'comment', source: command.source, page: command.page, anchor: command.anchor, text: command.text };
+        return { control: await control(target), browserComment: RuntimeBrowserCommentThreadSchema.parse(await services.browser(id, undefined, { action: 'commentWrite', write })) };
       }
       // Your Chrome's workspace group from the Browser tab: Stop, Close tab (a cloud tab too) and Focus in Chrome.
       case 'browserStop': case 'browserCloseTab': case 'browserFocusTab': {
@@ -228,11 +249,25 @@ export function createSessionControls(services: SessionControlServices) {
         await services.browser(String(target.id), undefined, command.type === 'browserStop' ? { action: 'stop', groupId: command.groupId } : { action: command.type === 'browserCloseTab' ? 'closeTab' : 'focusTab', groupId: command.groupId, targetId: command.targetId });
         return { control: await control(target) };
       }
+      // Show on page: your Chrome's tab to the front, comment mode on, the thread open.
+      case 'browserCommentShow': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        await services.browser(String(target.id), undefined, { action: 'commentShow', groupId: command.groupId, targetId: command.targetId, threadId: command.threadId });
+        return { control: await control(target) };
+      }
       // Take over (docs/APERTURE-DESIGN.md §7.2) on your Chrome's or the cloud browser's tab, from this device; Resume agent hands it back.
       case 'browserTakeOver': case 'browserResume': {
         if (!canApprove) throw new Error('Browser management requires human capability');
         if (!services.browser) throw new Error('Browser management unavailable');
         await services.browser(String(target.id), undefined, command.type === 'browserTakeOver' ? { action: 'takeOver', groupId: command.groupId, targetId: command.targetId, device: deviceId ?? null } : { action: 'resume', groupId: command.groupId, targetId: command.targetId });
+        return { control: await control(target) };
+      }
+      // Everything (browser-powers.ts) on the workspace's group on your Chrome, from the Browser tab: allowed for an hour, or ended now.
+      case 'browserEverything': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        await services.browser(String(target.id), undefined, { action: 'everything', pairingId: command.pairingId, on: command.on });
         return { control: await control(target) };
       }
       case 'prompt': {

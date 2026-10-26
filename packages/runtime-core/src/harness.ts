@@ -11,6 +11,7 @@ import { admitRuntimeCodemodeTool, createRetainedRulesExtension, type RetainedRu
 import { ruleGenerationRegistry } from './rule-generations.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema, RuntimeChildAgentsArgumentsSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema } from '@gitspace/protocol-runtime';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 import { z } from 'zod';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -182,14 +183,15 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   } })] });
   const [firstBrowserAction, ...otherBrowserActions] = RuntimeBrowserArgumentsSchema.options;
   const headlessSource = { source: z.literal('headless').default('headless') };
-  const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource)), RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema]);
+  const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource)), RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema,
+    RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema.extend(headlessSource)]);
   const childExtension = defineExtension({ name: 'gitspace.child-tools', tools: tools.filter(tool => tool.name === 'agents' || tool.name === BROWSER_TOOL_NAME).map(tool => {
     const schema = tool.name === 'agents' ? RuntimeChildAgentsArgumentsSchema : headlessBrowser;
     return {
       ...tool,
       description: tool.name === 'agents'
         ? 'Message parent or a named sibling, inspect agents, or wait for the next event. Subagents cannot spawn or stop agents.'
-        : 'Use the headless browser; {action:"chromes"} lists the project’s Chromes; {action:"comments",limit?} lists the workspace’s page comments, newest first: what people watching a share link of one of its tabs said about the page, with the element or area they pointed at and a crop of it. Subagents cannot access the user relay browser.',
+        : 'Use the headless browser; {action:"chromes"} lists the project’s Chromes; {action:"comments",status?,limit?} lists the workspace’s comment threads, newest first (open ones unless status is "all"): what people said about a page in the user’s Chrome, through a share link or on a capture, with the element or area they pointed at, a crop of it and the replies; only the main agent replies and resolves. {action:"captures",limit?} lists the workspace’s captures and {action:"capture",capture} reads one (its steps, comments and media addresses); {action:"replay",capture,args?} runs its steps on the cloud browser. Subagents cannot access the user relay browser or save a capture as a skill.',
       parameters: runtimeToolParameters(schema),
       prepareArguments: (input: unknown) => schema.parse(input),
     };

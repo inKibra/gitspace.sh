@@ -2,6 +2,7 @@ import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
 import { InspectorCloudArtifacts, readInspectorContext } from './account-inspector-data.js';
 import type { DriveUpload } from './drive-files.js';
 import type { TenantRange } from './tenant-store.js';
+import type { ArtifactFileGrant } from './artifact-file-url.js';
 
 /** Whole-file `read`s hold the file in memory; larger files are read by range or through `url`. */
 export const WORKSPACE_DRIVE_READ_MAX_BYTES = 32 * 1024 * 1024;
@@ -23,6 +24,8 @@ export interface WorkspaceDrive {
   read(path: string, range?: TenantRange): Promise<Uint8Array | null>;
   /** An absolute sealed `/files/` link to the file's current version, valid for `ARTIFACT_FILE_URL_MS`. */
   url(path: string): Promise<string>;
+  /** What a file link grants for the file's current version, for a route that serves it under its own token. */
+  grant(path: string): Promise<ArtifactFileGrant>;
   /** A new upload into this workspace's scope: JSON to keep between requests. Nothing is stored yet. */
   upload(): Promise<DriveUpload>;
   /** Stores the next part, `size` bytes arriving as `stream`, and returns the upload after it. Every part but the last
@@ -76,6 +79,10 @@ export function workspaceDrive(env: Env, workspace: { projectId: string; workspa
     async url(path) {
       const drive = await artifacts();
       return new URL((await drive.file(drive.writableUrl(path))).url, env.ACCOUNT_URL).href;
+    },
+    async grant(path) {
+      const drive = await artifacts();
+      return drive.grant(drive.writableUrl(path));
     },
     async upload() {
       return (await artifacts()).files.begin(scopeId);

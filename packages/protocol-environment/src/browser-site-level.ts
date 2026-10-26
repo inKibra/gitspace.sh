@@ -7,12 +7,13 @@ export type BrowserSiteLevel = (typeof BROWSER_SITE_LEVELS)[number];
 /**
  * Whether each browser action only reads a site, and so is allowed on a `read` site: opening and navigating to it
  * (navigation within the read site included), listing tabs, observing (the accessibility snapshot, its text and refs),
- * screenshots, and closing a tab the agent opened. `act` (click, fill, press), `evaluate` (page JavaScript) and `run`
- * (scripts) can change the page or submit, so a `read` site refuses them.
+ * screenshots, closing a tab the agent opened, and recording a profile or trace (`debug`). `act` (click, fill, press),
+ * `evaluate` (page JavaScript), `run` (scripts) and `storage` (cookies and page storage) can change the page, submit or
+ * reach credentials, so a `read` site refuses them.
  */
-export const READ_SITE_ACTIONS: Record<'open' | 'tabs' | 'navigate' | 'observe' | 'act' | 'evaluate' | 'screenshot' | 'close' | 'run', boolean> = {
-  open: true, tabs: true, navigate: true, observe: true, screenshot: true, close: true,
-  act: false, evaluate: false, run: false,
+export const READ_SITE_ACTIONS: Record<'open' | 'tabs' | 'navigate' | 'observe' | 'act' | 'evaluate' | 'screenshot' | 'close' | 'run' | 'debug' | 'storage', boolean> = {
+  open: true, tabs: true, navigate: true, observe: true, screenshot: true, close: true, debug: true,
+  act: false, evaluate: false, run: false, storage: false,
 };
 
 /** Why an agent may not change a page on `site`, which is approved `read`: the message agents see. */

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { BROWSER_WATCH_PATH, RuntimeBrowserWatchServerMessageSchema, type RuntimeBrowserRemoteInput, type RuntimeBrowserWatchClientMessage, type RuntimeBrowserWatchQuery, type RuntimeBrowserWatchServerMessage } from '@gitspace/protocol-runtime';
+import { BROWSER_WATCH_PATH, RuntimeBrowserWatchServerMessageSchema, type RuntimeBrowserCommentBox, type RuntimeBrowserRemoteInput, type RuntimeBrowserWatchClientMessage, type RuntimeBrowserWatchQuery, type RuntimeBrowserWatchServerMessage } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, useTouchPrimary } from '@gitspace/ui';
+import { CommentPin } from './comment-threads.js';
 import { signDeviceRequest } from './device.js';
 import { currentDevice } from './device-session.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -73,9 +74,10 @@ async function openWatch(query: RuntimeBrowserWatchQuery): Promise<WebSocket> {
  * stops them), Take over and Resume agent, and while you hold the tab from this device, your pointer, wheel, keys and
  * touches go to it, positions mapped from the frame to the tab's viewport. On a touch screen a text field types into
  * the tab's focused element. `takeover`: the browser can be taken over from GitSpace (else "Update the extension").
- * `focusInChrome` adds Focus in Chrome.
+ * `focusInChrome` adds Focus in Chrome. `pin` (Show on page) highlights a comment thread's pin, numbered `n`, where
+ * its anchor was in the tab's viewport.
  */
-export function BrowserWatchDialog({ identity, request, target, focusInChrome, takeover, onClose }: { identity: { projectId: string; workspaceId: string }; request: Request; target: BrowserWatchTarget; focusInChrome: boolean; takeover: boolean; onClose(): void }) {
+export function BrowserWatchDialog({ identity, request, target, focusInChrome, takeover, pin, onClose }: { identity: { projectId: string; workspaceId: string }; request: Request; target: BrowserWatchTarget; focusInChrome: boolean; takeover: boolean; pin?: { n: number; box: RuntimeBrowserCommentBox }; onClose(): void }) {
   const touch = useTouchPrimary();
   const [frame, setFrame] = useState<Frame | null>(null);
   const [page, setPage] = useState<Page | null>(null);
@@ -298,6 +300,7 @@ export function BrowserWatchDialog({ identity, request, target, focusInChrome, t
         onKeyDown={event => onKey(event, true)} onKeyUp={event => onKey(event, false)} onContextMenu={event => { if (input) event.preventDefault(); }}
       >
         {frame ? <img className="size-full object-contain" src={`data:image/jpeg;base64,${frame.data}`} alt={`Live view of ${title}`} draggable={false} /> : null}
+        {frame && pin ? <CommentPin n={pin.n} box={pin.box} resolved={false} highlighted /> : null}
         {status ? <p className="absolute inset-0 flex items-center justify-center p-4 text-center text-caption text-white/80">{status}</p> : null}
       </div>
     </div>

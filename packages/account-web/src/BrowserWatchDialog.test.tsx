@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { RuntimeBrowserHolder, RuntimeBrowserWatchServerMessage } from '@gitspace/protocol-runtime';
+import type { RuntimeBrowserCommentBox, RuntimeBrowserHolder, RuntimeBrowserWatchServerMessage } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { signDeviceRequest } from './device.js';
 import { BrowserWatchDialog, framePoint, type BrowserWatchTarget } from './BrowserWatchDialog.js';
@@ -38,8 +38,8 @@ const latest = () => FakeSocket.all.at(-1)!;
 const inputs = () => latest().sent.filter(message => typeof message === 'object' && message !== null && 'type' in message && message.type !== 'size');
 function button(text: string): HTMLButtonElement | undefined { return [...document.body.querySelectorAll('button')].find(candidate => candidate.textContent?.trim() === text); }
 const screen = () => document.body.querySelector<HTMLElement>('[role="application"]')!;
-async function show(target: BrowserWatchTarget, options: { takeover?: boolean; focusInChrome?: boolean } = {}) {
-  await act(async () => root.render(<BrowserWatchDialog identity={{ projectId: 'project', workspaceId: 'workspace' }} request={request} target={target} takeover={options.takeover ?? true} focusInChrome={options.focusInChrome ?? target.source === 'chrome'} onClose={() => { closed += 1; root.render(null); }} />));
+async function show(target: BrowserWatchTarget, options: { takeover?: boolean; focusInChrome?: boolean; pin?: { n: number; box: RuntimeBrowserCommentBox } } = {}) {
+  await act(async () => root.render(<BrowserWatchDialog identity={{ projectId: 'project', workspaceId: 'workspace' }} request={request} target={target} takeover={options.takeover ?? true} focusInChrome={options.focusInChrome ?? target.source === 'chrome'} pin={options.pin} onClose={() => { closed += 1; root.render(null); }} />));
   await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 }
 async function pointer(type: 'pointerdown' | 'pointerup' | 'pointermove', x: number, y: number, pointerType = 'mouse') {
@@ -82,6 +82,17 @@ it('shows the tab live on a socket this device signs, and closing the dialog sto
   await act(async () => button('Done')!.click());
   expect(closed).toBe(1);
   expect(latest().readyState).toBe(FakeSocket.CLOSED);
+});
+
+it('Show on page highlights the comment thread’s pin where it pointed on the live frame', async () => {
+  await show(chrome, { pin: { n: 3, box: { x: 0.25, y: 0.5, w: 0.25, h: 0.1 } } });
+  await latest().open();
+  expect(screen().querySelector('[aria-label="Comment 3"]')).toBeNull();
+  await latest().receive({ type: 'frame', data: 'AAAA', width: 1280, height: 800 });
+  const pin = screen().querySelector<HTMLElement>('[aria-label="Comment 3"]')!;
+  expect(pin.textContent).toBe('3');
+  expect(parseFloat(pin.style.left)).toBeCloseTo(50);
+  expect(parseFloat(pin.style.top)).toBeCloseTo(50);
 });
 
 it('sends your input only while this device holds the tab, at the spot of the frame you pointed at', async () => {

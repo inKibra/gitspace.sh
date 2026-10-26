@@ -1,16 +1,19 @@
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import type {
-  RuntimeBrowserPageComment,
+  RuntimeBrowserCommentThread,
   RuntimeBrowserShareBox,
   RuntimeBrowserSharePreview,
   RuntimeBrowserShareServerMessage,
   RuntimeBrowserShareTarget,
   RuntimeBrowserShareViewer,
+  RuntimeBrowserShareViewerMessage,
 } from '@gitspace/protocol-runtime';
-import { browserSharePointerColor } from '@gitspace/protocol-runtime';
+import { browserCommentPageKey, browserSharePointerColor } from '@gitspace/protocol-runtime';
 import { MessagePlusSquare } from '@untitledui/icons';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import { COMMENT_PURPLE, CommentPin, numberThreads, placeThread, ThreadPopover } from '../comment-threads.js';
+import type { ThreadActions } from '../comment-threads.js';
 import { glyph } from '../glyph.js';
 import { ShareComments } from './ShareComments.js';
 import { joinShare, openShareLive, ShareRequestError } from './share-client.js';
@@ -26,6 +29,8 @@ type Page = Extract<RuntimeBrowserShareServerMessage, { type: 'page' }>;
 type Frame = Extract<RuntimeBrowserShareServerMessage, { type: 'frame' }>;
 /** A comment being written: on the element at a point, or on a dragged area. */
 type Draft = { kind: 'point'; at: Point } | { kind: 'region'; region: RuntimeBrowserShareBox };
+/** A reply or resolve sent on the socket, settled when the thread comes back changed or the share refuses it. */
+type ThreadOperation = { threadId: string; settled(thread: RuntimeBrowserCommentThread): boolean; resolve(): void; reject(error: Error): void };
 
 /** At most 20 pointer messages a second. */
 const POINTER_INTERVAL_MS = 50;
@@ -36,8 +41,6 @@ const DRAG_PX = 8;
 const RECONNECT_MAX_MS = 15_000;
 /** The sharer's own pointer and avatar: gray, apart from the viewers' colors and the agent's blue. */
 const SHARER_GRAY = '#525252';
-/** Chrome's purple tab-group colour, which marks comment mode: the frame's ring, the outlines and the Comment button. */
-const COMMENT_PURPLE = '#a142f4';
 const CommentGlyph = glyph(MessagePlusSquare);
 /** Watchers shown as avatars in the header; the rest are counted. */
 const WATCHER_AVATARS = 6;
@@ -80,7 +83,9 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const [watchers, setWatchers] = useState<Watcher[]>([]);
   /** The sharer's own pointer on the tab, from their Chrome: drawn here, not on the tab. */
   const [sharerAt, setSharerAt] = useState<Point | null>(null);
-  const [comments, setComments] = useState<RuntimeBrowserPageComment[]>([]);
+  const [threads, setThreads] = useState<RuntimeBrowserCommentThread[]>([]);
+  /** The thread open over the page, by its root's id. */
+  const [openThread, setOpenThread] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
   const [connected, setConnected] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -94,6 +99,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
   const [stage, setStage] = useState<Size | null>(null);
   const live = useRef<ShareLive | null>(null);
   const sent = useRef<string | null>(null);
+  const threadOperation = useRef<ThreadOperation | null>(null);
   const press = useRef<{ start: Point; x: number; y: number; moved: boolean } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLDivElement>(null);
@@ -143,7 +149,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
           setShare(message.share);
           setWatchers(message.viewers.map(viewer => ({ ...viewer, at: null })));
           setSharerAt(null);
-          setComments(message.comments);
+          setThreads(message.threads);
           return;
         case 'page': setPage(message); return;
         case 'frame': setFrame(message); return;
@@ -151,15 +157,21 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
         case 'sharer': setSharerAt(message.at); return;
         case 'hit': setHit(message.target); return;
         case 'presence': setOnline(message.online); return;
-        case 'comments': {
-          setComments(message.comments);
-          const text = sent.current;
-          if (text !== null && message.comments.some(comment => comment.text === text && comment.by.name === joined.name)) {
+        case 'thread': {
+          const { thread } = message;
+          setThreads(current => current.some(other => other.root.id === thread.root.id) ? current.map(other => other.root.id === thread.root.id ? thread : other) : [...current, thread]);
+          const text = sent.current, { root } = thread;
+          if (text !== null && thread.replies.length === 0 && root.text === text && root.by.kind === 'person' && root.by.name === joined.name) {
             sent.current = null;
             setSending(false);
             setDraft(null);
             setDraftText('');
             setHit(null);
+          }
+          const operation = threadOperation.current;
+          if (operation?.threadId === root.id && operation.settled(thread)) {
+            threadOperation.current = null;
+            operation.resolve();
           }
           return;
         }
@@ -168,6 +180,9 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
             sent.current = null;
             setSending(false);
             setDraftError(message.message);
+          } else if (threadOperation.current) {
+            threadOperation.current.reject(new Error(message.message));
+            threadOperation.current = null;
           } else setNotice(message.message);
           return;
         case 'ended':
@@ -200,6 +215,8 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
         setSending(false);
         setDraftError('The connection dropped before your comment was saved. Send it again.');
       }
+      threadOperation.current?.reject(new Error('The connection dropped before it was saved. Try again.'));
+      threadOperation.current = null;
       timer = window.setTimeout(rejoin, Math.min(RECONNECT_MAX_MS, 1_000 * 2 ** failures));
       failures += 1;
     }
@@ -246,7 +263,8 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
     const at = pointAt(event);
     if (!at) return;
     point(at);
-    if (!commenting || draft) return;
+    if (!commenting) { setOpenThread(null); return; }
+    if (draft) return;
     press.current = { start: at, x: event.clientX, y: event.clientY, moved: false };
     // Keeps a drag going when it leaves the frame; a browser without capture ends it at the frame's edge instead.
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* no capture for this pointer */ }
@@ -258,6 +276,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
     const at = pointAt(event) ?? pressed.start;
     setDragBox(null);
     setDraftError(null);
+    setOpenThread(null);
     if (pressed.moved) {
       setHit(null);
       setDraft({ kind: 'region', region: boxBetween(pressed.start, at) });
@@ -296,15 +315,40 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
     cancelDraft();
     throttles.hit.cancel();
   };
+  /** Replies and resolves go on the socket, one at a time; each settles when its thread comes back changed. */
+  const threadActions: ThreadActions = {
+    reply: (threadId, text) => sendThreadChange(threadId, { type: 'commentReply', threadId, text }, thread => thread.replies.some(reply => reply.text === text && reply.by.kind === 'person' && reply.by.name === self.name)),
+    resolve: (threadId, reopen) => sendThreadChange(threadId, reopen ? { type: 'commentResolve', threadId, reopen } : { type: 'commentResolve', threadId }, thread => (thread.root.resolved === null) === reopen),
+  };
+  function sendThreadChange(threadId: string, message: RuntimeBrowserShareViewerMessage, settled: ThreadOperation['settled']): Promise<void> {
+    if (!live.current) return Promise.reject(new Error('Not connected. Try again once the tab is back.'));
+    if (threadOperation.current) return Promise.reject(new Error('Wait for the last change to be saved.'));
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    threadOperation.current = { threadId, settled, resolve, reject };
+    live.current.send(message);
+    return promise;
+  }
+  /** Opens a thread over the page, or closes it when it is open. */
+  const toggleThread = (threadId: string) => {
+    cancelDraft();
+    setOpenThread(current => current === threadId ? null : threadId);
+  };
 
   const sharer = share.sharer || 'Someone';
   const aspect = page ?? frame ?? { width: 16, height: 10 };
   const fit = stage ? Math.min(stage.width, (stage.height * aspect.width) / aspect.height) : null;
   const title = page?.title || share.page.title || share.page.site;
+  const frameHeight = ((fit ?? 0) * aspect.height) / aspect.width;
   const chosen = draft?.kind === 'region' ? draft.region : draft && hit ? hit.box : draft ? { ...draft.at, width: 0, height: 0 } : null;
-  const popover = chosen ? placeDraft(chosen, fit ?? 0, ((fit ?? 0) * aspect.height) / aspect.width) : null;
+  const popover = chosen ? placeDraft(chosen, fit ?? 0, frameHeight) : null;
   const draftLabel = draft?.kind === 'region' ? 'an area of the page' : hit ? shareTargetLabel(hit) : 'this spot';
   const shownWatchers = watchers.slice(0, WATCHER_AVATARS);
+  const numbered = numberThreads(threads);
+  // Pins: this page's open threads that point at something, where the tab's viewport showed it.
+  const pageKey = page ? browserCommentPageKey(page.url) : null;
+  const pinned = numbered.filter(({ thread: { root } }) => root.anchor !== null && root.resolved === null && browserCommentPageKey(root.page.url) === pageKey);
+  const shown = numbered.find(({ thread }) => thread.root.id === openThread) ?? null;
+  const shownPinned = shown !== null && pinned.includes(shown);
   return <main className="flex h-dvh flex-col bg-background">
     <header className="flex items-center gap-2.5 border-b border-border bg-surface-1 px-4 py-2.5">
       <img src="/favicon.png" alt="" width={20} height={20} className="shrink-0 rounded-md" />
@@ -355,6 +399,12 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
               {/* Viewers' named pointers, yours included, and the agent's cursor are drawn on the tab and arrive in its
                   frames. The sharer's own pointer is drawn here: on the tab it would sit under their cursor. */}
               {sharerAt && online ? <SharerPointer at={sharerAt} name={sharer} /> : null}
+              {share.comment ? pinned.map(({ thread: { root }, n }) => root.anchor ? <CommentPin key={root.id} n={n} box={root.anchor.box} resolved={false} highlighted={root.id === openThread} onClick={() => toggleThread(root.id)} /> : null) : null}
+              {shown ? <ThreadPopover
+                key={shown.thread.root.id} thread={shown.thread} n={shown.n} as={`${self.name}${self.guest ? ' (guest)' : ''}`} canResolve={!self.guest}
+                actions={threadActions} now={Date.now()} onClose={() => setOpenThread(null)}
+                style={placeThread(shownPinned ? shown.thread.root.anchor?.box ?? null : null, fit ?? 0, frameHeight)}
+              /> : null}
               {draft && popover ? <form
                 aria-label="New comment"
                 onSubmit={event => { event.preventDefault(); submitDraft(); }}
@@ -389,7 +439,7 @@ export function ShareViewer({ shareId, secret, preview, joined, name, signed, on
         </p>
       </div>
       {share.comment ? <aside className="flex max-h-[38dvh] flex-col overflow-y-auto border-t border-border bg-surface-1 p-4 lg:max-h-none lg:w-80 lg:border-l lg:border-t-0">
-        <ShareComments comments={comments} />
+        <ShareComments threads={numbered} open={openThread} onOpen={toggleThread} />
       </aside> : null}
     </div>
   </main>;

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { RuntimeBrowserNameSchema } from './browser.js';
+import { RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema } from './browser-comments.js';
 
 /**
  * Share links (docs/APERTURE-DESIGN.md §8, B1): one live tab on your Chrome, watched by people through
@@ -108,27 +109,6 @@ export const RuntimeBrowserShareTargetSchema = z.strictObject({
 });
 export type RuntimeBrowserShareTarget = z.infer<typeof RuntimeBrowserShareTargetSchema>;
 
-/** A comment on a page, kept by its workspace (`gitspace.page-comments`). B1 makes them from shares; B2 adds the in-page
- * comment tool, threads and resolving. `crop` is the drive path of a JPEG of the pointed area. */
-export const RuntimeBrowserPageCommentSchema = z.strictObject({
-  version: z.literal(1), commentId: z.string().uuid(), shareId: z.string().uuid().nullable(),
-  by: z.strictObject({ name: RuntimeBrowserShareNameSchema, guest: z.boolean() }),
-  text: z.string().trim().min(1).max(4000),
-  page: z.strictObject({ url: z.string().max(8192), title: z.string().max(500) }),
-  /** The element pointed at; null for a dragged area, or where nothing could be found. */
-  target: RuntimeBrowserShareTargetSchema.nullable(),
-  /** The area commented on: the target's box, or the dragged area. */
-  region: RuntimeBrowserShareBoxSchema,
-  viewport: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }),
-  scroll: z.strictObject({ x: z.number(), y: z.number() }),
-  crop: z.string().max(512).nullable(),
-  createdAt: z.iso.datetime(),
-});
-export type RuntimeBrowserPageComment = z.infer<typeof RuntimeBrowserPageCommentSchema>;
-/** A page comment as the Browser tab shows it, with a sealed `/files/` link to its crop. */
-export const RuntimeBrowserPageCommentViewSchema = z.strictObject({ comment: RuntimeBrowserPageCommentSchema, cropUrl: z.string().max(4096).nullable() });
-export type RuntimeBrowserPageCommentView = z.infer<typeof RuntimeBrowserPageCommentViewSchema>;
-
 /** Messages a viewer sends on the live socket (`GET /api/shares/<shareId>/live`, upgraded). `hello` comes first. */
 export const RuntimeBrowserShareViewerMessageSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('hello'), token: z.string().min(1).max(4096) }),
@@ -138,14 +118,20 @@ export const RuntimeBrowserShareViewerMessageSchema = z.discriminatedUnion('type
   z.strictObject({ type: z.literal('pointer'), at: RuntimeBrowserSharePointSchema.nullable() }),
   /** Comment mode, `comment` shares only: what is under this point? */
   z.strictObject({ type: z.literal('hit'), at: RuntimeBrowserSharePointSchema }),
-  /** A comment on the element at a point, or on a dragged area. */
-  z.strictObject({ type: z.literal('comment'), at: RuntimeBrowserSharePointSchema.optional(), region: RuntimeBrowserShareBoxSchema.optional(), text: z.string().trim().min(1).max(4000) }),
+  /** A comment on the element at a point, or on a dragged area: a new thread. */
+  z.strictObject({ type: z.literal('comment'), at: RuntimeBrowserSharePointSchema.optional(), region: RuntimeBrowserShareBoxSchema.optional(), text: RuntimeBrowserCommentTextSchema }),
+  /** A reply in one of this share's threads. */
+  z.strictObject({ type: z.literal('commentReply'), threadId: z.string().uuid(), text: RuntimeBrowserCommentTextSchema }),
+  /** Resolves (or with `reopen`, reopens) one of this share's threads; the account's owner only, never a guest. */
+  z.strictObject({ type: z.literal('commentResolve'), threadId: z.string().uuid(), reopen: z.boolean().optional() }),
 ]);
 export type RuntimeBrowserShareViewerMessage = z.infer<typeof RuntimeBrowserShareViewerMessageSchema>;
 
 /** Messages the live socket sends a viewer. */
 export const RuntimeBrowserShareServerMessageSchema = z.discriminatedUnion('type', [
-  z.strictObject({ type: z.literal('joined'), viewerId: z.string().uuid(), share: RuntimeBrowserSharePreviewSchema, viewers: z.array(RuntimeBrowserShareViewerSchema), comments: z.array(RuntimeBrowserPageCommentSchema) }),
+  /** `threads`: the share's comment threads, oldest first. A viewer whose own entry in `viewers` is not a guest may
+   * resolve them. */
+  z.strictObject({ type: z.literal('joined'), viewerId: z.string().uuid(), share: RuntimeBrowserSharePreviewSchema, viewers: z.array(RuntimeBrowserShareViewerSchema), threads: z.array(RuntimeBrowserCommentThreadSchema) }),
   /** The tab's page and viewport (CSS pixels), on joining and whenever they change. */
   z.strictObject({ type: z.literal('page'), url: z.string().max(8192), title: z.string().max(500), width: z.number().int().positive(), height: z.number().int().positive() }),
   /** One screencast frame of the tab (base64 JPEG, `width`×`height` image pixels). */
@@ -157,8 +143,9 @@ export const RuntimeBrowserShareServerMessageSchema = z.discriminatedUnion('type
   z.strictObject({ type: z.literal('sharer'), at: RuntimeBrowserSharePointSchema.nullable() }),
   /** The answer to the latest `hit`: what is under that point, or nothing. */
   z.strictObject({ type: z.literal('hit'), at: RuntimeBrowserSharePointSchema, target: RuntimeBrowserShareTargetSchema.nullable() }),
-  /** The share's comments, oldest first, whenever one is added. */
-  z.strictObject({ type: z.literal('comments'), comments: z.array(RuntimeBrowserPageCommentSchema) }),
+  /** One of the share's threads, whenever it is made or changes (a reply, resolved, reopened): it replaces the thread
+   * with its id, or is added last. */
+  z.strictObject({ type: z.literal('thread'), thread: RuntimeBrowserCommentThreadSchema }),
   /** The Chrome holding the tab went offline, or came back. */
   z.strictObject({ type: z.literal('presence'), online: z.boolean() }),
   z.strictObject({ type: z.literal('ended'), reason: RuntimeBrowserShareEndSchema }),

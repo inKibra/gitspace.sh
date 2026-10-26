@@ -54,14 +54,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   relay = { cloudWorkspaces: 0, pairings: [confirmed(work, 'Work Chrome')] };
   settings = {
-    alpha: { projectId: 'alpha', revision: 3, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false, takeover: false }] },
-    beta: { projectId: 'beta', revision: 5, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false, takeover: false }] },
+    alpha: { projectId: 'alpha', revision: 3, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false, takeover: false, powers: [], powersSupported: true }] },
+    beta: { projectId: 'beta', revision: 5, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: false, takeover: false, powers: [], powersSupported: true }] },
   };
   vi.mocked(accountBrowserStatus).mockImplementation(async () => relay);
   vi.mocked(projectBrowserSettings).mockImplementation(async projectId => settings[projectId]!);
   vi.mocked(updateProjectBrowserSettings).mockImplementation(async (projectId, revision, preferences) => {
     const current = settings[projectId]!;
-    settings[projectId] = { ...current, revision: revision + 1, defaultPairingId: preferences.defaultPairingId, browsers: current.browsers.map(browser => ({ ...browser, approved: preferences.approvals.some(item => item.pairingId === browser.pairingId) })) };
+    settings[projectId] = { ...current, revision: revision + 1, defaultPairingId: preferences.defaultPairingId, browsers: current.browsers.map(browser => ({ ...browser, approved: preferences.approvals.some(item => item.pairingId === browser.pairingId), powers: preferences.approvals.find(item => item.pairingId === browser.pairingId)?.powers ?? [] })) };
     return settings[projectId];
   });
 });
@@ -120,16 +120,39 @@ it('forgets a Chrome from its card only after you confirm', async () => {
   expect(container.textContent).toContain('No Chrome paired yet');
 });
 
-it('makes a Chrome approved in a project without a default that project’s default, and keeps an existing default', async () => {
+it('makes a Chrome approved in a project without a default that project’s default, and keeps an existing default and the other approvals’ powers', async () => {
   const other = '00000000-0000-4000-8000-000000000003';
-  settings.beta = { ...settings.beta!, defaultPairingId: other, browsers: [...settings.beta!.browsers, { pairingId: other, name: 'Home Chrome', note: 'personal', generation: 1, connected: false, approved: true, takeover: false }] };
+  settings.beta = { ...settings.beta!, defaultPairingId: other, browsers: [...settings.beta!.browsers, { pairingId: other, name: 'Home Chrome', note: 'personal', generation: 1, connected: false, approved: true, takeover: false, powers: ['debug'], powersSupported: false }] };
   await render();
   await act(() => button('Approve for projects').click());
   await act(async () => byLabel('Approved in Alpha').click());
-  expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('alpha', 3, { defaultPairingId: work, approvals: [{ pairingId: work }] });
+  expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('alpha', 3, { defaultPairingId: work, approvals: [{ pairingId: work, powers: [] }] });
   expect(document.body.textContent).toContain('Project default');
   await act(async () => byLabel('Approved in Beta').click());
-  expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('beta', 5, { defaultPairingId: other, approvals: [{ pairingId: other }, { pairingId: work }] });
+  expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('beta', 5, { defaultPairingId: other, approvals: [{ pairingId: other, powers: ['debug'] }, { pairingId: work, powers: [] }] });
+});
+
+it('turns one power on for a Chrome in one project, keeping its other powers and the other approvals, and keeps powers when it becomes the default', async () => {
+  const other = '00000000-0000-4000-8000-000000000003';
+  settings.alpha = { ...settings.alpha!, defaultPairingId: other, browsers: [{ ...settings.alpha!.browsers[0]!, approved: true, powers: ['record'] }, { pairingId: other, name: 'Home Chrome', note: '', generation: 1, connected: false, approved: true, takeover: false, powers: ['storage'], powersSupported: false }] };
+  await render();
+  await act(() => button('Manage Chrome').click());
+  expect(document.body.querySelector('[aria-label="Powers in Beta"]')).toBeNull();
+  expect(byLabel('Record video in Alpha').querySelector('[role="switch"]')?.getAttribute('aria-checked')).toBe('true');
+  await act(async () => byLabel('Cookies and storage for approved sites in Alpha').click());
+  expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('alpha', 3, { defaultPairingId: other, approvals: [{ pairingId: work, powers: ['record', 'storage'] }, { pairingId: other, powers: ['storage'] }] });
+  expect(byLabel('Cookies and storage for approved sites in Alpha').querySelector('[role="switch"]')?.getAttribute('aria-checked')).toBe('true');
+  await act(async () => button('Make default').click());
+  expect(updateProjectBrowserSettings).toHaveBeenLastCalledWith('alpha', 4, { defaultPairingId: work, approvals: [{ pairingId: work, powers: ['record', 'storage'] }, { pairingId: other, powers: ['storage'] }] });
+});
+
+it('says an online Chrome’s extension must be updated to 5.11 for its powers to work', async () => {
+  settings.alpha = { ...settings.alpha!, browsers: [{ ...settings.alpha!.browsers[0]!, approved: true, powersSupported: false }] };
+  settings.beta = { ...settings.beta!, browsers: [{ ...settings.beta!.browsers[0]!, powersSupported: false }] };
+  await render();
+  await act(() => button('Manage Chrome').click());
+  expect(document.body.textContent).toContain('Update the extension in this Chrome to 5.11 for powers to work');
+  expect(byLabel('Debug (profiles, traces, heap snapshots) in Alpha')).toBeTruthy();
 });
 
 it('names a Chrome and sets its one note for agents when you are done, saying when it was paired', async () => {
@@ -155,7 +178,7 @@ it('pairs a Chrome in one stepper: a short code with its countdown, the fingerpr
   });
   vi.mocked(confirmAccountBrowser).mockImplementation(async () => {
     relay = { cloudWorkspaces: 0, pairings: [confirmed(work, 'Work Chrome'), confirmed(fresh, 'Chrome 00000000')] };
-    for (const value of Object.values(settings)) value.browsers.push({ pairingId: fresh, name: 'Chrome 00000000', note: '', generation: 1, connected: true, approved: false, takeover: false });
+    for (const value of Object.values(settings)) value.browsers.push({ pairingId: fresh, name: 'Chrome 00000000', note: '', generation: 1, connected: true, approved: false, takeover: false, powers: [], powersSupported: true });
     return relay;
   });
   vi.mocked(updateAccountBrowser).mockImplementation(async () => relay);
@@ -181,7 +204,7 @@ it('pairs a Chrome in one stepper: a short code with its countdown, the fingerpr
   await act(async () => button('Finish').click());
   expect(updateAccountBrowser).toHaveBeenCalledWith(fresh, { name: 'Laptop Chrome' });
   expect(updateProjectBrowserSettings).toHaveBeenCalledTimes(1);
-  expect(updateProjectBrowserSettings).toHaveBeenCalledWith('beta', 5, { defaultPairingId: fresh, approvals: [{ pairingId: fresh }] });
+  expect(updateProjectBrowserSettings).toHaveBeenCalledWith('beta', 5, { defaultPairingId: fresh, approvals: [{ pairingId: fresh, powers: [] }] });
   expect(document.body.textContent).not.toContain('Use it in projects');
 });
 

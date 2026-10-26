@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BROWSER_SHARE_EXPIRIES_MINUTES, RuntimeBrowserShareExpirySchema, type RuntimeBrowserPageCommentView, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
+import { BROWSER_SHARE_EXPIRIES_MINUTES, RuntimeBrowserShareExpirySchema, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { Link01 } from '@untitledui/icons';
 
@@ -11,7 +11,7 @@ const END_LABEL: Record<NonNullable<RuntimeBrowserShare['endReason']>, string> =
 const AUDIT_LABEL: Record<RuntimeBrowserShare['audit'][number]['event'], string> = { created: 'shared the tab', joined: 'joined', left: 'left', commented: 'commented', connected: 'connected the tab to a workspace', ended: 'ended the share' };
 
 /** A share's link in a read-only field, with Copy. */
-function CopyLink({ link, label }: { link: string; label: string }) {
+export function CopyLink({ link, label }: { link: string; label: string }) {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
   const copy = async () => {
@@ -28,7 +28,7 @@ function CopyLink({ link, label }: { link: string; label: string }) {
 }
 
 /** `2 h 15 min left` until `expiresAt`, rounded up to the minute and ticking. */
-function TimeLeft({ expiresAt }: { expiresAt: string }) {
+export function TimeLeft({ expiresAt }: { expiresAt: string }) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
@@ -100,25 +100,5 @@ export function BrowserShares({ shares, error, pending, onStop }: { shares: read
             </details> : null}
           </li>;
         })}</ul>}
-  </section>;
-}
-
-/** Comments people made on pages of this workspace's shares, newest first: where they pointed, who, what, on which
- * page. `comments` is null until first read. */
-export function BrowserPageComments({ comments, error }: { comments: readonly RuntimeBrowserPageCommentView[] | null; error: string | null }) {
-  return <section aria-label="Page comments" className="flex flex-col gap-2">
-    <h3 className="text-body font-medium">Page comments</h3>
-    {error ? <p role="alert" className="text-caption text-destructive">{error}{comments ? ' Showing the last comments read.' : ''}</p> : null}
-    {comments === null ? (error ? null : <p role="status" className="text-caption text-muted-foreground">Loading comments…</p>)
-      : comments.length === 0 ? <p className="text-caption text-muted-foreground">No comments yet. People on a share link with comments can comment on the page; agents read them with web_browser.</p>
-        : <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-1 text-caption">{comments.map(({ comment, cropUrl }) => <li key={comment.commentId} aria-label={`Comment by ${comment.by.name}`} className="flex min-w-0 gap-3 p-2.5">
-          {cropUrl ? <img className="aspect-[16/10] w-24 shrink-0 rounded-md border border-border bg-surface-2 object-contain" src={cropUrl} alt={`Where ${comment.by.name} commented`} /> : null}
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <p className="flex flex-wrap items-center gap-2"><span className="font-medium">{comment.by.name}</span>{comment.by.guest ? <Badge size="compact" color="gray">guest</Badge> : null}<time className="tabular-nums text-muted-foreground" dateTime={comment.createdAt}>{new Date(comment.createdAt).toLocaleString()}</time></p>
-            <p className="whitespace-pre-wrap break-words text-body">{comment.text}</p>
-            {comment.target ? <p className="truncate text-muted-foreground">On {comment.target.role}{comment.target.name ? ` “${comment.target.name}”` : ''}</p> : null}
-            <a className="truncate text-muted-foreground underline" href={comment.page.url} target="_blank" rel="noreferrer" title={comment.page.url}>{comment.page.title || comment.page.url}</a>
-          </div>
-        </li>)}</ul>}
   </section>;
 }

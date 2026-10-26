@@ -4,7 +4,8 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, credentialProtocolBase64, signDeviceInvite, signRpcRequest } from '@gitspace/protocol';
-import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareSchema, RuntimeBrowserShareServerMessageSchema, browserBase64, parseBrowserShareLink, signRuntimeAccountBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeBrowserAuthorityCertificate, type RuntimeAccountBrowserAuthorizationBody, type RuntimeAccountBrowserPlacement, type RuntimeBrowserShareServerMessage } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserShareSchema, RuntimeBrowserShareServerMessageSchema, browserBase64, parseBrowserShareLink, signRuntimeAccountBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeBrowserAuthorityCertificate, type RuntimeAccountBrowserAuthorizationBody, type RuntimeAccountBrowserPlacement, type RuntimeBrowserShareServerMessage } from '@gitspace/protocol-runtime';
+import { workspaceCommentThreads } from '../src/browser-comments.js';
 import { BROWSER_UPLOAD_HEADER, browserSignedText, type BrowserSignedLabel } from '../src/browser-upload.js';
 import type { UserRelayDO } from '../src/index.js';
 import { workspaceDrive } from '../src/workspace-drive.js';
@@ -109,9 +110,10 @@ async function manage(relay: UserRelayDO, root: Identity, browser: Chrome, proje
   return JSON.parse(reply?.type === 'text' ? reply.text : 'null');
 }
 
-/** A request the Chrome's extension signs with its pairing key (`label` share unless said otherwise). */
-async function signed(browser: Pick<Chrome, 'identity' | 'pairingId' | 'generation'>, body: object, options: { label?: BrowserSignedLabel; header?: null } = {}) {
-  const path = '/api/browser-relay/shares', bytes = encoder.encode(JSON.stringify(body));
+/** A request the Chrome's extension signs with its pairing key (`label` share unless said otherwise, to `path`, the
+ * share route unless said otherwise). */
+async function signed(browser: Pick<Chrome, 'identity' | 'pairingId' | 'generation'>, body: object, options: { label?: BrowserSignedLabel; header?: null; path?: string } = {}) {
+  const path = options.path ?? '/api/browser-relay/shares', bytes = encoder.encode(JSON.stringify(body));
   const issuedAt = Date.now(), nonce = hex(crypto.getRandomValues(new Uint8Array(32))), bodySha256 = hex(await crypto.subtle.digest('SHA-256', bytes));
   const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(browserSignedText(options.label ?? 'share', { pairingId: browser.pairingId, generation: browser.generation, method: 'POST', pathname: path, bodySha256, issuedAt, nonce })))));
   const header = btoa(JSON.stringify({ pairingId: browser.pairingId, generation: browser.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -179,7 +181,7 @@ test('a tab shared from your Chrome: its link greets only with its secret, viewe
 
       // Mia watches: the Chrome streams the tab at the largest viewer's size, and its frames reach her.
       const mia = await watch(shareId, secret, 'Mia');
-      expect(mia.received[0]).toMatchObject({ type: 'joined', viewerId: mia.viewerId, share: { sharer: 'test', comment: false, ended: null }, viewers: [{ viewerId: mia.viewerId, name: 'Mia', guest: true }], comments: [] });
+      expect(mia.received[0]).toMatchObject({ type: 'joined', viewerId: mia.viewerId, share: { sharer: 'test', comment: false, ended: null }, viewers: [{ viewerId: mia.viewerId, name: 'Mia', guest: true }], threads: [] });
       expect(await browser.next('shareWatch')).toMatchObject({ shareId, targetId: 'your-tab', maxWidth: 1280, maxHeight: 1280 });
       expect(await mia.next('page')).toEqual({ type: 'page', ...page, width: 1280, height: 800 });
       mia.socket.send(JSON.stringify({ type: 'size', width: 800, height: 600 }));
@@ -229,7 +231,7 @@ test('a tab shared from your Chrome: its link greets only with its secret, viewe
   });
 });
 
-test('a comment share: the latest hit is answered, a comment is anchored by the Chrome, its crop lands in the workspace drive and the comment in the workspace and before everyone watching; the audit keeps who joined, commented and ended it', async () => {
+test('a comment share: the latest hit is answered, a comment is anchored by the Chrome as a thread, its crop lands in the workspace drive and the thread in the workspace; replies and resolving reach that share’s viewers and no other share’s; guests never resolve; the audit keeps who joined, commented and ended it', async () => {
   const { projectId, workspaceId, drive } = await workspace();
   const crop = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9, 7]);
   const target = { box: { x: 0.1, y: 0.2, width: 0.3, height: 0.1 }, role: 'button', name: 'Buy', text: 'Buy now', selectors: ['#buy'] };
@@ -265,14 +267,51 @@ test('a comment share: the latest hit is answered, a comment is anchored by the 
 
       mia.socket.send(JSON.stringify({ type: 'comment', at: { x: 0.2, y: 0.25 }, text: 'This button is too small' }));
       expect(await browser.next('shareAnchor')).toMatchObject({ shareId, at: { x: 0.2, y: 0.25 } });
-      const { comments } = await mia.next('comments');
-      expect(comments).toEqual([{ version: 1, commentId: expect.any(String), shareId, by: { name: 'Mia', guest: true }, text: 'This button is too small', page, target, region: target.box, viewport: { width: 1280, height: 800 }, scroll: { x: 0, y: 120 }, crop: `browser/comments/${comments[0]?.commentId}.jpg`, createdAt: expect.any(String) }]);
-      expect(await drive.read(`browser/comments/${comments[0]?.commentId}.jpg`)).toEqual(crop);
-      const kept = await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`), async (_authority, state) => [...(await state.storage.list({ prefix: 'runtime.page-comment:' })).values()]);
-      expect(kept.map(row => RuntimeBrowserPageCommentSchema.parse(row))).toEqual(comments);
-      // Someone joining later sees the comments made so far.
+      const { thread } = await mia.next('thread');
+      const threadId = thread.root.id;
+      expect(thread).toEqual({ replies: [], root: {
+        id: threadId, threadId, parentId: null, source: { kind: 'share', shareId }, page, by: { kind: 'person', name: 'Mia', guest: true }, text: 'This button is too small', createdAt: expect.any(String), resolved: null,
+        anchor: { role: 'button', name: 'Buy', selector: '#buy', box: { x: 0.1, y: 0.2, w: 0.3, h: 0.1 }, cropFile: expect.stringMatching(/^browser\/comments\/[0-9a-f-]{36}\.jpg$/u), scroll: { x: 0, y: 120 }, viewport: { w: 1280, h: 800 } },
+      } });
+      expect(await drive.read(thread.root.anchor?.cropFile ?? '')).toEqual(crop);
+      const kept = () => runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`), async (_authority, state) => workspaceCommentThreads(state.storage, { status: 'all' }));
+      expect(await kept()).toEqual([thread]);
+      // Someone joining later sees the threads so far; a viewer of another share of the workspace sees none of them.
       const ana = await watch(shareId, secret, 'Ana');
-      expect(ana.received[0]).toMatchObject({ type: 'joined', comments });
+      expect(ana.received[0]).toMatchObject({ type: 'joined', threads: [thread] });
+      const other = await share(browser, { targetId: 'other-tab', comment: true, expiresInMinutes: 15 });
+      const ben = await watch(other.shareId, other.secret, 'Ben');
+      expect(ben.received[0]).toMatchObject({ type: 'joined', threads: [] });
+
+      // A guest replies; a guest's resolve is refused.
+      ana.socket.send(JSON.stringify({ type: 'commentReply', threadId, text: 'And its label is cut off' }));
+      const replied = RuntimeBrowserCommentThreadSchema.parse((await mia.next('thread')).thread);
+      expect(replied.replies).toEqual([{ id: expect.any(String), threadId, parentId: threadId, source: { kind: 'share', shareId }, page, anchor: null, by: { kind: 'person', name: 'Ana', guest: true }, text: 'And its label is cut off', createdAt: expect.any(String), resolved: null }]);
+      expect((await ana.next('thread')).thread).toEqual(replied);
+      ana.socket.send(JSON.stringify({ type: 'commentResolve', threadId }));
+      expect(await ana.next('error')).toEqual({ type: 'error', message: 'Only the account’s owner resolves comments' });
+      // You resolve it from your Chrome's comment tool: its viewers see it resolved by you.
+      const commentRoute = { label: 'comment' as const, path: '/api/browser-relay/comments' };
+      const resolved = await signed(browser, { op: 'resolve', groupId, threadId }, commentRoute);
+      expect(resolved).toMatchObject({ status: 200, value: { thread: { root: { id: threadId, resolved: { by: 'test', at: expect.any(String) } } } } });
+      for (const viewer of [mia, ana]) expect((await viewer.next('thread')).thread).toEqual(resolved.value?.thread);
+      expect(await kept()).toEqual([resolved.value?.thread]);
+      expect(ben.received.filter(message => message.type === 'thread')).toEqual([]);
+      // A thread of one share is not another share's to reply in.
+      ben.socket.send(JSON.stringify({ type: 'commentReply', threadId, text: 'Me too' }));
+      expect(await ben.next('error')).toEqual({ type: 'error', message: 'Your reply was not saved: This comment thread is not on this share' });
+      // Your own comment from your Chrome's comment tool: its crop lands in the drive; it is no share's, so no viewer
+      // sees it; the page's threads (whatever its fragment) list it with the share's.
+      const chromeComment = { op: 'comment', groupId, page: { url: `${page.url}#intro`, title: page.title }, anchor: { role: 'heading', name: 'Docs', selector: 'h1', box: { x: 0, y: 0, w: 0.5, h: 0.1 } }, crop: browserBase64(crop), text: 'Rename this page' };
+      const mine = RuntimeBrowserCommentThreadSchema.parse((await signed(browser, chromeComment, commentRoute)).value?.thread);
+      expect(mine.root).toMatchObject({ source: { kind: 'chrome', pairingId: browser.pairingId }, by: { kind: 'person', name: 'test', guest: false }, anchor: { role: 'heading', name: 'Docs', selector: 'h1', cropFile: expect.stringMatching(/^browser\/comments\/[0-9a-f-]{36}\.jpg$/u) } });
+      expect(await drive.read(mine.root.anchor?.cropFile ?? '')).toEqual(crop);
+      const listed = await signed(browser, { op: 'list', groupId, url: page.url }, commentRoute);
+      expect(listed).toMatchObject({ status: 200, value: { name: 'test' } });
+      expect(z.array(RuntimeBrowserCommentThreadSchema).parse(listed.value?.threads).map(item => item.root.id)).toEqual([mine.root.id, threadId]);
+      expect([mia, ana, ben].map(viewer => viewer.received.filter(message => message.type === 'thread').length)).toEqual([3, 2, 0]);
+      // A group that is not this Chrome's takes nothing.
+      expect(await signed(browser, { ...chromeComment, groupId: crypto.randomUUID() }, commentRoute)).toMatchObject({ status: 404, error: { code: 'COMMENT_GROUP_UNKNOWN' } });
 
       const revoked = await signed(browser, { op: 'revoke', shareId });
       expect(revoked).toMatchObject({ status: 200, value: { share: { shareId, endReason: 'revoked', viewers: [] } } });
@@ -284,10 +323,10 @@ test('a comment share: the latest hit is answered, a comment is anchored by the 
       expect(await browser.next('shareUnwatch')).toMatchObject({ shareId });
       const audit = RuntimeBrowserShareSchema.parse(revoked.value?.share).audit;
       expect(audit.map(({ event, by, guest }) => ({ event, by, guest }))).toEqual([
-        { event: 'ended', by: 'you', guest: false }, { event: 'joined', by: 'Ana', guest: true }, { event: 'commented', by: 'Mia', guest: true },
+        { event: 'ended', by: 'you', guest: false }, { event: 'commented', by: 'Ana', guest: true }, { event: 'joined', by: 'Ana', guest: true }, { event: 'commented', by: 'Mia', guest: true },
         { event: 'joined', by: 'Mia', guest: true }, { event: 'created', by: 'you', guest: false },
       ]);
-      expect(audit.find(row => row.event === 'commented')?.detail).toBe('This button is too small');
+      expect(audit.filter(row => row.event === 'commented').map(row => row.detail)).toEqual(['And its label is cut off', 'This button is too small']);
       expect(await route(shareId, 'join', { secret, name: 'Late' })).toMatchObject({ status: 410, error: { code: 'SHARE_ENDED' } });
     } finally { firstHit.resolve(); browser.socket.close(); }
   });

@@ -23,27 +23,29 @@ const SIGNATURE_WINDOW_MS = 60_000;
 const UPLOADS_PER_CHROME = 16;
 /** A finished download waits this long for its run to collect it. */
 const DOWNLOAD_KEEP_MS = 60 * 60_000;
-const JSON_BODY_BYTES = 16 * 1024;
 const NONCES = 'browser.relay.upload-nonces';
 const UPLOAD = 'browser.relay.upload:';
 export const BROWSER_DOWNLOAD = 'browser.relay.download:';
 
 /** What a pairing-key signature on a request to the account is for: `upload` begins an upload, `share` makes, ends or
- * lists share links (`browser-share.ts`). The label is part of the signed text, so one never passes as the other. */
-export type BrowserSignedLabel = 'upload' | 'share';
+ * lists share links (`browser-share.ts`), `comment` is the in-page comment tool's (`BROWSER_COMMENT_PATH`). The label
+ * is part of the signed text, so one never passes as the other. */
+export type BrowserSignedLabel = 'upload' | 'share' | 'comment';
 /** The text a pairing key signs for one request. */
 export function browserSignedText(label: BrowserSignedLabel, input: { pairingId: string; generation: number; method: string; pathname: string; bodySha256: string; issuedAt: number; nonce: string }): string {
   return `gitspace-browser-relay-v2:${label}:${input.pairingId}:${input.generation}:${input.method}:${input.pathname}:${input.bodySha256}:${input.issuedAt}:${input.nonce}`;
 }
-/** Error codes and wording per label: `UPLOAD_SIGNATURE_INVALID`, `SHARE_SIGNATURE_INVALID`… */
-const SIGNED: Record<BrowserSignedLabel, { code: string; noun: string; Noun: string }> = {
-  upload: { code: 'UPLOAD', noun: 'upload', Noun: 'Upload' },
-  share: { code: 'SHARE', noun: 'share request', Noun: 'Share request' },
+/** Error codes and wording per label (`UPLOAD_SIGNATURE_INVALID`, `SHARE_SIGNATURE_INVALID`…), and the largest JSON
+ * body each takes: a comment carries its crop. */
+const SIGNED: Record<BrowserSignedLabel, { code: string; noun: string; Noun: string; bytes: number }> = {
+  upload: { code: 'UPLOAD', noun: 'upload', Noun: 'Upload', bytes: 16 * 1024 },
+  share: { code: 'SHARE', noun: 'share request', Noun: 'Share request', bytes: 16 * 1024 },
+  comment: { code: 'COMMENT', noun: 'comment request', Noun: 'Comment request', bytes: 640 * 1024 },
 };
 const Signature = z.object({ pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), issuedAt: z.number().int(), nonce: z.string().regex(/^[a-f0-9]{64}$/u), signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/u).max(128) });
 const Begin = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('download'), groupId: z.string().uuid(), attemptId: z.string().min(1).max(256), name: z.string().min(1).max(512), mediaType: z.string().min(1).max(128) }),
-  z.strictObject({ kind: z.literal('capture'), groupId: z.string().uuid(), captureId: z.string().uuid(), file: z.enum(['video.webm', 'frames.bin', 'frames.json', 'thumbnail.jpg']), mediaType: z.string().min(1).max(128) }),
+  z.strictObject({ kind: z.literal('capture'), groupId: z.string().uuid(), captureId: z.string().uuid(), file: z.enum(['video.webm', 'frames.bin', 'frames.json', 'thumbnail.jpg', 'steps.json', 'layout.jsonl']), mediaType: z.string().min(1).max(128) }),
 ]);
 const Complete = z.strictObject({ parts: z.number().int().positive(), size: z.number().int().positive().max(DRIVE_FILE_MAX_BYTES) });
 const Upload = z.object({
@@ -114,13 +116,13 @@ export async function browserRequestSigner(storage: Pick<DurableObjectStorage, '
   return { ok: true, pairingId: claim.pairingId };
 }
 
-/** A signed request's JSON body as a route reads it: a POST of at most 16 KiB with its Content-Length, and the body's
- * SHA-256 the signature covers. */
+/** A signed request's JSON body as a route reads it: a POST of at most its label's bytes with its Content-Length, and
+ * the body's SHA-256 the signature covers. */
 export async function readBrowserSignedRequest(request: Request, label: BrowserSignedLabel): Promise<{ ok: true; request: BrowserSignedRequest; body: unknown } | BrowserRequestFailure> {
-  const { code, noun, Noun } = SIGNED[label];
+  const { code, noun, Noun, bytes: limit } = SIGNED[label];
   if (request.method !== 'POST') return fail(405, 'METHOD_NOT_ALLOWED', `Send a ${noun} with POST`);
   const declared = Number(request.headers.get('content-length'));
-  if (!request.headers.has('content-length') || !Number.isSafeInteger(declared) || declared > JSON_BODY_BYTES) return fail(413, `${code}_INVALID`, `Send a ${noun} with at most ${JSON_BODY_BYTES} bytes of JSON and its Content-Length`);
+  if (!request.headers.has('content-length') || !Number.isSafeInteger(declared) || declared > limit) return fail(413, `${code}_INVALID`, `Send a ${noun} with at most ${limit} bytes of JSON and its Content-Length`);
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength !== declared) return fail(400, `${code}_INVALID`, 'The request does not match its Content-Length');
   const bodySha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(byte => byte.toString(16).padStart(2, '0')).join('');

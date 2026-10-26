@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { RuntimeBrowserPageComment, RuntimeBrowserSharePreview, RuntimeBrowserShareServerMessage } from '@gitspace/protocol-runtime';
+import type { RuntimeBrowserComment, RuntimeBrowserCommentThread, RuntimeBrowserSharePreview, RuntimeBrowserShareServerMessage } from '@gitspace/protocol-runtime';
 import { currentDevice } from '../device-session.js';
 import type { BrowserDevice } from '../device.js';
 import { SharePage } from './SharePage.js';
@@ -42,9 +42,22 @@ const answer = (value: unknown, status = 200) => new Response(JSON.stringify(sta
 function preview(overrides: Partial<RuntimeBrowserSharePreview> = {}): RuntimeBrowserSharePreview {
   return { sharer: 'Ada', page: { title: 'Checkout', site: 'shop.example', icon: null }, comment: true, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(), ended: null, browser: null, online: true, ...overrides };
 }
-function joinedMessage(share = preview()): RuntimeBrowserShareServerMessage {
-  return { type: 'joined', viewerId: grace, share, viewers: [{ viewerId: grace, name: 'Grace', guest: true, joinedAt }], comments: [] };
+function joinedMessage(share = preview(), threads: RuntimeBrowserCommentThread[] = []): RuntimeBrowserShareServerMessage {
+  return { type: 'joined', viewerId: grace, share, viewers: [{ viewerId: grace, name: 'Grace', guest: true, joinedAt }], threads };
 }
+const checkout = 'https://shop.example/checkout';
+/** A comment on the share: a thread's root when `threadId` is its own `id`, else a reply. */
+function comment(id: string, threadId: string, text: string, by: RuntimeBrowserComment['by'], fields: Partial<RuntimeBrowserComment> = {}): RuntimeBrowserComment {
+  const root = id === threadId;
+  return {
+    id, threadId, parentId: root ? null : threadId, source: { kind: 'share', shareId }, page: { url: checkout, title: 'Checkout' },
+    anchor: root ? { role: 'button', name: 'Pay now', selector: '#pay', box: { x: 0.4, y: 0.45, w: 0.2, h: 0.1 } } : null,
+    by, text, createdAt: '2026-10-24T09:58:00.000Z', resolved: null, ...fields,
+  };
+}
+const threadIds = ['66666666-6666-4666-8666-666666666661', '66666666-6666-4666-8666-666666666662', '66666666-6666-4666-8666-666666666663'] as const;
+const byLinus: RuntimeBrowserComment['by'] = { kind: 'person', name: 'Linus', guest: true };
+const byGrace: RuntimeBrowserComment['by'] = { kind: 'person', name: 'Grace', guest: true };
 const latest = () => FakeSocket.all.at(-1)!;
 const byLabel = (label: string) => document.body.querySelector<HTMLElement>(`[aria-label="${label}"]`);
 function button(text: string, scope: HTMLElement = document.body): HTMLButtonElement {
@@ -69,11 +82,11 @@ async function join(name = 'Grace') {
   await settle();
 }
 /** Joins, opens the socket and answers hello. */
-async function watch(share = preview()) {
+async function watch(share = preview(), threads: RuntimeBrowserCommentThread[] = []) {
   await open(share);
   await join();
   await latest().open();
-  await latest().receive(joinedMessage(share));
+  await latest().receive(joinedMessage(share, threads));
 }
 async function pointer(type: 'pointermove' | 'pointerdown' | 'pointerup', x: number, y: number) {
   await act(async () => { byLabel('Shared tab')!.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerType: 'mouse', pointerId: 1 })); });
@@ -252,12 +265,7 @@ it('in Comment mode outlines what the pointer hovers and comments on what is cli
   await act(async () => button('Comment', box!).click());
   expect(sentOf('comment')).toEqual([{ type: 'comment', at: { x: 0.5, y: 0.5 }, text: 'This should say the total' }]);
 
-  const comment: RuntimeBrowserPageComment = {
-    version: 1, commentId: '55555555-5555-4555-8555-555555555555', shareId, by: { name: 'Grace', guest: true }, text: 'This should say the total',
-    page: { url: 'https://shop.example/checkout', title: 'Checkout' }, target: { box: { x: 0.4, y: 0.45, width: 0.2, height: 0.1 }, role: 'button', name: 'Pay now', text: 'Pay now', selectors: ['#pay'] },
-    region: { x: 0.4, y: 0.45, width: 0.2, height: 0.1 }, viewport: { width: 1280, height: 800 }, scroll: { x: 0, y: 0 }, crop: null, createdAt: '2026-10-24T10:01:00.000Z',
-  };
-  await latest().receive({ type: 'comments', comments: [comment] });
+  await latest().receive({ type: 'thread', thread: { root: comment(threadIds[0], threadIds[0], 'This should say the total', byGrace, { createdAt: '2026-10-24T10:01:00.000Z' }), replies: [] } });
   expect(byLabel('New comment')).toBeNull();
   const panel = byLabel('Comments')!.textContent;
   expect(panel).toContain('Grace');
@@ -301,4 +309,77 @@ it('joins again with a fresh token when the socket drops', async () => {
   expect(latest().sent[0]).toEqual({ type: 'hello', token: 'token-2' });
   await latest().receive(joinedMessage());
   expect(document.body.textContent).not.toContain('Reconnecting');
+});
+
+const onCheckout: RuntimeBrowserShareServerMessage = { type: 'page', url: `${checkout}#summary`, title: 'Checkout', width: 1280, height: 800 };
+const pinsOn = () => [...byLabel('Shared tab')!.querySelectorAll<HTMLElement>('button[aria-label^="Comment "]')];
+
+it('pins this page’s open threads where they point; a pin or the list opens a thread, with no Resolve for a guest', async () => {
+  const open = { root: comment(threadIds[0], threadIds[0], 'This should say the total', byLinus), replies: [comment('77777777-7777-4777-8777-777777777771', threadIds[0], 'It hides the tax', { kind: 'agent', conversation: 'main' }, { createdAt: '2026-10-24T09:59:00.000Z' })] };
+  const resolved = { root: comment(threadIds[1], threadIds[1], 'Typo in the heading', byLinus, { createdAt: '2026-10-24T09:58:30.000Z', resolved: { by: 'Ada', at: '2026-10-24T09:59:00.000Z' } }), replies: [] };
+  const elsewhere = { root: comment(threadIds[2], threadIds[2], 'The cart total is stale', byLinus, { createdAt: '2026-10-24T09:59:30.000Z', page: { url: 'https://shop.example/cart', title: 'Cart' } }), replies: [] };
+  await watch(preview(), [elsewhere, resolved, open]);
+  await latest().receive(onCheckout);
+  // Only the open thread on this page (its URL without the fragment) is pinned, at its box's top-right corner.
+  const pins = pinsOn();
+  expect(pins.map(pin => pin.getAttribute('aria-label'))).toEqual(['Comment 1']);
+  expect(parseFloat(pins[0]!.style.left)).toBeCloseTo(60);
+  expect(parseFloat(pins[0]!.style.top)).toBeCloseTo(45);
+
+  await act(async () => pins[0]!.click());
+  const thread = byLabel('Comment thread 1')!;
+  expect(thread.textContent).toContain('On button “Pay now”');
+  expect(thread.textContent).toContain('This should say the total');
+  expect(thread.textContent).toContain('It hides the tax');
+  expect(thread.textContent).toContain('main');
+  expect(thread.querySelector('textarea')?.placeholder).toBe('Reply as Grace (guest)…');
+  expect([...thread.querySelectorAll('button')].map(item => item.textContent)).not.toContain('Resolve');
+
+  // The list opens a thread too, one on another page included.
+  await act(async () => byLabel('Comment 3 by Linus')!.click());
+  expect(byLabel('Comment thread 1')).toBeNull();
+  expect(byLabel('Comment thread 3')?.textContent).toContain('The cart total is stale');
+});
+
+it('replies on the socket and resolves as the account’s owner, keeping a refused reply in its field', async () => {
+  answers.join = () => answer({ token: 'token-1', viewerId: grace, name: 'Ada', guest: false, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() });
+  const thread = { root: comment(threadIds[0], threadIds[0], 'This should say the total', byLinus), replies: [] };
+  await watch(preview(), [thread]);
+  await latest().receive(onCheckout);
+  await act(async () => pinsOn()[0]!.click());
+  const popover = byLabel('Comment thread 1')!;
+  const field = () => popover.querySelector('textarea')!;
+  expect(field().placeholder).toBe('Reply as Ada…');
+  await typeInto(field(), 'Fixed in the next build');
+  await act(async () => button('Reply', popover).click());
+  expect(sentOf('commentReply')).toEqual([{ type: 'commentReply', threadId: threadIds[0], text: 'Fixed in the next build' }]);
+  await latest().receive({ type: 'error', message: 'The share refused the reply' });
+  expect(popover.textContent).toContain('The share refused the reply');
+  expect(field().value).toBe('Fixed in the next build');
+
+  await act(async () => button('Reply', popover).click());
+  const reply = comment('77777777-7777-4777-8777-777777777772', threadIds[0], 'Fixed in the next build', { kind: 'person', name: 'Ada', guest: false });
+  await latest().receive({ type: 'thread', thread: { ...thread, replies: [reply] } });
+  expect(field().value).toBe('');
+  expect(popover.textContent).toContain('Fixed in the next build');
+
+  await act(async () => button('Resolve', popover).click());
+  expect(sentOf('commentResolve')).toEqual([{ type: 'commentResolve', threadId: threadIds[0] }]);
+  await latest().receive({ type: 'thread', thread: { root: { ...thread.root, resolved: { by: 'Ada', at: '2026-10-24T10:00:00.000Z' } }, replies: [reply] } });
+  expect(pinsOn()).toEqual([]);
+  expect(button('Reopen', popover)).toBeTruthy();
+});
+
+it('shows threads and replies others add while watching', async () => {
+  await watch();
+  await latest().receive(onCheckout);
+  expect(pinsOn()).toEqual([]);
+  const thread = { root: comment(threadIds[0], threadIds[0], 'Can this be bigger?', byLinus), replies: [] };
+  await latest().receive({ type: 'thread', thread });
+  expect(pinsOn().map(pin => pin.textContent)).toEqual(['1']);
+  expect(byLabel('Comments')!.textContent).toContain('Can this be bigger?');
+  await act(async () => pinsOn()[0]!.click());
+  await latest().receive({ type: 'thread', thread: { ...thread, replies: [comment('77777777-7777-4777-8777-777777777773', threadIds[0], 'Done: 18px now', { kind: 'agent', conversation: 'main' })] } });
+  expect(byLabel('Comment thread 1')!.textContent).toContain('Done: 18px now');
+  expect(byLabel('Comments')!.textContent).toContain('1 reply');
 });

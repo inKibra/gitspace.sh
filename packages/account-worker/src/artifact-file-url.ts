@@ -21,6 +21,8 @@ const FileGrantSchema = z.object({
   expiresAt: z.number().int(),
 });
 export type ArtifactFileGrant = Omit<z.infer<typeof FileGrantSchema>, 'version' | 'expiresAt'>;
+/** A grant as another route's token holds it. */
+export const ArtifactFileGrantSchema = FileGrantSchema.omit({ version: true, expiresAt: true });
 
 const FILE_URL: SealedTokenKind = { scope: 'file-url:v1', context: 'gitspace-artifact-file-url-v1' };
 
@@ -43,22 +45,35 @@ function requestedRange(header: string | null, size: number): TenantRange | null
   return { offset: start, length: end - start + 1 };
 }
 
-/** `GET /files/<token>`: the granted file's bytes with byte ranges, for media elements and downloads. The response
- * can never act as a page of this origin: it is sandboxed, never sniffed, and anything but inert media downloads. */
-export async function serveArtifactFile(request: Request, env: Env): Promise<Response> {
-  const headers = new Headers({
+/** The headers every served file carries: it can never act as a page of this origin. */
+function fileHeaders(): Headers {
+  return new Headers({
     'content-security-policy': "sandbox; default-src 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex, nofollow, noarchive', 'accept-ranges': 'bytes',
   });
-  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { ...Object.fromEntries(headers), allow: 'GET, HEAD' } });
+}
+
+/** `GET /files/<token>`: the granted file's bytes with byte ranges, for media elements and downloads. The response
+ * can never act as a page of this origin: it is sandboxed, never sniffed, and anything but inert media downloads. */
+export async function serveArtifactFile(request: Request, env: Env): Promise<Response> {
+  const headers = fileHeaders();
   const url = new URL(request.url);
   const match = /^\/files\/([A-Za-z0-9_-]{40,2048})$/u.exec(url.pathname);
   if (!match) return new Response('Not found', { status: 404, headers });
   let grant: z.infer<typeof FileGrantSchema>;
   try { grant = FileGrantSchema.parse(await openToken(env, FILE_URL, match[1]!)); }
   catch { return new Response('Not found', { status: 404, headers }); }
-  const remaining = grant.expiresAt - Date.now();
-  if (remaining <= 0) return new Response('This file link expired; open the file again', { status: 404, headers });
+  if (grant.expiresAt <= Date.now()) return new Response('This file link expired; open the file again', { status: 404, headers });
+  return serveArtifactGrant(request, env, grant, grant.expiresAt);
+}
+
+/** A granted file version's bytes with byte ranges (GET or HEAD), cacheable until `expiresAt` (epoch ms), for a route
+ * that checked its own token. */
+export async function serveArtifactGrant(request: Request, env: Env, grant: ArtifactFileGrant, expiresAt: number): Promise<Response> {
+  const headers = fileHeaders();
+  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { ...Object.fromEntries(headers), allow: 'GET, HEAD' } });
+  const url = new URL(request.url);
+  const remaining = Math.max(0, expiresAt - Date.now());
   const etag = `"${grant.hash}"`;
   const mediaType = grant.mediaType && /^[\w!#$&^.+-]+\/[\w!#$&^.+-]+(?:;[^\r\n]*)?$/u.test(grant.mediaType) ? grant.mediaType : 'application/octet-stream';
   const filename = encodeURIComponent(grant.name).replace(/['()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);

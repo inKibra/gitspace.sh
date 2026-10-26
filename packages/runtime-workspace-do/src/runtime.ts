@@ -81,9 +81,10 @@ export type WorkspaceRuntime = {
   /** Project base workspace: a workspace's report of a turn the project agent started. Quiet, a line the agent reads on
    * its next turn; wake, an event that starts one (after the current one when it is busy). */
   workspaceReport(report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void>;
-  /** You took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2): an event for the main
-   * conversation, which starts a turn when it is idle (after the current one when it is busy). */
-  browserEvent(event: { kind: 'browser-taken' | 'browser-handback'; requestId: string; sender: { id: string; name: string }; text: string; payload: JsonValue }): Promise<void>;
+  /** You took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2), or asked for a capture's
+   * steps to be replayed (§11); a person commented on a page or replied in a comment thread (§9): an event for the
+   * main conversation, which starts a turn when it is idle (after the current one when it is busy). */
+  browserEvent(event: { kind: 'browser-taken' | 'browser-handback' | 'capture-replay' | 'page-comment'; requestId: string; sender: { id: string; name: string }; text: string; payload: JsonValue }): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
    * or an environment run dispatched to the cache machine its arguments name. */

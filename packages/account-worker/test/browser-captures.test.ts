@@ -224,6 +224,8 @@ test('you capture a cloud tab: its screencast frames stream into the drive, and 
       if (method === 'Target.getTargets') return { targetInfos: [page] };
       if (method === 'Target.attachToTarget') return { sessionId: 'capture-session' };
       if (method === 'Target.getTargetInfo') return { targetInfo: page };
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
       return {};
     },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -243,7 +245,7 @@ test('you capture a cloud tab: its screencast frames stream into the drive, and 
   const images = [jpeg(1280, 720, 1), jpeg(1280, 720, 2), jpeg(1024, 768, 3)];
   const saved = await record(older, '2026-10-24T10:00:00.000Z', images);
   expect(saved).toMatchObject({ captureId: older, name: 'Report · 2026-10-24 10:00 UTC', by: 'you', source: 'headless', browser: 'Cloud browser', target: { groupId, targetId: 'page' }, page: { url: 'https://example.com/report', title: 'Report' }, startedAt: '2026-10-24T10:00:00.000Z', endedAt: '2026-10-24T10:00:00.750Z', state: 'saved', tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: 3, width: 1280, height: 768 } } });
-  expect(sent.filter(command => command.sessionId === 'capture-session').map(({ method, params }) => method === 'Page.screencastFrameAck' ? `${method} ${String(params.sessionId)}` : method)).toEqual(['Page.startScreencast', 'Page.screencastFrameAck 1', 'Page.screencastFrameAck 2', 'Page.screencastFrameAck 3', 'Page.stopScreencast']);
+  expect(sent.filter(command => command.sessionId === 'capture-session' && /screencast/iu.test(command.method)).map(({ method, params }) => method === 'Page.screencastFrameAck' ? `${method} ${String(params.sessionId)}` : method)).toEqual(['Page.startScreencast', 'Page.screencastFrameAck 1', 'Page.screencastFrameAck 2', 'Page.screencastFrameAck 3', 'Page.stopScreencast']);
   expect(sent.find(command => command.method === 'Page.startScreencast')?.params).toEqual({ format: 'jpeg', quality: 70, maxWidth: 1280, maxHeight: 1280, everyNthFrame: 1 });
   const folder = `browser/captures/${older}/`;
   expect(await drive.read(`${folder}frames.bin`)).toEqual(joined(...images));
@@ -256,7 +258,7 @@ test('you capture a cloud tab: its screencast frames stream into the drive, and 
   vi.useRealTimers();
   const views = await captureViews(drive);
   expect(views.map(view => view.capture.captureId)).toEqual([newer, older]);
-  expect(Object.keys(views[1]?.files ?? {}).sort()).toEqual(['frames.bin', 'frames.json', 'thumbnail.jpg']);
+  expect(Object.keys(views[1]?.files ?? {}).sort()).toEqual(['frames.bin', 'frames.json', 'steps.json', 'thumbnail.jpg']);
   const link = z.string().parse(views[1]?.files['frames.json']);
   expect(link).toMatch(/^https:\/\/test\.gitspace\.sh\/files\/[^/]+$/u);
   expect(RuntimeBrowserFramesIndexSchema.parse(await (await exports.default.fetch(new Request(link))).json()).frames).toHaveLength(3);
@@ -265,4 +267,78 @@ test('you capture a cloud tab: its screencast frames stream into the drive, and 
   await captures.start(shim, drive, { captureId: lost, groupId, targetId: 'page' });
   expect(await new CloudCaptures().stop(lost, undefined, drive)).toMatchObject({ captureId: lost, state: 'failed', reason: 'The cloud browser closed while recording' });
   await captures.stop(lost);
+});
+
+test('a capture you make on your Chrome saves its steps, layout and comments as capture.json version 2, under the name you gave it while capturing', async () => {
+  const { projectId, workspaceId, drive } = await workspace();
+  await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
+    const root = await keys();
+    const browser = await chrome(relay, root, projectId, { ip: '192.0.2.32' });
+    try {
+      const { groupId } = await step(relay, root, browser, projectId, workspaceId);
+      const captureId = crypto.randomUUID(), folder = `browser/captures/${captureId}/`;
+      const steps = [{ atMs: 0, kind: 'goto', url: 'https://example.com/order' }, { atMs: 900, kind: 'fill', locator: "getByLabel('Name')", value: 'Ada', url: 'https://example.com/order' }, { atMs: 1500, kind: 'request', url: 'https://example.com/api/orders', method: 'POST', mutating: true }];
+      const layout = `${JSON.stringify({ atMs: 0, viewport: { w: 800, h: 600 }, scroll: { x: 0, y: 0 }, elements: [{ role: 'textbox', name: 'Name', selector: '#name', box: { x: 0.1, y: 0.1, w: 0.5, h: 0.05 } }] })}\n`;
+      browser.socket.send(JSON.stringify({ capture: { event: 'start', captureId, groupId, targetId: 'your-tab', track: 'video', sound: true, page: { url: 'https://example.com/order', title: 'Order' }, startedAt: new Date().toISOString() } }));
+      await expect.poll(async () => (await drive.read(`${folder}capture.json`)) !== null).toBe(true);
+      expect((await upload(browser, { kind: 'capture', groupId, captureId, file: 'video.webm', mediaType: 'video/webm' }, [encoder.encode('webm')])).status).toBe(200);
+      expect((await upload(browser, { kind: 'capture', groupId, captureId, file: 'layout.jsonl', mediaType: 'application/x-ndjson' }, [encoder.encode(layout)])).status).toBe(200);
+      expect((await upload(browser, { kind: 'capture', groupId, captureId, file: 'steps.json', mediaType: 'application/json' }, [encoder.encode(JSON.stringify(steps))])).status).toBe(200);
+      const tracks = { video: { path: 'video.webm', mediaType: 'video/webm', sound: true, durationMs: 2000 }, steps: { path: 'steps.json', count: 3 }, layout: { path: 'layout.jsonl', count: 1 }, comments: { count: 2 } };
+      browser.socket.send(JSON.stringify({ capture: { event: 'end', captureId, state: 'saved', reason: null, endedAt: new Date().toISOString(), tracks, name: 'Order a pizza' } }));
+      const stored = async () => JSON.parse(decoder.decode(await drive.read(`${folder}capture.json`) ?? new Uint8Array()));
+      await expect.poll(async () => (await stored()).state).toBe('saved');
+      expect(await stored()).toMatchObject({ version: 2, captureId, name: 'Order a pizza', source: 'relay', tracks });
+      expect(JSON.parse(decoder.decode(await drive.read(`${folder}steps.json`) ?? new Uint8Array()))).toEqual(steps);
+      const view = (await captureViews(drive)).find(entry => entry.capture.captureId === captureId);
+      expect(Object.keys(view?.files ?? {}).sort()).toEqual(['layout.jsonl', 'steps.json', 'video.webm']);
+    } finally { browser.socket.close(); }
+  });
+});
+
+test('a cloud capture records the steps taken in its tab, the requests that change data and the page’s layout, on the capture’s clock', async () => {
+  const { drive } = await workspace();
+  const sent: { method: string; params: Record<string, unknown>; sessionId?: string }[] = [];
+  const listeners = new Set<Parameters<BrowserChannel['subscribe']>[0]>();
+  const page = { targetId: 'page', type: 'page', url: 'https://example.com/order?token=abc', title: 'Order', attached: false };
+  const upstream: BrowserChannel = {
+    async send(method, params = {}, sessionId) {
+      sent.push({ method, params, ...(sessionId ? { sessionId } : {}) });
+      if (method === 'Target.getTargets') return { targetInfos: [page] };
+      if (method === 'Target.attachToTarget') return { sessionId: 'capture-session' };
+      if (method === 'Target.getTargetInfo') return { targetInfo: page };
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+      // The field you were still typing in when the capture stopped.
+      if (method === 'Runtime.evaluate' && params.returnByValue === true) return { result: { value: { kind: 'fill', locator: "getByLabel('Notes')", value: 'Ring twice', url: 'https://example.com/order' } } };
+      return {};
+    },
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    async close() {},
+  };
+  const event = (method: string, params: Record<string, unknown>) => { for (const listener of listeners) listener({ method, sessionId: 'capture-session', params }); };
+  const shim = await CdpBrowserShim.open(upstream), captures = new CloudCaptures(), captureId = crypto.randomUUID(), folder = `browser/captures/${captureId}/`;
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.parse('2026-10-25T10:00:00.000Z'));
+  await captures.start(shim, drive, { captureId, groupId: crypto.randomUUID(), targetId: 'page' });
+  // The recorder is in this document and every later one, in its own world.
+  expect(sent.filter(command => command.sessionId === 'capture-session').map(command => command.method).slice(0, 7)).toEqual(['Page.enable', 'Network.enable', 'Runtime.addBinding', 'Page.addScriptToEvaluateOnNewDocument', 'Page.getFrameTree', 'Page.createIsolatedWorld', 'Runtime.evaluate']);
+  vi.setSystemTime(Date.parse('2026-10-25T10:00:01.000Z'));
+  event('Page.screencastFrame', { data: browserBase64(jpeg(1280, 720, 1)), sessionId: 1, metadata: {} });
+  event('Runtime.bindingCalled', { name: '__gitspaceCapture', payload: `step ${JSON.stringify({ kind: 'click', locator: "getByRole('button', { name: 'Order' })", url: 'https://example.com/order' })}` });
+  event('Runtime.bindingCalled', { name: '__gitspaceCapture', payload: `layout ${JSON.stringify({ viewport: { w: 1280, h: 720 }, scroll: { x: 0, y: 0 }, elements: [{ role: 'button', name: 'Order', selector: '#order', box: { x: 0.4, y: 0.5, w: 0.1, h: 0.05 } }] })}` });
+  // A binding of the page's own is not the recorder's.
+  event('Runtime.bindingCalled', { name: 'pageBinding', payload: `step ${JSON.stringify({ kind: 'click', url: 'https://example.com/' })}` });
+  event('Network.requestWillBeSent', { type: 'Fetch', request: { method: 'POST', url: 'https://example.com/api/orders' } });
+  event('Network.requestWillBeSent', { type: 'Image', request: { method: 'GET', url: 'https://example.com/logo.png' } });
+  vi.setSystemTime(Date.parse('2026-10-25T10:00:02.000Z'));
+  const saved = await captures.stop(captureId);
+  expect(saved).toMatchObject({ version: 2, state: 'saved', tracks: { steps: { path: 'steps.json', count: 4 }, layout: { path: 'layout.jsonl', count: 1 } } });
+  expect(JSON.parse(decoder.decode(await drive.read(`${folder}steps.json`) ?? new Uint8Array()))).toEqual([
+    { atMs: 0, kind: 'goto', url: 'https://example.com/order?token=%C2%ABsecret%C2%BB' },
+    { atMs: 1000, kind: 'click', locator: "getByRole('button', { name: 'Order' })", url: 'https://example.com/order' },
+    { atMs: 1000, kind: 'request', url: 'https://example.com/api/orders', method: 'POST', mutating: true },
+    { atMs: 2000, kind: 'fill', locator: "getByLabel('Notes')", value: 'Ring twice', url: 'https://example.com/order' },
+  ]);
+  expect(decoder.decode(await drive.read(`${folder}layout.jsonl`) ?? new Uint8Array()).trim().split('\n').map(line => JSON.parse(line))).toEqual([{ atMs: 1000, viewport: { w: 1280, h: 720 }, scroll: { x: 0, y: 0 }, elements: [{ role: 'button', name: 'Order', selector: '#order', box: { x: 0.4, y: 0.5, w: 0.1, h: 0.05 } }] }]);
 });

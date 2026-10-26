@@ -1,6 +1,9 @@
 import { z } from 'zod';
-import { browserPairingCode, browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserPairingCodeSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, RuntimeBrowserCaptureSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPairing, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserPageComment, type RuntimeBrowserShare, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
-import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeBrowserNameSchema, RuntimeBrowserNoteSchema, RuntimeBrowserPlatformSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowserPlatform, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
+import { browserPairingCode, browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserPairingCodeSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, RuntimeBrowserCaptureSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPairing, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+// Comments (`browser-comments.ts`): your Chrome's in-page comment tool, and threads changed in a workspace.
+import { BROWSER_COMMENT_CROP_BYTES, RuntimeBrowserCommentChromeRequestSchema, type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentFilter, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite } from '@gitspace/protocol-runtime';
+import { COMMENT_CROPS, type CommentScope } from './browser-comments.js';
+import { BROWSER_EXTENSION_PROTOCOL, browserExtensionUpdateRequired, RuntimeBrowserCaptureNameSchema, RuntimeBrowserCaptureTracksSchema, RuntimeBrowserExtensionSchema, RuntimeBrowserGroupReportSchema, RuntimeBrowserNameSchema, RuntimeBrowserNoteSchema, RuntimeBrowserPlatformSchema, RuntimeProjectBrowserPreferencesSchema, RuntimeProjectBrowserSettingsSchema, RuntimeAccountBrowserGroupRowSchema, type RuntimeBrowserGroupReport, type RuntimeBrowserPlatform, type RuntimeBrowsersDocumentGroup, type RuntimeProjectBrowserPreferences } from '@gitspace/protocol-runtime';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { AccountBrowserRuntime, type AccountBrowserTransport } from './browser-runtime.js';
 import type { BrowserChannel } from './browser-cdp.js';
@@ -12,6 +15,10 @@ import { captureName, readCapture, writeCapture, type CaptureDrive } from './bro
 import { BROWSER_DOWNLOAD, BrowserDownloadSchema, BrowserUploads, browserRequestSigner, type BrowserRequestFailure, type BrowserSignedRequest, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
 import { BrowserShareEventSchema, BrowserShareFrameSchema, BrowserShares, closeOpenSocket, equalSecret, type BrowserShareAccount } from './browser-share.js';
 import { BrowserWatches } from './browser-watch.js';
+import { BrowserCaptureShares } from './browser-capture-share.js';
+import type { RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
+// Browser powers and Everything (`browser-powers.ts`): approval powers in grants, Everything per workspace and Chrome.
+import { BROWSER_EVERYTHING_MS, BROWSER_POWERS_UPDATE, BrowserEverythingRequestSchema, BrowserEverythingSchema, browserEverythingActive, type BrowserEverything, type BrowserEverythingNotice, type BrowserEverythingRequest, type BrowserPower } from '@gitspace/protocol-runtime';
 
 export function browserRelayArchive(endpoint: string): Uint8Array {
   return zipSync(Object.fromEntries(Object.entries(extensionFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
@@ -41,41 +48,61 @@ const ProjectSettings = z.object({ revision: z.number().int().nonnegative(), def
 type StoredPairing = z.infer<typeof Pairing>;
 const Proof = z.object({ pairing: z.literal('client'), pairingId: z.string().uuid(), clientNonce: z.string().regex(/^[a-f0-9]{64}$/), publicKey: z.string().max(128), proof: z.string().max(128), code: z.string().max(256).optional() });
 /** A capture you started on your Chrome (its popup or in-page Capture: `tabCapture` video, or frames), announced
- * before its files upload; `end` follows once every file completed, or says why it failed. */
+ * before its files upload; `end` follows once every file completed, or says why it failed, with the name you gave it
+ * while capturing (5.11 and later). */
 const CaptureAnnouncement = z.discriminatedUnion('event', [
   z.object({ event: z.literal('start'), captureId: z.string().uuid(), groupId: z.string().uuid(), targetId: z.string().min(1).max(256), track: z.enum(['video', 'frames']), sound: z.boolean(), page: z.object({ url: z.string(), title: z.string() }), startedAt: z.iso.datetime() }),
-  z.object({ event: z.literal('end'), captureId: z.string().uuid(), state: z.enum(['saved', 'failed']), reason: z.string().nullable(), endedAt: z.iso.datetime(), tracks: RuntimeBrowserCaptureSchema.shape.tracks }),
+  z.object({ event: z.literal('end'), captureId: z.string().uuid(), state: z.enum(['saved', 'failed']), reason: z.string().nullable(), endedAt: z.iso.datetime(), tracks: RuntimeBrowserCaptureTracksSchema, name: RuntimeBrowserCaptureNameSchema.optional() }),
 ]);
 const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional(), error: z.object({ message: z.string() }).optional(), targetId: z.string().optional(), sessionId: z.string().optional(), method: z.string().optional(), params: z.record(z.string(), z.unknown()).optional(), fenced: z.boolean().optional(), hello: z.boolean().optional(), Browser: z.string().optional(), protocol: z.number().int().nonnegative().optional(), extension: z.string().max(40).optional(), chromeInfo: z.boolean().optional(), controls: z.boolean().optional(), siteLevels: z.boolean().optional(), takeover: z.boolean().optional(),
   /** The OS a 5.8 or later extension says in its hello; one this release does not know is left out, not refused. */
-  platform: RuntimeBrowserPlatformSchema.optional().catch(undefined), group: RuntimeBrowserGroupReportSchema.optional(), capture: CaptureAnnouncement.optional(), shareFrame: BrowserShareFrameSchema.optional(), share: BrowserShareEventSchema.optional() });
+  platform: RuntimeBrowserPlatformSchema.optional().catch(undefined), group: RuntimeBrowserGroupReportSchema.optional(), capture: CaptureAnnouncement.optional(), shareFrame: BrowserShareFrameSchema.optional(), share: BrowserShareEventSchema.optional(),
+  /** A hello saying the extension's in-page comment tool takes `comments` notices (5.11 and later). */
+  comments: z.boolean().optional(),
+  /** A hello saying the extension enforces a grant's `powers` and `everything` and takes `everything` notices (5.11
+   * and later); `everything`: you allowed or ended Everything on a group from its popup or in-page toolbar. */
+  powers: z.boolean().optional(), everything: BrowserEverythingRequestSchema.optional(),
+  /** Replay steps on the extension's saved-capture card: the capture, and the workspace group its tab is in. */
+  captureReplay: z.object({ captureId: z.string().uuid(), groupId: z.string().uuid() }).optional(),
+  /** A name you gave a saved capture on the extension's saved-capture card, with the workspace group its tab is in. */
+  captureName: z.object({ captureId: z.string().uuid(), groupId: z.string().uuid(), name: RuntimeBrowserCaptureNameSchema }).optional() });
 /** A capture recording on a Chrome: the workspace it belongs to and the files that finished uploading (name → size). */
 const CaptureRow = z.object({ pairingId: z.string().uuid(), projectId: z.string(), workspaceId: z.string(), track: z.enum(['video', 'frames']), capture: RuntimeBrowserCaptureSchema, files: z.record(z.string(), z.number().int().nonnegative()) });
 type CaptureRow = z.infer<typeof CaptureRow>;
 const CAPTURE = 'browser.relay.capture:';
+/** Everything a workspace's agent has on a Chrome (`browser-powers.ts`): `<prefix><pairingId>:<projectId>:<workspaceId>`
+ * holds its `BrowserEverything` until it expires or you end it. */
+const EVERYTHING = 'browser.relay.everything:';
 const CaptureStarted = z.object({ url: z.string(), title: z.string() });
-const CaptureStopped = z.object({ count: z.number().int().nonnegative(), width: z.number().int().nonnegative(), height: z.number().int().nonnegative() }).partial();
+/** What the extension answers the Browser tab's `captureStop` of frames: the frames, and from 5.11 the steps, layout
+ * and comments tracks and the name you gave the capture. */
+const CaptureStopped = z.object({ count: z.number().int().nonnegative(), width: z.number().int().nonnegative(), height: z.number().int().nonnegative(), tracks: RuntimeBrowserCaptureTracksSchema, name: RuntimeBrowserCaptureNameSchema }).partial();
 /** The drive as the relay uses it: capture records and the files your Chrome uploads. */
 export type BrowserRelayDrive = CaptureDrive & BrowserUploadDrive;
-/** Where a workspace's groups are kept for its `gitspace.browsers` document, and the page comments made on its shares. */
+/** Where a workspace's groups are kept for its `gitspace.browsers` document, and its comment threads. */
 export type BrowserWorkspaces = { getByName(name: string): {
   browserGroupReported(identity: { projectId: string; workspaceId: string }, group: RuntimeBrowsersDocumentGroup): Promise<void>;
-  pageCommentAdded(identity: { projectId: string; workspaceId: string }, comment: RuntimeBrowserPageComment): Promise<void>;
+  browserCommentWrite(identity: { projectId: string; workspaceId: string }, write: RuntimeBrowserCommentWrite, by: RuntimeBrowserCommentAuthor, scope?: CommentScope): Promise<RuntimeBrowserCommentThread>;
+  browserComments(identity: { projectId: string; workspaceId: string }, filter: RuntimeBrowserCommentFilter): Promise<RuntimeBrowserCommentThread[]>;
+  captureReplayAsked(identity: { projectId: string; workspaceId: string }, request: { captureId: string; pairingId: string; browser: string }): Promise<void>;
+  /** Everything began or ended for the workspace on one of its Chromes: its Browser tab reads it again. */
+  browserEverythingChanged(identity: { projectId: string; workspaceId: string }): Promise<void>;
 } };
 /** The account's projects, whose names `chromeInfo` tells each Chrome. */
 export type BrowserProjects = { getByName(name: string): { list(): Promise<readonly { id: string; name: string }[]> } };
 /** Management actions a workspace sends through any Chrome confirmed on the account, online or not: they act on that
  * workspace's shares, and `shareConnect` checks the shared tab's own Chrome. */
 const SHARE_MANAGEMENT: Record<string, true> = { shares: true, shareRevoke: true, shareConnect: true };
-/** The extension's operation for each control from the Browser tab (`control`). */
-const CONTROL_OPERATION: Record<string, 'stopGroup' | 'closeTab' | 'focusTab' | 'takeOver' | 'resume' | undefined> = { stop: 'stopGroup', closeTab: 'closeTab', focusTab: 'focusTab', takeOver: 'takeOver', resume: 'resume' };
+/** The extension's operation for each control from the Browser tab (`control`); `commentShow` is Show on page. */
+const CONTROL_OPERATION: Record<string, 'stopGroup' | 'closeTab' | 'focusTab' | 'takeOver' | 'resume' | 'showComment' | undefined> = { stop: 'stopGroup', closeTab: 'closeTab', focusTab: 'focusTab', takeOver: 'takeOver', resume: 'resume', commentShow: 'showComment' };
 /** `informed`: the groups whose project the extension was told (`chromeInfo`), or null for an extension that does not
  * take those notices. `controls`: its hello said it takes Stop, Close tab and Focus in Chrome (`control`). `siteLevels`:
  * its hello said it enforces a grant's `read` sites (from 5.9); an older one never gets a grant with any. `takeover`:
  * its hello said it takes Take over and Resume agent and reports the tabs you hold (from 5.10). `agents`: how many
  * agents act on each of its groups, by group id, as its reports last said (an extension from 5.8 reports them); null
- * until one does. */
-type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; agents: Map<string, number> | null };
+ * until one does. `comments`: its hello said its in-page comment tool takes `comments` notices (from 5.11). `powers`:
+ * its hello said it enforces a grant's `powers` and `everything` (from 5.11); an older one never gets a grant with either. */
+type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; agents: Map<string, number> | null };
 /** Why a grant with sites approved read-only is not sent to an extension before 5.9: it would let agents click and type there. */
 const READ_SITES_UPDATE = 'Update the GitSpace extension in this Chrome to 5.9 or later: this version cannot keep agents from clicking or typing on the sites this workspace approved read-only:';
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
@@ -96,10 +123,10 @@ const BROWSER_SOCKET_TAG = 'browser';
 /** An admitted socket must finish pairing, through the extension's hello, within this long. */
 const PAIRING_DEADLINE_MS = 5000;
 /** What the relay's `ready` offers and its socket attachment records, as of this release; bumped whenever either
- * grows (2: `takeover`). A Chrome's socket survives a release, keeping the `ready` an older relay sent and the hello
- * flags it kept, so the relay closes one whose hello was answered by another release, and the extension says hello
- * again on its next connect. */
-const BROWSER_SOCKET_RELEASE = 2;
+ * grows (2: `takeover`; 3: `comments`, `powers`). A Chrome's socket survives a release, keeping the `ready` an older relay sent
+ * and the hello flags it kept, so the relay closes one whose hello was answered by another release, and the extension
+ * says hello again on its next connect. */
+const BROWSER_SOCKET_RELEASE = 3;
 const BrowserSocket = z.object({
   /** The server challenge the pairing proof signs. */
   nonce: z.string(),
@@ -120,6 +147,10 @@ const BrowserSocket = z.object({
   siteLevels: z.boolean().optional(),
   /** Set by a hello saying the extension takes `takeOver` and `resume` and reports the tabs you hold. */
   takeover: z.boolean().optional(),
+  /** Set by a hello saying the extension's in-page comment tool takes `comments` notices. */
+  comments: z.boolean().optional(),
+  /** Set by a hello saying the extension enforces a grant's `powers` and `everything`. */
+  powers: z.boolean().optional(),
   /** The `BROWSER_SOCKET_RELEASE` that answered the hello. */
   release: z.number().int().optional(),
 });
@@ -184,11 +215,14 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   private readonly shareLinks: BrowserShares;
   /** The Watch dialog's sockets on this Chrome's tabs (owner watch, `browser-watch.ts`). */
   private readonly watches: BrowserWatches;
+  /** Capture share links (`browser-capture-share.ts`): saved captures played from the drive, no Chrome needed. */
+  private readonly captureShares: BrowserCaptureShares;
   /** `drive` opens a workspace's drive, for capture records, comment crops and the files your Chrome uploads; `account`
    * names the account to share links' viewers; `schedule` re-arms the host's alarm when a share deadline changes;
    * `deviceActive` says whether a watching device still verifies. */
-  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces; USER_PROJECTS: BrowserProjects }, private readonly drive: (identity: { projectId: string; workspaceId: string }) => BrowserRelayDrive, account: BrowserShareAccount, schedule: () => Promise<void>, deviceActive: (deviceId: string) => Promise<boolean>) {
-    this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this });
+  constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces; USER_PROJECTS: BrowserProjects }, private readonly drive: (identity: { projectId: string; workspaceId: string }) => BrowserRelayDrive, private readonly account: BrowserShareAccount, schedule: () => Promise<void>, deviceActive: (deviceId: string) => Promise<boolean>) {
+    // `drive`: debug files of your Chrome's tabs (`browser-powers.ts`).
+    this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this, drive });
     this.uploads = new BrowserUploads(ctx.storage, {
       pairing: pairingId => this.signingKey(pairingId),
       group: async (pairingId, groupId) => {
@@ -226,7 +260,11 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         if (!pairing) throw new Error('The shared tab’s Chrome is no longer paired with this account');
         await this.approved(projectId, pairingId, pairing.generation);
       },
-      commented: (workspace, comment) => env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.workspaceId}`).pageCommentAdded(workspace, comment),
+      comment: async (workspace, write, by, scope) => {
+        const thread = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.workspaceId}`).browserCommentWrite(workspace, write, by, scope);
+        await this.commentChanged(workspace, thread);
+        return thread;
+      },
       drive,
       schedule,
     }, account);
@@ -238,6 +276,25 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       group: groupId => this.liveGroup(groupId),
       deviceActive,
     });
+    // Capture share links: the recording is read from its workspace's drive; comments go to its threads.
+    this.captureShares = new BrowserCaptureShares(ctx.storage, {
+      capture: (workspace, captureId) => readCapture(drive(workspace), captureId),
+      threads: (workspace, filter) => env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.workspaceId}`).browserComments(workspace, filter),
+      write: async (workspace, write, by, scope) => {
+        const thread = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.workspaceId}`).browserCommentWrite(workspace, write, by, scope);
+        await this.commentChanged(workspace, thread);
+        return thread;
+      },
+      group: async (pairingId, groupId) => {
+        const group = await this.liveGroup(groupId);
+        return group?.pairingId === pairingId ? { projectId: group.projectId, workspaceId: group.workspaceId } : undefined;
+      },
+      chrome: async pairingId => {
+        const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId && item.state === 'confirmed');
+        return pairing ? (await this.names([pairing]))(pairing) : undefined;
+      },
+      schedule,
+    }, account);
   }
   /** Whether the host's socket is a Chrome extension socket, a share viewer's or an owner watch's. */
   owns(socket: WebSocket) { return this.ctx.getTags(socket).includes(BROWSER_SOCKET_TAG) || this.shareLinks.owns(socket) || this.watches.owns(socket); }
@@ -274,7 +331,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (cached?.socket === bound.socket) { cached.product = product; return cached; }
     if (cached) this.disconnect(pairingId);
     // Request ids continue past any reply still in flight from before the relay hibernated.
-    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, agents: null };
+    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, agents: null };
     this.connections.set(pairingId, connection);
     return connection;
   }
@@ -316,7 +373,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const defaultPairingId = preferences.approvals.some(item => item.pairingId === preferences.defaultPairingId && confirmed.some(pairing => pairing.pairingId === item.pairingId && pairing.generation === item.generation)) ? preferences.defaultPairingId : null;
     return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId, browsers: confirmed.map(pairing => {
       const approval = preferences.approvals.find(item => item.pairingId === pairing.pairingId && item.generation === pairing.generation);
-      return { pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), note: pairing.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval, takeover: this.connection(pairing.pairingId)?.takeover === true };
+      return { pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), note: pairing.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval, takeover: this.connection(pairing.pairingId)?.takeover === true, powers: approval?.powers ?? [], powersSupported: this.connection(pairing.pairingId)?.powers === true };
     }) });
   }
   async setProjectSettings(projectId: string, expectedRevision: number, value: RuntimeProjectBrowserPreferences) {
@@ -333,7 +390,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         const pairing = registry.pairings.find(item => item.pairingId === approval.pairingId && item.state === 'confirmed');
         if (!pairing) return 'Browser fingerprint confirmation required';
         const prior = current.approvals.find(item => item.pairingId === approval.pairingId && item.generation === pairing.generation);
-        approvals.push({ pairingId: approval.pairingId, generation: pairing.generation, approvalId: prior?.approvalId ?? crypto.randomUUID() });
+        approvals.push({ pairingId: approval.pairingId, generation: pairing.generation, approvalId: prior?.approvalId ?? crypto.randomUUID(), powers: approval.powers });
       }
       const removed = current.approvals.filter(prior => !approvals.some(next => next.pairingId === prior.pairingId && next.generation === prior.generation));
       // LEGACY: a name this write drops from an approval moves to its unnamed pairing first; remove with
@@ -343,6 +400,8 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       await this.ctx.storage.transaction(async tx => {
         await tx.put(`browser.relay.project:${projectId}`, { revision: current.revision + 1, defaultPairingId: preferences.defaultPairingId, approvals });
         if (named.length) await tx.put('browser.relay.pairings', registry);
+        // Everything ends with the project's approval of its Chrome.
+        for (const item of removed) for (const key of (await tx.list({ prefix: `${EVERYTHING}${item.pairingId}:${projectId}:` })).keys()) await tx.delete(key);
         if (removed.length) for (const stored of (await tx.list({ prefix: 'browser.account.group:' })).values()) {
           const group = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = group.placement;
           if (group.projectId === projectId && placement.kind === 'account-relay' && removed.some(item => item.pairingId === placement.pairingId)) {
@@ -380,6 +439,13 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (placement.approvalId !== approval.approvalId) throw new Error('Project Chrome approval changed; previous browser authority is revoked');
     const groupId = command.type === 'execute' ? command.grant.body.groupId : command.groupId;
     if (groupId && await this.ctx.storage.get(`browser.account.revoked:${groupId}`)) throw new Error('Browser group revoked');
+    // A grant's powers are the approval's, and its Everything the one you allowed, until you end it or it expires.
+    if (command.type === 'execute') {
+      const grant = command.grant.body;
+      const removed = (grant.powers ?? []).filter(power => !approval.powers.includes(power));
+      if (removed.length) throw new Error(`Browser powers changed: ${removed.join(', ')} is no longer turned on for this Chrome in this project; call again`);
+      if (browserEverythingActive(grant, Date.now()) && (await this.everythingOn(placement.pairingId, scope.projectId, scope.workspaceId))?.expiresAt !== grant.everything?.expiresAt) throw new Error('Everything ended for this workspace on this Chrome; call again');
+    }
     return approval;
   }
   /** Starts pairing a Chrome: its short single-use code, which the extension redeems for the pairing's details. */
@@ -658,14 +724,17 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
         return socket.close(1008, 'Extension update required');
       }
-      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
       // `groupActivity`: this relay takes each group's colour and agents in the extension's reports; `takeover`: the tabs
-      // you hold (`held`) and each agent's tab (`targetId`) too.
-      socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true }));
+      // you hold (`held`) and each agent's tab (`targetId`) too; `comments`: the in-page comment tool's requests
+      // (`BROWSER_COMMENT_PATH`); `powers`: this relay takes `everything` requests and sends `everything` notices;
+      // `captureTracks`: a capture's steps, layout and comments tracks and its name.
+      socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true }));
       this.ctx.waitUntil(this.retryRevocations(state.pairingId));
       this.ctx.waitUntil(this.shareLinks.online(state.pairingId).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_online_failed', pairingId: state.pairingId, error: String(error) }))));
       this.ctx.waitUntil(this.watches.online(state.pairingId).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_watch_online_failed', pairingId: state.pairingId, error: String(error) }))));
       this.ctx.waitUntil(this.inform(state.pairingId));
+      if (message.powers) this.ctx.waitUntil(this.everythingOnline(state.pairingId).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_everything_online_failed', pairingId: state.pairingId, error: String(error) }))));
       return;
     }
     if (!state.product) throw new Error('Browser hello required');
@@ -681,6 +750,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       return;
     }
     if (message.capture) { const announcement = message.capture; this.ctx.waitUntil(this.captureAnnounced(state.pairingId, announcement).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_capture_announcement_failed', captureId: announcement.captureId, error: String(error) })))); return; }
+    if (message.everything) { const asked = message.everything; this.ctx.waitUntil(this.everythingRequested(state.pairingId, asked)); return; }
+    if (message.captureReplay) { const asked = message.captureReplay; this.ctx.waitUntil(this.captureReplayAsked(state.pairingId, asked).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_capture_replay_failed', captureId: asked.captureId, error: String(error) })))); return; }
+    if (message.captureName) { const named = message.captureName; this.ctx.waitUntil(this.captureRenamed(state.pairingId, named).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_capture_rename_failed', captureId: named.captureId, error: String(error) })))); return; }
     if (message.shareFrame) {
       const frame = message.shareFrame;
       // Owner watch: frames under a watch's id go to its viewers, not a share's.
@@ -760,6 +832,85 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     for (const groupId of ended) { await this.shareLinks.endGroup(groupId); this.watches.endGroup(groupId); }
     await this.retryRevocations();
   }
+  // Browser powers and Everything (`browser-powers.ts`).
+  /** Everything on a workspace's group on a Chrome while it lasts, else null. */
+  private async everythingOn(pairingId: string, projectId: string, workspaceId: string): Promise<BrowserEverything | null> {
+    const stored = BrowserEverythingSchema.safeParse(await this.ctx.storage.get(`${EVERYTHING}${pairingId}:${projectId}:${workspaceId}`));
+    return stored.success && Date.parse(stored.data.expiresAt) > Date.now() ? stored.data : null;
+  }
+  /** What a workspace's agents may do beyond its sites on each Chrome its project approved: the approval's powers,
+   * Everything while it lasts, whether the extension enforces them (online, its hello said `powers`), and its name. */
+  async powers(projectId: string, workspaceId: string): Promise<{ pairingId: string; name: string; powers: BrowserPower[]; supported: boolean; everything: BrowserEverything | null }[]> {
+    const [preferences, registry] = await Promise.all([this.projectPreferences(projectId), this.registry()]);
+    const confirmed = registry.pairings.filter(pairing => pairing.state === 'confirmed'), name = await this.names(confirmed);
+    const chromes = [];
+    for (const pairing of confirmed) {
+      const approval = preferences.approvals.find(item => item.pairingId === pairing.pairingId && item.generation === pairing.generation);
+      if (approval) chromes.push({ pairingId: pairing.pairingId, name: name(pairing), powers: approval.powers, supported: this.connection(pairing.pairingId)?.powers === true, everything: await this.everythingOn(pairing.pairingId, projectId, workspaceId) });
+    }
+    return chromes;
+  }
+  /** You allow Everything for a workspace on a Chrome for `BROWSER_EVERYTHING_MS`, or end it now, from GitSpace or that
+   * Chrome's popup. Allowing takes the project's approval of the Chrome and its extension online with `powers`. The
+   * workspace's group there shows it, and the workspace's Browser tab reads it again. */
+  async everything(projectId: string, workspaceId: string, pairingId: string, on: boolean): Promise<BrowserEverything | null> {
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId && item.state === 'confirmed');
+    if (!pairing) throw new Error('That Chrome is no longer paired with this account');
+    const key = `${EVERYTHING}${pairingId}:${projectId}:${workspaceId}`;
+    let everything: BrowserEverything | null = null;
+    if (on) {
+      await this.approved(projectId, pairingId, pairing.generation);
+      const connection = this.connection(pairingId);
+      if (!connection) throw this.offline(pairing, await this.names([pairing]), []);
+      if (!connection.powers) throw new Error(BROWSER_POWERS_UPDATE);
+      everything = { expiresAt: new Date(Date.now() + BROWSER_EVERYTHING_MS).toISOString() };
+      await this.ctx.storage.put(key, everything);
+    } else await this.ctx.storage.delete(key);
+    await this.tellEverything(pairingId, { projectId, workspaceId }, everything);
+    return everything;
+  }
+  /** The workspace groups on a Chrome that were not revoked. */
+  private async chromeGroups(pairingId: string) {
+    const groups: z.infer<typeof RuntimeAccountBrowserGroupRowSchema>[] = [];
+    for (const stored of (await this.ctx.storage.list({ prefix: 'browser.account.group:' })).values()) {
+      const group = RuntimeAccountBrowserGroupRowSchema.parse(stored);
+      if (group.placement.kind === 'account-relay' && group.placement.pairingId === pairingId && !await this.ctx.storage.get(`browser.account.revoked:${group.groupId}`)) groups.push(group);
+    }
+    return groups;
+  }
+  /** The Chrome's group of the workspace hears Everything as it is now (an extension whose hello said `powers`), and
+   * the workspace's Browser tab reads it again. */
+  private async tellEverything(pairingId: string, workspace: { projectId: string; workspaceId: string }, everything: BrowserEverything | null) {
+    const connection = this.connection(pairingId);
+    if (connection?.powers) for (const group of await this.chromeGroups(pairingId)) {
+      if (group.projectId === workspace.projectId && group.workspaceId === workspace.workspaceId) connection.socket.send(JSON.stringify({ operation: 'everything', groupId: group.groupId, expiresAt: everything?.expiresAt ?? null } satisfies BrowserEverythingNotice));
+    }
+    await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).browserEverythingChanged(workspace)
+      .catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_everything_notice_failed', workspaceId: workspace.workspaceId, error: String(error) })));
+  }
+  /** You allowed or ended Everything from the Chrome's popup or in-page toolbar, for the workspace of one of its groups.
+   * The Chrome hears Everything as it then is, also when the request is refused. */
+  private async everythingRequested(pairingId: string, request: BrowserEverythingRequest) {
+    const stored = await this.ctx.storage.get(`browser.account.group:${request.groupId}`);
+    const group = stored ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : null;
+    try {
+      if (!group || group.placement.kind !== 'account-relay' || group.placement.pairingId !== pairingId || await this.ctx.storage.get(`browser.account.revoked:${group.groupId}`)) throw new Error('That workspace group is not live on this Chrome');
+      await this.everything(group.projectId, group.workspaceId, pairingId, request.action === 'grant');
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'browser_everything_request_refused', pairingId, groupId: request.groupId, error: String(error) }));
+      const current = group ? await this.everythingOn(pairingId, group.projectId, group.workspaceId) : null;
+      this.connection(pairingId)?.socket.send(JSON.stringify({ operation: 'everything', groupId: request.groupId, expiresAt: current?.expiresAt ?? null } satisfies BrowserEverythingNotice));
+    }
+  }
+  /** A Chrome whose extension enforces powers came online: each of its groups hears Everything that is on. */
+  private async everythingOnline(pairingId: string) {
+    const connection = this.connection(pairingId);
+    if (!connection?.powers) return;
+    for (const group of await this.chromeGroups(pairingId)) {
+      const everything = await this.everythingOn(pairingId, group.projectId, group.workspaceId);
+      if (everything) connection.socket.send(JSON.stringify({ operation: 'everything', groupId: group.groupId, expiresAt: everything.expiresAt } satisfies BrowserEverythingNotice));
+    }
+  }
   /** Tells a Chrome whose extension takes `chromeInfo` (its hello said so; older ones never get it) its name, when you
    * paired it (null for Chromes paired before that was recorded), the names of the projects that approved it, and the
    * project of each of its live workspace groups, for its popup. A project the account no longer lists is left out. */
@@ -821,6 +972,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       if (authorization.body.command.type === 'execute') {
         const { read, groupId } = authorization.body.command.grant.body;
         if (read && !connection.siteLevels) throw new Error(`${READ_SITES_UPDATE} ${read.join(', ')}`);
+        if ((authorization.body.command.grant.body.powers || authorization.body.command.grant.body.everything) && !connection.powers) throw new Error(BROWSER_POWERS_UPDATE);
         await this.informGroup(placement.pairingId, connection, groupId);
       }
       await this.request(placement.pairingId, { operation: 'authorize', authorization }); connection.authorized.add(authorization.body.scope.attemptId);
@@ -842,19 +994,20 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const { pairingId } = await this.authorize(authorization, signal);
     return PreviewReply.parse(await this.request(pairingId, { operation: 'preview', groupId: command.groupId, targetId: command.targetId }));
   }
-  /** Stop, Close tab, Focus in Chrome, Take over and Resume agent from the Browser tab on this Chrome's workspace group
-   * (`stop`, `closeTab`, `focusTab`, `takeOver`, `resume`), checked and handed to the extension as any management
-   * request, and sent only to an extension whose hello said it takes them. */
+  /** Stop, Close tab, Focus in Chrome, Take over, Resume agent and Show on page from the Browser tab on this Chrome's
+   * workspace group (`stop`, `closeTab`, `focusTab`, `takeOver`, `resume`, `commentShow`), checked and handed to the
+   * extension as any management request, and sent only to an extension whose hello said it takes them. */
   async control(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<Record<string, never>> {
     const { scope, command } = authorization.body, placement = scope.placement;
     const operation = command.type === 'manage' ? CONTROL_OPERATION[command.action] : undefined;
-    if (command.type !== 'manage' || !operation || !command.groupId || (command.action !== 'stop' && !command.targetId) || placement.kind !== 'account-relay') throw new Error('Browser control authorization required');
+    if (command.type !== 'manage' || !operation || !command.groupId || (command.action !== 'stop' && !command.targetId) || (operation === 'showComment' && !command.threadId) || placement.kind !== 'account-relay') throw new Error('Browser control authorization required');
     const connection = this.connection(placement.pairingId);
     if (!connection?.controls) throw new Error('Update the GitSpace extension in this Chrome to stop, close or focus its tabs from GitSpace');
     if ((operation === 'takeOver' || operation === 'resume') && !connection.takeover) throw new Error('Update the GitSpace extension in this Chrome to 5.10 or later to take over its tabs from GitSpace');
+    if (operation === 'showComment' && !connection.comments) throw new Error('Update the GitSpace extension in this Chrome to 5.11 or later to show comments on its pages');
     const { pairingId } = await this.authorize(authorization, signal);
-    // The extension matches each field to the signed command, `device` included.
-    await this.request(pairingId, { operation, groupId: command.groupId, ...(command.action === 'stop' ? {} : { targetId: command.targetId }), ...(command.action === 'takeOver' ? { device: command.device } : {}) });
+    // The extension matches each field to the signed command, `device` and `threadId` included.
+    await this.request(pairingId, { operation, groupId: command.groupId, ...(command.action === 'stop' ? {} : { targetId: command.targetId }), ...(command.action === 'takeOver' ? { device: command.device } : {}), ...(operation === 'showComment' ? { threadId: command.threadId } : {}) });
     return {};
   }
   /** How many agents use a Chrome now: the scripts and single steps its extension's reports last counted on its
@@ -890,7 +1043,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       // A video ends with the extension's `end` once its file is in; frames end here.
       if (row.track === 'video') return await readCapture(drive, captureId) ?? row.capture;
       const frames = stopped.count && stopped.width && stopped.height ? { path: 'frames.bin', index: 'frames.json', count: stopped.count, width: stopped.width, height: stopped.height } : undefined;
-      return await this.finishCapture(captureId, { state: frames ? 'saved' : 'failed', reason: frames ? null : 'The tab showed nothing to record', endedAt: new Date().toISOString(), tracks: frames ? { frames } : {} }) ?? await readCapture(drive, captureId) ?? row.capture;
+      return await this.finishCapture(captureId, { state: frames ? 'saved' : 'failed', reason: frames ? null : 'The tab showed nothing to record', endedAt: new Date().toISOString(), tracks: frames ? { ...stopped.tracks, frames } : {}, name: stopped.name }) ?? await readCapture(drive, captureId) ?? row.capture;
     }
     if (!command.targetId) throw new Error('A capture names its tab');
     const group = await this.ctx.storage.get(`browser.account.group:${groupId}`);
@@ -900,7 +1053,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const { pairingId } = await this.authorize(authorization, signal);
     const page = CaptureStarted.parse(await this.request(pairingId, { operation: 'captureStart', captureId, groupId, targetId: command.targetId }));
     const startedAt = new Date().toISOString(), browser = pairing ? (await this.names([pairing]))(pairing) : 'Chrome';
-    const capture = RuntimeBrowserCaptureSchema.parse({ version: 1, captureId, name: captureName(page.title, startedAt), by: 'you', source: 'relay', browser, target: { groupId, targetId: command.targetId }, page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) }, startedAt, endedAt: null, state: 'recording', reason: null, tracks: {} });
+    const capture = RuntimeBrowserCaptureSchema.parse({ version: 2, captureId, name: captureName(page.title, startedAt), by: 'you', source: 'relay', browser, target: { groupId, targetId: command.targetId }, page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) }, startedAt, endedAt: null, state: 'recording', reason: null, tracks: {} });
     await this.ctx.storage.put(`${CAPTURE}${captureId}`, { pairingId, projectId: scope.projectId, workspaceId: scope.workspaceId, track: 'frames', capture, files: {} } satisfies CaptureRow);
     return writeCapture(drive, capture);
   }
@@ -908,7 +1061,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   private async captureAnnounced(pairingId: string, announcement: z.infer<typeof CaptureAnnouncement>): Promise<void> {
     if (announcement.event === 'end') {
       const stored = await this.ctx.storage.get(`${CAPTURE}${announcement.captureId}`);
-      if (stored && CaptureRow.parse(stored).pairingId === pairingId) await this.finishCapture(announcement.captureId, { state: announcement.state, reason: announcement.reason?.slice(0, 1024) ?? null, endedAt: announcement.endedAt, tracks: announcement.tracks });
+      if (stored && CaptureRow.parse(stored).pairingId === pairingId) await this.finishCapture(announcement.captureId, { state: announcement.state, reason: announcement.reason?.slice(0, 1024) ?? null, endedAt: announcement.endedAt, tracks: announcement.tracks, name: announcement.name });
       return;
     }
     if (await this.ctx.storage.get(`${CAPTURE}${announcement.captureId}`)) return;
@@ -916,27 +1069,48 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (!group || await this.ctx.storage.get(`browser.account.revoked:${announcement.groupId}`)) return;
     const grant = RuntimeAccountBrowserGroupRowSchema.parse(group), pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId);
     if (grant.placement.kind !== 'account-relay' || grant.placement.pairingId !== pairingId || !pairing) return;
-    const capture = RuntimeBrowserCaptureSchema.parse({ version: 1, captureId: announcement.captureId, name: captureName(announcement.page.title, announcement.startedAt), by: 'you', source: 'relay', browser: (await this.names([pairing]))(pairing),
+    const capture = RuntimeBrowserCaptureSchema.parse({ version: 2, captureId: announcement.captureId, name: captureName(announcement.page.title, announcement.startedAt), by: 'you', source: 'relay', browser: (await this.names([pairing]))(pairing),
       target: { groupId: announcement.groupId, targetId: announcement.targetId }, page: { url: announcement.page.url.slice(0, 8192), title: announcement.page.title.slice(0, 500) },
       startedAt: announcement.startedAt, endedAt: null, state: 'recording', reason: null, tracks: {} });
     await this.ctx.storage.put(`${CAPTURE}${announcement.captureId}`, { pairingId, projectId: grant.projectId, workspaceId: grant.workspaceId, track: announcement.track, capture, files: {} } satisfies CaptureRow);
     await writeCapture(this.drive(grant), capture);
   }
-  /** Saves a capture once: its tracks are those whose files completed; saved with none, it failed. Null when another
-   * stop already saved it. */
-  private async finishCapture(captureId: string, outcome: Pick<RuntimeBrowserCapture, 'state' | 'reason' | 'endedAt' | 'tracks'>): Promise<RuntimeBrowserCapture | null> {
+  /** You asked from the extension's saved-capture card to replay a capture: the workspace of the group it names, while
+   * that group is live on this Chrome, tells its main agent. */
+  private async captureReplayAsked(pairingId: string, asked: { captureId: string; groupId: string }): Promise<void> {
+    const group = await this.ctx.storage.get(`browser.account.group:${asked.groupId}`);
+    if (!group || await this.ctx.storage.get(`browser.account.revoked:${asked.groupId}`)) return;
+    const grant = RuntimeAccountBrowserGroupRowSchema.parse(group), pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId);
+    if (grant.placement.kind !== 'account-relay' || grant.placement.pairingId !== pairingId || !pairing) return;
+    await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${grant.workspaceId}`).captureReplayAsked({ projectId: grant.projectId, workspaceId: grant.workspaceId }, { captureId: asked.captureId, pairingId, browser: (await this.names([pairing]))(pairing) });
+  }
+  /** You renamed a saved capture on the extension's saved-capture card: renamed while its group is live on this Chrome
+   * and the capture is that group's. */
+  private async captureRenamed(pairingId: string, named: { captureId: string; groupId: string; name: string }): Promise<void> {
+    const group = await this.ctx.storage.get(`browser.account.group:${named.groupId}`);
+    if (!group || await this.ctx.storage.get(`browser.account.revoked:${named.groupId}`)) return;
+    const grant = RuntimeAccountBrowserGroupRowSchema.parse(group);
+    if (grant.placement.kind !== 'account-relay' || grant.placement.pairingId !== pairingId) return;
+    const drive = this.drive(grant), capture = await readCapture(drive, named.captureId);
+    if (capture?.target?.groupId === named.groupId && capture.source === 'relay' && capture.state !== 'recording') await writeCapture(drive, { ...capture, name: named.name });
+  }
+  /** Saves a capture once: its tracks are those whose files completed, with the steps, layout and comments that came
+   * along; saved with no video, frames or image, it failed. `name`: the one you gave it while capturing. Null when
+   * another stop already saved it. */
+  private async finishCapture(captureId: string, outcome: Pick<RuntimeBrowserCapture, 'state' | 'reason' | 'endedAt' | 'tracks'> & { name?: string }): Promise<RuntimeBrowserCapture | null> {
     const stored = await this.ctx.storage.get(`${CAPTURE}${captureId}`);
     if (!stored) return null;
     await this.ctx.storage.delete(`${CAPTURE}${captureId}`);
-    const row = CaptureRow.parse(stored), { image, frames, video } = outcome.tracks;
-    const tracks = {
+    const row = CaptureRow.parse(stored), { image, frames, video, steps, layout, comments } = outcome.tracks;
+    const media = {
       ...(image && row.files['image.jpg'] !== undefined ? { image: { ...image, path: 'image.jpg' } } : {}),
       ...(frames && row.files['frames.bin'] !== undefined && row.files['frames.json'] !== undefined ? { frames: { ...frames, path: 'frames.bin', index: 'frames.json' } } : {}),
       ...(video && row.files['video.webm'] !== undefined ? { video: { ...video, path: 'video.webm' } } : {}),
     };
-    const saved = outcome.state === 'saved' && Object.keys(tracks).length > 0;
+    const saved = outcome.state === 'saved' && Object.keys(media).length > 0;
+    const tracks = { ...media, ...(steps && row.files['steps.json'] !== undefined ? { steps } : {}), ...(layout && row.files['layout.jsonl'] !== undefined ? { layout } : {}), ...(comments ? { comments } : {}) };
     const reason = saved ? outcome.reason : outcome.reason ?? (outcome.state === 'saved' ? 'The recording’s files did not reach the drive' : 'The recording failed');
-    return writeCapture(this.drive(row), { ...row.capture, endedAt: outcome.endedAt ?? new Date().toISOString(), state: saved ? 'saved' : 'failed', reason, tracks: saved ? tracks : {} });
+    return writeCapture(this.drive(row), { ...row.capture, ...(outcome.name ? { name: outcome.name } : {}), endedAt: outcome.endedAt ?? new Date().toISOString(), state: saved ? 'saved' : 'failed', reason, tracks: saved ? tracks : {} });
   }
   /** One step of an upload from a Chrome (`browser-upload.ts`). */
   upload(step: BrowserUploadStep) { return this.uploads.step(step); }
@@ -944,6 +1118,54 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   async shareRequest(request: BrowserSignedRequest, body: unknown) {
     const signer = await browserRequestSigner(this.ctx.storage, pairingId => this.signingKey(pairingId), 'share', request);
     return signer.ok ? this.shareLinks.chromeRequest(signer.pairingId, body) : signer;
+  }
+  // Comments (`browser-comments.ts`): your Chrome's in-page comment tool, and threads changed in a workspace.
+  /** A request your Chrome's in-page comment tool signed with its pairing key (`BROWSER_COMMENT_PATH`): a thread on the
+   * page (its crop to the workspace's drive; on a capture's timeline for a capture this Chrome records in that
+   * workspace), a reply, resolving one, or the page's threads. Each lands in the workspace of the group it names, a
+   * group of this Chrome not revoked; you comment as the account's owner. */
+  async commentRequest(request: BrowserSignedRequest, body: unknown): Promise<{ ok: true; value: Record<string, unknown> } | BrowserRequestFailure> {
+    const signer = await browserRequestSigner(this.ctx.storage, pairingId => this.signingKey(pairingId), 'comment', request);
+    if (!signer.ok) return signer;
+    const parsed = RuntimeBrowserCommentChromeRequestSchema.safeParse(body);
+    if (!parsed.success) return { ok: false, status: 400, code: 'COMMENT_INVALID', message: `Invalid comment request: ${parsed.error.issues.map(issue => issue.message).join('; ')}` };
+    const input = parsed.data;
+    const stored = await this.ctx.storage.get(`browser.account.group:${input.groupId}`);
+    const group = stored && !await this.ctx.storage.get(`browser.account.revoked:${input.groupId}`) ? RuntimeAccountBrowserGroupRowSchema.parse(stored) : undefined;
+    if (!group || group.placement.kind !== 'account-relay' || group.placement.pairingId !== signer.pairingId) return { ok: false, status: 404, code: 'COMMENT_GROUP_UNKNOWN', message: 'This tab is in no workspace group of this Chrome' };
+    const workspace = { projectId: group.projectId, workspaceId: group.workspaceId };
+    const space = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`);
+    try {
+      const name = (await this.account.name()).slice(0, 60).trim() || 'You';
+      if (input.op === 'list') return { ok: true, value: { threads: await space.browserComments(workspace, { status: 'all', url: input.url, limit: 500 }), name } };
+      let write: RuntimeBrowserCommentWrite;
+      if (input.op === 'comment') {
+        const capture = input.capture ? await this.ctx.storage.get(`${CAPTURE}${input.capture.captureId}`) : undefined;
+        const row = capture ? CaptureRow.parse(capture) : undefined;
+        if (input.capture && (!row || row.pairingId !== signer.pairingId || row.projectId !== workspace.projectId || row.workspaceId !== workspace.workspaceId)) return { ok: false, status: 404, code: 'COMMENT_CAPTURE_UNKNOWN', message: 'This Chrome records no such capture in this workspace' };
+        const crop = input.crop ? browserUnbase64(input.crop) : null;
+        if (crop && crop.byteLength > BROWSER_COMMENT_CROP_BYTES) return { ok: false, status: 413, code: 'COMMENT_CROP_TOO_LARGE', message: `A comment's crop is at most ${BROWSER_COMMENT_CROP_BYTES} bytes` };
+        const cropFile = crop ? `${COMMENT_CROPS}${crypto.randomUUID()}.jpg` : undefined;
+        if (crop && cropFile) await this.drive(workspace).write(cropFile, 'image/jpeg', crop);
+        write = { op: 'comment', source: input.capture ? { kind: 'capture', ...input.capture } : { kind: 'chrome', pairingId: signer.pairingId }, page: input.page, anchor: { ...input.anchor, ...(cropFile ? { cropFile } : {}) }, text: input.text };
+      } else write = input.op === 'reply' ? { op: 'reply', threadId: input.threadId, text: input.text } : { op: 'resolve', threadId: input.threadId, ...(input.reopen === undefined ? {} : { reopen: input.reopen }) };
+      const thread = await space.browserCommentWrite(workspace, write, { kind: 'person', name, guest: false });
+      await this.commentChanged(workspace, thread);
+      return { ok: true, value: { thread } };
+    } catch (error) { return { ok: false, status: 409, code: 'COMMENT_REFUSED', message: (error instanceof Error ? error.message : String(error)).slice(0, 1024) }; }
+  }
+  /** A thread of a workspace was made or changed, here or in the workspace (`browserRelayCommentChanged`): its share's
+   * viewers see it, and each connected Chrome holding a group of that workspace whose extension takes them hears
+   * `{operation:'comments', groupId, threadId}`, so its in-page tool reads the page's threads again. */
+  async commentChanged(workspace: { projectId: string; workspaceId: string }, thread: RuntimeBrowserCommentThread): Promise<void> {
+    await this.shareLinks.threadChanged(thread);
+    const [rows, revoked] = await Promise.all([this.ctx.storage.list({ prefix: 'browser.account.group:' }), this.ctx.storage.list({ prefix: 'browser.account.revoked:' })]);
+    for (const stored of rows.values()) {
+      const group = RuntimeAccountBrowserGroupRowSchema.parse(stored), placement = group.placement;
+      if (group.projectId !== workspace.projectId || group.workspaceId !== workspace.workspaceId || placement.kind !== 'account-relay' || revoked.has(`browser.account.revoked:${group.groupId}`)) continue;
+      const connection = this.connection(placement.pairingId);
+      if (connection?.comments) connection.socket.send(JSON.stringify({ operation: 'comments', groupId: group.groupId, threadId: thread.root.id }));
+    }
   }
   /** A workspace's share links, live and ended in the last day, newest first. */
   shares(projectId: string, workspaceId: string): Promise<RuntimeBrowserShare[]> { return this.shareLinks.list(projectId, workspaceId); }
@@ -969,10 +1191,26 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   shareFetch(request: Request) { return this.shareLinks.accept(request); }
   /** The Watch dialog's socket on one of this account's Chrome tabs, checked by the route (`serveBrowserWatch`). */
   watchFetch(request: Request) { return this.watches.accept(request); }
-  /** The host relay's alarm: shares past their expiry end and viewer sockets that never said hello close. */
-  alarm() { return this.shareLinks.alarm(); }
-  /** The earliest share deadline the host's alarm must wake for; null when none. */
-  nextDeadline() { return this.shareLinks.nextDeadline(); }
+  /** The host relay's alarm: shares and capture shares past their expiry end and viewer sockets that never said hello close. */
+  async alarm() { await this.shareLinks.alarm(); await this.captureShares.alarm(); }
+  /** The earliest share or capture share deadline the host's alarm must wake for; null when none. */
+  async nextDeadline() {
+    const next = Math.min(await this.shareLinks.nextDeadline() ?? Infinity, await this.captureShares.nextDeadline() ?? Infinity);
+    return Number.isFinite(next) ? next : null;
+  }
+  /** Capture share links (`browser-capture-share.ts`): a workspace's, made from its Browser tab, ended from it; a
+   * request your Chrome signed (its saved card's Share); a link's greeting, open, file check and comments. */
+  captureShareList(workspace: { projectId: string; workspaceId: string }) { return this.captureShares.list(workspace); }
+  captureShareCreate(workspace: { projectId: string; workspaceId: string }, input: { captureId: string; comment: boolean; expiresInMinutes: number }) { return this.captureShares.create(workspace, input, { name: 'you', pairingId: null }); }
+  captureShareRevoke(workspace: { projectId: string; workspaceId: string }, captureShareId: string) { return this.captureShares.revoke(workspace, captureShareId); }
+  async captureShareRequest(request: BrowserSignedRequest, body: unknown) {
+    const signer = await browserRequestSigner(this.ctx.storage, pairingId => this.signingKey(pairingId), 'share', request);
+    return signer.ok ? this.captureShares.chromeRequest(signer.pairingId, body) : signer;
+  }
+  captureSharePreview(captureShareId: string, secret: string) { return this.captureShares.preview(captureShareId, secret); }
+  captureShareOpen(captureShareId: string, secret: string, viewer: { name: string; guest: boolean }) { return this.captureShares.open(captureShareId, secret, viewer); }
+  captureShareLive(captureShareId: string) { return this.captureShares.live(captureShareId); }
+  captureShareComment(captureShareId: string, viewer: { name: string; guest: boolean }, request: RuntimeBrowserCaptureShareComment) { return this.captureShares.comment(captureShareId, viewer, request); }
   /** A workspace group that is neither revoked nor expired, on a Chrome, with that Chrome's pairing. */
   private async liveGroup(groupId: string) {
     const stored = await this.ctx.storage.get(`browser.account.group:${groupId}`);
@@ -1009,6 +1247,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (!connection) throw this.offline(pairing, await this.names([pairing]), []);
     const read = command.grant.body.read;
     if (read && !connection.siteLevels) throw new Error(`${READ_SITES_UPDATE} ${read.join(', ')}`);
+    if ((command.grant.body.powers || command.grant.body.everything) && !connection.powers) throw new Error(BROWSER_POWERS_UPDATE);
     const claim = `browser.account.claim:${scope.projectId}:${scope.workspaceId}:${scope.attemptId}`;
     if (await this.ctx.storage.get(claim)) throw new Error('Browser authorization already consumed');
     await this.ctx.storage.put(claim, body.expiresAt);

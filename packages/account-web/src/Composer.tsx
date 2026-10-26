@@ -1,10 +1,11 @@
 import type { SkillView } from '@gitspace/protocol';
-import { parseBrowserShareLink, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { connectedTabText, TabChip } from './connected-tab.js';
+import { CaptureChip } from './capture-chip.js';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -164,6 +165,23 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     setShareChips((current) => new Map([...current, ...unread.map((link): [string, ShareChip] => [link.text, { state: 'reading' }])]));
     for (const link of unread) void readShareChip(link).then((chip) => setShareChips((current) => new Map(current).set(link.text, chip)));
   }, [tabs]);
+  // Captures mentioned in the draft (`capture://<id>`: the Browser tab's Mention, the extension's Copy mention), swapped
+  // out of its text into chips, each named once the workspace's captures are read (null: not found or not readable).
+  const [captures, setCaptures] = useState<readonly string[]>([]);
+  const [captureViews, setCaptureViews] = useState<ReadonlyMap<string, RuntimeBrowserCaptureView | null>>(new Map());
+  useEffect(() => {
+    const ids = captureMentionIds(message);
+    if (!ids.length) return;
+    setCaptures((current) => [...current, ...ids.filter((id) => !current.includes(id))]);
+    setMessage(message.replace(/capture:\/\/([0-9a-f-]{36})\s*/giu, (match: string, id: string) => ids.includes(id.toLowerCase()) ? '' : match));
+  }, [message]);
+  useEffect(() => {
+    const unread = captures.filter((id) => !captureViews.has(id));
+    if (!unread.length) return;
+    const named = (views: readonly RuntimeBrowserCaptureView[]) => setCaptureViews((current) => new Map([...current, ...unread.map((id): [string, RuntimeBrowserCaptureView | null] => [id, views.find((view) => view.capture.captureId === id) ?? null])]));
+    if (!sessionCommand) { named([]); return; }
+    void sessionCommand({ type: 'browserCaptures' }).then((result) => named(result.browserCaptures ?? []), () => named([]));
+  }, [captures]);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
     if (!text || !onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting) return false;
@@ -184,8 +202,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
           }
         } finally { setConnecting(false); }
       }
-      // What the agent reads in place of the links: the tabs, then the message.
-      const prompt = [...connected.map(connectedTabText), text].join('\n');
+      // What the agent reads in place of the links and chips: the tabs, the captures (the workspace adds each one's
+      // summary), then the message.
+      const prompt = [...connected.map(connectedTabText), ...(captures.length ? [captures.map(captureMention).join(' ')] : []), text].join('\n');
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
       const uploads = files.filter((file) => !file.type.startsWith('text/') || file.size > 256 * 1024);
       const uploaded = new Map<File, string>();
@@ -214,6 +233,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       else setLocalMessage(current => current.trim() === text ? '' : current);
       setAttachments([]);
       setTabs([]);
+      setCaptures([]);
       setJoined(connected);
       return true;
     } catch (failure) {
@@ -232,8 +252,8 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   // each edit/remove is reconciled against the canonical queue.
   const queue = useMemo<QueuedMessage[]>(() => controls
     ? [
-      ...controls.value.queue.steering.map((text, index) => ({ id: `steering:${index}`, text, files: [], kind: 'steering' as const })),
-      ...controls.value.queue.followUp.map((text, index) => ({ id: `followUp:${index}`, text, files: [], kind: 'followUp' as const })),
+      ...controls.value.queue.steering.map((text, index) => ({ id: `steering:${index}`, text: withoutCaptureSummaries(text), files: [], kind: 'steering' as const })),
+      ...controls.value.queue.followUp.map((text, index) => ({ id: `followUp:${index}`, text: withoutCaptureSummaries(text), files: [], kind: 'followUp' as const })),
     ]
     : [], [controls]);
   const onQueueChange = async (next: QueuedMessage[]): Promise<boolean | void> => {
@@ -313,6 +333,15 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         <Button variant="ghost" size="icon-compact" aria-label="Remove tab" disabled={connecting} onClick={() => setTabs((current) => current.filter((item) => item.text !== link.text))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}
+    {captures.length ? <ul aria-label="Mentioned captures" className="flex flex-wrap gap-1.5">{captures.map((id) => {
+      const view = captureViews.get(id);
+      const { steps, video, image } = view?.capture.tracks ?? {};
+      const detail = !view ? (captureViews.has(id) ? 'not found in this workspace' : 'reading…') : steps ? `${steps.count} steps` : video ? 'video' : image ? 'screenshot' : 'capture';
+      return <li key={id} aria-label={`Capture ${view?.capture.name ?? id}`} className="flex min-w-0 items-center gap-1">
+        <CaptureChip name={view?.capture.name ?? 'Capture'} detail={detail} />
+        <Button variant="ghost" size="icon-compact" aria-label="Remove capture" onClick={() => setCaptures((current) => current.filter((item) => item !== id))}><XClose width={14} height={14} /></Button>
+      </li>;
+    })}</ul> : null}
     <InputMessage
       data-slot="input-message"
       onBlurCapture={() => workspaceDraft?.onBlur()}
@@ -325,7 +354,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onFilesChange={setAttachments}
       accept="image/png,image/jpeg,image/webp,text/*,application/pdf"
       maxFiles={8}
-      history={controls?.value.history.map((entry) => entry.text) ?? []}
+      history={controls?.value.history.map((entry) => withoutCaptureSummaries(entry.text)) ?? []}
       status={streaming ? 'streaming' : 'idle'}
       streamingSubmitBehavior="queue"
       queue={queue}

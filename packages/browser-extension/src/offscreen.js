@@ -28,10 +28,13 @@ async function record({ captureId, groupId, streamId, account }) {
   const audio = new AudioContext();
   audio.createMediaStreamSource(stream).connect(audio.destination);
   const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', VIDEO_TYPE].find(type => MediaRecorder.isTypeSupported(type));
-  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2_500_000 });
+  // The recording takes its own copy of the sound, which the capturing bar's sound toggle turns off and on while you
+  // keep hearing the tab.
+  const sounds = stream.getAudioTracks().map(track => track.clone());
+  const recorder = new MediaRecorder(new MediaStream([...stream.getVideoTracks(), ...sounds]), { mimeType, videoBitsPerSecond: 2_500_000 });
   const sign = (method, pathname, bodySha256) => request({ uploadSign: { captureId, method, pathname, bodySha256 } }).then(reply => reply.header);
   const upload = file => new Upload(account, sign, { kind: 'capture', groupId, captureId, file, mediaType: file === 'video.webm' ? VIDEO_TYPE : 'image/jpeg' });
-  const recording = { stream, audio, recorder, video: upload('video.webm'), thumbnail: upload('thumbnail.jpg'), still: null, sound: stream.getAudioTracks().length > 0, startedAt: Date.now(), bytes: 0, written: Promise.resolve(), alive: 0, ended: null };
+  const recording = { stream, sounds, audio, recorder, video: upload('video.webm'), thumbnail: upload('thumbnail.jpg'), still: null, sound: sounds.length > 0, startedAt: Date.now(), bytes: 0, written: Promise.resolve(), alive: 0, ended: null };
   recorder.ondataavailable = event => {
     if (!event.data.size) return;
     recording.bytes += event.data.size;
@@ -70,7 +73,7 @@ function stop(captureId, reason) {
     recording.recorder.onstop = stopped.resolve;
     if (recording.recorder.state === 'inactive') stopped.resolve(); else recording.recorder.stop();
     await stopped.promise;
-    for (const track of recording.stream.getTracks()) track.stop();
+    for (const track of [...recording.stream.getTracks(), ...recording.sounds]) track.stop();
     await recording.audio.close().catch(() => {});
     const durationMs = Date.now() - recording.startedAt;
     try {
@@ -92,9 +95,18 @@ function ended(captureId, reason) {
   void stop(captureId, reason).then(result => chrome.runtime.sendMessage({ captureEnded: result })).catch(() => {});
 }
 
+/** The capturing bar's sound toggle: the recording's sound on or off from now. */
+function sound({ captureId, on }) {
+  const recording = recordings.get(captureId);
+  if (!recording || recording.ended) return Promise.reject(new Error('This capture is not recording here'));
+  if (!recording.sounds.length) return Promise.reject(new Error('This tab has no sound to record'));
+  for (const track of recording.sounds) track.enabled = on === true;
+  return Promise.resolve({ on: on === true });
+}
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id || message?.target !== 'offscreen') return;
-  const work = message.record ? record(message.record) : typeof message.stop === 'string' ? stop(message.stop, message.reason ?? null) : null;
+  const work = message.record ? record(message.record) : typeof message.stop === 'string' ? stop(message.stop, message.reason ?? null) : message.sound ? sound(message.sound) : null;
   if (!work) return;
   void work.then(respond, error => respond({ error: String(error?.message || error) }));
   return true;

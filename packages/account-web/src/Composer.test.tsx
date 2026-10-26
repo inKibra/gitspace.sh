@@ -179,3 +179,26 @@ it('sends without connecting a tab whose share ended or that you removed', async
   expect(sessionCommand).not.toHaveBeenCalled();
   expect(onSend.mock.calls.map(([text]) => text)).toEqual(['Compare and']);
 });
+
+it('turns a capture mention into a chip named from the workspace’s captures and sends the mention for the workspace to expand', async () => {
+  const captureId = '6f0c2a7e-1b2c-4d3e-8f90-a1b2c3d4e5f6', other = '00000000-0000-4000-8000-0000000000c2';
+  const view = { capture: { version: 2 as const, captureId, name: 'Order a pizza', by: 'you' as const, source: 'relay' as const, browser: 'Work Chrome', page: { url: 'https://shop.test/', title: 'Shop' }, target: null, startedAt: '2026-10-25T19:31:00.000Z', endedAt: '2026-10-25T19:31:14.000Z', state: 'saved' as const, reason: null, tracks: { steps: { path: 'steps.json' as const, count: 5 } }, skill: null }, files: {} };
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
+  const sessionCommand = vi.fn<NonNullable<ComposerProps['sessionCommand']>>(async () => ({ control, browserCaptures: [view] }));
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} sessionCommand={sessionCommand} />));
+
+  const textarea = container.querySelector('textarea')!;
+  await act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, `capture://${captureId} capture://${other} Make a skill of it`);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  for (let turn = 0; turn < 5; turn += 1) await act(async () => {});
+  expect(textarea.value).toBe('Make a skill of it');
+  expect(sessionCommand.mock.calls.map(([command]) => command)).toEqual([{ type: 'browserCaptures' }]);
+  expect(container.querySelector('[aria-label="Capture Order a pizza"]')?.textContent).toBe('Order a pizza· 5 steps');
+  expect(container.querySelector(`[aria-label="Capture ${other}"]`)?.textContent).toBe('Capture· not found in this workspace');
+  await act(async () => container.querySelector<HTMLButtonElement>(`[aria-label="Capture ${other}"] button[aria-label="Remove capture"]`)!.click());
+  await send();
+  expect(onSend.mock.calls.map(([text]) => text)).toEqual([`capture://${captureId}\nMake a skill of it`]);
+  expect(container.querySelector('[aria-label="Mentioned captures"]')).toBeNull();
+});

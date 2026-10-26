@@ -23,8 +23,9 @@ import { SHARE_EXPIRIES_MINUTES } from './share.js';
 type Connection = 'connected' | 'connecting' | 'off' | 'update' | 'unpaired';
 /** What an agent is doing on a group now: who (`main`) and, in a few words, what. */
 type Acting = { agent: string; doing: string };
-/** A workspace group using this Chrome; `held`: you hold one of its tabs (take over), whatever its agent does. */
-type Group = { groupId: string; name: string; color: string; project: string | null; tabs: number; acting: Acting | null; held: boolean };
+/** A workspace group using this Chrome; `held`: you hold one of its tabs (take over), whatever its agent does;
+ * `everything`: until when its agent has Everything (null while it has not) and whether you can allow it here. */
+type Group = { groupId: string; name: string; color: string; project: string | null; tabs: number; acting: Acting | null; held: boolean; everything: { until: string | null; available: boolean } };
 type Recording = { captureId: string; title: string; track: 'video' | 'frames'; startedAt: number; saving: boolean };
 /** What the service worker's `popupState` answers. `chrome` (this Chrome's name), `pairedAt` (when you paired it) and
  * `projects` (those that approved it) are null until the account said; `pairedAt` stays null for a Chrome paired before
@@ -38,7 +39,7 @@ type PopupState = {
 };
 type PopupRequest = { popupState: true } | { setEnabled: { enabled: boolean; minutes?: number } } | { stopGroup: string } | { focusGroup: string }
   | { ungroupTab: number } | { startCapture: number } | { stopCapture: string } | { shareCreate: { tabId: number; comment: boolean; expiresInMinutes: number } }
-  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { resetIdentity: true };
+  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { resetIdentity: true } | { everythingGrant: string } | { everythingEnd: string };
 /** The service worker answers the popup's next state, `ok` for pairing and reset, or why it refused. */
 type Reply = PopupState | { ok: true } | { error: string };
 declare const chrome: { runtime: { sendMessage(message: PopupRequest): Promise<Reply> } };
@@ -109,9 +110,32 @@ function Strip({ state }: { state: PopupState }) {
   </div>;
 }
 
+/** Everything on a workspace group (`powers.ts`): its time left with End now while its agent has it, else Allow
+ * everything for 1 hour where the account offers it. The time left is redrawn as each minute passes. */
+function Everything({ group, act }: { group: Group; act: Act }) {
+  const { until, available } = group.everything;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!until) return;
+    const left = Date.parse(until) - Date.now();
+    if (left <= 0) return;
+    const timer = setTimeout(() => setNow(Date.now()), left % 60_000 || 60_000);
+    return () => clearTimeout(timer);
+  }, [until, now]);
+  if (until && Date.parse(until) > now) return <div className="ml-5 flex items-center gap-2 rounded-md border border-[#fcd34d] bg-[#fef3c7] px-2 py-1 text-[11px] text-[#92400e]">
+    <span className="flex-1 font-semibold tabular-nums">⚡ Everything · {Math.max(1, Math.ceil((Date.parse(until) - now) / 60_000))} min left</span>
+    <Button variant="secondary" size="compact" onClick={() => { void act({ everythingEnd: group.groupId }, 'Everything ended.'); }}>End now</Button>
+  </div>;
+  if (!available) return null;
+  return <div className="ml-5 flex flex-col items-start text-[11px] text-muted-foreground">
+    <Button variant="ghost" size="compact" onClick={() => { void act({ everythingGrant: group.groupId }, ''); }}>⚡ Allow everything for 1 hour</Button>
+    <span className="px-2">Main agent only: any web page in this group, every power</span>
+  </div>;
+}
+
 function GroupRow({ group, act }: { group: Group; act: Act }) {
   const { acting } = group;
-  return <div className="flex items-center gap-2.5 rounded-lg px-1 py-1.5 hover:bg-hover">
+  return <div className="flex flex-col gap-1"><div className="flex items-center gap-2.5 rounded-lg px-1 py-1.5 hover:bg-hover">
     <span className="size-2.5 shrink-0 rounded-full" style={{ background: group.color }} />
     <div className="min-w-0 flex-1">
       <p className="truncate text-caption font-medium">{group.name}{group.project ? <> <span className="font-normal text-muted-foreground">· {group.project}</span></> : null}</p>
@@ -119,7 +143,7 @@ function GroupRow({ group, act }: { group: Group; act: Act }) {
     </div>
     {acting ? <Button variant="secondary" size="compact" onClick={() => { void act({ stopGroup: group.groupId }, 'Stopped.'); }}>Stop</Button>
       : <Button variant="ghost" size="compact" onClick={() => { void act({ focusGroup: group.groupId }, ''); }}>Show</Button>}
-  </div>;
+  </div><Everything group={group} act={act} /></div>;
 }
 
 /** Capture for a tab in a workspace group, in a row like Remove from group's: the popup is where Chrome lets GitSpace

@@ -1,13 +1,15 @@
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import {
-  BROWSER_SHARE_PER_CHROME, BROWSER_SHARE_VIEWERS, RuntimeBrowserPageCommentSchema, RuntimeBrowserShareAuditSchema, RuntimeBrowserShareBoxSchema,
+  BROWSER_COMMENT_CROP_BYTES, BROWSER_SHARE_PER_CHROME, BROWSER_SHARE_VIEWERS, RuntimeBrowserShareAuditSchema, RuntimeBrowserShareBoxSchema,
   RuntimeBrowserShareChromeRequestSchema, RuntimeBrowserShareEndSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareIconSchema, RuntimeBrowserShareJoinSchema, RuntimeBrowserShareNameSchema,
   RuntimeBrowserSharePointSchema, RuntimeBrowserShareSchema, RuntimeBrowserShareTargetSchema, RuntimeBrowserShareViewerMessageSchema, RuntimeBrowserShareViewerSchema,
   browserSharePointerColor, browserUnbase64,
-  type RuntimeBrowserConnectedTab, type RuntimeBrowserPageComment, type RuntimeBrowserShare, type RuntimeBrowserShareAudit, type RuntimeBrowserSharePreview,
+  type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite,
+  type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeBrowserShareAudit, type RuntimeBrowserSharePreview,
   type RuntimeBrowserShareServerMessage, type RuntimeBrowserShareViewer, type RuntimeBrowserShareViewerMessage,
 } from '@gitspace/protocol-runtime';
+import { COMMENT_CROPS, CommentThreadRowSchema, type StoredCommentThread } from './browser-comments.js';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { browserRouteReply, readBrowserSignedRequest, type BrowserRequestFailure } from './browser-upload.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, withDeviceAuthority } from './device-authority.js';
@@ -31,9 +33,9 @@ const UPDATE_REQUIRED = 'Update the GitSpace extension in Chrome to share tabs';
 const VIEW_ONLY = 'This share is view-only: you can watch and point';
 const SHARE = 'browser.relay.share:';
 const AUDIT = 'browser.relay.share-audit:';
+/** `browser.relay.share-comment:<shareId>:<root createdAt>:<threadId>`: the share's copy of its comment threads, kept
+ * from each change in the workspace, so a viewer joining sees them. */
 const COMMENT = 'browser.relay.share-comment:';
-/** Where comment crops land in the workspace's drive. */
-const CROPS = 'browser/comments/';
 /** Every viewer socket has this tag and `share-viewer:<shareId>`. */
 const VIEWER_TAG = 'share-viewer';
 /** A viewer socket says hello within this long. */
@@ -49,7 +51,6 @@ const ENDED_KEPT_MS = 24 * 60 * 60_000;
 const LISTED = 50;
 /** The largest frame the extension is asked for, in each dimension. */
 const FRAME_MAX = 1280;
-const CROP_MAX_BYTES = 400 * 1024;
 const VIEWER_MESSAGE_MAX = 16 * 1024;
 const SHARE_ROUTE = /^\/api\/shares\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(preview|join|live)$/u;
 const SHARE_VIEWER: SealedTokenKind = { scope: 'share-viewer:v1', context: 'gitspace-share-viewer-v1' };
@@ -114,8 +115,9 @@ export type BrowserShareHost = {
   group(groupId: string): Promise<{ projectId: string; workspaceId: string; pairingId: string } | undefined>;
   /** Throws, saying why, unless the Chrome at its current pairing is approved for the project. */
   approved(projectId: string, pairingId: string): Promise<void>;
-  /** Keeps a page comment in its workspace. */
-  commented(workspace: { projectId: string; workspaceId: string }, comment: RuntimeBrowserPageComment): Promise<void>;
+  /** Makes, replies in or resolves a thread in the workspace (`SpaceAuthorityDO.browserCommentWrite`), held to the
+   * share's threads; the share and its viewers then hear of it (`threadChanged`). Throws, saying why, when refused. */
+  comment(workspace: { projectId: string; workspaceId: string }, write: RuntimeBrowserCommentWrite, by: RuntimeBrowserCommentAuthor, scope: { shareId: string }): Promise<RuntimeBrowserCommentThread>;
   /** The workspace's drive, for comment crops. */
   drive(workspace: { projectId: string; workspaceId: string }): Pick<WorkspaceDrive, 'write'>;
   /** Re-arms the host's alarm at its earliest deadline, `nextDeadline` among them, or clears it. */
@@ -350,7 +352,8 @@ export class BrowserShares {
     if (message.type === 'size') { socket.serializeAttachment({ ...latest, size: { width: message.width, height: message.height } } satisfies ViewerSocket); return this.watch(record); }
     if (!record.comment) return this.send(socket, { type: 'error', message: VIEW_ONLY });
     if (message.type === 'hit') return this.hit(socket, socketId, record, message.at);
-    return this.comment(socket, viewer, record, message);
+    if (message.type === 'comment') return this.comment(socket, viewer, record, message);
+    return this.threadWrite(socket, viewer, record, message);
   }
 
   /** A viewer's socket closed: they left. */
@@ -439,7 +442,7 @@ export class BrowserShares {
     if (others.length >= BROWSER_SHARE_VIEWERS) return closeOpenSocket(socket, 1008, 'This share is full');
     const viewer: RuntimeBrowserShareViewer = { viewerId: token.viewerId, name: token.name, guest: token.guest, joinedAt: iso(Date.now()) };
     socket.serializeAttachment({ ...state, viewer } satisfies ViewerSocket);
-    this.send(socket, { type: 'joined', viewerId: viewer.viewerId, share: await this.greeting(record, false), viewers: [...others.map(other => other.viewer), viewer], comments: await this.comments(record.shareId) });
+    this.send(socket, { type: 'joined', viewerId: viewer.viewerId, share: await this.greeting(record, false), viewers: [...others.map(other => other.viewer), viewer], threads: await this.threads(record.shareId) });
     if (record.viewport) this.send(socket, { type: 'page', ...record.page, ...record.viewport });
     this.send(socket, { type: 'presence', online: this.host.online(record.pairingId) });
     const sharer = this.sharers.get(record.shareId);
@@ -469,30 +472,52 @@ export class BrowserShares {
     } finally { this.hits.delete(socketId); }
   }
 
-  /** A viewer's comment on a comment share: the extension anchors it, its crop goes to the workspace's drive and the
-   * comment to the workspace, and everyone watching sees it. */
+  /** A viewer's comment on a comment share, a new thread: the extension anchors it, its crop goes to the workspace's
+   * drive and the thread to the workspace, and everyone watching sees it. */
   private async comment(socket: WebSocket, viewer: RuntimeBrowserShareViewer, record: ShareRecord, message: Extract<RuntimeBrowserShareViewerMessage, { type: 'comment' }>): Promise<void> {
     const workspace = record.workspace;
     if (!workspace) return this.send(socket, { type: 'error', message: 'Comments need the tab in a workspace group' });
     if (!message.at && !message.region) return this.send(socket, { type: 'error', message: 'Point at something or drag over an area to comment on it' });
     try {
       const anchor = Anchor.parse(await this.host.request(record.pairingId, { operation: 'shareAnchor', shareId: record.shareId, ...(message.at ? { at: message.at } : {}), ...(message.region ? { region: message.region } : {}) }));
-      const commentId = crypto.randomUUID(), createdAt = iso(Date.now()), crop = anchor.crop ? browserUnbase64(anchor.crop) : null;
-      const cropPath = crop && crop.byteLength <= CROP_MAX_BYTES ? `${CROPS}${commentId}.jpg` : null;
-      if (crop && cropPath) await this.host.drive(workspace).write(cropPath, 'image/jpeg', crop);
-      const comment = RuntimeBrowserPageCommentSchema.parse({
-        version: 1, commentId, shareId: record.shareId, by: { name: viewer.name, guest: viewer.guest }, text: message.text,
-        page: { url: anchor.page.url.slice(0, 8192), title: anchor.page.title.slice(0, 500) }, target: anchor.target, region: anchor.region,
-        viewport: anchor.viewport, scroll: anchor.scroll, crop: cropPath, createdAt,
-      } satisfies RuntimeBrowserPageComment);
-      await this.host.commented({ projectId: workspace.projectId, workspaceId: workspace.workspaceId }, comment);
-      await this.ctx.storage.put(`${COMMENT}${record.shareId}:${createdAt}:${commentId}`, comment);
-      const kept = [...(await this.ctx.storage.list({ prefix: `${COMMENT}${record.shareId}:` })).keys()];
-      if (kept.length > COMMENTS_KEPT) await this.ctx.storage.delete(kept.slice(0, kept.length - COMMENTS_KEPT));
-      const comments = await this.comments(record.shareId);
-      for (const { socket: watching } of this.viewers(record.shareId)) this.send(watching, { type: 'comments', comments });
+      const crop = anchor.crop ? browserUnbase64(anchor.crop) : null;
+      const cropFile = crop && crop.byteLength <= BROWSER_COMMENT_CROP_BYTES ? `${COMMENT_CROPS}${crypto.randomUUID()}.jpg` : null;
+      if (crop && cropFile) await this.host.drive(workspace).write(cropFile, 'image/jpeg', crop);
+      const { target, region } = anchor;
+      await this.host.comment(workspace, {
+        op: 'comment', source: { kind: 'share', shareId: record.shareId }, page: { url: anchor.page.url.slice(0, 8192), title: anchor.page.title.slice(0, 500) }, text: message.text,
+        anchor: {
+          role: target?.role ?? '', name: target?.name ?? '', selector: target?.selectors[0] ?? '', box: { x: region.x, y: region.y, w: region.width, h: region.height },
+          ...(cropFile ? { cropFile } : {}), ...(message.region || !target ? { area: true } : {}), scroll: anchor.scroll, viewport: { w: anchor.viewport.width, h: anchor.viewport.height },
+        },
+      }, { kind: 'person', name: viewer.name, guest: viewer.guest }, { shareId: record.shareId });
       await this.audit(record.shareId, 'commented', viewer.name, viewer.guest, message.text);
     } catch (error) { this.send(socket, { type: 'error', message: `Your comment was not saved: ${described(error)}`.slice(0, 1024) }); }
+  }
+
+  /** A viewer's reply in one of the share's threads, or their resolving (reopening) one, which only the account's owner
+   * may do, never a guest. */
+  private async threadWrite(socket: WebSocket, viewer: RuntimeBrowserShareViewer, record: ShareRecord, message: Extract<RuntimeBrowserShareViewerMessage, { type: 'commentReply' | 'commentResolve' }>): Promise<void> {
+    const workspace = record.workspace;
+    if (!workspace) return this.send(socket, { type: 'error', message: 'Comments need the tab in a workspace group' });
+    if (message.type === 'commentResolve' && viewer.guest) return this.send(socket, { type: 'error', message: 'Only the account’s owner resolves comments' });
+    const write: RuntimeBrowserCommentWrite = message.type === 'commentReply' ? { op: 'reply', threadId: message.threadId, text: message.text } : { op: 'resolve', threadId: message.threadId, ...(message.reopen === undefined ? {} : { reopen: message.reopen }) };
+    try {
+      await this.host.comment(workspace, write, { kind: 'person', name: viewer.name, guest: viewer.guest }, { shareId: record.shareId });
+      if (message.type === 'commentReply') await this.audit(record.shareId, 'commented', viewer.name, viewer.guest, message.text);
+    } catch (error) { this.send(socket, { type: 'error', message: `${message.type === 'commentReply' ? 'Your reply was not saved' : 'The thread did not change'}: ${described(error)}`.slice(0, 1024) }); }
+  }
+
+  /** One of a share's threads was made or changed, wherever that happened (a viewer, your Chrome, the agent, the
+   * Browser tab): the share keeps it, its newest `COMMENTS_KEPT`, and everyone watching that share, and no other, sees
+   * it. A thread of no share, or of a forgotten share, changes nothing here. */
+  async threadChanged(thread: RuntimeBrowserCommentThread): Promise<void> {
+    const source = thread.root.source;
+    if (source.kind !== 'share' || await this.ctx.storage.get(`${SHARE}${source.shareId}`) === undefined) return;
+    await this.ctx.storage.put(`${COMMENT}${source.shareId}:${thread.root.createdAt}:${thread.root.id}`, { version: 2, thread } satisfies StoredCommentThread);
+    const kept = [...(await this.ctx.storage.list({ prefix: `${COMMENT}${source.shareId}:` })).keys()];
+    if (kept.length > COMMENTS_KEPT) await this.ctx.storage.delete(kept.slice(0, kept.length - COMMENTS_KEPT));
+    for (const { socket } of this.viewers(source.shareId)) this.send(socket, { type: 'thread', thread });
   }
 
   /** Asks the extension for frames at the largest viewer's size (at most `FRAME_MAX`) and for your pointer over the tab
@@ -650,9 +675,10 @@ export class BrowserShares {
     if (keys.length >= AUDIT_KEPT) await this.ctx.storage.delete(keys.slice(0, keys.length - AUDIT_KEPT + 1));
   }
 
-  /** A share's comments, oldest first. */
-  private async comments(shareId: string): Promise<RuntimeBrowserPageComment[]> {
-    return [...(await this.ctx.storage.list({ prefix: `${COMMENT}${shareId}:` })).values()].map(row => RuntimeBrowserPageCommentSchema.parse(row));
+  /** A share's threads, oldest first (version 1 comments, kept before threads, read as threads: see
+   * `CommentThreadRowSchema`). */
+  private async threads(shareId: string): Promise<RuntimeBrowserCommentThread[]> {
+    return [...(await this.ctx.storage.list({ prefix: `${COMMENT}${shareId}:` })).values()].map(row => CommentThreadRowSchema.parse(row));
   }
 
   /** What a share's greeting shows; `owner` (one of the account's devices) also learns the name of its Chrome. */

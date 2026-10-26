@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
-import { BROWSER_EXTENSION_PROTOCOL, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization } from '@gitspace/protocol-runtime';
+import { BROWSER_EVERYTHING_MS, BROWSER_EXTENSION_PROTOCOL, BROWSER_POWERS_UPDATE, browserBase64, signRuntimeBrowserAuthorityCertificate, signRuntimeAccountBrowserGrant, signRuntimeAccountBrowserAuthorization, type BrowserEverything, type BrowserPower } from '@gitspace/protocol-runtime';
 import { hostedBrowserRelay, type HostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
 
 const sockets: WebSocket[] = [];
@@ -111,6 +111,66 @@ test('a grant with a site at read reaches only an extension whose hello says it 
   expect(JSON.stringify(old.authorized)).not.toContain('"read"');
   await current.execute(['github.com']);
   expect(current.authorized).toEqual([expect.objectContaining({ body: expect.objectContaining({ command: expect.objectContaining({ grant: expect.objectContaining({ body: expect.objectContaining({ read: ['github.com'] }) }) }) }) })]);
+}));
+test('powers and Everything reach only an extension whose hello says powers; the relay holds a grant to the approval’s powers and to the Everything you allowed, for the main agent only, until its exact expiry or End now', () => fixture(async relay => {
+  const root = await keys(), workspace = await keys();
+  const expiresAt = new Date(Date.now() + 2 * BROWSER_EVERYTHING_MS).toISOString();
+  const authority = await signRuntimeBrowserAuthorityCertificate({ accountId: env.ACCOUNT_ID, projectId: 'project', workspaceId: 'workspace', publicKey: workspace.publicKey, issuedAt: new Date().toISOString(), expiresAt }, root.key.privateKey);
+  const chrome = async (ip: string, hello: object) => {
+    const pairing = await relay.pair({ ...trust, publicKey: root.publicKey }, 'wss://account.test/api/browser-relay/extension');
+    const connection = await connect(relay, ip);
+    await prove(connection, await keys(), pairing, pairing.code, hello);
+    const identity = (await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId);
+    if (!identity || identity.state !== 'pending-confirmation') throw new Error('Expected unconfirmed identity');
+    await relay.confirm(pairing.pairingId, identity.pairedKeyFingerprint);
+    const settings = await relay.projectSettings('project');
+    await relay.setProjectSettings('project', settings.revision, { defaultPairingId: settings.defaultPairingId ?? pairing.pairingId, approvals: [...settings.browsers.filter(browser => browser.approved).map(({ pairingId, powers }) => ({ pairingId, powers })), { pairingId: pairing.pairingId, powers: ['debug'] }] });
+    const placement = await relay.placement('project', pairing.pairingId);
+    const authorized: unknown[] = [], notices: unknown[] = [], groupId = crypto.randomUUID();
+    connection.socket.addEventListener('message', event => {
+      const message = z.object({ id: z.number().optional(), operation: z.string(), authorization: z.unknown().optional() }).loose().parse(JSON.parse(String(event.data)));
+      if (message.id === undefined) { notices.push(message); return; }
+      if (message.operation === 'authorize') authorized.push(message.authorization);
+      connection.socket.send(JSON.stringify({ id: message.id, result: message.operation === 'tabs' ? [] : {} }));
+    });
+    const execute = async (powers: { powers?: BrowserPower[]; everything?: BrowserEverything }, conversationKind: 'main' | 'subagent' = 'main') => {
+      const grant = await signRuntimeAccountBrowserGrant({ projectId: 'project', workspaceId: 'workspace', placement, groupId, groupName: 'Workspace', source: 'relay', stepsOnly: [], origins: ['example.com'], expiresAt, ...powers }, workspace.key.privateKey, authority);
+      const attemptId = crypto.randomUUID(), deadlineAt = new Date(Date.now() + 60_000).toISOString();
+      return relay.execute(await signRuntimeAccountBrowserAuthorization({ scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind, taskId: attemptId, requestId: attemptId, attemptId }, issuedAt: new Date().toISOString(), expiresAt: deadlineAt, dispatch: { version: 1, tool: 'browser', deadlineAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'tabs', source: 'relay', pairingId: pairing.pairingId }, grant } }, workspace.key.privateKey, authority));
+    };
+    return { pairingId: pairing.pairingId, groupId, authorized, notices, execute };
+  };
+  const everythingOf = async (pairingId: string) => (await relay.powers('project', 'workspace')).find(item => item.pairingId === pairingId)?.everything;
+  // An extension before 5.11 says no `powers` in its hello: it never gets a grant with powers or Everything.
+  const old = await chrome('192.0.2.40', { siteLevels: true }), current = await chrome('192.0.2.41', { siteLevels: true, powers: true });
+  await expect(old.execute({ powers: ['debug'] })).rejects.toThrow(BROWSER_POWERS_UPDATE);
+  await expect(relay.everything('project', 'workspace', old.pairingId, true)).rejects.toThrow(BROWSER_POWERS_UPDATE);
+  expect(old.authorized).toEqual([]);
+  expect((await relay.projectSettings('project')).browsers.map(browser => [browser.pairingId, browser.powers, browser.powersSupported])).toEqual([[old.pairingId, ['debug'], false], [current.pairingId, ['debug'], true]]);
+  // A grant's powers are the approval's.
+  await current.execute({ powers: ['debug'] });
+  await expect(current.execute({ powers: ['debug', 'storage'] })).rejects.toThrow('Browser powers changed: storage is no longer turned on');
+  // Everything is the one you allowed, for the main agent only, and the Chrome's group hears it.
+  await expect(current.execute({ everything: { expiresAt: new Date(Date.now() + 60_000).toISOString() } })).rejects.toThrow('Everything ended for this workspace on this Chrome');
+  const allowed = await relay.everything('project', 'workspace', current.pairingId, true);
+  if (!allowed) throw new Error('Expected Everything');
+  expect(Date.parse(allowed.expiresAt) - Date.now()).toBeGreaterThan(BROWSER_EVERYTHING_MS - 5000);
+  await current.execute({ everything: allowed });
+  await expect(current.execute({ everything: allowed }, 'subagent')).rejects.toThrow('main-agent-only');
+  expect(current.notices).toContainEqual({ operation: 'everything', groupId: current.groupId, expiresAt: allowed.expiresAt });
+  // It ends at its signed expiry exactly: on a millisecond before, gone at it.
+  const deadline = Date.parse(allowed.expiresAt);
+  vi.spyOn(Date, 'now').mockReturnValue(deadline - 1);
+  expect(await everythingOf(current.pairingId)).toEqual(allowed);
+  vi.spyOn(Date, 'now').mockReturnValue(deadline);
+  expect(await everythingOf(current.pairingId)).toBeNull();
+  vi.restoreAllMocks();
+  // End now: a grant still carrying it is refused, and the group hears it ended.
+  const again = await relay.everything('project', 'workspace', current.pairingId, true);
+  if (!again) throw new Error('Expected Everything');
+  await relay.everything('project', 'workspace', current.pairingId, false);
+  await expect(current.execute({ everything: again })).rejects.toThrow('Everything ended for this workspace on this Chrome');
+  expect(current.notices.at(-1)).toEqual({ operation: 'everything', groupId: current.groupId, expiresAt: null });
 }));
 test('a candidate past its pairing deadline is closed and frees its budget on the next admission', () => fixture(async relay => {
   await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');

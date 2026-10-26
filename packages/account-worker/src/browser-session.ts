@@ -59,7 +59,8 @@ export async function browserPreview(shim: CdpBrowserShim, targetId: string): Pr
 /** A client of the shared browser as the agent tools use it: the browser channel shape over a shim client. */
 function shimChannel(shim: CdpBrowserShim, label: string, hold: CdpShimOptions['hold']): BrowserChannel {
   const listeners = new Set<Parameters<BrowserChannel['subscribe']>[0]>();
-  const client = shim.client(event => { for (const listener of listeners) listener(event); }, { cursor: { label }, hold });
+  // A storage step reaches the cookies of the site it names (`browser-powers.ts`), the service session cookie never.
+  const client = shim.client(event => { for (const listener of listeners) listener(event); }, { cursor: { label }, hold, siteCookies: true });
   return {
     send: (method, params, sessionId) => client.send(method, params ?? {}, sessionId),
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -324,6 +325,8 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       storage: this.ctx.storage,
       // One channel serves every caller's single steps, so its cursor cannot say which agent acts.
       cloud: async () => shimChannel(await this.shim(), 'Agent', { holds: targetId => this.held.has(targetId), refuse: () => BROWSER_TAB_HELD }),
+      // Debug files of the cloud browser's tabs (`browser-powers.ts`).
+      drive: identity => workspaceDrive(this.env, identity),
       services: {
         urlPattern: hostedServiceUrlPattern(this.env),
         hostname: hostname => isHostedServiceHostname(this.env, hostname),

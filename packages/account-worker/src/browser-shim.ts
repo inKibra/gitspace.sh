@@ -13,6 +13,9 @@ export interface CdpShimOptions {
   hold?: { holds(targetId: string): boolean; refuse(targetId: string): string };
   /** Draws the ghost cursor on this client's pages, labeled with who acts (docs/APERTURE-DESIGN.md §6.4). */
   cursor?: { label: string };
+  /** The agent's single steps with a site's cookies (`browser-powers.ts`): `Network.getCookies`, `setCookie` and
+   * `deleteCookies` by the site's URL on a tab's session, never the workspace's service session cookie. */
+  siteCookies?: boolean;
   /** Runs before a client's navigation (`Page.navigate`, `Target.createTarget`) reaches the browser. */
   navigating?: (url: string) => Promise<void>;
 }
@@ -25,6 +28,8 @@ const REFUSED_COMMANDS: Readonly<Record<string, string>> = {
   'Storage.getCookies': WHOLE_BROWSER, 'Storage.setCookies': WHOLE_BROWSER, 'Storage.clearCookies': WHOLE_BROWSER, 'Storage.clearDataForOrigin': WHOLE_BROWSER, 'Storage.clearDataForStorageKey': WHOLE_BROWSER,
   'Network.getCookies': COOKIES, 'Network.setCookie': COOKIES, 'Network.setCookies': COOKIES, 'Network.deleteCookies': COOKIES,
 };
+/** The cookie commands a client with `siteCookies` sends on a tab's session. */
+const SITE_COOKIE_COMMANDS: Readonly<Record<string, true>> = { 'Network.getCookies': true, 'Network.setCookie': true, 'Network.deleteCookies': true };
 const SERVICE_COOKIE_VALUE = new RegExp(`${SERVICE_COOKIE}=[^;\\s]*`, 'gu');
 /** Blanks the service session cookie wherever a network event shows it: request headers (`Cookie`, raw header text)
  * and cookie lists (`associatedCookies`). Changes `value` in place; every client gets the same event. */
@@ -183,7 +188,9 @@ export class CdpShimClient {
     const page = session !== undefined && !this.browserSessions.has(session) ? this.pages.get(session) : typeof params.targetId === 'string' ? params.targetId : undefined;
     if (page !== undefined && this.options.hold?.holds(page)) throw new Error(this.options.hold.refuse(page));
     if (sessionId && this.browserSessions.has(sessionId)) return this.onBrowserSession(method, params, sessionId);
-    const refused = REFUSED_COMMANDS[method];
+    const siteCookie = this.options.siteCookies === true && session !== undefined && SITE_COOKIE_COMMANDS[method] === true;
+    if (siteCookie && params.name === SERVICE_COOKIE) throw new Error(`${method} would reach the workspace's service session cookie and is not allowed`);
+    const refused = siteCookie ? undefined : REFUSED_COMMANDS[method];
     const refusal = refused ? `${method} ${refused} and is not allowed` : this.options.policy?.(method, params, session) ?? null;
     if (refusal) throw new Error(refusal);
     if ((method === 'Page.navigate' || method === 'Target.createTarget') && typeof params.url === 'string') await this.options.navigating?.(params.url);
@@ -191,6 +198,8 @@ export class CdpShimClient {
       if (!this.sessions.has(session)) throw new Error(`Session ${session} does not belong to this client`);
       const result = await this.upstream.send(method, params, session);
       if (this.options.cursor) this.drawCursor(method, params, session);
+      // A site's cookies as a power step reads them: without the service session cookie.
+      if (siteCookie && method === 'Network.getCookies') { const read = z.object({ cookies: z.array(z.object({ name: z.string() }).loose()) }).parse(result); return { cookies: read.cookies.filter(cookie => cookie.name !== SERVICE_COOKIE) }; }
       return result;
     }
     switch (method) {

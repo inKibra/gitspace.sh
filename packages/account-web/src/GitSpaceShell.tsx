@@ -184,7 +184,7 @@ export interface GitSpaceShellProps {
   onOpenSettings?: (section?: 'source') => void;
   onNavigateView?: (view: AppView) => void;
   skills?: readonly SkillView[];
-  renderInspector?: (onClose: () => void, initialView: 'environment' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void) => ReactNode;
+  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void) => ReactNode;
   renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
@@ -594,8 +594,11 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [inspectorSection, setInspectorSection] = useState<'environment' | undefined>();
+  // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
+  // which plays it.
+  const capturing = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('capture');
+  const [inspectorOpen, setInspectorOpen] = useState(capturing);
+  const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | undefined>(capturing ? 'browser' : undefined);
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (typeof window === 'undefined') return 440;

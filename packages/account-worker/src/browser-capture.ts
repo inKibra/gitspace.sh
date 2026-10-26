@@ -1,13 +1,15 @@
 import { z } from 'zod';
-import { BROWSER_DRIVE_PREFIX, RuntimeBrowserCaptureSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
+import { BROWSER_DRIVE_PREFIX, RuntimeBrowserCaptureSchema, type RuntimeBrowserCapture, type RuntimeBrowserCaptureTracks, type RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
 import { CAPTURE_MAX_MS, CAPTURE_SCREENCAST, ScreencastRecorder } from '@gitspace/runtime-machine/browser-screencast';
-import type { CdpBrowserShim, CdpShimClient } from './browser-shim.js';
+import { browserCaptureRecorderFunction, CaptureTrackRecorder, captureTrackEvent } from '@gitspace/browser-extension';
+import type { CdpBrowserShim, CdpEvent, CdpShimClient } from './browser-shim.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
 
 /** The workspace drive as captures use it. */
 export type CaptureDrive = Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url'>;
-/** Files a capture's folder may hold beside `capture.json`. */
-export const CAPTURE_FILES = { 'image.jpg': 'image/jpeg', 'video.webm': 'video/webm', 'frames.bin': 'application/octet-stream', 'frames.json': 'application/json', 'thumbnail.jpg': 'image/jpeg' } as const;
+/** Files a capture's folder may hold beside `capture.json`; `steps.json` and `layout.jsonl` are its steps and layout
+ * tracks (`browser-capture-tracks.ts` in protocol-runtime). */
+export const CAPTURE_FILES = { 'image.jpg': 'image/jpeg', 'video.webm': 'video/webm', 'frames.bin': 'application/octet-stream', 'frames.json': 'application/json', 'thumbnail.jpg': 'image/jpeg', 'steps.json': 'application/json', 'layout.jsonl': 'application/x-ndjson' } as const;
 export type CaptureFile = keyof typeof CAPTURE_FILES;
 const encoder = new TextEncoder();
 
@@ -56,20 +58,85 @@ export async function captureViews(drive: CaptureDrive): Promise<RuntimeBrowserC
 }
 
 const TargetInfo = z.object({ targetInfo: z.object({ url: z.string(), title: z.string() }) });
-type Recording = { capture: RuntimeBrowserCapture; drive: CaptureDrive; client: CdpShimClient; sessionId: string; recorder: ScreencastRecorder; frames: WritableStreamDefaultWriter<Uint8Array>; stored: Promise<unknown>; stopping?: Promise<RuntimeBrowserCapture> };
+/** The isolated world a cloud capture's recorder runs in, in every document of its tab, and the binding it reports to. */
+const CAPTURE_WORLD = 'gitspace-capture', CAPTURE_BINDING = '__gitspaceCapture';
 
 /**
- * The cloud browser's captures (docs/APERTURE-DESIGN.md §11): each records one tab's screencast through a shim client
- * of its own. Frames stream into `frames.bin` in the workspace's drive as they are kept; `frames.json`, a thumbnail and
- * the saved `capture.json` are written at the stop. A capture stops itself at 30 minutes or 1 GiB.
+ * A cloud capture's steps and layout tracks: the recorder (`browserCaptureRecorderFunction`) runs in an isolated world
+ * of each document of the tab, where the agent's input and yours during take over are trusted input; the session's
+ * Page and Network events give the navigations and requests. Layout lines stream into `layout.jsonl` from the first.
+ */
+class CloudCaptureTracks {
+  readonly recorder: CaptureTrackRecorder;
+  private layout: { writer: WritableStreamDefaultWriter<Uint8Array>; stored: Promise<unknown> } | null = null;
+
+  constructor(private readonly drive: CaptureDrive, private readonly folder: string, startedAt: number, url: string) {
+    this.recorder = new CaptureTrackRecorder({ startedAt, url, layout: line => this.line(line) });
+  }
+
+  /** Puts the recorder in the tab's documents, this one and each later one. */
+  static async install(client: CdpShimClient, sessionId: string): Promise<void> {
+    const source = `(${browserCaptureRecorderFunction})(${JSON.stringify({ binding: CAPTURE_BINDING })})`;
+    for (const method of ['Page.enable', 'Network.enable']) await client.send(method, {}, sessionId);
+    await client.send('Runtime.addBinding', { name: CAPTURE_BINDING, executionContextName: CAPTURE_WORLD }, sessionId);
+    await client.send('Page.addScriptToEvaluateOnNewDocument', { source, worldName: CAPTURE_WORLD }, sessionId);
+    await client.send('Runtime.evaluate', { expression: source, contextId: await CloudCaptureTracks.world(client, sessionId) }, sessionId);
+  }
+
+  /** The recorder's world in the tab's current document (a world of that name is made once per document). */
+  private static async world(client: CdpShimClient, sessionId: string): Promise<number> {
+    const frameId = z.object({ frameTree: z.object({ frame: z.object({ id: z.string() }) }) }).parse(await client.send('Page.getFrameTree', {}, sessionId)).frameTree.frame.id;
+    return z.object({ executionContextId: z.number() }).parse(await client.send('Page.createIsolatedWorld', { frameId, worldName: CAPTURE_WORLD }, sessionId)).executionContextId;
+  }
+
+  event(event: CdpEvent): void {
+    if (event.method === 'Runtime.bindingCalled' && event.params?.name === CAPTURE_BINDING && typeof event.params.payload === 'string') this.recorder.page(event.params.payload);
+    else captureTrackEvent(this.recorder, event.method, event.params);
+  }
+
+  /** The field still being typed in becomes the last step and the recorder leaves the page; then `steps.json` is
+   * written and `layout.jsonl` completed. Answers the tracks they make. */
+  async save(client: CdpShimClient, sessionId: string): Promise<Pick<RuntimeBrowserCaptureTracks, 'steps' | 'layout'>> {
+    const expression = `(() => { const recorder = (${browserCaptureRecorderFunction}); const typing = recorder({ flush: true }); recorder({ remove: true }); return typing; })()`;
+    const typing = await CloudCaptureTracks.world(client, sessionId).then(contextId => client.send('Runtime.evaluate', { expression, contextId, returnByValue: true }, sessionId)).catch(() => null);
+    const value = z.object({ result: z.object({ value: z.unknown() }) }).safeParse(typing);
+    if (value.success && value.data.result.value) this.recorder.page(`step ${JSON.stringify(value.data.result.value)}`);
+    const finished = await this.recorder.finish();
+    await this.drive.write(`${this.folder}steps.json`, CAPTURE_FILES['steps.json'], finished.steps);
+    if (!this.layout) return { steps: finished.tracks.steps };
+    await this.layout.writer.close();
+    await this.layout.stored;
+    return finished.tracks;
+  }
+
+  async abort(error: unknown): Promise<void> { await this.layout?.writer.abort(error).catch(() => {}); }
+
+  private line(bytes: Uint8Array): Promise<void> {
+    if (!this.layout) {
+      const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+      const stored = this.drive.write(`${this.folder}layout.jsonl`, CAPTURE_FILES['layout.jsonl'], readable);
+      stored.catch(() => {});
+      this.layout = { writer: writable.getWriter(), stored };
+    }
+    return this.layout.writer.write(bytes);
+  }
+}
+type Recording = { capture: RuntimeBrowserCapture; drive: CaptureDrive; client: CdpShimClient; sessionId: string; recorder: ScreencastRecorder; frames: WritableStreamDefaultWriter<Uint8Array>; stored: Promise<unknown>; tracks: CloudCaptureTracks; stopping?: Promise<RuntimeBrowserCapture> };
+
+/**
+ * The cloud browser's captures (docs/APERTURE-DESIGN.md §11): each records one tab's screencast, steps and layout
+ * through a shim client of its own. Frames stream into `frames.bin` and layout into `layout.jsonl` in the workspace's
+ * drive as they are kept; `frames.json`, a thumbnail, `steps.json` and the saved `capture.json` are written at the
+ * stop. A capture stops itself at 30 minutes or 1 GiB.
  */
 export class CloudCaptures {
   private readonly live = new Map<string, Recording>();
   get recording(): boolean { return this.live.size > 0; }
 
   async start(shim: CdpBrowserShim, drive: CaptureDrive, input: { captureId: string; groupId: string; targetId: string }): Promise<RuntimeBrowserCapture> {
-    let recorder: ScreencastRecorder | undefined, sessionId: string | undefined;
+    let recorder: ScreencastRecorder | undefined, tracks: CloudCaptureTracks | undefined, sessionId: string | undefined;
     const client = shim.client(event => {
+      if (event.sessionId === sessionId) tracks?.event(event);
       if (event.method === 'Page.screencastFrame' && event.sessionId === sessionId) recorder?.frame(event.params);
       // The tab closed: what was recorded is kept.
       if (event.method === 'Target.detachedFromTarget' && event.params?.sessionId === sessionId) void this.stop(input.captureId).catch(() => {});
@@ -79,7 +146,7 @@ export class CloudCaptures {
       const page = TargetInfo.parse(await client.send('Target.getTargetInfo', { targetId: input.targetId })).targetInfo;
       const startedAt = new Date().toISOString();
       const capture = await writeCapture(drive, {
-        version: 1, captureId: input.captureId, name: captureName(page.title, startedAt), by: 'you', source: 'headless', browser: 'Cloud browser',
+        version: 2, captureId: input.captureId, name: captureName(page.title, startedAt), by: 'you', source: 'headless', browser: 'Cloud browser',
         target: { groupId: input.groupId, targetId: input.targetId }, page: { url: page.url.slice(0, 8192), title: page.title.slice(0, 500) },
         startedAt, endedAt: null, state: 'recording', reason: null, tracks: {},
       });
@@ -94,8 +161,10 @@ export class CloudCaptures {
         ack: frameSessionId => client.send('Page.screencastFrameAck', { sessionId: frameSessionId }, session),
         limit: reason => { void this.stop(input.captureId, reason).catch(() => {}); },
       });
-      this.live.set(input.captureId, { capture, drive, client, sessionId, recorder, frames, stored });
+      tracks = new CloudCaptureTracks(drive, captureFolder(input.captureId), Date.parse(startedAt), page.url);
+      this.live.set(input.captureId, { capture, drive, client, sessionId, recorder, frames, stored, tracks });
       setTimeout(() => { void this.stop(input.captureId, 'The capture reached 30 minutes').catch(() => {}); }, CAPTURE_MAX_MS);
+      await CloudCaptureTracks.install(client, sessionId);
       await client.send('Page.startScreencast', CAPTURE_SCREENCAST, sessionId);
       return capture;
     } catch (error) {
@@ -131,13 +200,16 @@ export class CloudCaptures {
       await client.send('Page.stopScreencast', {}, sessionId).catch(() => {});
       const frames = await recording.recorder.stop().finally(() => recording.frames.close().catch(() => {}));
       const endedAt = new Date().toISOString();
-      if (!frames.count) { await recording.stored.catch(() => {}); return await writeCapture(drive, { ...capture, endedAt, state: 'failed', reason: ended ?? 'The tab showed nothing to record' }); }
+      if (!frames.count) { await recording.stored.catch(() => {}); await recording.tracks.abort(new Error('Nothing recorded')); return await writeCapture(drive, { ...capture, endedAt, state: 'failed', reason: ended ?? 'The tab showed nothing to record' }); }
       await recording.stored;
       await drive.write(`${folder}frames.json`, CAPTURE_FILES['frames.json'], encoder.encode(JSON.stringify(frames.index)));
       if (frames.thumbnail) await drive.write(`${folder}thumbnail.jpg`, CAPTURE_FILES['thumbnail.jpg'], frames.thumbnail);
-      return await writeCapture(drive, { ...capture, endedAt, state: 'saved', reason: ended ?? null, tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: frames.count, width: frames.width, height: frames.height } } });
+      // Steps and layout that could not be saved leave the frames saved without them.
+      const steps = await recording.tracks.save(client, sessionId).catch(async (error: unknown) => { await recording.tracks.abort(error); return {}; });
+      return await writeCapture(drive, { ...capture, endedAt, state: 'saved', reason: ended ?? null, tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: frames.count, width: frames.width, height: frames.height }, ...steps } });
     } catch (error) {
       await recording.frames.abort(error).catch(() => {});
+      await recording.tracks.abort(error);
       return writeCapture(drive, { ...capture, endedAt: new Date().toISOString(), state: 'failed', reason: (error instanceof Error ? error.message : String(error)).slice(0, 1024) });
     } finally {
       this.live.delete(capture.captureId);

@@ -5,9 +5,13 @@ import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { RuntimeBrowserHolderSchema, RuntimeBrowserPageCommentSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserHolder, type RuntimeBrowserPageComment, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
-import { BROWSER_GROUP_ROWS, PAGE_COMMENT_ROWS, PAGE_COMMENTS_KEPT, retireWorkspaceBrowsers } from './runtime-browser.js';
+import { RuntimeBrowserCommentAuthorSchema, RuntimeBrowserCommentFilterSchema, RuntimeBrowserCommentWriteSchema, RuntimeBrowserHolderSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentFilter, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite, type RuntimeBrowserHolder, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
+import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
+import { announceComment, workspaceCommentThreads, writeWorkspaceComment, type CommentScope } from './browser-comments.js';
 import { holdersChanged } from './browser-takeover.js';
+import { captureReplayAskedText, withCaptureSummaries } from './browser-capture-agent.js';
+import { readCapture } from './browser-capture.js';
+import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
@@ -46,8 +50,6 @@ type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 /** How long a machine stays offline before its workspaces' conversations are told. */
 const OFFLINE_NOTICE_MS = 60_000;
 const OfflineMachinesSchema = z.record(z.string(), z.object({ since: z.number(), told: z.boolean() }));
-/** How many page comment rows (`PAGE_COMMENT_ROWS`) the workspace holds. */
-const PAGE_COMMENT_COUNT = 'runtime.page-comment-count';
 
 /** Whether a base checkout at `commit` already holds the project's `tip` (true) or fast-forwards to it (false). One with
  * commits the tip lacks is never moved there: those commits would leave its branch. */
@@ -576,22 +578,35 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
   }
 
-  /** A comment someone watching one of this workspace's shares made on its tab (docs/APERTURE-DESIGN.md §8), kept as a
-   * row for the agent's `comments` and the Browser tab; past `PAGE_COMMENTS_KEPT` the oldest go. Tabs showing the
-   * Browser tab hear of it (`page-comments`). An archived workspace takes none. */
-  async pageCommentAdded(raw: unknown, comment: RuntimeBrowserPageComment): Promise<void> {
+  /** Everything (`browser-powers.ts`) began or ended for this workspace on one of its Chromes: tabs showing the
+   * Browser tab read it again. */
+  async browserEverythingChanged(raw: unknown): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
+  }
+
+  /** A change to this workspace's comment threads (docs/APERTURE-DESIGN.md §9) from the relay: a share viewer's comment,
+   * reply or resolve (`scope` holds them to their share), your Chrome's in-page tool, or a capture share's viewer
+   * (held to their capture). Tabs showing the Browser tab hear of it, and the main conversation of a person's new
+   * comment or reply; the relay tells share viewers and Chromes itself. Throws, saying why, when refused. An archived
+   * workspace takes none. */
+  async browserCommentWrite(raw: unknown, write: RuntimeBrowserCommentWrite, by: RuntimeBrowserCommentAuthor, scope: CommentScope = {}): Promise<RuntimeBrowserCommentThread> {
     const identity = RuntimeIdentitySchema.parse(raw);
     authorizeWorkspaceRuntime(await this.metadata(identity), identity, true);
-    const row = RuntimeBrowserPageCommentSchema.parse(comment);
-    const key = `${PAGE_COMMENT_ROWS}${new Date(row.createdAt).toISOString()}:${row.commentId}`;
-    await this.ctx.storage.transaction(async tx => {
-      const kept = z.number().int().nonnegative().parse(await tx.get(PAGE_COMMENT_COUNT) ?? 0) + (await tx.get(key) === undefined ? 1 : 0);
-      await tx.put(key, row);
-      const oldest = kept > PAGE_COMMENTS_KEPT ? [...(await tx.list({ prefix: PAGE_COMMENT_ROWS, limit: kept - PAGE_COMMENTS_KEPT })).keys()] : [];
-      if (oldest.length) await tx.delete(oldest);
-      await tx.put(PAGE_COMMENT_COUNT, kept - oldest.length);
-    });
-    this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId), version: Date.now() }]);
+    const written = await writeWorkspaceComment(this.ctx.storage, RuntimeBrowserCommentWriteSchema.parse(write), RuntimeBrowserCommentAuthorSchema.parse(by), scope);
+    await announceComment({
+      live: () => this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'page-comments', identity.projectId), version: Date.now() }]),
+      event: async event => (await this.getRuntime(identity)).browserEvent(event),
+    }, written);
+    return written.thread;
+  }
+
+  /** This workspace's comment threads that match `filter`, newest first: for the relay's Chrome comment tool and capture
+   * shares. */
+  async browserComments(raw: unknown, filter: RuntimeBrowserCommentFilter): Promise<RuntimeBrowserCommentThread[]> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
+    return workspaceCommentThreads(this.ctx.storage, RuntimeBrowserCommentFilterSchema.parse(filter));
   }
 
   /** Permanent deletion of this workspace's runtime, attachments and placement. The tombstone is written before and
@@ -830,7 +845,23 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return this.environment.ended(runId, signal);
   }
   async runtimeDraft(raw: unknown, actor: { deviceId: string }) { const input = RuntimeDraftSaveInputSchema.parse(raw); return (await this.getRuntime(input)).saveDraft(input, actor.deviceId); }
-  async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) { const input = RuntimeSubmitInputSchema.parse(raw); return (await this.getRuntime(input)).submit(input, actor?.deviceId); }
+  /** A message naming captures (`capture://<id>`) reaches the agent with each one's summary after its text
+   * (`browser-capture-agent.ts`). */
+  async runtimeSubmit(raw: unknown, actor?: { deviceId: string }) {
+    const input = RuntimeSubmitInputSchema.parse(raw), runtime = await this.getRuntime(input);
+    return runtime.submit({ ...input, text: await withCaptureSummaries(input.text, workspaceDrive(this.env, input), this.ctx.storage) }, actor?.deviceId);
+  }
+  /** You asked from your Chrome's saved-capture card (`browser-relay.ts`) for a capture's steps to be replayed: the main
+   * conversation hears it (`capture-replay`) and replays it with web_browser. A capture this workspace does not keep is
+   * not announced; an archived workspace takes none. */
+  async captureReplayAsked(raw: unknown, request: { captureId: string; pairingId: string; browser: string }): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    authorizeWorkspaceRuntime(await this.metadata(identity), identity, true);
+    const capture = await readCapture(workspaceDrive(this.env, identity), request.captureId);
+    if (!capture) return;
+    const at = new Date().toISOString();
+    await (await this.getRuntime(identity)).browserEvent({ kind: 'capture-replay', requestId: `capture-replay:${capture.captureId}:${at}`, sender: { id: request.pairingId, name: `Chrome "${request.browser}"` }, text: captureReplayAskedText(capture), payload: { captureId: capture.captureId, at } });
+  }
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
   /** Approving an agent's machine-attach question attaches that machine; the asking conversation hears when it is ready. */
   async runtimeAnswer(raw: unknown, actor: { deviceId: string; canApprove: boolean }) {
