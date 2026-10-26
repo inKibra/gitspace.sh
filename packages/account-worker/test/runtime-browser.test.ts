@@ -659,6 +659,19 @@ test('a share link you paste connects its tab to the workspace’s group on its 
   expect(RuntimeBrowserConnectedTabSchema.parse(await manage({ action: 'shareConnect', ...paste('Notes') }))).toMatchObject({ groupId: connected.groupId, targetId: 'tab-Notes' });
 });
 
+test('a tab you add from your Chrome’s popup gets the workspace’s group there: made with a signed grant the first time, renewed after, the one the agent’s tabs uses', async () => {
+  const f = await fixture('physical', true);
+  f.knownPairings.set(f.pairing.pairingId, { ...f.pairing });
+  /** The workspace's grants on that Chrome, as the steps it signed carry them. */
+  const grants = () => f.dispatches.flatMap(dispatch => 'body' in dispatch && dispatch.body.command.type === 'execute' ? [dispatch.body.command.grant.body] : []);
+  const groupId = await f.authority.manage(f.input.conversationId, undefined, { action: 'tabGroup', pairingId: f.pairing.pairingId });
+  expect(grants()).toEqual([expect.objectContaining({ groupId, projectId: 'project', workspaceId: 'workspace', groupName: 'Workspace', placement: expect.objectContaining({ pairingId: f.pairing.pairingId }) })]);
+  expect(await f.authority.manage(f.input.conversationId, undefined, { action: 'tabGroup', pairingId: f.pairing.pairingId })).toBe(groupId);
+  expect(grants().map(grant => grant.groupId)).toEqual([groupId, groupId]);
+  const agentTabs = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'tabs', source: 'relay', pairingId: f.pairing.pairingId }), requestId: 'agent-tabs', attemptId: 'agent-tabs' };
+  expect((await f.authority.prepare(agentTabs)).groupId).toBe(groupId);
+});
+
 test('a comment thread: you start one and reply from the Browser tab, the main agent replies and resolves it, you reopen it; subagents and guests never write what is not theirs; each person’s new comment or reply reaches the main conversation once, and every change the relay', async () => {
   const f = await fixture();
   const page = { url: 'https://example.com/pricing#plans', title: 'Pricing' };

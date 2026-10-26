@@ -202,8 +202,8 @@ test('the relay records the extension version and protocol each browser reports,
   const previous = await chrome('Chrome/129', { protocol: BROWSER_EXTENSION_PROTOCOL - 1 });
   const current = await chrome('Chrome/130', { protocol: BROWSER_EXTENSION_PROTOCOL, extension: '5.1.0' });
   expect(unversioned.ready).toEqual({ updateRequired: { protocol: 0, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } });
-  expect(previous.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true });
-  expect(current.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true });
+  expect(previous.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true, addTab: true });
+  expect(current.ready).toEqual({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true, addTab: true });
   const extensions = Object.fromEntries((await relay.status()).pairings.map(pairing => [pairing.pairingId, pairing.extension]));
   expect(extensions[unversioned.pairingId]).toEqual({ version: null, protocol: 0, updateRequired: true });
   expect(extensions[previous.pairingId]).toEqual({ version: null, protocol: BROWSER_EXTENSION_PROTOCOL - 1, updateRequired: false });

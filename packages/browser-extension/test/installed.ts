@@ -65,7 +65,7 @@ const DEFAULT_FAVICON = png(0);
  * (`commentThreads`, `commentRequests`); `hold` delays an upload request until the test lets it go. Capture's
  * offscreen document runs as Chrome would load it (`recorders`). `restart` stops the service worker and starts it
  * again on the same Chrome and IndexedDB. */
-export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number; activity?: boolean; takeover?: boolean; comments?: boolean; captureTracks?: boolean; powers?: boolean } = {}) {
+export async function installed(options: { local?: Record<string, unknown>; live?: boolean; protocol?: number; activity?: boolean; takeover?: boolean; comments?: boolean; captureTracks?: boolean; powers?: boolean; addTab?: boolean } = {}) {
   const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const workspace = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const identity = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
@@ -112,6 +112,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
   /** Tabs the extension closed (`chrome.tabs.remove`), and windows it brought to the front. */
   const removed: number[] = [];
   const focusedWindows: number[] = [];
+  /** URLs of the tabs the extension opened (`chrome.tabs.create`). */
+  const opened: string[] = [];
   let clock = 0;
   let timerId = 0;
   const timers: Timer[] = [];
@@ -204,6 +206,25 @@ export async function installed(options: { local?: Record<string, unknown>; live
     else thread.root.resolved = body.reopen ? null : { by: 'Bradley', at: new Date().toISOString() };
     return json({ status: 'ok', value: { thread } });
   };
+  /** The workspaces the account lists to this Chrome's popup (`POST /api/browser-relay/workspaces`), and each request
+   * as it came. Adding a tab works as the relay does it: for the workspace of this Chrome's grant, its step (`tabs`)
+   * makes or renews its group and the tab joins it (`adoptTab`); a workspace of a project that has not approved this
+   * Chrome, or one the account does not know, is refused. */
+  const workspaces: Array<{ projectId: string; project: string; workspaceId: string; name: string; approved: boolean }> = [];
+  const workspaceRequests: Array<Record<string, unknown>> = [];
+  const workspaceRequest = async (request: AccountRequest) => {
+    const body = JSON.parse(new TextDecoder().decode(request.body));
+    workspaceRequests.push(body);
+    if (body.op === 'list') return json({ status: 'ok', value: { workspaces } });
+    const chosen = workspaces.find(item => item.projectId === body.projectId && item.workspaceId === body.workspaceId);
+    if (!chosen?.approved) return new Response(JSON.stringify({ status: 'error', error: { code: 'WORKSPACE_CHROME_UNAPPROVED', message: `This Chrome isn't approved in ${chosen?.project ?? 'that project'}` } }), { status: 403 });
+    if (chosen.projectId !== projectId || chosen.workspaceId !== workspaceId) return new Response(JSON.stringify({ status: 'error', error: { code: 'WORKSPACE_UNKNOWN', message: 'That is not an active workspace of this account' } }), { status: 404 });
+    await authorize({ type: 'execute', args: { action: 'tabs', source: 'relay', pairingId }, grant }, 'browser');
+    await execute({ operation: 'tabs', groupId: grant.body.groupId });
+    try { await execute({ operation: 'adoptTab', groupId: grant.body.groupId, targetId: body.targetId }); }
+    catch (error) { return new Response(JSON.stringify({ status: 'error', error: { code: 'WORKSPACE_ADD_REFUSED', message: error instanceof Error ? error.message : String(error) } }), { status: 409 }); }
+    return json({ status: 'ok', value: { groupId: grant.body.groupId } });
+  };
   const fetch = async (input: URL | string, init: { method?: string; headers?: Record<string, string>; body?: Uint8Array<ArrayBuffer> | string; credentials?: string } = {}) => {
     const url = new URL(String(input));
     if (url.protocol === 'chrome-extension:' && url.pathname === '/_favicon/') return new Response(favicons.get(url.searchParams.get('pageUrl') ?? '') ?? DEFAULT_FAVICON);
@@ -218,6 +239,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
     for (const hold of held) if (hold.matches(request)) await hold.release;
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/shares') return shareRequest(request);
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/comments') return commentRequest(request);
+    if (request.method === 'POST' && url.pathname === '/api/browser-relay/workspaces') return workspaceRequest(request);
     if (request.method === 'POST' && url.pathname === '/api/browser-relay/pairing-code') {
       const code = String(JSON.parse(new TextDecoder().decode(request.body)).code), details = pairingCodes.get(code);
       pairingCodes.delete(code);
@@ -328,6 +350,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
       get: async (id: number) => tabs.get(id),
       query: async (query: { groupId?: number; active?: boolean }) => [...tabs.values()].filter(tab => query.active ? tab.id === activeTabId && (query.groupId === undefined || tab.groupId === query.groupId) : tab.groupId === query.groupId),
       update: async (tabId: number) => { focused.push({ tabId, windowId: tabs.get(tabId)?.windowId ?? -1 }); },
+      /** Tabs the extension opened, by URL. */
+      create: async ({ url }: { url: string }) => { opened.push(url); return { id: 1000 + opened.length, url }; },
       ungroup: async (tabId: number) => { ungrouped.push(tabId); },
       // Like Chrome: the tab goes, and `onRemoved` reports it.
       remove: async (ids: number | number[]) => { for (const id of [ids].flat()) { removed.push(id); tabs.delete(id); for (const listener of tabRemoved) listener(id); } },
@@ -391,7 +415,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
       sent, notify,
     });
     runInContext(extensionFiles('https://account.gitspace.test')['background.js'] ?? '', started);
-    if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4}; accountActivity = ${options.activity === true}; accountTakeover = ${options.takeover === true}; accountComments = ${options.comments === true}; accountCaptureTracks = ${options.captureTracks === true}; accountPowers = ${options.powers === true};`, started);
+    if (!options.live) runInContext(`socket = { readyState: 1, send: value => { sent.push(JSON.parse(value)); notify(); }, close() { this.readyState = 3; } }; connected = true; accountProtocol = ${options.protocol ?? 4}; accountActivity = ${options.activity === true}; accountTakeover = ${options.takeover === true}; accountComments = ${options.comments === true}; accountCaptureTracks = ${options.captureTracks === true}; accountPowers = ${options.powers === true}; accountAddTab = ${options.addTab === true};`, started);
     await settle();
     return started;
   };
@@ -506,7 +530,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
    * comment request carry this Chrome's signature over their label, method, path, body hash, time and nonce; a request
    * to an upload's link carries no signature at all. */
   const authorizedAsRequired = async (request: AccountRequest) => {
-    const label = request.pathname === '/api/browser-relay/uploads' ? 'upload' : request.pathname === '/api/browser-relay/shares' ? 'share' : request.pathname === '/api/browser-relay/comments' ? 'comment' : null;
+    const label = request.pathname === '/api/browser-relay/uploads' ? 'upload' : request.pathname === '/api/browser-relay/shares' ? 'share' : request.pathname === '/api/browser-relay/comments' ? 'comment' : request.pathname === '/api/browser-relay/workspaces' ? 'workspace' : null;
     if (!label) return request.pathname.startsWith('/api/uploads/') && request.header === null;
     if (!request.header) return false;
     const proof = JSON.parse(Buffer.from(request.header, 'base64url').toString());
@@ -515,9 +539,9 @@ export async function installed(options: { local?: Record<string, unknown>; live
     return proof.pairingId === pairingId && proof.generation === 1 && crypto.subtle.verify('Ed25519', identity.publicKey, Buffer.from(proof.signature, 'base64'), new TextEncoder().encode(message));
   };
   return {
-    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, stored: state,
+    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, opened, stored: state,
     requests, uploads, uploaded, files, shares, pairingCodes, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
-    commentThreads, commentRequests,
+    commentThreads, commentRequests, workspaces, workspaceRequests, pairingId,
     execute, authorize, begin, signGrant, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor, restart,
     /** You bring a tab to the front of its window, as Chrome reports it (`chrome.tabs.onActivated`). */
     activate: (tabId: number) => { activeTabId = tabId; for (const listener of tabActivated) listener({ tabId, windowId: tabs.get(tabId)?.windowId ?? 1 }); },

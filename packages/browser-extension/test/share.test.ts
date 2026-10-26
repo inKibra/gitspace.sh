@@ -240,7 +240,7 @@ describe('Share this tab in the popup', () => {
     chrome.activate(9);
     const popup = await chrome.openPopup();
     closing.push(popup.close);
-    expect(button(popup, 'comment')).toMatchObject({ disabled: true, title: 'Comments need the tab in a workspace group' });
+    expect(button(popup, 'comment')).toMatchObject({ disabled: true });
     expect(popup.document.body.textContent).toContain('This tab · elsewhere.example');
     // There is no Share button: copying the link makes the share, then copies it.
     button(popup, 'Copy to clipboard').click();

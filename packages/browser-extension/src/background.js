@@ -17,6 +17,7 @@ import { TabScreencast } from './screencast.ts';
 import { ChromeEverything, EVERYTHING_ORIGINS, powerStepCommand, stepReach } from './powers.ts';
 import { CaptureTracksInChrome } from './capture-tracks.ts';
 import { relaySignature, Upload } from './upload.ts';
+import { workspaceRequest } from './workspaces.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 const ACCOUNT_ORIGIN = new URL(GITSPACE_ACCOUNT_URL).origin;
@@ -139,6 +140,13 @@ let accountCaptureTracks = false;
 /** Whether the connected account takes Everything from this Chrome (its `ready` says `powers`): `everything`
  * requests, answered by `everything` notices. */
 let accountPowers = false;
+/** Whether the connected account takes the popup's workspace requests (its `ready` says `addTab`): the workspaces to
+ * add a tab to, and adding it (`workspaces.ts`). */
+let accountAddTab = false;
+const ADD_TAB_OFFLINE = 'Adding a tab to a workspace needs GitSpace connected to your account';
+const ADD_TAB_UPDATE = 'Your GitSpace account does not add tabs to workspaces yet; update GitSpace';
+/** Why the popup cannot add a tab to a workspace now; null when it can. */
+function addTabUnavailable() { return !connected ? ADD_TAB_OFFLINE : !accountAddTab ? ADD_TAB_UPDATE : null; }
 const EVERYTHING_ALARM = 'relay-everything';
 /** Everything on this Chrome's workspace groups. When it begins or ends on a group, its title and the toolbars of the
  * tabs the agent uses there follow, and each tab of it is checked again: at its expiry a tab off the approved sites
@@ -2084,8 +2092,9 @@ async function connect() {
           // `closeTab`, `focusTab`); `siteLevels`: it enforces a grant's sites at read; `takeover`: it takes `takeOver`
           // and `resume`, and refuses the agent's commands on a tab you hold; `comments`: it has the in-page comment
           // tool, takes the account's `comments` notices and Show on page (`showComment`); `captureTracks`: its captures
-          // record steps and layout (`capture-tracks.ts`); `stepEnded`: it takes the account's `stepEnded` notices.
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true, comments: true, captureTracks: true, powers: true, stepEnded: true }));
+          // record steps and layout (`capture-tracks.ts`); `stepEnded`: it takes the account's `stepEnded` notices;
+          // `addTab`: its popup adds tabs to workspaces (`workspaces.ts`).
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true, comments: true, captureTracks: true, powers: true, stepEnded: true, addTab: true }));
           return;
         } finally { authenticating = false; }
       }
@@ -2105,7 +2114,7 @@ async function connect() {
           updateToolbar();
           connection.close();
         } else {
-          connected = true; accountProtocol = account; accountActivity = message.groupActivity === true; accountTakeover = message.takeover === true; accountComments = message.comments === true; accountCaptureTracks = message.captureTracks === true; accountPowers = message.powers === true; updateToolbar(); await chrome.storage.local.remove('compatibility');
+          connected = true; accountProtocol = account; accountActivity = message.groupActivity === true; accountTakeover = message.takeover === true; accountComments = message.comments === true; accountCaptureTracks = message.captureTracks === true; accountPowers = message.powers === true; accountAddTab = message.addTab === true; updateToolbar(); await chrome.storage.local.remove('compatibility');
           void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {});
           // The in-page controls show Capture once the account saves captures, and Comment once it takes comments: the
           // tab you look at in a workspace group gets its toolbar.
@@ -2144,7 +2153,7 @@ async function connect() {
     clearTimeout(handshakeTimeout);
     if (socket !== connection) return;
     for (const channel of channels.values()) channel.cancelNavigation?.();
-    socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; accountTakeover = false; accountComments = false; accountCaptureTracks = false; identityGeneration++; managingIdentity = true;
+    socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; accountTakeover = false; accountComments = false; accountCaptureTracks = false; accountAddTab = false; identityGeneration++; managingIdentity = true;
     updateToolbar();
     identityOperations = identityOperations.catch(() => {}).then(async () => {
       try { await Promise.allSettled([...queues.values()]); await reset(); }
@@ -2188,7 +2197,7 @@ async function popupState() {
     groups: groups.map(({ chromeGroupId, ...group }) => group),
     activeTab: tabGroup ? { tabId: active.id, groupId: tabGroup.groupId, name: tabGroup.name, color: tabGroup.color,
       capture: recording ? { recording: recording.captureId, unavailable: null } : { recording: null, unavailable: !connected ? 'Capture needs GitSpace connected to your account' : accountProtocol < MEDIA_PROTOCOL ? 'Your GitSpace account does not save captures yet; update GitSpace' : null } } : null,
-    shareTab: shared ? { tabId: active.id, host: new URL(active.url).hostname, grouped: Boolean(tabGroup), unavailable: !connected ? SHARE_OFFLINE : accountProtocol < SHARE_PROTOCOL ? SHARE_UPDATE : null } : null,
+    shareTab: shared ? { tabId: active.id, host: new URL(active.url).hostname, grouped: Boolean(tabGroup), unavailable: !connected ? SHARE_OFFLINE : accountProtocol < SHARE_PROTOCOL ? SHARE_UPDATE : null, addable: !tabGroup && addTabUnavailable() === null } : null,
     shares: shared ? liveShares.filter(share => share.targetId === shared.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [],
     recordings: [...captures.values()].map(capture => ({ captureId: capture.captureId, title: capture.title, track: capture.track, startedAt: capture.startedAt, saving: capture.ending !== null })),
     log: ((await stored('run-log')) || []).slice(0, 10),
@@ -2208,6 +2217,41 @@ async function ungroupTab(tabId) {
   const tab = await chrome.tabs.get(tabId);
   if (!(await workspaceGroups()).some(({ group }) => group.id === tab.groupId)) throw new Error('This tab is not in a workspace group');
   await chrome.tabs.ungroup(tabId);
+}
+// ── Adding a tab to a workspace from the popup (`workspaces.ts`) ──
+/** The popup's picker: the workspaces the account lists, each with this Chrome's group of it if there is one, its
+ * colour and how many tabs it holds. */
+async function workspaceChoices() {
+  const unavailable = addTabUnavailable();
+  if (unavailable) throw new Error(unavailable);
+  const identity = await stored('identity');
+  if (!identity) throw new Error('Human pairing required');
+  const value = await workspaceRequest(GITSPACE_ACCOUNT_URL, identity, { op: 'list' });
+  if (!Array.isArray(value?.workspaces)) throw new Error('The account answered with an unexpected list of workspaces');
+  const groups = await workspaceGroups();
+  const workspaces = [];
+  for (const item of value.workspaces) {
+    if (typeof item?.projectId !== 'string' || typeof item.project !== 'string' || typeof item.workspaceId !== 'string' || typeof item.name !== 'string' || typeof item.approved !== 'boolean') continue;
+    // A workspace's group record is kept under its scope (`groupRecord`).
+    const found = groups.find(({ key }) => key === 'group:' + JSON.stringify([identity.trust.accountId, identity.pairingId, item.projectId, item.workspaceId]));
+    workspaces.push({ projectId: item.projectId, project: item.project, workspaceId: item.workspaceId, name: item.name, approved: item.approved,
+      group: found ? { color: GROUP_HEX[found.group.color] ?? GROUP_HEX.grey, tabs: (await chrome.tabs.query({ groupId: found.group.id })).length } : null });
+  }
+  return { workspaces };
+}
+/** Choosing a workspace in the popup's picker: the account has the workspace make or renew its group on this Chrome,
+ * then moves the tab into it as if you dragged it in (`adoptTab`), making the Chrome group where there is none. */
+async function addTab({ tabId, projectId, workspaceId }) {
+  if (!Number.isInteger(tabId) || typeof projectId !== 'string' || typeof workspaceId !== 'string') throw new Error('Invalid workspace choice');
+  const unavailable = addTabUnavailable();
+  if (unavailable) throw new Error(unavailable);
+  const tab = await chrome.tabs.get(tabId);
+  if (!siteOf(tab.url)) throw new Error('Only a web page (http or https) can join a workspace');
+  const targetId = (await targets()).find(target => target.tabId === tabId)?.id;
+  if (!targetId) throw new Error('Chrome cannot add this tab to a workspace');
+  const identity = await stored('identity');
+  if (!identity) throw new Error('Human pairing required');
+  await workspaceRequest(GITSPACE_ACCOUNT_URL, identity, { op: 'add', projectId, workspaceId, targetId });
 }
 /** The popup's requests besides pairing; each answers with what the popup shows next. */
 function popupRequest(message) {
@@ -2230,6 +2274,11 @@ function popupRequest(message) {
   if (typeof message.everythingEnd === 'string') return everything.end(message.everythingEnd).then(popupState);
   // Open GitSpace: the account, in a tab of its own.
   if (message.openAccount === true) return chrome.tabs.create({ url: GITSPACE_ACCOUNT_URL }).then(popupState);
+  // Adding this tab to a workspace (`workspaces.ts`): the picker's workspaces, choosing one, and Approve… for a project
+  // that has not approved this Chrome, which opens GitSpace at Plugins → Browsers → Manage Chrome for it.
+  if (message.workspaceChoices === true) return workspaceChoices();
+  if (typeof message.addTab === 'object' && message.addTab !== null) return addTab(message.addTab).then(popupState);
+  if (message.manageChrome === true) return stored('identity').then(identity => chrome.tabs.create({ url: new URL(`/plugins?tab=browsers&manage=${encodeURIComponent(identity?.pairingId ?? '')}`, GITSPACE_ACCOUNT_URL).href })).then(popupState);
 }
 /** The offscreen document's requests: signing the begin request of its uploads, and a recording that ended on its own. Hearing
  * from it at all keeps this worker running while it records. */
@@ -2270,7 +2319,7 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
   await Promise.all([...captures.values()].map(capture => endCapture(capture, 'This Chrome’s GitSpace pairing changed', true)));
   managingIdentity = true;
   identityGeneration++;
-  const previous = socket; socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; accountTakeover = false; accountComments = false; accountCaptureTracks = false; pairingCode = undefined; chromeInfo = null;
+  const previous = socket; socket = undefined; connected = false; accountProtocol = 0; accountActivity = false; accountTakeover = false; accountComments = false; accountCaptureTracks = false; accountAddTab = false; pairingCode = undefined; chromeInfo = null;
   previous?.close();
   for (const channel of channels.values()) channel.cancelNavigation?.();
   try {

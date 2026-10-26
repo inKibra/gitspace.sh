@@ -32,9 +32,9 @@ const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
 export async function sha256Hex(body: Uint8Array<ArrayBuffer>): Promise<string> { return hex(await crypto.subtle.digest('SHA-256', body)); }
 
 /** The signature header for one request, made with the pairing key (in the service worker, which holds it): `label`
- * names what the request does, `upload` for an upload's begin, `share` for a share request and `comment` for one of
- * the in-page comment tool (`comments.ts`). */
-export async function relaySignature(identity: SigningIdentity, label: 'upload' | 'share' | 'comment', method: string, pathname: string, bodySha256: string): Promise<string> {
+ * names what the request does, `upload` for an upload's begin, `share` for a share request, `comment` for one of the
+ * in-page comment tool (`comments.ts`) and `workspace` for the popup's workspace requests (`workspaces.ts`). */
+export async function relaySignature(identity: SigningIdentity, label: 'upload' | 'share' | 'comment' | 'workspace', method: string, pathname: string, bodySha256: string): Promise<string> {
   const issuedAt = Date.now();
   const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
   const message = `gitspace-browser-relay-v2:${label}:${identity.pairingId}:${identity.generation}:${method}:${pathname}:${bodySha256}:${issuedAt}:${nonce}`;

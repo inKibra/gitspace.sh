@@ -111,9 +111,10 @@ function describeChrome(pairing: ConfirmedPairing): string {
   return [pairing.chromeVersion ? `Chrome ${pairing.chromeVersion}` : 'Chrome', pairing.platform, pairing.extension ? `extension ${pairing.extension.version ?? 'from before versions were reported'}` : null].filter(part => part !== null).join(' · ');
 }
 
-/** Plugins → Browsers: your paired Chromes, pairing in progress, and the built-in cloud browser. */
-export function BrowserPlugins({ projects, browsers, query, onPair }: { projects: readonly Project[]; browsers: BrowserPluginsState; query: string; onPair(request: PairChromeRequest): void }) {
-  const [managing, setManaging] = useState<string | null>(null);
+/** Plugins → Browsers: your paired Chromes, pairing in progress, and the built-in cloud browser. `manage` opens that
+ * Chrome's Manage Chrome. */
+export function BrowserPlugins({ projects, browsers, query, onPair, manage = null }: { projects: readonly Project[]; browsers: BrowserPluginsState; query: string; onPair(request: PairChromeRequest): void; manage?: string | null }) {
+  const [managing, setManaging] = useState<string | null>(manage);
   const action = useSerialAction('Forget Chrome');
   const pairings = browsers.relay?.pairings ?? [];
   const normalized = query.trim().toLowerCase();

@@ -100,8 +100,10 @@ export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCa
  * device taking it) makes you the tab's holder, so none of the agent's commands reach it; `resume` hands it back.
  * Comments: `commentShow` (`groupId`, `targetId`, `threadId`) brings your Chrome's tab to the front with
  * comment mode on and that thread open. Everything (`browser-powers.ts`): `everything` (`pairingId`, `on`) allows it
- * on the workspace's group on that Chrome for an hour, or ends it. */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'captureShares', 'captureShareCreate', 'captureShareRevoke', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'comments', 'commentWrite', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume', 'commentShow', 'everything']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
+ * on the workspace's group on that Chrome for an hour, or ends it. Adding a tab from your Chrome's popup
+ * (`browser-workspaces.ts`): `tabGroup` (`pairingId`) makes or renews the workspace's group on that Chrome, as the
+ * agent's `tabs` there does, and answers the group's id. */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'captureShares', 'captureShareCreate', 'captureShareRevoke', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'comments', 'commentWrite', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume', 'commentShow', 'everything', 'tabGroup']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
   shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(43_200).optional(), device: z.string().min(1).max(256).nullable().optional(),
   /** Capture share links (`browser-capture-share.ts`): `captureShares` lists the workspace's; `captureShareCreate`
    * (`captureId`, `comment`, `expiresInMinutes`) shares a saved capture; `captureShareRevoke` (`captureShareId`) ends one. */
@@ -110,7 +112,7 @@ export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['
   threadId: z.string().uuid().optional(),
   /** `comments`: open threads only (the default) or every one; `commentWrite`: the change. */
   status: RuntimeBrowserCommentStatusSchema.optional(), write: RuntimeBrowserCommentWriteSchema.optional(),
-  /** `everything`: the Chrome, and whether Everything begins (true) or ends. */
+  /** `everything` and `tabGroup`: the Chrome; `everything`: whether Everything begins (true) or ends. */
   pairingId: z.string().uuid().optional(), on: z.boolean().optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({

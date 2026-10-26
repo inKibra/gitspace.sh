@@ -28,9 +28,10 @@ const UPLOAD = 'browser.relay.upload:';
 export const BROWSER_DOWNLOAD = 'browser.relay.download:';
 
 /** What a pairing-key signature on a request to the account is for: `upload` begins an upload, `share` makes, ends or
- * lists share links (`browser-share.ts`), `comment` is the in-page comment tool's (`BROWSER_COMMENT_PATH`). The label
- * is part of the signed text, so one never passes as the other. */
-export type BrowserSignedLabel = 'upload' | 'share' | 'comment';
+ * lists share links (`browser-share.ts`), `comment` is the in-page comment tool's (`BROWSER_COMMENT_PATH`),
+ * `workspace` lists workspaces or adds a tab to one from the popup (`BROWSER_WORKSPACES_PATH`). The label is part of
+ * the signed text, so one never passes as the other. */
+export type BrowserSignedLabel = 'upload' | 'share' | 'comment' | 'workspace';
 /** The text a pairing key signs for one request. */
 export function browserSignedText(label: BrowserSignedLabel, input: { pairingId: string; generation: number; method: string; pathname: string; bodySha256: string; issuedAt: number; nonce: string }): string {
   return `gitspace-browser-relay-v2:${label}:${input.pairingId}:${input.generation}:${input.method}:${input.pathname}:${input.bodySha256}:${input.issuedAt}:${input.nonce}`;
@@ -41,6 +42,7 @@ const SIGNED: Record<BrowserSignedLabel, { code: string; noun: string; Noun: str
   upload: { code: 'UPLOAD', noun: 'upload', Noun: 'Upload', bytes: 16 * 1024 },
   share: { code: 'SHARE', noun: 'share request', Noun: 'Share request', bytes: 16 * 1024 },
   comment: { code: 'COMMENT', noun: 'comment request', Noun: 'Comment request', bytes: 640 * 1024 },
+  workspace: { code: 'WORKSPACE', noun: 'workspace request', Noun: 'Workspace request', bytes: 16 * 1024 },
 };
 const Signature = z.object({ pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), issuedAt: z.number().int(), nonce: z.string().regex(/^[a-f0-9]{64}$/u), signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/u).max(128) });
 const Begin = z.discriminatedUnion('kind', [

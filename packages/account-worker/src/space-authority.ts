@@ -585,6 +585,15 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
   }
 
+  /** You add a tab to this workspace from your Chrome's popup (`browser-workspaces.ts`): the workspace's group on that
+   * Chrome, made or renewed by its main conversation as the agent's `tabs` there does it; its id. */
+  async browserTabGroup(raw: unknown, pairingId: string): Promise<string> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const { browserGroupId } = await (await this.getRuntime(identity)).session(undefined, { type: 'browserTabGroup', pairingId }, true);
+    if (!browserGroupId) throw new Error('The workspace made no group on this Chrome');
+    return browserGroupId;
+  }
+
   /** A change to this workspace's comment threads (docs/APERTURE-DESIGN.md §9) from the relay: a share viewer's comment,
    * reply or resolve (`scope` holds them to their share), your Chrome's in-page tool, or a capture share's viewer
    * (held to their capture). Tabs showing the Browser tab hear of it, and the main conversation of a person's new

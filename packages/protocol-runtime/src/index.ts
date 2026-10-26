@@ -18,6 +18,7 @@ export * from './browser-capture-rules.js';
 export * from './browser-capture-share.js';
 export * from './browser-capture-agent.js';
 export * from './browser-powers.js';
+export * from './browser-workspaces.js';
 export * from './tool-arguments.js';
 export * from './apply-patch.js';
 export * from './subagent-policy.js';

@@ -97,8 +97,9 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
-  /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null). */
-  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | null>;
+  /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null);
+   * `tabGroup` the group's id. */
+  browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
 };
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
@@ -269,6 +270,12 @@ export function createSessionControls(services: SessionControlServices) {
         if (!services.browser) throw new Error('Browser management unavailable');
         await services.browser(String(target.id), undefined, { action: 'everything', pairingId: command.pairingId, on: command.on });
         return { control: await control(target) };
+      }
+      // Adding a tab from your Chrome's popup: the workspace's group on that Chrome, made or renewed.
+      case 'browserTabGroup': {
+        if (!canApprove) throw new Error('Browser management requires human capability');
+        if (!services.browser) throw new Error('Browser management unavailable');
+        return { control: await control(target), browserGroupId: z.string().uuid().parse(await services.browser(String(target.id), undefined, { action: 'tabGroup', pairingId: command.pairingId })) };
       }
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {

@@ -19,6 +19,8 @@ import { BrowserCaptureShares } from './browser-capture-share.js';
 import type { RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
 // Browser powers and Everything (`browser-powers.ts`): approval powers in grants, Everything per workspace and Chrome.
 import { BROWSER_EVERYTHING_MS, BROWSER_POWERS_UPDATE, BrowserEverythingRequestSchema, BrowserEverythingSchema, browserEverythingActive, type BrowserEverything, type BrowserEverythingNotice, type BrowserEverythingRequest, type BrowserPower } from '@gitspace/protocol-runtime';
+// Adding a tab to a workspace from your Chrome's popup (`browser-workspaces.ts`).
+import { BROWSER_WORKSPACE_CHOICES, RuntimeBrowserWorkspaceChromeRequestSchema, type RuntimeBrowserWorkspaceChoice } from '@gitspace/protocol-runtime';
 
 export function browserRelayArchive(endpoint: string): Uint8Array {
   return zipSync(Object.fromEntries(Object.entries(extensionFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
@@ -64,6 +66,8 @@ const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional
   powers: z.boolean().optional(), everything: BrowserEverythingRequestSchema.optional(),
   /** A hello saying the extension takes `stepEnded` notices (5.11.1 and later). */
   stepEnded: z.boolean().optional(),
+  /** A hello saying the extension's popup adds tabs to workspaces (`BROWSER_WORKSPACES_PATH`, 5.12 and later). */
+  addTab: z.boolean().optional(),
   /** Replay steps on the extension's saved-capture card: the capture, and the workspace group its tab is in. */
   captureReplay: z.object({ captureId: z.string().uuid(), groupId: z.string().uuid() }).optional(),
   /** A name you gave a saved capture on the extension's saved-capture card, with the workspace group its tab is in. */
@@ -89,9 +93,15 @@ export type BrowserWorkspaces = { getByName(name: string): {
   captureReplayAsked(identity: { projectId: string; workspaceId: string }, request: { captureId: string; pairingId: string; browser: string }): Promise<void>;
   /** Everything began or ended for the workspace on one of its Chromes: its Browser tab reads it again. */
   browserEverythingChanged(identity: { projectId: string; workspaceId: string }): Promise<void>;
+  /** You add a tab to the workspace from a Chrome's popup: the workspace's group on that Chrome, made or renewed. */
+  browserTabGroup(identity: { projectId: string; workspaceId: string }, pairingId: string): Promise<string>;
 } };
-/** The account's projects, whose names `chromeInfo` tells each Chrome. */
-export type BrowserProjects = { getByName(name: string): { list(): Promise<readonly { id: string; name: string }[]> } };
+/** The account's projects, whose names `chromeInfo` tells each Chrome, and its directory of projects and workspaces,
+ * which a Chrome's popup lists to add a tab to (`BROWSER_WORKSPACES_PATH`). */
+export type BrowserProjects = { getByName(name: string): {
+  list(): Promise<readonly { id: string; name: string }[]>;
+  directorySnapshot(): Promise<{ projects: readonly { id: string; name: string; lifecycle: string }[]; workspaces: readonly { id: string; projectId: string; name: string; lifecycle: string; updatedAt: string }[] }>;
+} };
 /** Management actions a workspace sends through any Chrome confirmed on the account, online or not: they act on that
  * workspace's shares, and `shareConnect` checks the shared tab's own Chrome. */
 const SHARE_MANAGEMENT: Record<string, true> = { shares: true, shareRevoke: true, shareConnect: true };
@@ -104,10 +114,15 @@ const CONTROL_OPERATION: Record<string, 'stopGroup' | 'closeTab' | 'focusTab' | 
  * agents act on each of its groups, by group id, as its reports last said (an extension from 5.8 reports them); null
  * until one does. `comments`: its hello said its in-page comment tool takes `comments` notices (from 5.11). `powers`:
  * its hello said it enforces a grant's `powers` and `everything` (from 5.11); an older one never gets a grant with either.
- * `stepEnded`: its hello said it takes `stepEnded` notices (from 5.11.1). */
-type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; stepEnded: boolean; agents: Map<string, number> | null };
+ * `stepEnded`: its hello said it takes `stepEnded` notices (from 5.11.1). `addTab`: its hello said its popup adds tabs
+ * to workspaces (from 5.12). */
+type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; stepEnded: boolean; addTab: boolean; agents: Map<string, number> | null };
 /** Why a grant with sites approved read-only is not sent to an extension before 5.9: it would let agents click and type there. */
 const READ_SITES_UPDATE = 'Update the GitSpace extension in this Chrome to 5.9 or later: this version cannot keep agents from clicking or typing on the sites this workspace approved read-only:';
+/** Why an extension before 5.12 cannot add a tab to a workspace from its popup. */
+const ADD_TAB_UPDATE = 'Update the GitSpace extension in this Chrome to 5.12 or later to add tabs to workspaces';
+/** The project lifecycles whose workspaces a Chrome's popup lists. */
+const LISTED_PROJECTS: Record<string, true> = { active: true, 'cloud-only': true };
 /** A script running on a Chrome (`browser.run`): its authority, the connection it began on, and its CDP connection
  * once the script connects. */
 type ScriptRun = { authorization: RuntimeAccountBrowserAuthorization; grant: RuntimeAccountBrowserSignedGrant; pairingId: string; attemptId: string; deadline: number; connection: Connection; browser?: RelayBrowser; socket?: WebSocket };
@@ -126,10 +141,10 @@ const BROWSER_SOCKET_TAG = 'browser';
 /** An admitted socket must finish pairing, through the extension's hello, within this long. */
 const PAIRING_DEADLINE_MS = 5000;
 /** What the relay's `ready` offers and its socket attachment records, as of this release; bumped whenever either
- * grows (2: `takeover`; 3: `comments`, `powers`). A Chrome's socket survives a release, keeping the `ready` an older relay sent
- * and the hello flags it kept, so the relay closes one whose hello was answered by another release, and the extension
- * says hello again on its next connect. */
-const BROWSER_SOCKET_RELEASE = 3;
+ * grows (2: `takeover`; 3: `comments`, `powers`; 4: `addTab`). A Chrome's socket survives a release, keeping the
+ * `ready` an older relay sent and the hello flags it kept, so the relay closes one whose hello was answered by another
+ * release, and the extension says hello again on its next connect. */
+const BROWSER_SOCKET_RELEASE = 4;
 const BrowserSocket = z.object({
   /** The server challenge the pairing proof signs. */
   nonce: z.string(),
@@ -156,6 +171,8 @@ const BrowserSocket = z.object({
   powers: z.boolean().optional(),
   /** Set by a hello saying the extension takes `stepEnded` notices. */
   stepEnded: z.boolean().optional(),
+  /** Set by a hello saying the extension's popup adds tabs to workspaces. */
+  addTab: z.boolean().optional(),
   /** The `BROWSER_SOCKET_RELEASE` that answered the hello. */
   release: z.number().int().optional(),
 });
@@ -336,7 +353,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (cached?.socket === bound.socket) { cached.product = product; return cached; }
     if (cached) this.disconnect(pairingId);
     // Request ids continue past any reply still in flight from before the relay hibernated.
-    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, stepEnded: bound.state.stepEnded === true, agents: null };
+    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, stepEnded: bound.state.stepEnded === true, addTab: bound.state.addTab === true, agents: null };
     this.connections.set(pairingId, connection);
     return connection;
   }
@@ -729,12 +746,13 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
         return socket.close(1008, 'Extension update required');
       }
-      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), ...(message.stepEnded ? { stepEnded: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), ...(message.stepEnded ? { stepEnded: true } : {}), ...(message.addTab ? { addTab: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
       // `groupActivity`: this relay takes each group's colour and agents in the extension's reports; `takeover`: the tabs
       // you hold (`held`) and each agent's tab (`targetId`) too; `comments`: the in-page comment tool's requests
       // (`BROWSER_COMMENT_PATH`); `powers`: this relay takes `everything` requests and sends `everything` notices;
-      // `captureTracks`: a capture's steps, layout and comments tracks and its name.
-      socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true }));
+      // `captureTracks`: a capture's steps, layout and comments tracks and its name; `addTab`: the popup's workspace
+      // requests (`BROWSER_WORKSPACES_PATH`).
+      socket.send(JSON.stringify({ ready: true, protocol: BROWSER_EXTENSION_PROTOCOL, groupActivity: true, takeover: true, comments: true, powers: true, captureTracks: true, addTab: true }));
       this.ctx.waitUntil(this.retryRevocations(state.pairingId));
       this.ctx.waitUntil(this.shareLinks.online(state.pairingId).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_share_online_failed', pairingId: state.pairingId, error: String(error) }))));
       this.ctx.waitUntil(this.watches.online(state.pairingId).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_watch_online_failed', pairingId: state.pairingId, error: String(error) }))));
@@ -1175,6 +1193,44 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
       const connection = this.connection(placement.pairingId);
       if (connection?.comments) connection.socket.send(JSON.stringify({ operation: 'comments', groupId: group.groupId, threadId: thread.root.id }));
     }
+  }
+  // Adding a tab to a workspace from your Chrome's popup (`browser-workspaces.ts`).
+  /** A request your Chrome's popup signed with its pairing key (`BROWSER_WORKSPACES_PATH`), from an extension whose
+   * hello said `addTab`. `list`: the account's active workspaces, at most `BROWSER_WORKSPACE_CHOICES`: those of the
+   * projects that approved this Chrome first, the one whose group here was used last first, then the most recently
+   * changed; then those of the other projects. `add`: the workspace makes or renews its group on this Chrome, and the
+   * tab joins it as if you dragged it in; refused where the project has not approved this Chrome. */
+  async workspaceRequest(request: BrowserSignedRequest, body: unknown): Promise<{ ok: true; value: Record<string, unknown> } | BrowserRequestFailure> {
+    const signer = await browserRequestSigner(this.ctx.storage, pairingId => this.signingKey(pairingId), 'workspace', request);
+    if (!signer.ok) return signer;
+    const parsed = RuntimeBrowserWorkspaceChromeRequestSchema.safeParse(body);
+    if (!parsed.success) return { ok: false, status: 400, code: 'WORKSPACE_INVALID', message: `Invalid workspace request: ${parsed.error.issues.map(issue => issue.message).join('; ')}` };
+    const { pairingId } = signer, input = parsed.data;
+    const connection = this.connection(pairingId);
+    if (!connection) return { ok: false, status: 409, code: 'WORKSPACE_CHROME_OFFLINE', message: 'This Chrome is not connected to GitSpace; adding a tab to a workspace needs it connected' };
+    if (!connection.addTab) return { ok: false, status: 409, code: 'WORKSPACE_UPDATE_REQUIRED', message: ADD_TAB_UPDATE };
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === pairingId && item.state === 'confirmed');
+    if (!pairing) return { ok: false, status: 404, code: 'WORKSPACE_CHROME_UNKNOWN', message: 'This Chrome is no longer paired with this account' };
+    const [directory, settings, groups] = await Promise.all([this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).directorySnapshot(), this.ctx.storage.list({ prefix: 'browser.relay.project:' }), this.chromeGroups(pairingId)]);
+    const approved = new Set([...settings].filter(([, stored]) => ProjectSettings.parse(stored).approvals.some(item => item.pairingId === pairingId && item.generation === pairing.generation)).map(([key]) => key.slice('browser.relay.project:'.length)));
+    const projects = new Map(directory.projects.filter(project => LISTED_PROJECTS[project.lifecycle]).map(project => [project.id, project.name]));
+    const workspaces = directory.workspaces.filter(workspace => workspace.lifecycle === 'active' && projects.has(workspace.projectId));
+    if (input.op === 'list') {
+      // A group's grant is renewed on each use, so the latest expiry is the group used last.
+      const used = new Map<string, number>();
+      for (const group of groups) used.set(`${group.projectId}:${group.workspaceId}`, Math.max(used.get(`${group.projectId}:${group.workspaceId}`) ?? 0, Date.parse(group.expiresAt)));
+      const lastUsed = (workspace: { id: string; projectId: string }) => used.get(`${workspace.projectId}:${workspace.id}`) ?? 0;
+      const listed = workspaces.toSorted((left, right) => Number(approved.has(right.projectId)) - Number(approved.has(left.projectId)) || lastUsed(right) - lastUsed(left) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+      return { ok: true, value: { workspaces: listed.slice(0, BROWSER_WORKSPACE_CHOICES).map(workspace => ({ projectId: workspace.projectId, project: projects.get(workspace.projectId) ?? '', workspaceId: workspace.id, name: workspace.name, approved: approved.has(workspace.projectId) }) satisfies RuntimeBrowserWorkspaceChoice) } };
+    }
+    const workspace = workspaces.find(item => item.id === input.workspaceId && item.projectId === input.projectId);
+    if (!workspace) return { ok: false, status: 404, code: 'WORKSPACE_UNKNOWN', message: 'That is not an active workspace of this account' };
+    if (!approved.has(workspace.projectId)) return { ok: false, status: 403, code: 'WORKSPACE_CHROME_UNAPPROVED', message: `This Chrome isn't approved in ${projects.get(workspace.projectId)}: approve it in GitSpace, Plugins → Browsers → Manage Chrome` };
+    try {
+      const groupId = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.id}`).browserTabGroup({ projectId: workspace.projectId, workspaceId: workspace.id }, pairingId);
+      await this.request(pairingId, { operation: 'adoptTab', groupId, targetId: input.targetId });
+      return { ok: true, value: { groupId } };
+    } catch (error) { return { ok: false, status: 409, code: 'WORKSPACE_ADD_REFUSED', message: (error instanceof Error ? error.message : String(error)).slice(0, 1024) }; }
   }
   /** A workspace's share links, live and ended in the last day, newest first. */
   shares(projectId: string, workspaceId: string): Promise<RuntimeBrowserShare[]> { return this.shareLinks.list(projectId, workspaceId); }

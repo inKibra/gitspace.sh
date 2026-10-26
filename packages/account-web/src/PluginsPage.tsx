@@ -135,14 +135,16 @@ export function PluginsPage(props: PluginsPageProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [target, setTarget] = useState<Target>('workspace');
-  // `?tab=browsers` opens Browsers; `&pair=<project>` also opens the pairing dialog with that project chosen.
+  // `?tab=browsers` opens Browsers; `&pair=<project>` also opens the pairing dialog with that project chosen, and
+  // `&manage=<pairingId>` (Approve… in a Chrome's popup) that Chrome's Manage Chrome.
   const [linked] = useState(() => typeof window === 'undefined' ? new URLSearchParams() : new URLSearchParams(window.location.search));
   const [tab, setTab] = useState(() => linked.get('tab') === 'browsers' ? 2 : props.connections.some((connection) => connection.transport.type !== 'composio') ? 1 : 0);
   const [pairing, setPairing] = useState<PairChromeRequest | null>(() => linked.has('pair') ? { projectId: linked.get('pair') || null } : null);
   useEffect(() => {
-    if (!linked.has('pair')) return;
+    if (!linked.has('pair') && !linked.has('manage')) return;
     const url = new URL(window.location.href);
     url.searchParams.delete('pair');
+    url.searchParams.delete('manage');
     window.history.replaceState(window.history.state, '', url);
   }, [linked]);
   const [machineId, setMachineId] = useState('');
@@ -284,7 +286,7 @@ export function PluginsPage(props: PluginsPageProps) {
       })}</CardGroup> : <EmptyState icon={<PuzzlePiece01 width={22} height={22} strokeWidth={1.5} />} title={customConnections.length ? 'No matching custom plugins' : 'No custom plugins connected'} description={customConnections.length ? 'Change the filter to see your custom plugins.' : 'Connect a local stdio, Streamable HTTP, or SSE MCP server.'} action={customConnections.length ? undefined : <Button variant="primary" leadingIcon={PlusGlyph} onClick={() => setCreatingCustom(true)}>Add custom plugin</Button>} />}
     </TabsSubtlePanel>
     <TabsSubtlePanel index={2} selectedIndex={tab} idPrefix="plugins-source">
-      <BrowserPlugins projects={props.projects} browsers={props.browsers} query={query} onPair={setPairing} />
+      <BrowserPlugins projects={props.projects} browsers={props.browsers} query={query} onPair={setPairing} manage={linked.get('manage')} />
     </TabsSubtlePanel>
     {pairing ? <PairChromeDialog request={pairing} projects={props.projects} browsers={props.browsers} onClose={() => setPairing(null)} /> : null}
     {tab !== 2 ? <section aria-label="Runtime diagnostics" className="mt-8 flex flex-col gap-3 border-t border-border pt-6">

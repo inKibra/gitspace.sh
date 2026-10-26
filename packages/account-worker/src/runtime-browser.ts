@@ -551,20 +551,25 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       return { thread, cropUrl: crop !== undefined && kept.has(crop) ? await drive.url(crop) : null };
     }));
   }
+  /** The workspace's group on one of your Chromes, made or renewed as the agent's `tabs` there does it; its id. Your
+   * connecting a link or adding a tab is not a run of the agent's: it is not in the recent runs. */
+  async function chromeGroup(conversationId: string, pairingId: string) {
+    const id = crypto.randomUUID();
+    const tabs: Input = { tool: 'browser', args: { action: 'tabs', source: 'relay', pairingId }, conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' };
+    const { groupId } = await prepareCall(tabs);
+    const listed = await executeCall(tabs);
+    if (listed.status !== 'completed') throw new Error(listed.status === 'failed' ? listed.error.message : 'Making this workspace’s group on that Chrome was interrupted');
+    return groupId;
+  }
   /** Share links on your Chromes (docs/APERTURE-DESIGN.md §8). A pasted share connects to the workspace's group on the
-   * share's Chrome: where the workspace has none live, the group is made or renewed as the agent's `tabs` there does it,
-   * and the share connects to that group. */
+   * share's Chrome: where the workspace has none live, the group is made or renewed first (`chromeGroup`), and the
+   * share connects to that group. */
   async function share(conversationId: string, command: RuntimeBrowserManagement) {
     if (command.action === 'shares') return RuntimeBrowserShareSchema.array().parse(await account.share(conversationId, command));
     if (command.action !== 'shareConnect') return RuntimeBrowserShareSchema.parse(await account.share(conversationId, command));
     const asked = ShareConnection.parse(await account.share(conversationId, command));
     if ('connected' in asked) return asked.connected;
-    const id = crypto.randomUUID();
-    const tabs: Input = { tool: 'browser', args: { action: 'tabs', source: 'relay', pairingId: asked.needsGroup.pairingId }, conversationId, taskId: id, requestId: id, attemptId: id, replay: 'unsafe' };
-    // Your connecting a link is not a run of the agent's: it is not in the recent runs.
-    const { groupId } = await prepareCall(tabs);
-    const listed = await executeCall(tabs);
-    if (listed.status !== 'completed') throw new Error(listed.status === 'failed' ? listed.error.message : 'Making this workspace’s group on that Chrome was interrupted');
+    const groupId = await chromeGroup(conversationId, asked.needsGroup.pairingId);
     const connected = ShareConnection.parse(await account.share(conversationId, { ...command, groupId }));
     if ('needsGroup' in connected) throw new Error('That Chrome did not keep this workspace’s group; connect the link again');
     return connected.connected;
@@ -592,6 +597,11 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       if (!env.RELAY) throw new Error('Account Chrome relay unavailable');
       await env.RELAY.getByName(env.RELAY_NAME).browserRelayEverything(identity.projectId, identity.workspaceId, command.pairingId, command.on);
       return null;
+    }
+    // A tab you add to this workspace from your Chrome's popup goes into the workspace's group there.
+    if (command.action === 'tabGroup') {
+      if (!command.pairingId) throw new Error('Adding a tab names its Chrome');
+      return chromeGroup(conversationId, command.pairingId);
     }
     if (command.action === 'comments') return commentViews(command);
     if (command.action === 'commentWrite') {

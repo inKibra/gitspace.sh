@@ -22,12 +22,12 @@ let root: Root;
 let container: HTMLDivElement;
 let animationDescriptor: PropertyDescriptor | undefined;
 
-function Page({ initial = null }: { initial?: PairChromeRequest | null }) {
+function Page({ initial = null, manage = null }: { initial?: PairChromeRequest | null; manage?: string | null }) {
   const browsers = useBrowserPlugins(projects);
   const [pairing, setPairing] = useState<PairChromeRequest | null>(initial);
-  return <><BrowserPlugins projects={projects} browsers={browsers} query="" onPair={setPairing} />{pairing ? <PairChromeDialog request={pairing} projects={projects} browsers={browsers} onClose={() => setPairing(null)} /> : null}</>;
+  return <><BrowserPlugins projects={projects} browsers={browsers} query="" onPair={setPairing} manage={manage} />{pairing ? <PairChromeDialog request={pairing} projects={projects} browsers={browsers} onClose={() => setPairing(null)} /> : null}</>;
 }
-async function render(initial: PairChromeRequest | null = null) { await act(async () => root.render(<Page initial={initial} />)); }
+async function render(initial: PairChromeRequest | null = null, manage: string | null = null) { await act(async () => root.render(<Page initial={initial} manage={manage} />)); }
 function byLabel(label: string): HTMLElement {
   const element = document.body.querySelector<HTMLElement>(`[aria-label="${label}"]`);
   if (!element) throw new Error(`Missing ${label}`);
@@ -104,6 +104,12 @@ it('warns when a Chrome is approved nowhere and offers to approve it for project
   expect(container.textContent).not.toContain('Approved in 0 projects');
   await act(() => button('Approve for projects').click());
   expect(byLabel('Approved in Alpha')).toBeTruthy();
+});
+
+it('opens Manage Chrome for the Chrome a link names (Approve… in that Chrome’s popup), to approve it for projects', async () => {
+  await render(null, work);
+  expect(byLabel('Approved in Alpha')).toBeTruthy();
+  expect(document.body.textContent).toContain('Paired Oct 23 · fingerprint AAAA AAAA AAAA AAAA · online now');
 });
 
 it('forgets a Chrome from its card only after you confirm', async () => {

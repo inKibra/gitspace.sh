@@ -49,7 +49,7 @@ import { serveIngress } from './service-ingress.js';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { BROWSER_UPLOAD_PATH, browserRouteReply, readBrowserSignedRequest, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
-import { BROWSER_COMMENT_PATH, type RuntimeBrowserCommentThread } from '@gitspace/protocol-runtime';
+import { BROWSER_COMMENT_PATH, BROWSER_WORKSPACES_PATH, type RuntimeBrowserCommentThread } from '@gitspace/protocol-runtime';
 import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './browser-share.js';
 import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, serveBrowserWatch } from './browser-watch.js';
 import { serveBrowserCaptureShare } from './browser-capture-share.js';
@@ -467,6 +467,8 @@ export class UserRelayDO extends BudgetedDurableObject {
    * changed (the agent's or the Browser tab's), for its share's viewers and the workspace's Chromes. */
   browserRelayComment(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.commentRequest(request, body); }
   browserRelayCommentChanged(workspace: { projectId: string; workspaceId: string }, thread: RuntimeBrowserCommentThread) { return this.browserRelay.commentChanged(workspace, thread); }
+  /** A request your Chrome's popup signed with its pairing key: the workspaces it may add a tab to, or adding one. */
+  browserRelayWorkspaces(request: BrowserSignedRequest, body: unknown) { return this.browserRelay.workspaceRequest(request, body); }
   /** Capture share links (`browser-capture-share.ts`): a workspace's from its Browser tab, a request your Chrome signed,
    * and a link's greeting, open, file check and comments. */
   browserCaptureShares(workspace: { projectId: string; workspaceId: string }) { return this.browserRelay.captureShareList(workspace); }
@@ -1208,6 +1210,11 @@ export default {
     if (url.pathname === BROWSER_COMMENT_PATH) {
       const read = await readBrowserSignedRequest(request, 'comment');
       return browserRouteReply(read.ok ? await env.RELAY.getByName(env.RELAY_NAME).browserRelayComment(read.request, read.body) : read);
+    }
+    // Your Chrome's popup adding a tab to a workspace, signed by its pairing key.
+    if (url.pathname === BROWSER_WORKSPACES_PATH) {
+      const read = await readBrowserSignedRequest(request, 'workspace');
+      return browserRouteReply(read.ok ? await env.RELAY.getByName(env.RELAY_NAME).browserRelayWorkspaces(read.request, read.body) : read);
     }
     // Capture share links: public, before device authority (an open signed by one of the account's devices is checked there).
     if (url.pathname === BROWSER_CAPTURE_SHARE_PATH || url.pathname.startsWith('/api/capture-shares/')) return serveBrowserCaptureShare(request, env);

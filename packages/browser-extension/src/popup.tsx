@@ -1,8 +1,9 @@
 // The extension's popup (docs/APERTURE-DESIGN.md §6.4; the agreed look is account-web's BrowsersMockExtension
 // `Popup`): whether GitSpace is on in this Chrome and connected, the workspaces using it with what their agent is doing,
-// and this tab: its share link (copying it makes the share), what people on it may do, who is watching, Capture (your
-// click here is what lets Chrome record the tab) and leaving its workspace group. Identity & pairing is a second
-// panel. Off, it says so and offers Turn on. It asks the service worker for everything (`popupRequest`).
+// and this tab: adding it to a workspace while it is in none, its share link (copying it makes the share), what people
+// on it may do, who is watching, Capture (your click here is what lets Chrome record the tab) and leaving its workspace
+// group. Identity & pairing is a second panel. Off, it says so and offers Turn on. It asks the service worker for
+// everything (`popupRequest`).
 import { useEffect, useId, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Recording01 } from '@untitledui/icons';
@@ -34,15 +35,23 @@ type PopupState = {
   enabled: boolean; reenableAt: number | null; account: string; chrome: string | null; connection: Connection;
   projects: string[] | null; fingerprint: string | null; pairedAt: string | null; compatibility: string | null; groups: Group[];
   activeTab: { tabId: number; groupId: string; name: string; color: string; capture: { recording: string | null; unavailable: string | null } } | null;
-  shareTab: { tabId: number; host: string; grouped: boolean; unavailable: string | null } | null;
+  shareTab: { tabId: number; host: string; grouped: boolean; unavailable: string | null; addable: boolean } | null;
   shares: RuntimeBrowserShare[]; recordings: Recording[]; log: RunLogEntry[];
 };
+/** A workspace the picker offers (`workspaceChoices`): `approved` when its project approved this Chrome; `group` this
+ * Chrome's group of it, if there is one. */
+type Choice = { projectId: string; project: string; workspaceId: string; name: string; approved: boolean; group: { color: string; tabs: number } | null };
 type PopupRequest = { popupState: true } | { setEnabled: { enabled: boolean; minutes?: number } } | { stopGroup: string } | { focusGroup: string }
   | { ungroupTab: number } | { startCapture: number } | { stopCapture: string } | { shareCreate: { tabId: number; comment: boolean; expiresInMinutes: number } }
-  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { resetIdentity: true } | { everythingGrant: string } | { everythingEnd: string };
+  | { shareRevoke: { shareId: string } } | { openAccount: true } | { pairCode: string } | { resetIdentity: true } | { everythingGrant: string } | { everythingEnd: string }
+  | { addTab: { tabId: number; projectId: string; workspaceId: string } } | { manageChrome: true };
 /** The service worker answers the popup's next state, `ok` for pairing and reset, or why it refused. */
 type Reply = PopupState | { ok: true } | { error: string };
-declare const chrome: { runtime: { sendMessage(message: PopupRequest): Promise<Reply> } };
+declare const chrome: { runtime: {
+  /** The picker's workspaces, or why there are none. */
+  sendMessage(message: { workspaceChoices: true }): Promise<{ workspaces: Choice[] } | { error: string }>;
+  sendMessage(message: PopupRequest): Promise<Reply>;
+} };
 
 const BLUE = '#1a73e8';
 const RED = '#dc2626';
@@ -51,7 +60,8 @@ type DotColor = 'dim' | 'green' | 'orange' | 'red';
 const DOT: Record<DotColor, string> = { dim: 'var(--muted-foreground)', green: '#22c55e', orange: '#f97316', red: '#ef4444' };
 /** What people on a share link may do: view always, comment where the tab is in a workspace group. */
 const CAPABILITIES: readonly ('view' | 'comment')[] = ['view', 'comment'];
-const COMMENT_NEEDS_GROUP = 'Comments need the tab in a workspace group';
+/** The picker lists this many recent workspaces before you type. */
+const RECENT_CHOICES = 5;
 
 async function request(message: PopupRequest): Promise<PopupState | null> {
   const reply = await chrome.runtime.sendMessage(message);
@@ -194,7 +204,7 @@ function ShareLink({ state, act }: { state: PopupState; act: Act }) {
       {CAPABILITIES.map(capability => {
         const on = capability === 'view' || comments;
         const locked = capability === 'view' || Boolean(share) || !tab.grouped;
-        return <button key={capability} type="button" disabled={locked} aria-pressed={on} title={capability === 'comment' && !tab.grouped ? COMMENT_NEEDS_GROUP : undefined} onClick={() => setComment(value => !value)}
+        return <button key={capability} type="button" disabled={locked} aria-pressed={on} title={capability === 'comment' && !tab.grouped ? 'Comments go to a workspace: add this tab to one first' : undefined} onClick={() => setComment(value => !value)}
           className={`rounded-full border px-2 py-0.5 ${on ? 'border-transparent text-white' : 'border-border text-muted-foreground'} ${capability === 'comment' && !tab.grouped ? 'opacity-50' : ''}`} style={on ? { background: BLUE } : undefined}>{on ? '✓ ' : ''}{capability}</button>;
       })}
       {share ? <span className="ml-auto text-muted-foreground">{lasting(duration)}</span> : <DropdownMenu>
@@ -204,7 +214,7 @@ function ShareLink({ state, act }: { state: PopupState; act: Act }) {
         </DropdownContent>
       </DropdownMenu>}
     </div>
-    {!tab.grouped ? <p className="text-[11px] text-muted-foreground">{COMMENT_NEEDS_GROUP}.</p> : null}
+    {!tab.grouped ? <p className="text-[11px] text-muted-foreground">Add the tab to a workspace to let people comment: their comments go to that workspace, and its agent can use the tab on its approved sites.</p> : null}
     <p className="text-[11px] text-muted-foreground">Paste it into one of your workspaces to give its agent this tab, or send it to someone to watch and point{comments ? ' and comment' : ''}. Only you and your agent ever click or type. Ends when it expires, when you stop it, or when the tab closes.</p>
     {!share && tab.unavailable ? <p className="text-[11px] text-muted-foreground">{tab.unavailable}</p> : null}
     {share ? <div className="flex items-center gap-2 rounded-lg bg-surface-3 px-2.5 py-1.5 text-caption">
@@ -215,11 +225,76 @@ function ShareLink({ state, act }: { state: PopupState; act: Act }) {
   </>;
 }
 
+/** Adds a tab in no workspace group to a workspace (the agreed look is account-web's BrowsersMockExtension
+ * `WorkspacePicker`): search as you type over workspace and project names, grouped by project; empty, the recent
+ * workspaces of the projects that approved this Chrome. Each shows its group here (its colour and tabs) or that adding
+ * makes one; one whose project has not approved this Chrome says so, with Approve…. The account lists the workspaces
+ * when the picker first opens. */
+function WorkspacePicker({ tabId, act }: { tabId: number; act: Act }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [choices, setChoices] = useState<Choice[] | null>(null);
+  const [failed, setFailed] = useState('');
+  useEffect(() => {
+    if (!open || choices) return;
+    let current = true;
+    setFailed('');
+    chrome.runtime.sendMessage({ workspaceChoices: true }).then(reply => { if (current) { if ('error' in reply) setFailed(reply.error); else setChoices(reply.workspaces); } },
+      (error: unknown) => { if (current) setFailed(error instanceof Error ? error.message : String(error)); });
+    return () => { current = false; };
+  }, [open, choices]);
+  const needle = query.trim().toLowerCase();
+  const shown = !choices ? [] : needle ? choices.filter(item => `${item.name} ${item.project}`.toLowerCase().includes(needle)) : choices.filter(item => item.approved).slice(0, RECENT_CHOICES);
+  const projects = [...new Set(shown.map(item => item.projectId))];
+  // The rows as they show, by project, so the arrow keys go down the list.
+  const rows = projects.flatMap(projectId => shown.filter(item => item.projectId === projectId));
+  const choosable = rows.filter(item => item.approved);
+  const choose = (item: Choice) => { setOpen(false); void act({ addTab: { tabId, projectId: item.projectId, workspaceId: item.workspaceId } }, ''); };
+  return <div className="flex flex-col gap-1.5">
+    <label className="flex h-8 items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 text-caption focus-within:border-[#1a73e8]">
+      <span className="text-muted-foreground">⌕</span>
+      <input value={query} placeholder="Add to a workspace…" aria-label="Find a workspace" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+        onFocus={() => setOpen(true)} onChange={event => { setQuery(event.target.value); setActive(0); setOpen(true); }}
+        onKeyDown={event => {
+          if (event.key === 'ArrowDown') { event.preventDefault(); setActive(index => Math.min(index + 1, choosable.length - 1)); }
+          if (event.key === 'ArrowUp') { event.preventDefault(); setActive(index => Math.max(index - 1, 0)); }
+          const item = choosable[active];
+          if (event.key === 'Enter' && item) { event.preventDefault(); choose(item); }
+          if (event.key === 'Escape') setOpen(false);
+        }} />
+      {open ? <span className="text-[10px] text-muted-foreground">↑↓ Enter</span> : null}
+    </label>
+    {open ? <div role="listbox" aria-label="Workspaces" className="flex max-h-56 flex-col overflow-auto rounded-lg border border-border bg-surface-1 py-1 shadow-lg">
+      {!choices ? <p className="px-2.5 py-2 text-caption text-muted-foreground">{failed || 'Finding your workspaces…'}</p> : <>
+        {!needle && shown.length ? <p className="px-2.5 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Recent</p> : null}
+        {projects.map(projectId => <div key={projectId}>
+          {needle ? <p className="px-2.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{rows.find(item => item.projectId === projectId)?.project}</p> : null}
+          {rows.filter(item => item.projectId === projectId).map(item => {
+            const selected = choosable[active] === item;
+            return <div key={item.workspaceId} role="option" aria-selected={selected} aria-disabled={!item.approved} onClick={() => { if (item.approved) choose(item); }}
+              className={`flex items-center gap-2 px-2.5 py-1.5 ${item.approved ? 'cursor-pointer' : 'opacity-60'} ${selected ? 'bg-hover' : ''}`}>
+              {item.group ? <span className="size-2.5 shrink-0 rounded-full" style={{ background: item.group.color }} /> : <span className="size-2.5 shrink-0 rounded-full border border-dashed border-neutral-400" />}
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-caption font-medium">{item.name}{needle ? null : <span className="font-normal text-muted-foreground"> · {item.project}</span>}</p>
+                <p className="truncate text-[11px] text-muted-foreground">{!item.approved ? `This Chrome isn't approved in ${item.project}` : item.group ? `Its group here · ${item.group.tabs} ${item.group.tabs === 1 ? 'tab' : 'tabs'}` : 'No tab group here yet · adding makes one'}</p>
+              </div>
+              {!item.approved ? <button type="button" className="text-[11px]" style={{ color: BLUE }} onClick={() => { void act({ manageChrome: true }, ''); }}>Approve…</button> : null}
+            </div>;
+          })}
+        </div>)}
+        {!shown.length ? <p className="px-2.5 py-2 text-caption text-muted-foreground">{needle ? `No workspace matches “${query}”.` : 'No recent workspace: type to find one.'}</p> : null}
+      </>}
+    </div> : null}
+  </div>;
+}
+
 function ThisTab({ state, act }: { state: PopupState; act: Act }) {
   const { activeTab: group, shareTab } = state;
   if (!group && !shareTab) return null;
   return <section className="flex flex-col gap-2 border-t border-border px-4 py-3">
     <Heading>This tab{shareTab ? ` · ${shareTab.host}` : ''}{group ? <> · in <span style={{ color: group.color }}>{group.name}</span></> : null}</Heading>
+    {shareTab?.addable ? <WorkspacePicker tabId={shareTab.tabId} act={act} /> : null}
     <ShareLink state={state} act={act} />
     <Capture state={state} act={act} />
     {group ? <div className="flex items-center gap-2">

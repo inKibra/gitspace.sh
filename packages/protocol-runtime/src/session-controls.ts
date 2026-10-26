@@ -82,6 +82,9 @@ export const RuntimeSessionCommandSchema = z.union([
   /** Everything (`browser-powers.ts`) on the workspace's group on your Chrome `pairingId`: allowed for an hour (`on`),
    * or ended now. */
   z.object({ type: z.literal('browserEverything'), pairingId: z.string().uuid(), on: z.boolean() }),
+  /** Adding a tab from your Chrome's popup (`browser-workspaces.ts`): the workspace's group on your Chrome `pairingId`,
+   * made or renewed as the agent's `tabs` there does it; the result's `browserGroupId` names it. */
+  z.object({ type: z.literal('browserTabGroup'), pairingId: z.string().uuid() }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
@@ -105,7 +108,7 @@ export const RuntimeSessionInputSchema = RuntimeIdentitySchema.extend({ conversa
 export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), browserOverview: RuntimeBrowserOverviewSchema.optional(), browserPreview: RuntimeBrowserPreviewSchema.optional(), browserCaptures: z.array(RuntimeBrowserCaptureViewSchema).max(500).optional(), browserCapture: RuntimeBrowserCaptureViewSchema.optional(),
   browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(),
   browserComments: z.array(RuntimeBrowserCommentThreadViewSchema).max(500).optional(), browserComment: RuntimeBrowserCommentThreadSchema.optional(),
-  browserCaptureShares: z.array(RuntimeBrowserCaptureShareSchema).max(100).optional(), browserCaptureShare: RuntimeBrowserCaptureShareSchema.optional(),
+  browserCaptureShares: z.array(RuntimeBrowserCaptureShareSchema).max(100).optional(), browserCaptureShare: RuntimeBrowserCaptureShareSchema.optional(), browserGroupId: z.string().uuid().optional(),
   setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;

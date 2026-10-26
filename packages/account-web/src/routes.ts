@@ -47,7 +47,7 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   url.searchParams.delete('gallery');
   if (route !== 'settings') url.searchParams.delete('mode');
   if (route !== 'inference') url.searchParams.delete('profile');
-  if (route !== 'plugins') { url.searchParams.delete('tab'); url.searchParams.delete('pair'); }
+  if (route !== 'plugins') { url.searchParams.delete('tab'); url.searchParams.delete('pair'); url.searchParams.delete('manage'); }
   if (isGlobalView(route)) {
     url.searchParams.delete('project');
     url.searchParams.delete('workspace');
