@@ -32,10 +32,70 @@ function ExtensionIcon({ state, large }: { state: IconState; large?: boolean }) 
 
 // ── Popup ──
 
-type PopupTab = { host: string; group?: string };
+type PopupTab = { host: string; group?: string; groupColor?: string; picker?: { query?: string; open?: boolean } };
 type Capability = 'view' | 'comment';
-function Popup({ on, onToggle, tab = { host: 'news.ycombinator.com' }, watching }: { on: boolean; onToggle(): void; tab?: PopupTab; watching?: string }) {
+
+// ── Adding a tab to a workspace ──
+
+/** A workspace the picker can add the tab to: its Chrome group colour when it has one in this Chrome. */
+type PickerWorkspace = { name: string; project: string; color: string | null; tabs: number; approved: boolean; recent?: boolean };
+const PICKER_WORKSPACES: PickerWorkspace[] = [
+  { name: 'Cross-machine browser relay', project: 'GitSpace', color: BLUE, tabs: 2, approved: true, recent: true },
+  { name: 'Challenges and streaks', project: 'ToneTempo', color: PURPLE, tabs: 2, approved: true, recent: true },
+  { name: 'Coach subscriptions', project: 'ToneTempo', color: null, tabs: 0, approved: true, recent: true },
+  { name: 'Challenges UI storybook', project: 'ToneTempo', color: null, tabs: 0, approved: true },
+  { name: 'Session recovery and bounded history', project: 'GitSpace', color: null, tabs: 0, approved: true },
+  { name: 'Workflow schedules', project: 'inkibra core', color: null, tabs: 0, approved: false },
+];
+/** Search as you type over workspace and project names; empty shows the recent ones. Choosing one moves the tab into
+ * that workspace's tab group in this Chrome, making the group if the workspace has none here yet. */
+function WorkspacePicker({ initialQuery = '', initialOpen = false, onChoose }: { initialQuery?: string; initialOpen?: boolean; onChoose(workspace: PickerWorkspace): void }) {
+  const [query, setQuery] = useState(initialQuery);
+  const [open, setOpen] = useState(initialOpen);
+  const [active, setActive] = useState(0);
+  const needle = query.trim().toLowerCase();
+  const shown = needle ? PICKER_WORKSPACES.filter(item => `${item.name} ${item.project}`.toLowerCase().includes(needle)) : PICKER_WORKSPACES.filter(item => item.recent);
+  const projects = [...new Set(shown.map(item => item.project))];
+  const choosable = shown.filter(item => item.approved);
+  const choose = (item: PickerWorkspace) => { if (!item.approved) return; setOpen(false); onChoose(item); };
+  return <div className="flex flex-col gap-1.5">
+    <label className="flex h-8 items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 text-caption focus-within:border-[#1a73e8]">
+      <span className="text-muted-foreground">⌕</span>
+      <input value={query} placeholder="Add to a workspace…" aria-label="Find a workspace" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+        onFocus={() => setOpen(true)} onChange={event => { setQuery(event.target.value); setActive(0); setOpen(true); }}
+        onKeyDown={event => {
+          if (event.key === 'ArrowDown') { event.preventDefault(); setActive(index => Math.min(index + 1, choosable.length - 1)); }
+          if (event.key === 'ArrowUp') { event.preventDefault(); setActive(index => Math.max(index - 1, 0)); }
+          if (event.key === 'Enter' && choosable[active]) choose(choosable[active]);
+          if (event.key === 'Escape') setOpen(false);
+        }} />
+      {open ? <span className="text-[10px] text-muted-foreground">↑↓ Enter</span> : null}
+    </label>
+    {open ? <div role="listbox" className="flex max-h-56 flex-col overflow-auto rounded-lg border border-border bg-surface-1 py-1 shadow-lg">
+      {!needle ? <p className="px-2.5 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Recent</p> : null}
+      {projects.map(project => <div key={project}>
+        {needle ? <p className="px-2.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{project}</p> : null}
+        {shown.filter(item => item.project === project).map(item => {
+          const selected = choosable[active] === item;
+          return <div key={item.name} role="option" aria-selected={selected} aria-disabled={!item.approved} onMouseDown={event => { event.preventDefault(); choose(item); }}
+            className={`flex items-center gap-2 px-2.5 py-1.5 ${item.approved ? 'cursor-pointer' : 'opacity-60'} ${selected ? 'bg-hover' : ''}`}>
+            {item.color ? <span className="size-2.5 shrink-0 rounded-full" style={{ background: item.color }} /> : <span className="size-2.5 shrink-0 rounded-full border border-dashed border-neutral-400" />}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-caption font-medium">{item.name}{needle ? null : <span className="font-normal text-muted-foreground"> · {item.project}</span>}</p>
+              <p className="truncate text-[11px] text-muted-foreground">{!item.approved ? `This Chrome isn't approved in ${item.project}` : item.color ? `Its group here · ${item.tabs} tabs` : 'No tab group here yet · adding makes one'}</p>
+            </div>
+            {!item.approved ? <span className="text-[11px]" style={{ color: BLUE }}>Approve…</span> : null}
+          </div>;
+        })}
+      </div>)}
+      {!shown.length ? <p className="px-2.5 py-2 text-caption text-muted-foreground">No workspace matches “{query}”.</p> : null}
+    </div> : null}
+  </div>;
+}
+
+function Popup({ on, onToggle, tab: initialTab = { host: 'news.ycombinator.com' }, watching }: { on: boolean; onToggle(): void; tab?: PopupTab; watching?: string }) {
   const [people, setPeople] = useState<Record<Capability, boolean>>({ view: true, comment: true });
+  const [tab, setTab] = useState<PopupTab>(initialTab);
   return <div className="flex w-[360px] flex-col overflow-hidden rounded-xl border border-border bg-surface-1 text-left shadow-xl">
     <header className="flex items-center gap-2.5 border-b border-border px-4 py-3">
       <img src="/favicon.png" alt="" width={24} height={24} className="rounded-md" style={{ filter: on ? undefined : 'grayscale(1)' }} />
@@ -56,14 +116,20 @@ function Popup({ on, onToggle, tab = { host: 'news.ycombinator.com' }, watching 
         </div>)}
       </section>
       <section className="flex flex-col gap-2 border-t border-border px-4 py-3">
-        <h3 className="text-caption font-semibold text-muted-foreground">This tab · {tab.host}{tab.group ? <> · in <span style={{ color: BLUE }}>{tab.group}</span></> : null}</h3>
+        <h3 className="text-caption font-semibold text-muted-foreground">This tab · {tab.host}{tab.group ? <> · in <span style={{ color: tab.groupColor ?? BLUE }}>{tab.group}</span></> : null}</h3>
+        {!tab.group ? <WorkspacePicker initialQuery={tab.picker?.query} initialOpen={tab.picker?.open} onChoose={item => setTab(current => ({ host: current.host, group: item.name, groupColor: item.color ?? '#188038' }))} /> : null}
         <InputCopy value="https://bradleat.gitspace.sh/s/7Kq2mX9fV1#c8Zr4tWb0yLe" displayValue="bradleat.gitspace.sh/s/7Kq2mX9f…" />
         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
           <span className="text-muted-foreground">People can</span>
-          {(['view', 'comment'] satisfies Capability[]).map(capability => <button key={capability} type="button" disabled={capability === 'view'} onClick={() => setPeople(current => ({ ...current, [capability]: !current[capability] }))} className={`rounded-full border px-2 py-0.5 ${people[capability] ? 'border-transparent text-white' : 'border-border text-muted-foreground'}`} style={people[capability] ? { background: BLUE } : undefined}>{people[capability] ? '✓ ' : ''}{capability}</button>)}
+          {(['view', 'comment'] satisfies Capability[]).map(capability => {
+            const locked = capability === 'view' || (capability === 'comment' && !tab.group);
+            const checked = capability === 'view' || (people[capability] && Boolean(tab.group));
+            return <button key={capability} type="button" disabled={locked} title={capability === 'comment' && !tab.group ? 'Comments go to a workspace: add this tab to one first' : undefined} onClick={() => setPeople(current => ({ ...current, [capability]: !current[capability] }))} className={`rounded-full border px-2 py-0.5 ${checked ? 'border-transparent text-white' : 'border-border text-muted-foreground'} ${locked && capability === 'comment' ? 'opacity-50' : ''}`} style={checked ? { background: BLUE } : undefined}>{checked ? '✓ ' : ''}{capability}</button>;
+          })}
           <span className="ml-auto text-muted-foreground">for 1 hour ▾</span>
         </div>
-        <p className="text-[11px] text-muted-foreground">Paste it into one of your workspaces to give its agent this tab, or send it to someone to watch and point{people.comment ? ' and comment' : ''}. Only you and your agent ever click or type. Ends when it expires, when you stop it, or when the tab closes.</p>
+        {!tab.group ? <p className="text-[11px] text-muted-foreground">Add the tab to a workspace to let people comment: their comments go to that workspace, and its agent can use the tab on its approved sites.</p> : null}
+        <p className="text-[11px] text-muted-foreground">Paste it into one of your workspaces to give its agent this tab, or send it to someone to watch and point{people.comment && tab.group ? ' and comment' : ''}. Only you and your agent ever click or type. Ends when it expires, when you stop it, or when the tab closes.</p>
         {watching ? <div className="flex items-center gap-2 rounded-lg bg-surface-3 px-2.5 py-1.5 text-caption"><StatusDot color="green" pulse /><span className="min-w-0 flex-1 truncate">{watching}</span><Button variant="ghost" size="compact">Stop sharing</Button></div> : null}
         {tab.group ? <div className="flex items-center gap-2"><span className="shrink-0 whitespace-nowrap"><Button variant="ghost" size="compact">Remove from group</Button></span><span className="text-[11px] text-muted-foreground">Drag it to another group in Chrome to move it.</span></div> : null}
       </section>
@@ -434,6 +500,14 @@ export function ExtensionMock() {
         <div><h2 className="text-subtitle font-medium">Popup</h2><Caption>The panel Chrome opens when you click the GitSpace icon next to the address bar (try it in the window above). It is about this Chrome as a whole: on or off, who is using it, and a share link for the current tab. Comment and Record live only in the in-page toolbar, which a tab gets once it is in a workspace.</Caption></div>
         <div className="flex flex-wrap items-start gap-6"><Popup on={on} onToggle={() => setOn(value => !value)} /><Popup on onToggle={() => {}} tab={{ host: 'httpbin.org', group: 'Cross-machine browser relay' }} watching="Ana is watching · 52 min left" /><Popup on={false} onToggle={() => setOn(true)} /></div>
         <Note>One share link per tab, no Share button: copying it creates it. Who opens it decides what it does. Pasted into one of <em>your</em> workspaces, it gives that workspace&apos;s agent the tab (the composer turns it into a tab chip; the agent never sees the link). Opened by a person, it is the live viewer with the capabilities ticked here. A person&apos;s own agents get nothing from it. See view 2 for the paste and below for the viewer.</Note>
+        <div className="flex flex-col gap-3">
+          <div><h3 className="text-body font-medium">Adding a tab to a workspace</h3><Caption>A tab in no workspace group gets a search box: type part of a workspace or project name, choose one, and the tab moves into that workspace&apos;s tab group in this Chrome. A workspace with no group here yet gets one, in its colour. Then people can comment on the tab&apos;s share link (comments go to that workspace) and its agent can use the tab on its approved sites. Projects that haven&apos;t approved this Chrome show why, with Approve.</Caption></div>
+          <div className="flex flex-wrap items-start gap-6">
+            <Popup on onToggle={() => {}} tab={{ host: 'news.ycombinator.com', picker: { open: true } }} />
+            <Popup on onToggle={() => {}} tab={{ host: 'news.ycombinator.com', picker: { query: 'chall', open: true } }} />
+            <Popup on onToggle={() => {}} tab={{ host: 'news.ycombinator.com', picker: { query: 'work', open: true } }} />
+          </div>
+        </div>
         <Viewer />
         <Note>Pairing, the fingerprint and reset move under &ldquo;Identity &amp; pairing&rdquo;; pairing starts from GitSpace (Plugins → Pair a Chrome). Off stops running scripts and refuses new ones without unpairing.</Note>
       </section>
