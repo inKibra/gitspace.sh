@@ -17,6 +17,7 @@ import { browserRunSummary, logBrowserRun, recentBrowserRuns, viewNames, type Br
 import type { SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { RuntimeAccountBrowserAuthorization, RuntimeAccountBrowserPlacement } from '@gitspace/protocol-runtime';
 import type { RuntimeTakeoverTab } from '@gitspace/protocol-runtime';
+import { localhostPort, localhostRefusal, machineBrowserNote, type WorkspaceServiceUrl } from './workspace-service-urls.js';
 export interface RuntimeBrowserAuthority {
   prepare: ToolServices['prepareBrowser'];
   execute: ToolServices['invoke'];
@@ -102,6 +103,8 @@ export async function retireWorkspaceBrowsers(storage: { list(options: { prefix:
 /** `approvedSites`: the approved sites at their levels, and the commit their `.gitspace/bundle.json` was read at (null with none). */
 export type RuntimeBrowserAuthorityOptions = {
   storage: BrowserStorage; env: BrowserEnvironment; identity: { projectId: string; workspaceId: string }; runtime(): BrowserRuntime; selectExecution(args: RuntimeBrowserArguments, candidates: RuntimeAttachment[]): Promise<RuntimeAttachment>; approvedSites(): Promise<{ sites: { pattern: string; level: BrowserSiteLevel }[]; revision: string | null }>; groupName(): Promise<string>;
+  /** The workspace's running http services at their workspace URLs. */
+  services(): Promise<WorkspaceServiceUrl[]>;
   /** The workspace's drive, where captures are kept. */
   drive(): CaptureDrive;
   /** Moves a file on an attached machine (`machinePath`, inside its /tmp) to the workspace's drive at `path`. */
@@ -154,8 +157,9 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   }
   const account = createAccountBrowserAuthority(options, signing, holder);
   function accountPlacement(args: RuntimeBrowserArguments) {
-    // Scripts run in the workspace's browser session, on the cloud browser or your Chrome: no machine browser runs them.
-    return args.source === 'relay' || args.action === 'run' || !args.on && !options.runtime().attachments.list().some(item => item.state === 'ready' && item.capabilities.includes('browser.headless'));
+    // Headless means the cloud browser; a machine's headless browser runs single steps only when the agent names that
+    // machine with `on` (localhost on that machine), and never scripts.
+    return args.source === 'relay' || args.action === 'run' || !args.on;
   }
   async function signed(input: Input, placement: { machineId: string; attachmentId: string; generation: number }, command: RuntimeBrowserAuthorizationBody['command'], expiresAt: string): Promise<RuntimeToolDispatch> {
     const scope = { ...identity, machineId: placement.machineId, attachmentId: placement.attachmentId, generation: placement.generation, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId };
@@ -211,6 +215,9 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
         if (host && sites.read.some(pattern => browserOriginMatches(pattern, host))) throw new Error(readSiteRefusal(host));
       }
     }
+    // The cloud browser cannot reach a machine's localhost: the agent hears where the service is instead.
+    const port = args.source === 'headless' && !args.on && (args.action === 'open' || args.action === 'navigate') && args.url ? localhostPort(args.url) : null;
+    if (port !== null) throw new Error(localhostRefusal(port, await options.services()));
     return { conversation, args, sites };
   }
   async function prepareCall(input: Input) {
@@ -314,7 +321,9 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       await storage.put(`runtime.browser.revoked:${body.groupId}`, true);
       return { ...result, error: { ...result.error, message: `${result.error.message}: that browser group ended on the machine. Call again to start a new group.` } };
     }
-    return result;
+    if (result.status !== 'completed' || !(args.action === 'open' || args.action === 'navigate') || !args.url) return result;
+    const note = machineBrowserNote(args.url, typeof args.on === 'string' ? args.on : placement.machineId, await options.services());
+    return note ? { ...result, content: [...result.content, { type: 'text', text: note }] } : result;
   }
   /** Element names of the pages the agent observed, by ref, so the recent runs name what a later `act` acted on; the
    * newest `REF_NAMES_KEPT`, while this object stays awake. */
@@ -540,7 +549,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       const groupId = await liveGroup('cloud');
       const cloud = groupId && env.BROWSER_SESSION ? await env.BROWSER_SESSION.getByName(`${env.ACCOUNT_ID}:${identity.projectId}:${identity.workspaceId}`).overview() : null;
       const tab = cloud?.tabs.find(item => item.targetId === args.targetId);
-      if (!groupId || !cloud || !tab) throw new Error((await headlessMachines()).length ? `The cloud browser has no tab ${args.targetId}. Tabs of a machine's headless browser cannot be taken over: open the page on the cloud browser (web_browser run, or source "relay" on the user's Chrome) and ask for that tab.` : `The cloud browser has no tab ${args.targetId}: web_browser tabs lists its tabs.`);
+      if (!groupId || !cloud || !tab) throw new Error((await headlessMachines()).length ? `The cloud browser has no tab ${args.targetId}. Tabs of a machine's headless browser cannot be taken over: open the page on the cloud browser (web_browser without on, or source "relay" on the user's Chrome) and ask for that tab.` : `The cloud browser has no tab ${args.targetId}: web_browser tabs lists its tabs.`);
       return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId, targetId: tab.targetId, url: tab.url, title: tab.title, holder: cloud.held.some(item => item.targetId === tab.targetId) ? 'you' : 'agent' };
     }
     if (!env.RELAY) throw new Error('Account Chrome relay unavailable');

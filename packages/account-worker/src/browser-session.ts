@@ -9,6 +9,7 @@ import { CdpBrowserShim, serveCdpSocket, type CdpShimOptions } from './browser-s
 import { BROWSER_TAB_HELD } from './browser-takeover.js';
 import { BROWSER_RUNNER_SOURCE } from './generated/browser-runner.js';
 import { hostedServiceUrlPattern, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
+import { localhostPort, localhostRefusal, type WorkspaceServiceUrl } from './workspace-service-urls.js';
 import { SERVICE_COOKIE, type ServiceWorkspace } from './service-sessions.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 import { CloudCaptures } from './browser-capture.js';
@@ -72,7 +73,8 @@ function shimChannel(shim: CdpBrowserShim, label: string, hold: CdpShimOptions['
  * responses included. Clients of the shim cannot set or read cookies, and their network events show the cookie blank. */
 export class CloudServiceCookies {
   private readonly admitted = new Map<string, { at: number; done: Promise<void> }>();
-  constructor(private readonly env: Pick<Env, 'RELAY' | 'RELAY_NAME' | 'TENANT_ID'>, private readonly upstream: BrowserChannel, private readonly workspace: ServiceWorkspace) {}
+  /** `services` lists the workspace's running http services at their workspace URLs. */
+  constructor(private readonly env: Pick<Env, 'RELAY' | 'RELAY_NAME' | 'TENANT_ID'>, private readonly upstream: BrowserChannel, private readonly workspace: ServiceWorkspace, private readonly services: () => Promise<WorkspaceServiceUrl[]>) {}
 
   /** Gives the browser its session for `hostname` unless one set in the last 10 minutes holds; requests meanwhile wait
    * for the same one. Refused for a hostname that is not a live one of this workspace. */
@@ -89,8 +91,11 @@ export class CloudServiceCookies {
   }
 
   /** A client's navigation to a hosted name gets its session first, so a script's `goto` loads the service too. One
-   * that is not this workspace's goes without, and the hosted path refuses it. */
+   * that is not this workspace's goes without, and the hosted path refuses it. A navigation to localhost, which the
+   * cloud browser cannot reach, is refused with the workspace URL of the service on that port, if any. */
   async navigating(url: string): Promise<void> {
+    const port = localhostPort(url);
+    if (port !== null) throw new Error(localhostRefusal(port, await this.services()));
     const hostname = URL.parse(url)?.hostname;
     if (hostname && isHostedServiceHostname(this.env, hostname)) await this.admit(hostname).catch(() => {});
   }
@@ -145,7 +150,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     if (!workspace) return Promise.reject(new Error('Browser session has no workspace'));
     const opening = (async () => {
       const upstream = await launchCloudBrowser(this.env.BROWSER, AbortSignal.timeout(30_000));
-      const cookies = new CloudServiceCookies(this.env, upstream, workspace);
+      const cookies = new CloudServiceCookies(this.env, upstream, workspace, () => this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.projectId}`).workspaceServices(workspace.workspaceId));
       this.upstream = upstream;
       this.cookies = cookies;
       // A dropped connection ends this browser; the next use opens another.

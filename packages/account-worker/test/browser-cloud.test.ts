@@ -48,7 +48,7 @@ test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud sets its
     return new Response(null, { status: 101, webSocket: pair[0] });
   } };
   const upstream = await launchCloudBrowser(binding, AbortSignal.timeout(5000));
-  const cookies = new CloudServiceCookies(env, upstream, workspace);
+  const cookies = new CloudServiceCookies(env, upstream, workspace, async () => []);
   const runtime = new AccountBrowserRuntime({ storage, cloud: async () => upstream, services: { urlPattern: hostedServiceUrlPattern(env), hostname: name => isHostedServiceHostname(env, name), workspace: (name, grant) => isWorkspaceServiceHostname(env, workspace, name, grant), admit: name => cookies.admit(name) } });
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
   const placement = { kind: 'cloud', accountId: 'account' };
@@ -86,7 +86,7 @@ test('a script going to its workspace service gets the session cookie first; one
     subscribe() { return () => {}; },
     async close() {},
   };
-  const cookies = new CloudServiceCookies(env, upstream, workspace);
+  const cookies = new CloudServiceCookies(env, upstream, workspace, async () => []);
   const script = (await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) })).client(() => {});
   await script.send('Target.createTarget', { url: `https://${hostname}/app` });
   await script.send('Target.createTarget', { url: `https://${elsewhere}/app` });
@@ -94,6 +94,16 @@ test('a script going to its workspace service gets the session cookie first; one
   const [cookie] = SetCookies.parse(sent[1]?.params).cookies;
   expect(cookie.url).toBe(`https://${hostname}/`);
   expect(await env.RELAY.getByName(env.RELAY_NAME).serviceValidate(cookie.value, elsewhere)).toBeNull();
+});
+
+test('a script going to localhost on the cloud browser is refused with the workspace URL of the service on that port', async () => {
+  const sent: string[] = [];
+  const upstream: BrowserChannel = { async send(method) { sent.push(method); return method === 'Target.createTarget' ? { targetId: 'page' } : { frameId: 'frame' }; }, subscribe() { return () => {}; }, async close() {} };
+  const cookies = new CloudServiceCookies(env, upstream, workspace, async () => [{ name: 'web', url: `https://web--workspace--${env.TENANT_ID}-srv.gssh.dev`, port: 5173, machine: 'Darktop' }]);
+  const script = (await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) })).client(() => {});
+  await expect(script.send('Target.createTarget', { url: 'http://localhost:5173/' })).rejects.toThrow(`This workspace's \`web\` service on port 5173 is at https://web--workspace--${env.TENANT_ID}-srv.gssh.dev; open that. For a port with no service URL, add on:"Darktop".`);
+  await expect(script.send('Target.createTarget', { url: 'http://127.0.0.1:9000/' })).rejects.toThrow('no service of this workspace has a URL for port 9000');
+  expect(sent).not.toContain('Target.createTarget');
 });
 
 afterEach(() => { vi.restoreAllMocks(); });

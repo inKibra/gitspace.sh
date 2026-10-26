@@ -4,7 +4,8 @@ import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 
 const id = z.string().min(1).max(256);
 const source = z.enum(['relay', 'headless']).default('headless');
-const selection = { source, on: RuntimeDispatchSelectionSchema.shape.on, pairingId: z.string().uuid().optional() };
+/** `on` puts a headless step on that machine's headless browser instead of the cloud browser. */
+const selection = { source, on: RuntimeDispatchSelectionSchema.shape.on.describe('Only for a port with no service URL; prefer the cloud browser.'), pairingId: z.string().uuid().optional() };
 const tab = { ...selection, targetId: id };
 export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('open'), ...selection, targetId: id.optional(), url: z.string().max(8192).optional() }),

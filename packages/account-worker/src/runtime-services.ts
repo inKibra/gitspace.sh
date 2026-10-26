@@ -22,6 +22,7 @@ import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
 import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './runtime-browser.js';
+import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
 import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
@@ -241,6 +242,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
     selectExecution: (args, candidates) => selections.cache(args, candidates),
+    services: () => authority().workspaceServices(identity.workspaceId),
     approvedSites: async () => {
       const { state, commit } = await options.environment.refreshBrowserOrigins(identity);
       return { sites: approvedBrowserSites(state), revision: commit };
@@ -868,14 +870,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         }
       },
       async instructions(conversationId) {
-      const project = await authority().getProject();
+      // One call reads the project, this workspace and its running services' URLs.
+      const { project, workspace, services } = await authority().instructionContext(identity.workspaceId);
       if (!project) throw new Error('Project is not configured');
-      const workspace = await authority().getWorkspace(identity.workspaceId);
       if (!workspace && identity.workspaceId !== baseWorkspaceId) throw new Error('Workspace does not belong to this project');
+      const serviceSummary = servicesBlock(services);
       const main = (await options.runtime().browserConversation(conversationId)).root;
       if (!main) {
         const [committed, skills] = await Promise.all([options.instructionLoader.loadInstructions(), enabledSkills()]);
-        return [committed, skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n')].filter(Boolean).join('\n\n');
+        return [committed, serviceSummary, skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n')].filter(Boolean).join('\n\n');
       }
       const owned = { projectId: identity.projectId, spaceId: identity.workspaceId };
       const context = env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId, identity.workspaceId]));
@@ -884,7 +887,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       ]);
       const skillSummary = skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n');
       const canonical = `Current canonical workspace instructions. These replace prior Goal, Workflow, and Rubric instructions. Follow the latest requirements and gates unless the user tells you otherwise.\n${JSON.stringify({ goal, workflow, rubric })}`;
-      return [USER_PRECEDENCE, `Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Only the user approves lifecycle scripts in Environment, enters secrets, answers protected interactive prompts and shares QA outside GitSpace; your tools cannot do these.`, SHOWING_FILES, committed, canonical, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
+      return [USER_PRECEDENCE, `Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Only the user approves lifecycle scripts in Environment, enters secrets, answers protected interactive prompts and shares QA outside GitSpace; your tools cannot do these.`, SHOWING_FILES, committed, canonical, serviceSummary, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
     } },
     operations: {
       execute,

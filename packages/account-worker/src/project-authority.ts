@@ -40,6 +40,7 @@ import { behindOrigin } from './cloud-stack-status.js';
 import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } from './guide-shares.js';
 import { z } from 'zod';
 import { BudgetedDurableObject } from './storage-quarantine.js';
+import type { WorkspaceServiceUrl } from './workspace-service-urls.js';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 const RemoteHeadsSchema = z.array(z.object({ branch: z.string().min(1).max(512), head: remoteBranchStateSchema.shape.head })).max(1_000);
@@ -1763,6 +1764,18 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   listHostedPointers(): HostedServicePointer[] {
     return this.ctx.storage.sql.exec<{ pointer_json: string }>('SELECT pointer_json FROM hosted_pointers ORDER BY hostname').toArray()
       .map(row => hostedServicePointerSchema.parse(JSON.parse(row.pointer_json)));
+  }
+
+  /** A workspace's running http services at their workspace URLs, by name, each with the machine its pointer names. */
+  workspaceServices(workspaceId: string): WorkspaceServiceUrl[] {
+    const pointers = new Map(this.listHostedPointers().map(pointer => [pointer.hostname, pointer]));
+    return this.listHostedRoutes().filter(route => route.workspaceId === workspaceId && hostedServiceUrlKind(route.hostname) === 'workspace')
+      .map(route => ({ name: route.hostname.split('--')[0] ?? route.serviceName, url: `https://${route.hostname}`, port: route.port, machine: pointers.get(route.hostname)?.machineLabel ?? route.machineId }));
+  }
+
+  /** What a workspace's instructions read from the project each turn, in one call. */
+  instructionContext(workspaceId: string): { project: CloudProjectSummary | null; workspace: CloudWorkspaceDefinition | null; services: WorkspaceServiceUrl[] } {
+    return { project: this.getProject(), workspace: this.getWorkspace(workspaceId), services: this.workspaceServices(workspaceId) };
   }
 
   /** Records a route the hosted route registry accepted, with the pointer it holds for a workspace URL. A machine URL keeps its first live owner. */

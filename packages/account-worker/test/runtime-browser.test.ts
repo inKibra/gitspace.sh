@@ -1,3 +1,4 @@
+import type { WorkspaceServiceUrl } from '../src/workspace-service-urls.js';
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -124,15 +125,17 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
     async url(path: string) { return `https://account.test/files/${encodeURIComponent(path)}`; },
   };
   const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: { getByName: () => relayObject ?? relay }, BROWSER_SESSION, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
+  /** The workspace's running services at their workspace URLs. */
+  const services: WorkspaceServiceUrl[] = [];
   const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
     const machineId = args.on ?? state.defaultMachineId;
     const selected = candidates.find(item => machineId === null || item.machineId === machineId);
     if (!selected) throw new Error('No selected browser cache is ready');
     return selected;
-  }, approvedSites: async () => ({ sites: state.origins.map(pattern => ({ pattern, level: state.levels[pattern] ?? 'full' })), revision: state.revision }), groupName: async () => 'Workspace', drive: () => drive,
+  }, approvedSites: async () => ({ sites: state.origins.map(pattern => ({ pattern, level: state.levels[pattern] ?? 'full' })), revision: state.revision }), groupName: async () => 'Workspace', drive: () => drive, services: async () => services,
   async fromMachine(move) { moved.push(move); await drive.write(move.path, move.mediaType, machineFiles.get(move.machinePath) ?? new Uint8Array()); } });
   const input = { tool: 'browser', args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'relay', url: 'https://example.com/' }), conversationId: String(root.id), taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' as const };
-  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls, controlCalls, closedCloudTabs, cloudHeld, browserEvents, runtime };
+  return { authority, input, state, dispatches, sessions, attachments, machines, machineAnswers, attachment, pairing, knownPairings, forgottenPairings, offlinePairings, storage, drive, files, machineFiles, moved, shares, shareCalls, controlCalls, closedCloudTabs, cloudHeld, browserEvents, runtime, services };
 }
 test('project-approved Chrome creates its workspace group without a second human approval', async () => {
   const f = await fixture(); const card = await f.authority.prepare(f.input);
@@ -293,6 +296,37 @@ test('headless explicit on still dispatches to exact ready machine',async()=>{
  const f=await fixture();f.input.args=RuntimeBrowserArgumentsSchema.parse({action:'open',source:'headless',on:'machine'});
  const card=await f.authority.prepare(f.input); expect('machineId' in card && card.machineId).toBe('machine');
  await f.authority.execute(f.input);const dispatched=f.dispatches[0];expect(dispatched && 'machineId' in dispatched && dispatched.machineId).toBe('machine');
+});
+test('a headless single step goes to the cloud browser even with a ready headless machine attached', async () => {
+  const f = await fixture();
+  f.input.args = RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', url: 'https://example.com/' });
+  const card = await f.authority.prepare(f.input);
+  expect('placement' in card && card.placement.kind).toBe('cloud');
+  await f.authority.execute(f.input);
+  expect(f.sessions.map(session => session.authorization.body.scope.placement.kind)).toEqual(['cloud']);
+  expect(f.dispatches.some(dispatch => 'machineId' in dispatch)).toBe(false);
+});
+test('a cloud step to localhost is answered with the service URL on that port, or how to reach a port without one, before any browser', async () => {
+  const f = await fixture();
+  f.services.push({ name: 'web', url: 'https://web--workspace--account-srv.gssh.dev', port: 5173, machine: 'Darktop' });
+  const step = (args: Record<string, unknown>, attemptId: string) => f.authority.prepare({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ source: 'headless', ...args }), requestId: attemptId, attemptId });
+  const hint = 'localhost isn\'t reachable from the cloud browser. This workspace\'s `web` service on port 5173 is at https://web--workspace--account-srv.gssh.dev; open that. For a port with no service URL, add on:"Darktop".';
+  await expect(step({ action: 'open', url: 'http://localhost:5173/login' }, 'open')).rejects.toThrow(hint);
+  await expect(step({ action: 'navigate', targetId: 'tab', url: 'http://[::1]:5173/' }, 'navigate')).rejects.toThrow(hint);
+  await expect(step({ action: 'open', url: 'http://127.0.0.1:9000/' }, 'unknown')).rejects.toThrow('no service of this workspace has a URL for port 9000. Declare the service in .gitspace/services.json');
+  expect([f.sessions, f.dispatches]).toEqual([[], []]);
+});
+test('a step on a machine’s headless browser ends with a note: the service URL for a localhost port that has one, the cloud browser for any other site', async () => {
+  const f = await fixture();
+  f.services.push({ name: 'web', url: 'https://web--workspace--account-srv.gssh.dev', port: 5173, machine: 'Darktop' });
+  const step = async (url: string, attemptId: string) => {
+    const input = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', on: 'machine', url }), requestId: attemptId, attemptId };
+    await f.authority.prepare(input);
+    return (await f.authority.execute(input)).content.slice(1);
+  };
+  expect(await step('http://localhost:5173/', 'served')).toEqual([{ type: 'text', text: 'This port has a service URL (https://web--workspace--account-srv.gssh.dev); the cloud browser can open it, and the user can watch and take it over there.' }]);
+  expect(await step('https://example.com/', 'site')).toEqual([{ type: 'text', text: 'This runs on machine\'s headless browser, which the user can\'t watch live; use the cloud browser unless you need this machine.' }]);
+  expect(await step('http://localhost:8080/', 'undeclared')).toEqual([]);
 });
 test('account group revocation prevents old approval reuse',async()=>{
  const f=await fixture();const first=await f.authority.prepare(f.input);await f.authority.execute(f.input);
