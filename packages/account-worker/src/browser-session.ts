@@ -372,9 +372,10 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     });
     type Runner = WorkerEntrypoint & { run(input: { label: string; state: unknown }): Promise<string> };
     const stopped = Promise.withResolvers<never>();
+    const limit = `The script ran longer than ${BROWSER_RUN_LIMIT_MS / 1000} s and was stopped`;
     const timer = setTimeout(() => {
       this.endRun(run, 'Script stopped');
-      stopped.reject(new Error(`The script ran longer than ${BROWSER_RUN_LIMIT_MS / 1000} s and was stopped`));
+      stopped.reject(new Error(limit));
     }, BROWSER_RUN_LIMIT_MS);
     let text: string;
     // Downloads your Chrome's extension saved for this run, which it finishes uploading before the run ends.
@@ -382,13 +383,20 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     // Why your Chrome stopped the script (you took one of its tabs over), which its result says instead of the error
     // its Playwright saw as its connection closed.
     let takenOver: string | null = null;
-    try { text = await Promise.race([sandbox.getEntrypoint<Runner>().run({ label: scope.conversationKind === 'main' ? 'Agent' : 'Subagent', state: await this.ctx.storage.get(stateKey) ?? {} }), stopped.promise]); }
-    finally {
-      clearTimeout(timer);
-      this.runFiles.delete(run);
-      this.stopped.delete(run);
-      // Cuts the script off your Chrome; a lost end still lapses at the run's deadline.
-      if (relay && relayToken) ({ downloads: chromeDownloads, stopped: takenOver } = await relay.browserRelayScriptEnd(relayToken).catch((error: unknown) => { console.warn(JSON.stringify({ event: 'browser_relay_script_end_failed', error: String(error) })); return { downloads: [], stopped: null }; }));
+    // What the script was waiting on in your Chrome as it ended, which a script stopped at its time limit says.
+    let waiting: string | null = null;
+    try {
+      try { text = await Promise.race([sandbox.getEntrypoint<Runner>().run({ label: scope.conversationKind === 'main' ? 'Agent' : 'Subagent', state: await this.ctx.storage.get(stateKey) ?? {} }), stopped.promise]); }
+      finally {
+        clearTimeout(timer);
+        this.runFiles.delete(run);
+        this.stopped.delete(run);
+        // Cuts the script off your Chrome; a lost end still lapses at the run's deadline.
+        if (relay && relayToken) ({ downloads: chromeDownloads, stopped: takenOver, waiting } = await relay.browserRelayScriptEnd(relayToken).catch((error: unknown) => { console.warn(JSON.stringify({ event: 'browser_relay_script_end_failed', error: String(error) })); return { downloads: [], stopped: null, waiting: null }; }));
+      }
+    } catch (error) {
+      if (waiting && error instanceof Error && error.message === limit) throw new Error(`${limit}: ${waiting}`);
+      throw error;
     }
     const ran = RunResult.parse(JSON.parse(text));
     const result = takenOver ? { ...ran, ok: false, value: undefined, error: takenOver } : ran;

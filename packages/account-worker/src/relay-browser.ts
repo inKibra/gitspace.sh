@@ -35,8 +35,20 @@ export class RelayBrowser implements BrowserChannel {
   /** Tabs this run attached, by lease session. */
   private readonly attached = new Map<string, { targetId: string; unlisten(): void }>();
   private readonly listeners = new Set<Listener>();
+  /** Commands your Chrome has not answered yet, and when the last tab event came: why a script that stopped at its
+   * time limit was waiting (`waiting`). */
+  private readonly unanswered = new Map<number, { method: string; sentAt: number }>();
+  private sent = 0;
+  private lastEventAt: number | null = null;
 
   constructor(private readonly link: RelayRunLink) {}
+
+  /** What the script waited on: the oldest command your Chrome has not answered, else how long no tab event came. */
+  waiting(now = Date.now()): string {
+    const oldest = [...this.unanswered.values()].sort((left, right) => left.sentAt - right.sentAt)[0];
+    if (oldest) return `your Chrome had not answered ${oldest.method} for ${Math.round((now - oldest.sentAt) / 1000)} s`;
+    return this.lastEventAt === null ? 'no command was waiting on your Chrome and no event came from its tabs' : `no command was waiting on your Chrome and its tabs sent no event for ${Math.round((now - this.lastEventAt) / 1000)} s`;
+  }
 
   async send(method: string, params: Params = {}, sessionId?: string): Promise<unknown> {
     // Browser-domain commands concern the whole browser even on a tab's session (Playwright asks a page for its
@@ -104,8 +116,11 @@ export class RelayBrowser implements BrowserChannel {
     this.listeners.clear();
   }
 
-  private command(targetId: string, sessionId: string, method: string, params: Params): Promise<unknown> {
-    return this.link.request({ operation: 'command', targetId, sessionId, method, params, attemptId: this.link.attemptId });
+  private async command(targetId: string, sessionId: string, method: string, params: Params): Promise<unknown> {
+    const id = ++this.sent;
+    this.unanswered.set(id, { method, sentAt: Date.now() });
+    try { return await this.link.request({ operation: 'command', targetId, sessionId, method, params, attemptId: this.link.attemptId }); }
+    finally { this.unanswered.delete(id); }
   }
 
   /** The group's tabs as page targets of the one context. */
@@ -128,6 +143,7 @@ export class RelayBrowser implements BrowserChannel {
   private track(targetId: string, sessionId: string): void {
     if (this.attached.has(sessionId)) return;
     const unlisten = this.link.listen(targetId, event => {
+      this.lastEventAt = Date.now();
       if (event.method === 'disconnected') this.gone(sessionId, targetId);
       else if (event.method) this.emit({ method: event.method, params: event.params, sessionId });
     });

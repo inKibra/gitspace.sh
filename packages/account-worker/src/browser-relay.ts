@@ -1333,20 +1333,22 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     return { token };
   }
   /** Ends a script: its CDP connection closes and the extension refuses its attempt from now on, having finished
-   * uploading the run's downloads, which are returned (workspace-relative drive paths). */
-  async scriptEnd(token: string): Promise<{ downloads: { path: string; size: number; mediaType: string }[]; stopped: string | null }> {
+   * uploading the run's downloads, which are returned (workspace-relative drive paths), with what the script was
+   * waiting on in your Chrome as it ended (`RelayBrowser.waiting`). */
+  async scriptEnd(token: string): Promise<{ downloads: { path: string; size: number; mediaType: string }[]; stopped: string | null; waiting: string | null }> {
     const run = this.scripts.get(token), taken = this.takenScripts.get(token);
     this.takenScripts.delete(token);
+    const waiting = run?.browser?.waiting() ?? null;
     if (run) await this.endScript(token, run, 'Script ended');
     const attemptId = run?.attemptId ?? taken?.attemptId;
-    if (!attemptId) return { downloads: [], stopped: null };
+    if (!attemptId) return { downloads: [], stopped: null, waiting };
     const downloads: { path: string; size: number; mediaType: string }[] = [];
     for (const [key, stored] of await this.ctx.storage.list({ prefix: `${BROWSER_DOWNLOAD}${attemptId}:` })) {
       const { path, size, mediaType } = BrowserDownloadSchema.parse(stored);
       downloads.push({ path, size, mediaType });
       await this.ctx.storage.delete(key);
     }
-    return { downloads, stopped: taken ? SCRIPT_TAKEN_REFUSAL : null };
+    return { downloads, stopped: taken ? SCRIPT_TAKEN_REFUSAL : null, waiting };
   }
   /** A script's CDP connection, from its sandbox through `BrowserSessionCdp`: `BROWSER_SCRIPT_PATH<token>/<cursor
    * label>`. Public requests never reach this path (index.ts forwards only `/ws` and `/tunnel/` to the relay object);

@@ -50,6 +50,8 @@ async function chrome(relay: UserRelayDO, root: Identity, protocol: number) {
       if (message.method === 'Runtime.evaluate' && expression === '6 * 7') result = { result: { type: 'number', value: 42 } };
       // You took this tab over: the extension stops the script at this command.
       if (message.method === 'Runtime.evaluate' && expression === 'yours') { socket.send(JSON.stringify({ id, error: { message: SCRIPT_TAKEN_REFUSAL } })); return; }
+      // A command your Chrome never answers.
+      if (message.method === 'Runtime.evaluate' && expression === 'unanswered') return;
       const url = tabs.find(tab => tab.targetId === message.targetId)?.url ?? 'about:blank';
       // Enough of a page for Playwright to adopt it: its main frame, whose id is the tab's, as in Chrome.
       if (message.method === 'Page.getFrameTree') result = { frameTree: { frame: { id: String(message.targetId), loaderId: 'loader', url, domainAndRegistry: '', securityOrigin: new URL(url).origin, mimeType: 'text/html', secureContextType: 'Secure', crossOriginIsolatedContextType: 'NotIsolated', gatedAPIFeatures: [] }, childFrames: [] } };
@@ -153,7 +155,32 @@ test('a script your Chrome stops because you took its tab over ends at once, and
       void client.send('Runtime.evaluate', { expression: 'yours' }, 'lease-your-tab');
       expect((await closed).reason).toBe(SCRIPT_TAKEN_REFUSAL);
       await expect.poll(() => browser.operations).toContainEqual({ operation: 'release', attemptId });
-      expect(await relay.browserRelayScriptEnd(token)).toEqual({ downloads: [], stopped: SCRIPT_TAKEN_REFUSAL });
+      expect(await relay.browserRelayScriptEnd(token)).toEqual({ downloads: [], stopped: SCRIPT_TAKEN_REFUSAL, waiting: null });
+    } finally { browser.socket.close(); }
+  });
+});
+
+test('a script that ends says what it waited on in your Chrome: the command still unanswered, else how long its tabs were silent', async () => {
+  await runInDurableObject(env.RELAY.getByName(crypto.randomUUID()), async (relay: UserRelayDO) => {
+    const root = await keys(), browser = await chrome(relay, root, BROWSER_EXTENSION_PROTOCOL);
+    try {
+      const begin = async () => {
+        const { token } = await relay.browserRelayScriptBegin(await runAuthorization(root, browser.placement));
+        const socket = (await relay.fetch(upgrade(`https://relay/browser-relay/script/${token}/Agent`))).webSocket;
+        if (!socket) throw new Error('Missing script socket');
+        socket.accept();
+        const client = cdp(socket);
+        await client.send('Target.setAutoAttach', { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+        // Answered in order: once this returns, so has everything the script sent before it.
+        await client.send('Runtime.evaluate', { expression: '6 * 7' }, 'lease-your-tab');
+        return { token, client };
+      };
+      const waiting = await begin();
+      void waiting.client.send('Runtime.evaluate', { expression: 'unanswered' }, 'lease-your-tab');
+      await expect.poll(() => browser.operations.some(item => item.operation === 'command' && JSON.stringify(item.params).includes('unanswered'))).toBe(true);
+      expect((await relay.browserRelayScriptEnd(waiting.token)).waiting).toMatch(/^your Chrome had not answered Runtime\.evaluate for \d+ s$/);
+      const idle = await begin();
+      expect((await relay.browserRelayScriptEnd(idle.token)).waiting).toBe('no command was waiting on your Chrome and no event came from its tabs');
     } finally { browser.socket.close(); }
   });
 });
