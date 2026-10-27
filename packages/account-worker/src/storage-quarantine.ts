@@ -18,7 +18,7 @@ export const StorageIncidentReportSchema = z.object({
 });
 export type StorageIncidentReport = z.infer<typeof StorageIncidentReportSchema>;
 /** A recorded storage incident; `resolvedAt` is null while it is active. */
-export const StorageIncidentSchema = StorageIncidentReportSchema.extend({ resolvedAt: z.string().nullable() });
+export const StorageIncidentSchema = StorageIncidentReportSchema.extend({ resolvedAt: z.string().nullable().default(null) });
 export type StorageIncident = z.infer<typeof StorageIncidentSchema>;
 
 /** Every Durable Object class of the account. The storage breaker is installed before the class touches its storage;

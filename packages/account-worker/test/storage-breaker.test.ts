@@ -135,3 +135,14 @@ test('an object that never trips stores nothing for the breaker', async () => {
     expect(state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name LIKE '\\_storage%' ESCAPE '\\'").toArray()).toEqual([]);
   });
 });
+
+test('incidents recorded before resolution existed stay listed as active', async () => {
+  const account = env.ACCOUNT_STATE.getByName('account');
+  const id = env.USER_SETTINGS.getByName(crypto.randomUUID()).id.toString();
+  // A record as stored before incidents had `resolvedAt`.
+  await runInDurableObject(account, async (_instance, state) => {
+    const stored = await state.storage.get('storage-incidents');
+    await state.storage.put('storage-incidents', [...(Array.isArray(stored) ? stored : []), { objectId: id, className: 'SpaceAuthorityDO', name: null, kind: 'alert', reason: 'was awake 21.3 of the last 24 hours', at: '2026-10-24T22:20:29.000Z' }]);
+  });
+  expect((await account.listStorageIncidents()).filter(item => item.objectId === id)).toEqual([expect.objectContaining({ kind: 'alert', reason: 'was awake 21.3 of the last 24 hours', resolvedAt: null })]);
+});
