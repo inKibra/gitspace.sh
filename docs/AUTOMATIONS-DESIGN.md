@@ -57,6 +57,13 @@ Outsiders' text must not reach an agent that has write tools, secrets or your ma
 - An untrusted event is recorded as "Skipped: author not trusted" with **Approve this run** and **Trust this author**.
 - Schedules and manual runs are trusted.
 
+## 5a. Agents and automations (decided 2026-10-27)
+
+- The project agent manages automations with `automations.create`, `update`, `delete`, `runNow` and `list` (as people do with crons today). Workspace agents cannot: they link and unlink subjects, and ask the project agent for an automation. A workspace an automation started therefore cannot create automations. This is the rule `start` already follows (only the project agent starts workspaces).
+- An automation the project agent creates is **Proposed**: it does nothing until a person switches it on. Its card names the agent, its reason and a link to the conversation. An agent's edit to an approved automation returns it to Proposed; turning one off or deleting it needs no approval.
+- Only people change the trust list and the limits (concurrency, daily run cap, rounds per subject). Every automation runs under them, whoever made it.
+- A mention of the tenant's bot by a trusted person ("audit dependencies nightly") reaches the project agent, which may propose an automation.
+
 ## 6. Loops
 
 Some loops are the point (CI fails, the agent fixes it, pushes, CI runs again); others must be cut (a release triggers a blog post whose publication is itself a release).
@@ -91,7 +98,7 @@ One-time migration: every project cron becomes an automation with a schedule tri
 
 ## 11. UI
 
-As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. The page adds a Linked pull requests and issues section (links, how each was made, and the follow-through settings) and a Trusted authors section; at phone width its tables become stacked lists.
+A top-level page that replaces Crons in the sidebar, with the project chosen in its header; **All projects** shows the summary and recent runs of every project, and choosing a project shows its automations, links, trust list and runs. The sidebar item shows a count of runs waiting for approval or failed. As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. The page adds a Linked pull requests and issues section (links, how each was made, and the follow-through settings) and a Trusted authors section; at phone width its tables become stacked lists.
 
 ## 12. Milestones
 

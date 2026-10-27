@@ -6,7 +6,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, ShapeProvider, SizeProvider, Switch,
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TooltipProvider, untitledIcons, useShape,
 } from '@gitspace/ui';
-import { CheckCircle, DotsHorizontal, Edit03, Link01, LinkBroken01, MinusCircle, Play, Plus, RefreshCcw01, Trash01, XCircle } from '@untitledui/icons';
+import { CheckCircle, ChevronDown, DotsHorizontal, MessageChatCircle, Edit03, Link01, LinkBroken01, MinusCircle, Play, Plus, RefreshCcw01, Trash01, XCircle } from '@untitledui/icons';
 import { StrictMode, useState, type ReactElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@gitspace/ui/fluid-theme.css';
@@ -32,7 +32,9 @@ interface Automation {
   onlyIf: readonly ReactNode[];
   then: ReactNode;
   modes: readonly Mode[];
-  last: { at: string; status: RunStatus };
+  last: { at: string; status: RunStatus } | null;
+  /** Made by the project agent and not yet switched on by a person. */
+  proposed?: { at: string; reason: string };
 }
 
 const AUTOMATIONS: readonly Automation[] = [
@@ -63,6 +65,14 @@ const AUTOMATIONS: readonly Automation[] = [
     onlyIf: [],
     then: <>Message the project agent</>,
     modes: [], last: { at: '7 h ago', status: 'failed' },
+  },
+  {
+    id: 'dependabot', name: 'Check dependency updates', enabled: false,
+    when: <>GitHub · pull request {code('opened')}</>,
+    onlyIf: [<>author is {code('dependabot[bot]')}</>, <>changed paths match {code('**/package.json')}</>],
+    then: <>Start a workspace for the pull request with agent {code('reviewer')} · starts in <strong className="font-semibold">Review</strong></>,
+    modes: ['Review'], last: null,
+    proposed: { at: '2 h ago', reason: 'You asked that dependency bumps be built and smoke-tested before anyone merges them; Dependabot opens about 6 a week here.' },
   },
   {
     id: 'ci', name: 'Fix failing CI on main', enabled: false,
@@ -109,6 +119,7 @@ const FOLLOW_THROUGH: readonly { event: ReactNode; delivery: Delivery }[] = [
 
 interface Run {
   id: string;
+  project: string;
   status: RunStatus;
   /** The automation, or "Linked" when the event reached a linked workspace without one. */
   by: string;
@@ -128,51 +139,67 @@ const REVIEW_CHECKS = (draft: boolean | null, author: boolean | null) => [
 
 const RUNS: readonly Run[] = [
   {
-    id: 'r9', status: 'queued', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1143 · Drop .omp agent support',
+    id: 'r9', project: 'inkibra core', status: 'queued', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1143 · Drop .omp agent support',
     workspace: null, outcome: 'Waiting for a slot: 2 of 2 runs are working', at: '1 min ago', checks: REVIEW_CHECKS(true, true),
     timeline: [{ at: '14:02:11', label: 'Delivery received' }, { at: '14:02:11', label: 'Author has write access' }, { at: '14:02:11', label: 'Conditions passed' }, { at: '14:02:11', label: 'Queued: 2 of 2 runs working' }],
   },
   {
-    id: 'r8', status: 'running', by: 'Linked', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
+    id: 'r8', project: 'inkibra core', status: 'running', by: 'Linked', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
     workspace: 'session-recovery', outcome: 'Review comment from @dana: woke its agent', at: '3 min ago', checks: [],
     timeline: [{ at: '13:59:02', label: 'Delivery received' }, { at: '13:59:02', label: 'Linked to session-recovery (same branch)' }, { at: '13:59:02', label: 'Review comment from a person: wakes the agent' }, { at: '13:59:03', label: 'Round 2 of 5 today on this pull request' }, { at: '13:59:03', label: 'Sent; agent working' }],
   },
   {
-    id: 'r7', status: 'running', by: 'Start work from labels', event: 'issues.labeled · gitspace:plan', subject: 'Issue #391 · Coach subscriptions renew twice',
+    id: 'r7', project: 'inkibra core', status: 'running', by: 'Start work from labels', event: 'issues.labeled · gitspace:plan', subject: 'Issue #391 · Coach subscriptions renew twice',
     workspace: 'plan-issue-391', outcome: 'Started in Plan and linked to the issue', at: '9 min ago', checks: [],
     timeline: [{ at: '13:53:40', label: 'Delivery received' }, { at: '13:53:40', label: 'Label gitspace:plan added by @bradleat (write access)' }, { at: '13:53:41', label: 'Started workspace plan-issue-391 in Plan' }, { at: '13:53:41', label: 'Linked to Issue #391' }],
   },
   {
-    id: 'r6', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1144 · Faster tone detection',
+    id: 'r6', project: 'inkibra core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1144 · Faster tone detection',
     workspace: null, outcome: 'Author not trusted: @outside-dev', at: '20 min ago', checks: REVIEW_CHECKS(true, true), untrusted: '@outside-dev',
     timeline: [{ at: '13:42:15', label: 'Delivery received' }, { at: '13:42:15', label: 'Skipped: @outside-dev has no write access and is not on the trust list' }],
   },
   {
-    id: 'r5', status: 'finished', by: 'Mention', event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
+    id: 'r5', project: 'inkibra core', status: 'finished', by: 'Mention', event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
     workspace: 'plan-issue-391', outcome: 'No linked workspace: the project agent linked it to plan-issue-391', at: '41 min ago', checks: [],
     timeline: [{ at: '13:21:08', label: 'Delivery received' }, { at: '13:21:08', label: `Comment by @bradleat mentions ${BOT}` }, { at: '13:21:08', label: 'Issue #392 has no linked workspace: sent to the project agent' }, { at: '13:21:40', label: 'Project agent linked Issue #392 to plan-issue-391 and sent it the comment' }],
   },
   {
-    id: 'r4', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1141 · WIP: automations run model',
+    id: 'r4', project: 'inkibra core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1141 · WIP: automations run model',
     workspace: null, outcome: 'Conditions: the pull request is a draft', at: '38 min ago', checks: REVIEW_CHECKS(false, null),
     timeline: [{ at: '13:24:19', label: 'Delivery received' }, { at: '13:24:19', label: 'Skipped: the pull request is a draft' }],
   },
   {
-    id: 'r3', status: 'finished', by: 'Linked', event: 'check_suite.completed · success', subject: 'PR #1131 · Storybook JIT server memory',
+    id: 'r3', project: 'inkibra core', status: 'finished', by: 'Linked', event: 'check_suite.completed · success', subject: 'PR #1131 · Storybook JIT server memory',
     workspace: 'storybook-jit', outcome: 'Checks passed: notice only', at: '1 h ago', checks: [],
     timeline: [{ at: '12:58:51', label: 'Delivery received' }, { at: '12:58:51', label: 'Linked to storybook-jit (linked by you)' }, { at: '12:58:51', label: 'Passing checks: notice only, the agent stays asleep' }],
   },
   {
-    id: 'r2', status: 'finished', by: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
+    id: 'r2', project: 'inkibra core', status: 'finished', by: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
     workspace: 'inkibra core', outcome: 'The project agent started triage-issue-387 in Plan', at: '2 h ago', checks: [{ label: "no label 'wontfix'", passed: true }],
     timeline: [{ at: '11:40:55', label: 'Delivery received' }, { at: '11:40:55', label: 'Conditions passed' }, { at: '11:40:56', label: 'Asked the project agent' }, { at: '11:41:30', label: 'Project agent started triage-issue-387 in Plan and linked it' }],
   },
   {
-    id: 'r1', status: 'failed', by: 'Nightly dependency audit', event: 'schedule 06:00 UTC', subject: '—',
+    id: 'r1', project: 'inkibra core', status: 'failed', by: 'Nightly dependency audit', event: 'schedule 06:00 UTC', subject: '—',
     workspace: 'inkibra core', outcome: 'anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00', at: '7 h ago', checks: [],
     timeline: [{ at: '06:00:00', label: 'Tick' }, { at: '06:00:01', label: 'Sent to the project agent' }, { at: '06:00:04', label: 'Failed: anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00' }],
   },
 ];
+
+const OTHER_RUNS: readonly Run[] = [
+  {
+    id: 'g2', project: 'GitSpace', status: 'running', by: 'Linked', event: 'check_suite.completed · failure', subject: 'PR #212 · Extension 5.13.0',
+    workspace: 'cross-machine-browser-relay', outcome: 'Failed checks: woke its agent', at: '6 min ago', checks: [],
+    timeline: [{ at: '13:56:10', label: 'Delivery received' }, { at: '13:56:10', label: 'Linked to cross-machine-browser-relay (same branch)' }, { at: '13:56:11', label: 'Failed checks: wakes the agent' }],
+  },
+];
+
+const PROJECTS: readonly { name: string; on: string; waiting: number; failed: number }[] = [
+  { name: 'inkibra core', on: '4 of 5 on · 1 proposed', waiting: 1, failed: 1 },
+  { name: 'GitSpace', on: 'No automations · 1 linked pull request', waiting: 0, failed: 0 },
+  { name: 'Golconda IDF Data Vault', on: 'No automations', waiting: 0, failed: 0 },
+  { name: 'Golconda PPVA Enrollment', on: 'No automations', waiting: 0, failed: 0 },
+];
+const ALL_PROJECTS = 'All projects';
 
 const PAST_EVENTS = [
   'PR #1143 · pull_request.opened · 1 min ago',
@@ -232,9 +259,10 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
         {automation.modes.map(mode => <Badge key={mode} size="compact" color={MODE_COLOR[mode]}>{mode}</Badge>)}
       </span></CardTitle>
       <CardDescription><span className="flex flex-wrap items-center gap-1.5">
-        <span>Last run {automation.last.at}</span><Badge variant="dot" size="compact" color={STATUS_COLOR[automation.last.status]}>{automation.last.status}</Badge>
+        {automation.proposed ? <><Badge size="compact" color="amber">Proposed</Badge><span>by the project agent · {automation.proposed.at}</span></>
+          : automation.last ? <><span>Last run {automation.last.at}</span><Badge variant="dot" size="compact" color={STATUS_COLOR[automation.last.status]}>{automation.last.status}</Badge></> : <span>No runs yet</span>}
       </span></CardDescription>
-      <CardAction>
+      {automation.proposed ? null : <CardAction>
         <div className="flex items-center gap-2">
           <Switch label={enabled ? 'On' : 'Off'} checked={enabled} onToggle={() => setEnabled(value => !value)} />
           <DropdownMenu>
@@ -247,7 +275,7 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
             </DropdownContent>
           </DropdownMenu>
         </div>
-      </CardAction>
+      </CardAction>}
     </CardHeader>
     <CardContent>
       <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
@@ -257,7 +285,16 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
         <Row label="Then">{automation.then}</Row>
       </dl>
     </CardContent>
-    {enabled ? null : <CardFooter><span className="text-caption text-muted-foreground">Off: events are not recorded as runs</span></CardFooter>}
+    {automation.proposed ? <CardFooter><div className="flex w-full flex-col gap-3">
+      <p className="flex items-start gap-2 text-body text-muted-foreground"><MessageChatCircle className="mt-0.5 shrink-0" width={16} height={16} strokeWidth={1.5} />{automation.proposed.reason}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="primary" size="compact" type="button">Switch on</Button>
+        <Button variant="secondary" size="compact" type="button" onClick={onEdit}>Edit first</Button>
+        <Button variant="ghost" size="compact" type="button">Open conversation</Button>
+        <Button variant="ghost" size="compact" type="button">Dismiss</Button>
+      </div>
+    </div></CardFooter>
+      : enabled ? null : <CardFooter><span className="text-caption text-muted-foreground">Off: events are not recorded as runs</span></CardFooter>}
   </Card>;
 }
 
@@ -338,21 +375,22 @@ function TrustList(): ReactElement {
   </div>;
 }
 
-function RunsTable({ onOpen }: { onOpen(run: Run): void }): ReactElement {
+function RunsTable({ runs, showProject, onOpen }: { runs: readonly Run[]; showProject: boolean; onOpen(run: Run): void }): ReactElement {
   return <>
   <ul className="flex flex-col divide-y divide-border border-y border-border sm:hidden">
-    {RUNS.map(run => <li key={run.id}><button type="button" className="flex w-full flex-col gap-0.5 py-3 text-left" onClick={() => onOpen(run)}>
+    {runs.map(run => <li key={run.id}><button type="button" className="flex w-full flex-col gap-0.5 py-3 text-left" onClick={() => onOpen(run)}>
       <span className="flex items-center justify-between gap-2"><Badge variant="dot" size="compact" color={STATUS_COLOR[run.status]}>{run.status}</Badge><span className="text-caption tabular-nums text-muted-foreground">{run.at}</span></span>
-      <span className="text-body">{run.subject}</span>
+      <span className="text-body">{showProject ? <span className="text-muted-foreground">{run.project} · </span> : null}{run.subject}</span>
       <span className="text-caption text-muted-foreground">{run.outcome}</span>
       <span className="text-caption text-muted-foreground">{run.by} · <span className="font-mono">{run.event}</span></span>
     </button></li>)}
   </ul>
   <div className="hidden sm:block"><Table size="compact">
-    <TableHeader><TableRow><TableHead className="w-24">Status</TableHead><TableHead className="w-[40%]">Subject</TableHead><TableHead>From · event</TableHead><TableHead className="hidden sm:table-cell">Workspace</TableHead><TableHead className="w-24 text-right">When</TableHead></TableRow></TableHeader>
+    <TableHeader><TableRow><TableHead className="w-24">Status</TableHead>{showProject ? <TableHead className="w-[14%]">Project</TableHead> : null}<TableHead className={showProject ? 'w-[30%]' : 'w-[40%]'}>Subject</TableHead><TableHead>From · event</TableHead><TableHead className="hidden sm:table-cell">Workspace</TableHead><TableHead className="w-24 text-right">When</TableHead></TableRow></TableHeader>
     <TableBody>
-      {RUNS.map((run, index) => <TableRow key={run.id} index={index} className="cursor-pointer" onClick={() => onOpen(run)}>
+      {runs.map((run, index) => <TableRow key={run.id} index={index} className="cursor-pointer" onClick={() => onOpen(run)}>
         <TableCell><Badge variant="dot" size="compact" color={STATUS_COLOR[run.status]}>{run.status}</Badge></TableCell>
+        {showProject ? <TableCell className="max-w-0"><span className="block truncate">{run.project}</span></TableCell> : null}
         <TableCell className="max-w-0">
           <span className="block truncate">{run.subject}</span>
           <span className="block truncate text-caption text-muted-foreground">{run.outcome}</span>
@@ -516,47 +554,87 @@ function LinkDialog({ onClose }: { onClose(): void }): ReactElement {
   </>;
 }
 
+function ProjectPicker({ project, onPick }: { project: string; onPick(project: string): void }): ReactElement {
+  return <DropdownMenu>
+    <DropdownTrigger render={<button type="button" className="-ml-1 flex items-center gap-1 rounded px-1 text-caption font-medium text-muted-foreground hover:text-foreground" aria-label="Project">{project}<ChevronDown width={14} height={14} strokeWidth={1.5} /></button>} />
+    <DropdownContent align="start" className="min-w-[240px] w-[240px]">
+      {[ALL_PROJECTS, ...PROJECTS.map(entry => entry.name)].map((name, index) => <MenuItem key={name} index={index} label={name} onSelect={() => onPick(name)} />)}
+    </DropdownContent>
+  </DropdownMenu>;
+}
+
+function AllProjects({ onPick, onOpen }: { onPick(project: string): void; onOpen(run: Run): void }): ReactElement {
+  const shape = useShape();
+  return <>
+    <Section title="Projects">
+      <ul className={`${shape.container} flex flex-col divide-y divide-border bg-surface-2 shadow-surface-1`}>
+        {PROJECTS.map(entry => <li key={entry.name}><button type="button" className="flex w-full flex-wrap items-center justify-between gap-2 px-5 py-3 text-left" onClick={() => onPick(entry.name)}>
+          <span className="flex flex-col gap-0.5"><span className="text-body font-medium">{entry.name}</span><span className="text-caption text-muted-foreground">{entry.on}</span></span>
+          <span className="flex gap-1.5">
+            {entry.waiting ? <Badge size="compact" color="amber">{entry.waiting} waiting for approval</Badge> : null}
+            {entry.failed ? <Badge size="compact" color="red">{entry.failed} failed today</Badge> : null}
+          </span>
+        </button></li>)}
+      </ul>
+    </Section>
+    <Section title="Recent runs" aside={<span className="text-caption text-muted-foreground">Every project · choose one to change its automations</span>}>
+      <RunsTable runs={[...RUNS.slice(0, 2), ...OTHER_RUNS, ...RUNS.slice(2)]} showProject onOpen={onOpen} />
+    </Section>
+  </>;
+}
+
 function AutomationsMock(): ReactElement {
   const shape = useShape();
+  const [project, setProject] = useState('inkibra core');
   const [editing, setEditing] = useState(false);
   const [linking, setLinking] = useState(false);
   const [run, setRun] = useState<Run | null>(null);
+  const all = project === ALL_PROJECTS;
+  const empty = project !== ALL_PROJECTS && project !== 'inkibra core';
   return <div className="flex h-dvh flex-col bg-background">
     <PageCanvas>
-      <PageHeader kicker="inkibra core" title="Automations"
-        description="When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace."
-        actions={<Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>} />
+      <PageHeader kicker={<ProjectPicker project={project} onPick={setProject} />} title="Automations"
+        description={all ? 'Every project\'s automations and runs. Choose a project to change its automations, links and trusted authors.' : 'When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace.'}
+        actions={all || empty ? undefined : <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>} />
 
-      <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
+      {empty ? null : <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
         <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">
-          <Stat value="4 of 5" label="On" />
-          <Stat value="2 / 2" label="Working now" />
+          <Stat value="4 of 5" label="On · 1 proposed" />
+          <Stat value={all ? '3 / 4' : '2 / 2'} label="Working now" />
           <Stat value={1} label="Queued" />
           <Stat value={1} label="Waiting for approval" />
         </div>
-        <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">At most 2 runs work at once. A run holds a slot only while its agent works; a workspace waiting for you does not.</p>
-      </section>
+        <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">{all ? 'Each project runs at most 2 at once.' : 'At most 2 runs work at once.'} A run holds a slot only while its agent works; a workspace waiting for you does not.</p>
+      </section>}
 
-      <Section title="Automations">
-        <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-          {AUTOMATIONS.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
-        </CardGroup>
-      </Section>
+      {all ? <AllProjects onPick={setProject} onOpen={setRun} />
+        : empty ? <div className={`${shape.container} flex flex-col items-start gap-3 bg-surface-2 px-5 py-6 shadow-surface-1`}>
+          <strong className="text-body font-semibold">No automations in {project}</strong>
+          <p className="max-w-xl text-body text-muted-foreground">Start work when a pull request opens, an issue is labeled, or on a schedule. The project agent can propose automations too; they wait here until you switch them on.</p>
+          <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>
+        </div>
+        : <>
+          <Section title="Automations">
+            <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
+              {AUTOMATIONS.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
+            </CardGroup>
+          </Section>
 
-      <Section title="Linked pull requests and issues"
-        aside={<Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Link01)} onClick={() => setLinking(true)}>Link a pull request or issue</Button>}>
-        <p className="text-caption text-muted-foreground">Each has one workspace in this project, linked when GitSpace starts the workspace for it, when an agent or you link it, or by branch. Mention {code(BOT)} in a comment to reach its workspace; with no link, the mention goes to the project agent.</p>
-        <LinksTable onLink={() => setLinking(true)} />
-        <FollowThrough />
-      </Section>
+          <Section title="Linked pull requests and issues"
+            aside={<Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Link01)} onClick={() => setLinking(true)}>Link a pull request or issue</Button>}>
+            <p className="text-caption text-muted-foreground">Each has one workspace in this project, linked when GitSpace starts the workspace for it, when an agent or you link it, or by branch. Mention {code(BOT)} in a comment to reach its workspace; with no link, the mention goes to the project agent.</p>
+            <LinksTable onLink={() => setLinking(true)} />
+            <FollowThrough />
+          </Section>
 
-      <Section title="Trusted authors">
-        <TrustList />
-      </Section>
+          <Section title="Trusted authors">
+            <TrustList />
+          </Section>
 
-      <Section title="Recent runs" aside={<span className="text-caption text-muted-foreground">Every event seen, skipped ones included</span>}>
-        <RunsTable onOpen={setRun} />
-      </Section>
+          <Section title="Recent runs" aside={<span className="text-caption text-muted-foreground">Every event seen, skipped ones included</span>}>
+            <RunsTable runs={RUNS} showProject={false} onOpen={setRun} />
+          </Section>
+        </>}
 
       <Dialog open={editing} onOpenChange={open => { if (!open) setEditing(false); }}>
         <DialogContent size="lg"><Editor onClose={() => setEditing(false)} /></DialogContent>
