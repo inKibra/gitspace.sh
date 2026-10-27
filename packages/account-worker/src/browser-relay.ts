@@ -629,7 +629,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
           if (!await crypto.subtle.verify('Ed25519', key, browserUnbase64(proof.signature), new TextEncoder().encode(`gitspace-browser-relay-v2:admission:${proof.pairingId}:${proof.generation}:${proof.issuedAt}:${proof.nonce}`))) return { status: 403 } as const;
         } catch { return { status: 403 } as const; }
         let window = windows.identities.find(item => item.pairingId === pairing.pairingId);
-        if (window?.nonces.includes(proof.nonce) || this.bound(pairing.pairingId)) return { status: 403 } as const;
+        // A socket still bound to this pairing does not refuse it: one that died without a close looks open here until
+        // the platform notices, and the Chrome holding the key reconnects. Binding replaces it (`receive`).
+        if (window?.nonces.includes(proof.nonce)) return { status: 403 } as const;
         if (window && window.nonces.length >= 8) return { status: 429 } as const;
         if (!window) { window = { pairingId: pairing.pairingId, start: now, nonces: [] }; windows.identities.push(window); }
         window.nonces.push(proof.nonce);
@@ -704,7 +706,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const pairingId = state.success ? state.data.pairingId : undefined;
     if (!state.success || !pairingId) return;
     if (this.connections.get(pairingId)?.socket === socket) this.disconnect(pairingId);
-    if (!state.data.product) return;
+    // A socket replaced by the Chrome's newer connection leaves it online.
+    const current = this.bound(pairingId);
+    if (!state.data.product || (current && current.socket !== socket)) return;
     await this.seen(pairingId, false);
     await this.shareLinks.offline(pairingId);
     this.watches.offline(pairingId);
@@ -729,7 +733,12 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
           registry.pairings = registry.pairings.map(item => item === pairing ? { ...pairing, state: 'pending-confirmation', publicKey: proof.publicKey, code: null, expiresAt: null } : item);
           await this.ctx.storage.put('browser.relay.pairings', registry);
         } else if (!equalSecret(pairing.publicKey, proof.publicKey)) return false;
-        if (this.bound(pairing.pairingId)) return false;
+        // The same key on a new socket is the same Chrome reconnecting: the socket it left is closed and forgotten.
+        const previous = this.bound(pairing.pairingId);
+        if (previous) {
+          previous.socket.close(4001, 'Replaced by a newer connection');
+          if (this.connections.get(pairing.pairingId)?.socket === previous.socket) this.disconnect(pairing.pairingId);
+        }
         socket.serializeAttachment({ ...state, pairingId: pairing.pairingId } satisfies BrowserSocketState);
         return true;
       });

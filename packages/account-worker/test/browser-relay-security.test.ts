@@ -315,6 +315,30 @@ test('recent admission proof remains consumed across an older rate window bounda
   expect((await relay.fetch(recent)).status).toBe(403);
 }));
 
+test('a Chrome reconnecting with its key while the relay still holds its old socket replaces it and stays online', () => fixture(async relay => {
+  const pairing = await relay.pair(trust, 'wss://account.test/api/browser-relay/extension'), identity = await keys();
+  const first = await connect(relay);
+  await prove(first, identity, pairing);
+  const pending = (await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId);
+  if (!pending || pending.state !== 'pending-confirmation') throw new Error('Missing pending identity');
+  await relay.confirm(pairing.pairingId, pending.pairedKeyFingerprint);
+  // The old socket is still open on the relay: its Chrome went away without a close.
+  const replaced = Promise.withResolvers<CloseEvent>();
+  first.socket.addEventListener('close', replaced.resolve, { once: true });
+  const issuedAt = Date.now(), nonce = 'f'.repeat(64);
+  const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', identity.key.privateKey, new TextEncoder().encode(`gitspace-browser-relay-v2:admission:${pairing.pairingId}:${pairing.generation}:${issuedAt}:${nonce}`))));
+  const reconnect = request('198.51.100.7');
+  reconnect.headers.set('sec-websocket-protocol', `gitspace-admission.${btoa(JSON.stringify({ pairingId: pairing.pairingId, generation: pairing.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`);
+  const response = await relay.fetch(reconnect);
+  expect(response.status).toBe(101);
+  if (!response.webSocket) throw new Error('Missing reconnected socket');
+  const challenge = frame(response.webSocket); response.webSocket.accept(); sockets.push(response.webSocket);
+  await prove({ socket: response.webSocket, challenge: z.object({ serverNonce: z.string() }).parse(await challenge) }, identity, pairing);
+  expect(((await replaced.promise).code)).toBe(4001);
+  // The old socket's close arriving after the new hello leaves the Chrome online.
+  expect((await relay.status()).pairings.find(item => item.pairingId === pairing.pairingId)?.connected).toBe(true);
+}));
+
 test('one IPv6 /48 cannot exhaust anonymous capacity or history for another network', () => fixture(async relay => {
   await relay.pair(trust, 'wss://account.test/api/browser-relay/extension');
   let admitted = 0;

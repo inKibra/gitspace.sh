@@ -524,3 +524,36 @@ test('your Chrome sends the shared page’s icon for the greeting, which says wh
     } finally { vi.useRealTimers(); if (browser.socket.readyState === WebSocket.OPEN) browser.socket.close(); }
   });
 });
+
+test('your Chrome reconnecting while the relay still holds its old socket takes over the share: viewers are not told it went offline when the old socket fails later', async () => {
+  const { projectId } = await workspace();
+  await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO, state) => {
+    const root = await keys();
+    const browser = await chrome(relay, root, projectId, { protocol: 6, ip: '192.0.2.58' }, message => message.operation === 'shareTab' ? { ...page, groupId: null } : message.operation === 'shareWatch' ? { ...page, width: 1280, height: 800 } : {});
+    const { shareId, secret } = await share(browser, { targetId: 'your-tab', comment: false, expiresInMinutes: 60 });
+    const mia = await watch(shareId, secret, 'Mia');
+    await browser.next('shareWatch');
+    // The Chrome reconnects with its key; its old socket never closed on its side.
+    const old = state.getWebSockets().find(socket => z.object({ pairingId: z.string() }).safeParse(socket.deserializeAttachment()).data?.pairingId === browser.pairingId);
+    if (!old) throw new Error('Missing the relay side of the old socket');
+    const replaced = new Promise<number>(resolve => browser.socket.addEventListener('close', event => resolve(event.code), { once: true }));
+    const issuedAt = Date.now(), nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
+    const signature = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(`gitspace-browser-relay-v2:admission:${browser.pairingId}:${browser.generation}:${issuedAt}:${nonce}`))));
+    const admission = `gitspace-admission.${btoa(JSON.stringify({ pairingId: browser.pairingId, generation: browser.generation, issuedAt, nonce, signature })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`;
+    const next = (await relay.fetch(new Request('https://account.test/api/browser-relay/extension', { headers: { upgrade: 'websocket', origin: `chrome-extension://${'a'.repeat(32)}`, 'cf-connecting-ip': '192.0.2.59', 'sec-websocket-protocol': admission } }))).webSocket;
+    if (!next) throw new Error('Missing reconnected socket');
+    const challenge = frame(next); next.accept();
+    try {
+      const { serverNonce } = z.object({ serverNonce: z.string() }).parse(await challenge), clientNonce = 'c'.repeat(64);
+      const proof = browserBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', browser.identity.key.privateKey, encoder.encode(`gitspace-browser-relay-v2:client:${serverNonce}:${clientNonce}`))));
+      const paired = frame(next); next.send(JSON.stringify({ pairing: 'client', pairingId: browser.pairingId, clientNonce, publicKey: browser.identity.publicKey, proof })); await paired;
+      const ready = frame(next); next.send(JSON.stringify({ hello: true, Browser: 'Chrome/131.0.0.0', protocol: 6 })); await ready;
+      expect(await replaced).toBe(4001);
+      // The dead Chrome connection under the old socket fails later.
+      await relay.webSocketError(old);
+      expect(await route(shareId, 'preview', { secret })).toMatchObject({ status: 200, value: { online: true } });
+      expect(mia.received.filter(message => message.type === 'presence')).not.toContainEqual({ type: 'presence', online: false });
+      mia.socket.close();
+    } finally { next.close(); }
+  });
+});
