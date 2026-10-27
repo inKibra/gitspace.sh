@@ -464,6 +464,96 @@ function TestWithPastEvent(): ReactElement {
   </section>;
 }
 
+type FilterKind = 'base' | 'head' | 'branch' | 'author' | 'draft' | 'labels' | 'paths' | 'conclusion' | 'review';
+interface Filter { kind: FilterKind; mode: string; values: readonly string[] }
+const FILTER_LABEL: Record<FilterKind, string> = {
+  base: 'Base branch', head: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', labels: 'Labels', paths: 'Changed files', conclusion: 'Conclusion', review: 'Review',
+};
+const FILTER_MODES: Record<FilterKind, readonly string[]> = {
+  base: ['is one of', 'is not one of'], head: ['is one of', 'is not one of'], branch: ['is one of', 'is not one of'], author: ['is one of', 'is not one of'],
+  draft: ['Not a draft', 'Only drafts'], labels: ['has any of', 'has none of'], paths: ['touch any of', 'touch none of'], conclusion: ['is one of'], review: ['is one of'],
+};
+/** In the product these come from the repository through the GitHub App: its branches, labels and recent authors. */
+const FILTER_SUGGESTIONS: Record<FilterKind, readonly string[]> = {
+  base: ['main', 'develop', 'release/*'], head: ['dependabot/*', 'renovate/*', 'gitspace/*'], branch: ['main', 'develop'], author: ['dependabot[bot]', 'renovate[bot]', 'bradleat', 'dana'],
+  draft: [], labels: ['bug', 'wontfix', 'needs-design', 'gitspace:plan'], paths: ['**/package.json', 'docs/**', 'packages/account-web/**'], conclusion: ['failure', 'timed_out', 'cancelled'], review: ['approved', 'changes_requested', 'commented'],
+};
+const FILTERS_BY_EVENT: Record<string, readonly FilterKind[]> = {
+  'Pull request': ['base', 'head', 'author', 'draft', 'labels', 'paths'], 'Pull request review': ['base', 'author', 'review'], 'Issue': ['author', 'labels'],
+  'Issue comment': ['author', 'labels'], 'Push': ['branch', 'author', 'paths'], 'Check suite': ['branch', 'conclusion'],
+};
+const EVENT_NOUN: Record<string, string> = {
+  'Pull request': 'pull requests', 'Pull request review': 'reviews', 'Issue': 'issues', 'Issue comment': 'comments', 'Push': 'pushes', 'Check suite': 'check suites',
+};
+
+function filterPhrase(filter: Filter): string {
+  const values = filter.values.join(' or ');
+  const negative = filter.mode.includes('not') || filter.mode.includes('none');
+  switch (filter.kind) {
+    case 'base': return negative ? `not into ${values}` : `into ${values}`;
+    case 'head': return negative ? `not from ${values}` : `from ${values}`;
+    case 'branch': return negative ? `not on ${values}` : `on ${values}`;
+    case 'author': return negative ? `not by ${values}` : `by ${values}`;
+    case 'draft': return filter.mode === 'Not a draft' ? 'not drafts' : 'only drafts';
+    case 'labels': return negative ? `without the label ${values}` : `labeled ${values}`;
+    case 'paths': return negative ? `not touching ${values}` : `touching ${values}`;
+    case 'conclusion': return `that ended ${values}`;
+    case 'review': return `that are ${values.replaceAll('_', ' ')}`;
+  }
+}
+
+function ChipsInput({ kind, values, onChange }: { kind: FilterKind; values: readonly string[]; onChange(values: readonly string[]): void }): ReactElement {
+  const shape = useShape();
+  const [draft, setDraft] = useState('');
+  const add = () => { const value = draft.trim(); if (value && !values.includes(value)) onChange([...values, value]); setDraft(''); };
+  return <div className={`${shape.input} flex w-full min-w-0 flex-wrap items-center gap-1 border border-border bg-background px-1.5 py-1`}>
+    {values.map(value => <span key={value} className="flex min-w-0 max-w-full items-center gap-0.5 rounded bg-surface-2 py-0.5 pl-1.5 pr-0.5 font-mono text-caption [overflow-wrap:anywhere]">
+      {value}
+      <button type="button" className="rounded p-0.5 text-muted-foreground hover:text-foreground" aria-label={`Remove ${value}`} onClick={() => onChange(values.filter(entry => entry !== value))}><XCircle width={12} height={12} strokeWidth={1.5} /></button>
+    </span>)}
+    <input list={`suggest-${kind}`} value={draft} placeholder={values.length ? 'Add…' : FILTER_SUGGESTIONS[kind][0]} aria-label={`Add to ${FILTER_LABEL[kind]}`}
+      onChange={e => setDraft(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} onBlur={add}
+      className="min-w-[6rem] flex-1 bg-transparent px-1 py-0.5 font-mono text-caption text-foreground outline-none" />
+    <datalist id={`suggest-${kind}`}>{FILTER_SUGGESTIONS[kind].filter(value => !values.includes(value)).map(value => <option key={value} value={value} />)}</datalist>
+  </div>;
+}
+
+function Filters({ event }: { event: string }): ReactElement {
+  const [filters, setFilters] = useState<readonly Filter[]>([
+    { kind: 'base', mode: 'is one of', values: ['main'] },
+    { kind: 'draft', mode: 'Not a draft', values: [] },
+    { kind: 'author', mode: 'is not one of', values: ['dependabot[bot]'] },
+  ]);
+  const offered = FILTERS_BY_EVENT[event] ?? [];
+  const shown = filters.filter(filter => offered.includes(filter.kind));
+  const unused = offered.filter(kind => !filters.some(filter => filter.kind === kind));
+  const update = (kind: FilterKind, change: Partial<Filter>) => setFilters(current => current.map(filter => filter.kind === kind ? { ...filter, ...change } : filter));
+  const complete = shown.filter(filter => filter.kind === 'draft' || filter.values.length);
+  return <section className="flex flex-col gap-3">
+    <strong className="text-body font-semibold">Only if</strong>
+    <p className="text-body">Runs for {EVENT_NOUN[event] ?? 'events'}{complete.length ? ' ' : ''}{complete.map(filterPhrase).join(', ')}{complete.length ? '' : ' of every kind'}.</p>
+    <ul className="flex flex-col divide-y divide-border border-y border-border">
+      {shown.map(filter => <li key={filter.kind} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1.5 py-2.5 sm:grid-cols-[7.5rem_minmax(0,1fr)_auto]">
+        <span className="pt-1.5 text-caption font-medium text-muted-foreground">{FILTER_LABEL[filter.kind]}</span>
+        <div className="col-span-2 row-start-2 flex min-w-0 flex-col items-stretch gap-2 sm:col-span-1 sm:col-start-2 sm:row-start-1">
+          {FILTER_MODES[filter.kind].length > 1 ? <div className="w-44 max-w-full"><Select value={filter.mode} onValueChange={mode => update(filter.kind, { mode })}><SelectTrigger aria-label={`${FILTER_LABEL[filter.kind]} rule`} />{options(FILTER_MODES[filter.kind])}</Select></div>
+            : <span className="pt-1.5 text-body text-muted-foreground">{FILTER_MODES[filter.kind][0]}</span>}
+          {filter.kind === 'draft' ? null : <ChipsInput kind={filter.kind} values={filter.values} onChange={values => update(filter.kind, { values })} />}
+        </div>
+        <Button variant="ghost" size="icon" type="button" className="col-start-2 row-start-1 sm:col-start-3" aria-label={`Remove the ${FILTER_LABEL[filter.kind]} filter`}
+          onClick={() => setFilters(current => current.filter(entry => entry.kind !== filter.kind))}><Trash01 width={14} height={14} strokeWidth={1.5} /></Button>
+      </li>)}
+    </ul>
+    {unused.length ? <div><DropdownMenu>
+      <DropdownTrigger render={<Button variant="ghost" size="compact" type="button" leadingIcon={glyph(Plus)}>Add a filter</Button>} />
+      <DropdownContent align="start" className="min-w-[200px] w-[200px]">
+        {unused.map((kind, index) => <MenuItem key={kind} index={index} label={FILTER_LABEL[kind]} onSelect={() => setFilters(current => [...current, { kind, mode: FILTER_MODES[kind][0] ?? '', values: [] }])} />)}
+      </DropdownContent>
+    </DropdownMenu></div> : null}
+    <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">release/*</span>, <span className="font-mono">docs/**</span>. Authors without write access who are not on the trust list are skipped, with Approve this run.</p>
+  </section>;
+}
+
 function Editor({ onClose }: { onClose(): void }): ReactElement {
   const shape = useShape();
   const [name, setName] = useState('Review pull requests');
@@ -474,7 +564,6 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
   const [mode, setMode] = useState<string>('Review');
   const [agent, setAgent] = useState('reviewer');
   const [prompt, setPrompt] = useState('Review {{pull_request.html_url}} against {{pull_request.base.ref}}. Leave one review with inline comments; request changes only for correctness or security problems.');
-  const conditions = [['Base branch', 'is', 'main'], ['Draft', 'is', 'false'], ['Author', 'is not', 'dependabot[bot]']];
   return <>
     <DialogHeader>
       <DialogTitle>Edit automation</DialogTitle>
@@ -498,22 +587,12 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
         {trigger === 'Label added' ? <p className="text-caption text-muted-foreground">Each label starts its own mode: <span className="font-mono">gitspace:plan</span> in Plan, <span className="font-mono">gitspace:code</span> in Code, <span className="font-mono">gitspace:review</span> in Review.</p> : null}
       </section>
 
-      <section className="flex flex-col gap-3">
-        <strong className="text-body font-semibold">Only if</strong>
-        {conditions.map(([field, op, value]) => <div key={field} className="grid grid-cols-[minmax(0,1fr)_minmax(0,10rem)_minmax(0,1fr)_auto] items-center gap-2 [&>*]:min-w-0">
-          <Select value={field} onValueChange={() => undefined}><SelectTrigger aria-label="Field" />{options(['Base branch', 'Head branch', 'Author', 'Draft', 'Label', 'Changed paths'])}</Select>
-          <Select value={op} onValueChange={() => undefined}><SelectTrigger aria-label="Operator" />{options(['is', 'is not', 'matches'])}</Select>
-          <span className={`${shape.input} border border-border bg-surface-2 px-2 py-1.5 font-mono text-caption`}>{value}</span>
-          <Button variant="ghost" size="icon" type="button" aria-label="Remove condition"><Trash01 width={14} height={14} strokeWidth={1.5} /></Button>
-        </div>)}
-        <div><Button variant="ghost" size="compact" type="button" leadingIcon={glyph(Plus)}>Add condition</Button></div>
-        <p className="text-caption text-muted-foreground">Authors without write access who are not on the trust list are skipped, with Approve this run.</p>
-      </section>
+      {trigger === 'GitHub event' ? <Filters event={event} /> : null}
 
       <section className="flex flex-col gap-3">
         <strong className="text-body font-semibold">Then</strong>
         <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(['Start a workspace for the subject', 'Message a workspace', 'Message the project agent', 'Ask the project agent'])}</Select></Field>
-        {then === 'Start a workspace for the subject' ? <div className="grid grid-cols-2 gap-3">
+        {then === 'Start a workspace for the subject' ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Starts in"><Select value={mode} onValueChange={setMode}><SelectTrigger aria-label="Starts in" />{options(['Plan', 'Code', 'Review'])}</Select></Field>
           <Field label="Agent"><Select value={agent} onValueChange={setAgent}><SelectTrigger aria-label="Agent" />{options(['default', 'reviewer', 'scout'])}</Select></Field>
         </div> : null}
