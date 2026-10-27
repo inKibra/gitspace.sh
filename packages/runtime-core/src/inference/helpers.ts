@@ -54,6 +54,11 @@ async function chatModel(models: Models, settings: InferenceProfile['settings'],
   if (!model) throw new Error(`No authenticated admitted chat model matches ${selection}`);
   return model;
 }
+/** A helper's model request fails naming the model it asked, so its caller can tell which provider or account to fix. */
+async function asking<T>(model: { provider: string; id: string }, request: Promise<T>): Promise<T> {
+  try { return await request; }
+  catch (error) { throw new Error(`${model.provider}/${model.id}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+}
 async function completeText(models: Models, selected: ResolvedProfileModel, prompt: string, system: string | undefined, signal: AbortSignal | undefined): Promise<string> {
   const message = await models.completeSimple(selected.model, { systemPrompt: system, messages: [{ role: 'user', content: prompt, timestamp: Date.now() }] }, { signal, ...(selected.thinking === null || selected.thinking === 'off' ? {} : { reasoning: selected.thinking }) });
   if (message.stopReason === 'error' || message.stopReason === 'aborted') throw new Error(message.errorMessage ?? `Model request ${message.stopReason}`);
@@ -98,7 +103,7 @@ export async function runProfileModelHelper(models: Models, operation: 'completi
     const input = completionArgs.parse(args);
     const model = await chatModel(models, settings, input.model);
     const system = input.schema === undefined ? input.system : `${input.system ?? ''}\nReturn only JSON matching this JSON Schema, with no markdown or explanation:\n${JSON.stringify(input.schema)}`;
-    const text = await completeText(models, model, input.prompt, system, signal);
+    const text = await asking(model.model, completeText(models, model, input.prompt, system, signal));
     return input.schema === undefined ? text : parseStructured(text, input.schema);
   }
   const input = judgeArgs.parse(args);
@@ -121,8 +126,10 @@ export async function runProfileModelHelper(models: Models, operation: 'completi
   const classifier = chooseModel(await models.getAvailableOfType('classifier', undefined, { signal }), settings, input.model, 'judge');
   if (classifier) {
     const state: JsonObject = typeof input.state === 'object' && input.state !== null && !Array.isArray(input.state) ? input.state : { state: input.state };
-    const result = await models.classify(classifier.model, { state, questions }, { signal });
-    if (result.stopReason !== 'stop') throw new Error(result.errorMessage ?? `Classification ${result.stopReason}`);
+    const result = await asking(classifier.model, models.classify(classifier.model, { state, questions }, { signal }).then(classified => {
+      if (classified.stopReason !== 'stop') throw new Error(classified.errorMessage ?? `Classification ${classified.stopReason}`);
+      return classified;
+    }));
     const answers: JsonObject = {};
     for (const [id, answer] of Object.entries(result.answers)) {
       const question = input.questions[id];
@@ -140,6 +147,6 @@ export async function runProfileModelHelper(models: Models, operation: 'completi
   // A registry without an applicable classifier still has a real cloud inference
   // path: the admitted chat model must return the same checked answer schema.
   const model = await chatModel(models, settings, input.model ?? 'fast');
-  const text = await completeText(models, model, JSON.stringify({ state: input.state, questions: input.questions }), `Evaluate each question independently against the supplied state. Return only JSON matching this JSON Schema:\n${JSON.stringify(schema)}\nProbabilities for choice and score questions must sum to one. Score is the probability-weighted zero-based criterion index. Confidence is your confidence in the judgment.`, signal);
+  const text = await asking(model.model, completeText(models, model, JSON.stringify({ state: input.state, questions: input.questions }), `Evaluate each question independently against the supplied state. Return only JSON matching this JSON Schema:\n${JSON.stringify(schema)}\nProbabilities for choice and score questions must sum to one. Score is the probability-weighted zero-based criterion index. Confidence is your confidence in the judgment.`, signal));
   return validateJudgments(parseStructured(text, schema), input.questions);
 }
