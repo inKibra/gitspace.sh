@@ -27,6 +27,35 @@ describe('a script on your Chrome', () => {
     expect(chrome.sent).toEqual([]);
   });
 
+  it('names only the execution contexts it was given: the extension’s own world in the page, and any it never heard of, are refused', async () => {
+    const chrome = await installed();
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    // Chrome reports the page's contexts to the tab's session: the page's own world, and the extension's.
+    await chrome.pageEvent('target-1', 'Runtime.executionContextCreated', { context: { id: 1, uniqueId: 'page-1', origin: 'https://app.example', name: '', auxData: { isDefault: true, type: 'default', frameId: 'main' } } });
+    await chrome.pageEvent('target-1', 'Runtime.executionContextCreated', { context: { id: 2, uniqueId: 'gitspace-2', origin: 'chrome-extension://extension', name: 'GitSpace Browser Relay', auxData: { isDefault: false, type: 'isolated', frameId: 'main' } } });
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ['Runtime.evaluate', { expression: 'document.title', contextId: 2 }],
+      ['Runtime.evaluate', { expression: 'document.title', uniqueContextId: 'gitspace-2' }],
+      ['Runtime.callFunctionOn', { functionDeclaration: 'function() { return chrome.runtime.id; }', executionContextId: 2 }],
+      ['DOM.resolveNode', { backendNodeId: 5, executionContextId: 2 }],
+      ['Runtime.evaluate', { expression: '1', contextId: 99 }],
+    ];
+    for (const [method, params] of refused) await expect(chrome.execute(command(attemptId, 'target-1', method, params))).rejects.toThrow(`${method} names an execution context this script was not given`);
+    expect(chrome.commands.filter(({ params }) => params.contextId === 2 || params.executionContextId === 2 || params.uniqueContextId === 'gitspace-2' || params.contextId === 99)).toEqual([]);
+    // The page's world it heard of, and a world it makes, are its own (Playwright's utility world).
+    chrome.answer(({ method }) => method === 'Page.createIsolatedWorld' ? { executionContextId: 7 } : undefined);
+    await chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: 'document.title', contextId: 1 }));
+    await chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: 'document.title', uniqueContextId: 'page-1' }));
+    await chrome.execute(command(attemptId, 'target-1', 'Page.createIsolatedWorld', { frameId: 'main', worldName: '__playwright_utility_world__' }));
+    await chrome.execute(command(attemptId, 'target-1', 'DOM.resolveNode', { backendNodeId: 5, executionContextId: 7 }));
+    // One destroyed is no longer its own, nor are any once the page's are cleared.
+    await chrome.pageEvent('target-1', 'Runtime.executionContextDestroyed', { executionContextId: 1, executionContextUniqueId: 'page-1' });
+    await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '1', contextId: 1 }))).rejects.toThrow('names an execution context this script was not given');
+    await chrome.pageEvent('target-1', 'Runtime.executionContextsCleared', {});
+    await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.callFunctionOn', { functionDeclaration: 'function() {}', executionContextId: 7 }))).rejects.toThrow('names an execution context this script was not given');
+  });
+
   it('sees and reaches only the sites it names', async () => {
     const chrome = await installed();
     const attemptId = await chrome.begin(['app.example']);

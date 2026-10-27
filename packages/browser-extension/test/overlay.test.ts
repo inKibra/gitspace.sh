@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Window, type Element, type ShadowRoot } from 'happy-dom';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
+import { browserCaptureBarFunction } from '../src/capture-tracks.js';
 import { browserOverlayFunction } from '../src/overlay.js';
 
-const show = { show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Clicking “Medium”', binding: '__gitspaceStop', capture: 'ready', recording: null } };
+const show = { show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Clicking “Medium”', capture: 'ready', recording: null } };
 const windows: Window[] = [];
 afterEach(async () => { for (const window of windows.splice(0)) await window.happyDOM.close(); });
 
-/** A page with the overlay function and the screenshot mask callable as the extension calls them; the overlay's
- * closed shadow root is kept for the test, which a page never gets. happy-dom has no Web Animations, which the
- * overlay's pulses and presses use, so they run as Chrome's would with no effect here. */
+/** A page with the overlay function and the screenshot mask callable as the extension calls them, in its world of
+ * the page, whose extension is there (`chrome.runtime.id`) and which keeps what the overlay sends (`__gitspaceSend`);
+ * the overlay's closed shadow root is kept for the test, which a page never gets. happy-dom has no Web Animations,
+ * which the overlay's pulses and presses use, so they run as Chrome's would with no effect here. */
 function page() {
   const window = new Window();
   windows.push(window);
@@ -17,8 +19,11 @@ function page() {
   const attach = window.HTMLElement.prototype.attachShadow;
   window.HTMLElement.prototype.attachShadow = function (init) { const root = attach.call(this, init); roots.push(root); return root; };
   Object.assign(window.Element.prototype, { animate: () => ({ finished: Promise.resolve() }) });
+  const sent: string[] = [];
+  const runtime: { id?: string } = { id: 'extension' };
+  Object.assign(window, { chrome: { runtime }, __gitspaceSend: async (payload: string) => { sent.push(payload); return {}; } });
   const call = (declaration: string, argument?: unknown): unknown => window.eval(`(${declaration})`)(argument);
-  return { window, roots, call, host: () => window.document.querySelector('[data-gitspace-overlay]') };
+  return { window, roots, sent, runtime, call, host: () => window.document.querySelector('[data-gitspace-overlay]') };
 }
 /** Whether an element of the overlay shows: neither it nor anything holding it is `display: none`. */
 function visible(element: Element): boolean {
@@ -40,11 +45,9 @@ describe('the in-page overlay', () => {
     expect(window.getComputedStyle(element).visibility).not.toBe('hidden');
   });
 
-  it('says who acts on which workspace and what it is doing; Stop calls the binding of its own world, and the page never sees the click', () => {
-    const { window, roots, call } = page();
-    const stops: string[] = [];
+  it('says who acts on which workspace and what it is doing; Stop tells the extension, and the page never sees the click', () => {
+    const { window, roots, sent: stops, call } = page();
     const clicks: string[] = [];
-    Object.assign(window, { __gitspaceStop: (payload: string) => { stops.push(payload); } });
     window.document.addEventListener('click', event => { clicks.push(event.type); });
     call(browserOverlayFunction, show);
     expect(roots[0]?.textContent).toContain('main · Checkout');
@@ -57,9 +60,7 @@ describe('the in-page overlay', () => {
   });
 
   it('Capture starts a capture where the account saves them; while it records, REC shows and Stop capture ends it', () => {
-    const { window, roots, call } = page();
-    const presses: string[] = [];
-    Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
+    const { roots, sent: presses, call } = page();
     const buttons = () => [...roots[0]?.querySelectorAll('button') ?? []];
     const shown = () => buttons().filter(visible).map(button => button.textContent);
     call(browserOverlayFunction, { show: { ...show.show, capture: 'none' } });
@@ -76,9 +77,7 @@ describe('the in-page overlay', () => {
   });
 
   it('while the agent acts, Take over and your own pointer or key press on the page take the tab; the page’s own events and presses on the toolbar do not', () => {
-    const { window, roots, call, host } = page();
-    const presses: string[] = [];
-    Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
+    const { window, roots, sent: presses, call, host } = page();
     // Chrome marks your input (and the agent's, which the extension tells apart) trusted; a page's own events are not.
     const input = (target: Element, type: string, trusted: boolean) => {
       const event = type === 'keydown' ? new window.KeyboardEvent(type, { bubbles: true, composed: true, key: 'a' }) : new window.PointerEvent(type, { bubbles: true, composed: true });
@@ -107,9 +106,7 @@ describe('the in-page overlay', () => {
   });
 
   it('while you hold the tab, says you are in control and the agent is paused, in a grey frame; Resume agent hands it back', () => {
-    const { window, roots, call } = page();
-    const presses: string[] = [];
-    Object.assign(window, { __gitspaceStop: (payload: string) => { presses.push(payload); } });
+    const { window, roots, sent: presses, call } = page();
     call(browserOverlayFunction, { show: { ...show.show, mode: 'you', doing: null } });
     expect(roots[0]?.textContent).toContain("You're in control");
     expect(roots[0]?.textContent).toContain('main is paused · it sees your changes when it resumes');
@@ -141,7 +138,7 @@ describe('the in-page overlay', () => {
     expect(host()).toBeNull();
   });
 
-  it('replaces one a previous debugger session left and leaves when removed', () => {
+  it('replaces one an earlier version drew in a world of its own, and leaves when removed', () => {
     const { window, call } = page();
     const stale = window.document.createElement('div');
     stale.setAttribute('data-gitspace-overlay', '');
@@ -155,21 +152,54 @@ describe('the in-page overlay', () => {
     expect(call(browserOverlayFunction, { cursor: { x: 1, y: 1, type: 'mouseMoved' } })).toBe(false);
   });
 
-  it('with report, says where your own pointer is, at most ten times a second and the latest each time, and when it leaves the tab; never the agent’s pointer, and nothing once reporting stops', () => {
+  it('stays the only toolbar on the page: one an earlier version draws later goes at once, the capture bar stays, and its own comes back when taken away', async () => {
     const { window, call, host } = page();
-    const reports: string[] = [];
-    // The page's timers, which the test runs.
-    const timers = new Map<number, () => void>();
+    call(browserOverlayFunction, show);
+    const ours = host();
+    call(browserCaptureBarFunction, { binding: '__gitspaceSend', show: { mode: 'capture', name: 'Order', startedAt: Date.now(), steps: 0, comments: 0, sound: null, saving: false } });
+    // An earlier version's toolbar, drawn after this one from a world of its own.
+    const stale = window.document.createElement('div');
+    stale.setAttribute('data-gitspace-overlay', '');
+    window.document.documentElement.appendChild(stale);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(stale.isConnected).toBe(false);
+    expect(window.document.querySelectorAll('[data-gitspace-overlay]')).toHaveLength(2);
+    // That earlier toolbar took this one away as it installed.
+    ours?.remove();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(ours?.isConnected).toBe(true);
+  });
+
+  it('asks the extension to draw it again once nothing refreshed it for 75 s, and leaves when the extension cannot be asked', async () => {
+    const { window, sent, call, host } = page();
+    const timers = new Map<number, { run: () => void; ms: number }>();
+    let timer = 0;
+    Object.assign(window, { setTimeout: (run: () => void, ms = 0) => { timers.set(++timer, { run, ms }); return timer; }, clearTimeout: (id: number) => { timers.delete(id); } });
+    const deadline = () => { for (const [id, { run, ms }] of [...timers]) if (ms === 75_000) { timers.delete(id); run(); } };
+    call(browserOverlayFunction, show);
+    deadline();
+    expect(sent).toEqual(['refresh']);
+    expect(host()).not.toBeNull();
+    // The extension is gone: asking fails, and the overlay leaves the page.
+    Object.assign(window, { __gitspaceSend: async () => { throw new Error('Extension context invalidated.'); } });
+    deadline();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(host()).toBeNull();
+  });
+
+  it('with report, says where your own pointer is, at most ten times a second and the latest each time, and when it leaves the tab; never the agent’s pointer, and nothing once reporting stops', () => {
+    const { window, sent: reports, call, host } = page();
+    // The page's timers, which the test runs: those of the next second.
+    const timers = new Map<number, { run: () => void; ms: number }>();
     let timer = 0;
     Object.assign(window, {
-      __gitspaceStop: (payload: string) => { reports.push(payload); },
-      setTimeout: (run: () => void) => { timers.set(++timer, run); return timer; },
+      setTimeout: (run: () => void, ms = 0) => { timers.set(++timer, { run, ms }); return timer; },
       clearTimeout: (id: number) => { timers.delete(id); },
     });
-    const elapse = () => { for (const [id, run] of [...timers]) { timers.delete(id); run(); } };
+    const elapse = () => { for (const [id, { run, ms }] of [...timers]) if (ms < 1000) { timers.delete(id); run(); } };
     // Without a related target: the pointer left the page, not moved within it.
     const mouse = (type: string, x = 0, y = 0) => window.document.dispatchEvent(new window.MouseEvent(type, { clientX: x, clientY: y }));
-    call(browserOverlayFunction, { show: null, report: '__gitspaceStop' });
+    call(browserOverlayFunction, { show: null, report: true });
     expect(host()).not.toBeNull();
     mouse('mousemove', 512, 384); mouse('mousemove', 256, 192); mouse('mousemove', 768, 576);
     expect(reports).toEqual(['pointer {"x":0.5,"y":0.5}']);
@@ -183,7 +213,7 @@ describe('the in-page overlay', () => {
     mouse('mouseout');
     elapse();
     expect(reports.at(-1)).toBe('pointer null');
-    call(browserOverlayFunction, { show: null, report: null });
+    call(browserOverlayFunction, { show: null, report: false });
     mouse('mousemove', 512, 384);
     elapse();
     expect(reports).toHaveLength(3);

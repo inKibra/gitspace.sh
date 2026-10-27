@@ -25,11 +25,11 @@ function shareOf(shareId: string, viewers: RuntimeBrowserShare['viewers'] = []):
 }
 
 describe('a share of a tab on your Chrome', () => {
-  it('watching a tab nobody uses clears a toolbar an earlier debugger session left on it, and shows none', async () => {
+  it('watching a tab nobody uses puts nothing on its page', async () => {
     const chrome = await sharing();
     await chrome.ask({ operation: 'shareWatch', shareId: crypto.randomUUID(), targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
     await settle();
-    expect(chrome.overlays('target-9')).toEqual([{ remove: true }]);
+    expect(chrome.pageScripts).toEqual([]);
   });
 
   it('streams the tab while someone watches: at most four frames a second, the newest when they come faster, none while the connection is backed up', async () => {
@@ -132,30 +132,29 @@ describe('a share of a tab on your Chrome', () => {
     const shareId = crypto.randomUUID();
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
     await chrome.fromRelay({ operation: 'sharePointers', shareId, pointers: [{ viewerId: 'ann', name: 'Ann', color: '#e5484d', at: { x: 0.5, y: 0.25 } }, { viewerId: 'bob', name: 'Bob', color: '#0090ff', at: { x: 0.1, y: 0.9 } }] });
-    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:ann`, name: 'Ann', color: '#e5484d', x: 0.5, y: 0.25 }, { id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.1, y: 0.9 }] });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:ann`, name: 'Ann', color: '#e5484d', x: 0.5, y: 0.25 }, { id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.1, y: 0.9 }], report: false });
     await chrome.fromRelay({ operation: 'sharePointers', shareId, pointers: [{ viewerId: 'bob', name: 'Bob', color: '#0090ff', at: { x: 0.2, y: 0.8 } }] });
-    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.2, y: 0.8 }] });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.2, y: 0.8 }], report: false });
     await chrome.fromRelay({ operation: 'sharePointers', shareId, pointers: [] });
     expect(chrome.overlays('target-9').at(-1)).toEqual({ remove: true });
     // Notices get no answer.
     expect(chrome.sent.filter(message => 'error' in message || 'result' in message).map(message => message.id)).toEqual(['relay-1']);
   });
 
-  it('says where your own pointer is over the tab while the account draws it for the viewers, from the overlay’s own world only', async () => {
+  it('says where your own pointer is over the tab while the account draws it for the viewers, from the extension’s own world of the tab’s main frame only', async () => {
     const chrome = await sharing();
     const shareId = crypto.randomUUID();
-    const pointer = (payload: string, executionContextId: number) => chrome.pageEvent('target-9', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload, executionContextId });
+    const pointer = (payload: string, frameId = 0) => chrome.fromPage(9, payload, frameId);
     // An account that does not draw it (before extension 5.8) never asks, and nothing reports it.
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
-    // Only the new session's sweep of an earlier toolbar: no pointer report.
-    expect(chrome.overlays('target-9')).toEqual([{ remove: true }]);
+    expect(chrome.pageScripts).toEqual([]);
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600, reportPointer: true });
-    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, report: '__gitspaceStop' });
-    await pointer('pointer {"x":0.5,"y":0.25}', 50);
-    // A page's own script cannot reach the binding of the overlay's world.
-    await pointer('pointer {"x":0.9,"y":0.9}', 7);
-    await pointer('pointer {"x":2,"y":0.9}', 50);
-    await pointer('pointer null', 50);
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [], report: true });
+    await pointer('pointer {"x":0.5,"y":0.25}');
+    // A frame of the page other than its main one is not the overlay's.
+    await pointer('pointer {"x":0.9,"y":0.9}', 3);
+    await pointer('pointer {"x":2,"y":0.9}');
+    await pointer('pointer null');
     expect(chrome.sent.filter(message => message.share)).toEqual([{ share: { event: 'pointer', shareId, at: { x: 0.5, y: 0.25 } } }, { share: { event: 'pointer', shareId, at: null } }]);
     // Nobody watches any more: the overlay, which only reported, leaves.
     await chrome.ask({ operation: 'shareUnwatch', shareId });

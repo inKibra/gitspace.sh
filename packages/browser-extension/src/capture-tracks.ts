@@ -3,10 +3,11 @@
  * recorded on one clock with its video or frames, and the in-page capturing bar and saved card on your Chrome (the
  * agreed look is account-web's BrowsersMockExtension modes `capture`, `capture-comment` and `saved`).
  *
- * - `browserCaptureRecorderFunction` runs in an isolated world of the recorded tab (the overlay's on your Chrome, its
- *   own on the cloud browser): it turns your trusted clicks, typing, key presses and form changes into steps with
+ * - `browserCaptureRecorderFunction` runs in an isolated world of the recorded tab (the extension's page world on your
+ *   Chrome, `page.ts`; its own on the cloud browser): it turns your trusted clicks, typing, key presses and form changes into steps with
  *   Playwright locators computed in the page, masking secrets, and samples the visible elements when the page changes,
- *   at most twice a second. It reports through the world's binding (`step {…}`, `layout {…}`).
+ *   at most twice a second. It reports (`step {…}`, `layout {…}`) through the function its `binding` names: a CDP
+ *   binding on the cloud browser, `__gitspaceSend` (`page.ts`) on your Chrome.
  * - `CaptureTrackRecorder` receives those reports, the tab's navigations and its requests (`Network` domain) and
  *   keeps them on the capture's clock: steps in memory for `steps.json`, layout lines streamed to `layout.jsonl`.
  *   The cloud browser's captures use it too (account-worker `browser-capture.ts`).
@@ -20,7 +21,7 @@ import { accountValue, relaySignature, sha256Hex, SIGNATURE_HEADER, type Signing
 
 /**
  * In an isolated world of a recorded tab. `{ binding }` installs the recorder (once per document; again only names
- * the binding), `{ flush: true }` answers the step of a field still being typed in (null if none) instead of reporting
+ * the function it reports through), `{ flush: true }` answers the step of a field still being typed in (null if none) instead of reporting
  * it, `{ remove: true }` stops it. Only trusted events count, and none on GitSpace's own hosts (`data-gitspace-overlay`).
  * A click on a text field, checkbox, select or file input is left to the `fill`, `check`, `select` or `upload` its
  * change makes; typing becomes one `fill` when the field changes or another step comes. Values of password fields,
@@ -337,13 +338,13 @@ export type CaptureBarView =
   | { mode: 'saved'; name: string; workspace: string; pills: string[]; mention: string; share: string; replay: string; notice: string | null };
 
 /**
- * In the overlay's isolated world, above the overlay (docs/APERTURE-DESIGN.md §11; the mock's `capture`,
+ * In the extension's page world (`page.ts`), above the overlay (docs/APERTURE-DESIGN.md §11; the mock's `capture`,
  * `capture-comment` and `saved` modes). `{ show: CaptureBarView | null, binding }` draws or hides it; `{ copy }` puts
  * text on the clipboard (resolves whether it did); `{ remove: true }` takes it away. While capturing: a red dot, the
  * name with ✎ (click to rename: Enter keeps it, Escape does not), the time, steps and comments; Comment (or C outside
  * a field), the sound toggle for video, and Done; the REC badge in the corner. In comment mode: the comment tool's
  * line with Back to doing (Esc is the comment tool's own) and Done. Saved: the card with the tracks, the mention, Copy
- * mention, Share, Replay steps, Open in GitSpace and ✕. Its buttons call the binding with `captureComment`,
+ * mention, Share, Replay steps, Open in GitSpace and ✕. Its buttons call the function `binding` names with `captureComment`,
  * `captureBack`, `captureSound`, `captureDone`, `captureName "<name>"`, `captureMention`, `captureShare`,
  * `captureReplay`, `captureOpen` and `captureClose`. Styled inline in a closed shadow root, nothing focusable but the
  * name being renamed.
@@ -369,6 +370,7 @@ export const browserCaptureBarFunction = `function(command) {
     host.setAttribute('data-gitspace-overlay', '');
     host.setAttribute('aria-hidden', 'true');
     host.style.cssText = 'all:initial;position:fixed;inset:0;display:block;pointer-events:none;z-index:2147483647;contain:layout style';
+    (globalThis.__gitspaceHosts ??= new WeakSet()).add(host);
     const root = host.attachShadow({ mode: 'closed' });
     const state = { binding: command.binding, view: null, clock: 0, renaming: false };
     const press = text => { const call = globalThis[state.binding]; if (typeof call === 'function') call(text); return typeof call === 'function'; };
@@ -525,9 +527,9 @@ export type CaptureTracksHost = {
   upload(capture: ChromeCapture, file: typeof CAPTURE_TRACK_FILES[keyof typeof CAPTURE_TRACK_FILES], mediaType: string): TrackUpload;
   /** Draws the tab's in-page overlay again (which draws the bar, `draw`). */
   redraw(targetId: string): void;
-  /** Calls a function in the tab's overlay world and answers its value; `gesture` runs it as your click would (the
-   * clipboard needs one). */
-  call(targetId: string, declaration: string, argument: unknown, gesture?: boolean): Promise<unknown>;
+  /** Runs the recorder (`browserCaptureRecorderFunction`) or the bar (`browserCaptureBarFunction`) in the tab's page
+   * world (`page.ts`) and answers its value. */
+  call(targetId: string, name: 'recorder' | 'bar', argument: unknown): Promise<unknown>;
   send(message: object): void;
   identity(): Promise<SigningIdentity | undefined>;
   commentMode(targetId: string, mode: CaptureCommentMode | null): Promise<void>;
@@ -546,12 +548,14 @@ type Card = { captureId: string; groupId: string; name: string; workspace: strin
 
 const clock = (ms: number) => { const seconds = Math.round(ms / 1000); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; };
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
+/** What the recorder and the bar report through in the extension's page world (`page.ts`). */
+const PAGE_SEND = '__gitspaceSend';
 /** The commands of the capturing bar and the saved card (`browserCaptureBarFunction`). */
 const BAR_COMMANDS: Record<string, true> = { captureComment: true, captureBack: true, captureSound: true, captureDone: true, captureName: true, captureMention: true, captureShare: true, captureReplay: true, captureOpen: true, captureClose: true };
 
 /**
  * Steps and layout tracks of the captures recording on your Chrome, their capturing bar and, once one is saved, its
- * card on the tab. A tab keeps its overlay (and the debugger) while either shows (`shows`).
+ * card on the tab. A tab keeps its overlay while either shows (`shows`).
  */
 export class CaptureTracksInChrome {
   private readonly live = new Map<string, Live>();
@@ -581,8 +585,8 @@ export class CaptureTracksInChrome {
     else if (this.cards.delete(targetId)) void this.host.release(targetId);
   }
 
-  /** A call of the overlay world's binding on the tab; false when it is not the tracks'. */
-  binding(targetId: string, payload: string): boolean {
+  /** A message from the tab's page world (`page.ts`); false when it is not the tracks'. */
+  message(targetId: string, payload: string): boolean {
     const live = this.recordingOn(targetId);
     if (payload.startsWith('step ') || payload.startsWith('layout ')) {
       if (live?.recorder.page(payload) && payload.startsWith('step ')) this.host.redraw(targetId);
@@ -606,18 +610,18 @@ export class CaptureTracksInChrome {
     return true;
   }
 
-  /** Draws the tab's recorder, bar or card in the overlay world (after the overlay itself), or takes them away. */
-  async draw(targetId: string, binding: string): Promise<void> {
+  /** Draws the tab's recorder, bar or card in the page world (after the overlay itself), or takes them away. */
+  async draw(targetId: string): Promise<void> {
     const live = this.recordingOn(targetId), card = this.cards.get(targetId);
     if (!live && !card) {
       if (!this.drawn.delete(targetId)) return;
-      await this.host.call(targetId, browserCaptureRecorderFunction, { remove: true });
-      await this.host.call(targetId, browserCaptureBarFunction, { remove: true });
+      await this.host.call(targetId, 'recorder', { remove: true });
+      await this.host.call(targetId, 'bar', { remove: true });
       return;
     }
     this.drawn.add(targetId);
-    await this.host.call(targetId, browserCaptureRecorderFunction, live ? { binding } : { remove: true });
-    await this.host.call(targetId, browserCaptureBarFunction, { binding, show: live ? this.recordingView(live) : card ? this.cardView(card) : null });
+    await this.host.call(targetId, 'recorder', live ? { binding: PAGE_SEND } : { remove: true });
+    await this.host.call(targetId, 'bar', { binding: PAGE_SEND, show: live ? this.recordingView(live) : card ? this.cardView(card) : null });
   }
 
   /** A capture ends: the field being typed in becomes its last step, comment mode ends, `steps.json` uploads and
@@ -626,7 +630,7 @@ export class CaptureTracksInChrome {
     const live = this.live.get(capture.captureId);
     if (!live) return null;
     this.host.redraw(capture.targetId);
-    const typing = await this.host.call(capture.targetId, browserCaptureRecorderFunction, { flush: true }).catch(() => null);
+    const typing = await this.host.call(capture.targetId, 'recorder', { flush: true }).catch(() => null);
     if (typing) live.recorder.page(`step ${JSON.stringify(typing)}`);
     if (live.commenting) await this.host.commentMode(capture.targetId, null).catch(() => {});
     const finished = await live.recorder.finish();
@@ -696,7 +700,7 @@ export class CaptureTracksInChrome {
       if (command === 'captureClose') { this.cards.delete(targetId); await this.host.release(targetId); return; }
       else if (command === 'captureMention') {
         // The mention the chat reads (`captureMention` in protocol-runtime).
-        card.mention = await this.host.call(targetId, browserCaptureBarFunction, { copy: `capture://${card.captureId}` }, true) === true ? 'Copied' : 'Copy mention';
+        card.mention = await this.host.call(targetId, 'bar', { copy: `capture://${card.captureId}` }) === true ? 'Copied' : 'Copy mention';
         if (card.mention !== 'Copied') card.notice = 'Chrome did not let GitSpace copy here';
       } else if (command === 'captureShare') {
         card.share = 'Sharing…';
@@ -704,7 +708,7 @@ export class CaptureTracksInChrome {
         const identity = await this.host.identity();
         if (!identity) throw new Error('This Chrome is not paired');
         const link = shareLink(await captureShareRequest(this.host.account, identity, { op: 'create', captureId: card.captureId, groupId: card.groupId, comment: true, expiresInMinutes: CAPTURE_SHARE_MINUTES }));
-        const copied = await this.host.call(targetId, browserCaptureBarFunction, { copy: link }, true) === true;
+        const copied = await this.host.call(targetId, 'bar', { copy: link }) === true;
         card.share = copied ? 'Link copied' : 'Share';
         if (!copied) card.notice = `Share link: ${link}`;
       } else if (command === 'captureReplay') {

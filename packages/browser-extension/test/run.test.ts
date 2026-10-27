@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readSiteStepRefusal, relayRunCommand, relayRunEvent, runSites, type RelayRunTab, type TabUrls } from '../src/commands.js';
 
-const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], read: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you', account: 'https://account.gitspace.test' };
+const tab: RelayRunTab = { grant: { origins: ['app.example', '*.docs.example'] }, stepsOnly: [], read: [], urls: { tabUrl: 'https://app.example/' }, targetId: 'target', session: 'session', sessionId: 'session', addedBy: 'you', account: 'https://account.gitspace.test', contexts: { ids: new Set([3]), unique: new Set() } };
 const READ_ONLY = (site: string) => `${site} is read-only for agents in this workspace: you may open, observe and screenshot it, not click or type`;
 
 describe('script commands on your Chrome', () => {

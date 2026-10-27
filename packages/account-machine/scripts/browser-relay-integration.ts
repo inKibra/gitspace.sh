@@ -38,7 +38,7 @@ try {
   const extension = join(root, 'extension'); await mkdir(extension);
   for (const [name, bytes] of Object.entries(archive)) { if (name.includes('/') || name.includes('..')) throw new Error('Unsafe fixture archive entry'); await writeFile(join(extension, name), bytes); }
   const manifest = z.object({ host_permissions: z.array(z.string()) }).parse(JSON.parse(strFromU8(archive['manifest.json']!)));
-  assert.deepEqual(manifest.host_permissions, [`${address.origin}/*`]);
+  assert.deepEqual(manifest.host_permissions, ['<all_urls>', `${address.origin}/*`]);
   context = await chromium.launchPersistentContext(join(root, 'profile'), { executablePath: process.env.CHROME_PATH, headless: true, args: ['--no-sandbox', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   const extensionWorker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
   const extensionId = new URL(extensionWorker.url()).host;

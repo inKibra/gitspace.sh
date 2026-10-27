@@ -162,7 +162,20 @@ export type RelayRunTab = {
   /** Everything is on (`powers.ts`): `grant` then holds every http(s) site, there are no levels, and only the hard
    * limits (`everythingRefusal`) refuse a command. */
   everything?: boolean;
+  /** The tab's execution contexts the script was given (`RunContexts`); a command naming another is refused. */
+  contexts: RunContexts;
 };
+/** The execution contexts of a tab a script was given: the ids and unique ids of the `Runtime.executionContextCreated`
+ * events the extension forwarded to it (never one of the extension's own worlds), and the worlds it made with
+ * `Page.createIsolatedWorld`, until destroyed or cleared. */
+export type RunContexts = { ids: Set<number>; unique: Set<string> };
+/** Why a script command that names an execution context it was not given (`contextId`, `executionContextId` or
+ * `uniqueContextId`, on any method) is refused, or null. A command naming none runs in the page's default context. */
+function contextRefusal(method: string, params: Record<string, unknown>, contexts: RunContexts): string | null {
+  const unknownId = [params.contextId, params.executionContextId].some(id => id !== undefined && !(typeof id === 'number' && contexts.ids.has(id)));
+  const unknownUnique = params.uniqueContextId !== undefined && !(typeof params.uniqueContextId === 'string' && contexts.unique.has(params.uniqueContextId));
+  return unknownId || unknownUnique ? `${method} names an execution context this script was not given` : null;
+}
 /** What the extension does with one script command: send it (with these parameters), answer `{}` without effect, or refuse it. */
 export type RelayRunVerdict = { send: Record<string, unknown> } | { noop: true } | { refused: string };
 
@@ -240,6 +253,9 @@ export function runDestinationRefusal(tab: { grant: { origins: string[] }; steps
  */
 export function relayRunCommand(method: string, params: Record<string, unknown>, tab: RelayRunTab): RelayRunVerdict {
   if (tab.sessionId !== undefined && tab.sessionId !== tab.session) return { refused: `${method} names a session outside this tab` };
+  // The extension's own worlds in the page, and any other a script was not told of, are not the script's.
+  const context = contextRefusal(method, params, tab.contexts);
+  if (context) return { refused: context };
   const outside = method === 'Target.getTargetInfo' ? null : runTabRefusal(tab);
   if (outside) return { refused: outside };
   if (RUN_NOOPS[method]) return { noop: true };

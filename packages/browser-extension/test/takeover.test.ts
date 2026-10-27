@@ -19,8 +19,8 @@ async function chromeWith(options: { live?: boolean; activity?: boolean; takeove
       await chrome.execute({ operation: 'open', grant: chrome.grant });
       await settle();
     },
-    /** The tab's overlay calls its binding from its own world: a button, or your input on the page (`take`). */
-    press: (targetId: string, payload: string) => chrome.pageEvent(targetId, 'Runtime.bindingCalled', { name: '__gitspaceStop', payload, executionContextId: 50 }),
+    /** The tab's overlay tells the extension from its own world: a button, or your input on the page (`take`). */
+    press: (targetId: string, payload: string) => chrome.fromPage(Number(targetId.slice('target-'.length)), payload),
   };
 }
 describe('taking over a tab the agent uses', () => {
@@ -121,7 +121,7 @@ describe('taking over a tab the agent uses', () => {
     await chrome.execute(command(attemptId, 'target-1', 'Input.insertText', { text: 'x' }));
     await settle();
     const shown = chrome.overlays('target-1').filter(call => call.show).length;
-    // The overlay removes itself 75 s after its last refresh; a key every few seconds changes nothing it shows.
+    // The overlay asks to be drawn again 75 s after its last refresh; a key every few seconds changes nothing it shows.
     const start = Date.now();
     try {
       for (const seconds of [10, 20, 31]) { setSystemTime(new Date(start + seconds * 1000)); await chrome.execute(command(attemptId, 'target-1', 'Input.insertText', { text: 'x' })); await settle(); }

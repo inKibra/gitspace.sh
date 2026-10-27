@@ -1,21 +1,24 @@
 import { z } from 'zod';
 import { expect } from 'bun:test';
 import { createContext, runInContext } from 'node:vm';
-import { Window } from 'happy-dom';
+import { Window, type ShadowRoot } from 'happy-dom';
 import { BROWSER_EXTENSION_PROTOCOL, browserBase64, RuntimeAccountBrowserSignedGrantSchema, RuntimeBrowserCommentChromeRequestSchema, signRuntimeAccountBrowserAuthorization, signRuntimeAccountBrowserGrant, signRuntimeBrowserAuthorityCertificate, type RuntimeAccountBrowserAuthorizationBody, type RuntimeBrowserCommentThread, type RuntimeBrowserShare } from '@gitspace/protocol-runtime';
 import { extensionFiles } from '../src/index.js';
-import { browserOverlayFunction } from '../src/overlay.js';
 
 type Tab = { id: number; groupId: number; url: string; index: number; windowId: number; title?: string; width?: number; height?: number; favIconUrl?: string; status?: string };
 type Group = { id: number; title: string; color: string; collapsed: boolean };
 type Reply = Record<string, unknown> & { error?: string };
 type DebuggerEvent = (source: { targetId: string }, method: string, params: object) => void;
 type TabUpdated = (tabId: number, change: Record<string, unknown>, tab: Tab) => void;
-type Sender = { id: string; url: string };
+type Sender = { id: string; url: string; tab?: { id: number; url: string }; frameId?: number };
 type Listener = (message: Record<string, unknown>, sender: Sender, respond: (value: unknown) => void) => boolean | undefined;
 /** One DevTools command the extension sent to a tab. */
 export type DebuggerCommand = { targetId: string; method: string; params: Record<string, unknown> };
-type Timer = { id: number; at: number; run: () => void };
+/** One script the extension ran in a tab's page (`chrome.scripting.executeScript`): `page.js`, or a function of it by
+ * name with its command, as the page received it (a call that found no page script there is not one). */
+export type PageScript = { tabId: number; world: string; file?: string; name?: string; command?: Record<string, unknown> };
+/** A timer of the service worker or of a tab's page; a worker that stops leaves none of its own behind. */
+type Timer = { id: number; at: number; run: () => void; page: boolean };
 type Toolbar = { icon: Record<string, { width: number; colors: string[] }>; badge: string; title: string; badgeColor: string };
 /** One request the extension made to its account, as the account received it. */
 export type AccountRequest = { method: string; pathname: string; header: string | null; body: Uint8Array<ArrayBuffer> };
@@ -28,8 +31,6 @@ export const screencasts = (commands: DebuggerCommand[], targetId: string) => co
 
 const projectId = 'project';
 const workspaceId = 'workspace';
-/** Commands the extension sends for the in-page overlay, apart from those the agent's commands cause. */
-const OVERLAY_METHODS: Record<string, true> = { 'Page.getFrameTree': true, 'Page.createIsolatedWorld': true, 'Runtime.addBinding': true };
 /** What the fake debugger answers, by method; anything else answers `{}`. */
 const ANSWERS: Record<string, object> = {
   'Page.getFrameTree': { frameTree: { frame: { id: 'main' } } },
@@ -54,15 +55,8 @@ export const FRAME = browserBase64(Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0x00
 export const png = (n: number) => Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, n]);
 /** The icon `_favicon` serves for a page Chrome has no icon of. */
 const DEFAULT_FAVICON = png(0);
-/** The command an overlay call (`Runtime.callFunctionOn` of the overlay's function, sent as JSON text) gives the
- * overlay as the page receives it; undefined for any other call. */
-export function overlayCommand(params: Record<string, unknown>): Record<string, unknown> | undefined {
-  if (!String(params.functionDeclaration ?? '').includes(browserOverlayFunction) || !Array.isArray(params.arguments)) return undefined;
-  const value = z.object({ value: z.unknown() }).parse(params.arguments[0]).value;
-  return z.record(z.string(), z.unknown()).parse(typeof value === 'string' ? JSON.parse(value) : value);
-}
-/** A value as chrome.debugger passes it in a call's arguments: without the properties whose value is null, at any
- * depth (arrays keep their nulls). */
+/** A value as chrome.debugger and chrome.scripting pass it in a call's arguments: without the properties whose value
+ * is null, at any depth (arrays keep their nulls). */
 function withoutNulls(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutNulls);
   if (value === null || typeof value !== 'object') return value;
@@ -296,6 +290,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const recorders: Recorder[] = [];
   const streamIds: Array<{ targetTabId: number }> = [];
   const captureGrants = new Set<number>();
+  /** The manifest's version as `chrome.runtime.getManifest` gives it, to the worker and to the extension's page world. */
+  const getManifest = () => ({ version: '5.7.0' });
   const workerSender = { id: 'extension', url: 'chrome-extension://extension/background.js' };
   const offscreenSender = { id: 'extension', url: 'chrome-extension://extension/offscreen.html' };
   /** Delivers a runtime message as Chrome does: to every listener of the other contexts; the first to answer wins. */
@@ -333,16 +329,45 @@ export async function installed(options: { local?: Record<string, unknown>; live
       AudioContext: class { createMediaStreamSource() { return { connect() {} }; } destination = {}; async close() {} },
       ImageCapture: class { async grabFrame() { return { width: 1280, height: 720 }; } },
       MediaRecorder, MediaStream, OffscreenCanvas, fetch, crypto, TextEncoder, URL, atob, btoa, Uint8Array, console, Blob,
-      setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run }); return timerId; },
+      setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run, page: false }); return timerId; },
       clearTimeout: (id: number) => { const index = timers.findIndex(timer => timer.id === id); if (index >= 0) timers.splice(index, 1); },
       setInterval: () => 0, clearInterval: () => {},
     });
     runInContext(extensionFiles('https://account.gitspace.test')['offscreen.js'] ?? '', context);
   };
 
+  /** Each tab's page as Chrome keeps it, whatever the service worker does: a window where the extension's scripts run
+   * in its own world (`chrome.scripting.executeScript`) and from where that world messages the worker, as this
+   * extension's content script of the tab's main frame. `roots` are the closed shadow roots drawn there, which a page
+   * never gets. Its timers run on the fake clock. */
+  const pages = new Map<number, { window: Window; roots: ShadowRoot[] }>();
+  const pageScripts: PageScript[] = [];
+  const pageSender = (tabId: number, frameId = 0): Sender => ({ id: 'extension', url: tabs.get(tabId)?.url ?? '', tab: { id: tabId, url: tabs.get(tabId)?.url ?? '' }, frameId });
+  const pageOf = (tabId: number) => {
+    const found = pages.get(tabId);
+    if (found) return found;
+    const tab = tabs.get(tabId);
+    if (!tab) throw new Error(`No tab with id: ${tabId}.`);
+    const window = new Window({ url: tab.url, width: 1024, height: 768 });
+    const roots: ShadowRoot[] = [];
+    const attach = window.HTMLElement.prototype.attachShadow;
+    window.HTMLElement.prototype.attachShadow = function (init) { const root = attach.call(this, init); roots.push(root); return root; };
+    // happy-dom has no Web Animations, which the overlay's pulses and presses use: they run with no effect here.
+    Object.assign(window.Element.prototype, { animate: () => ({ finished: Promise.resolve() }) });
+    Object.assign(window, {
+      chrome: { runtime: { id: 'extension', getManifest, sendMessage: (message: Record<string, unknown>) => deliver(listeners, message, pageSender(tabId)) } },
+      setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run, page: true }); return timerId; },
+      clearTimeout: (id: number) => { const index = timers.findIndex(timer => timer.id === id); if (index >= 0) timers.splice(index, 1); },
+      setInterval: () => 0, clearInterval: () => {},
+    });
+    const page = { window, roots };
+    pages.set(tabId, page);
+    return page;
+  };
+
   const chrome = {
     runtime: {
-      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest: () => ({ version: '5.7.0' }), getPlatformInfo: async () => ({ os: 'win', arch: 'x86-64' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
+      id: 'extension', getURL: (path: string) => `chrome-extension://extension/${path}`, getManifest, getPlatformInfo: async () => ({ os: 'win', arch: 'x86-64' }), onMessage: { addListener: (listener: Listener) => { listeners.push(listener); } },
       getContexts: async () => offscreenOpen ? [{ contextType: 'OFFSCREEN_DOCUMENT' }] : [],
       sendMessage: (message: Record<string, unknown>) => deliver(offscreenListeners, message, workerSender),
     },
@@ -366,6 +391,21 @@ export async function installed(options: { local?: Record<string, unknown>; live
         return answer(command) ?? ANSWERS[method] ?? {};
       },
       onEvent: { addListener: (listener: DebuggerEvent) => { debuggerEvent = listener; } }, onDetach: { addListener: (listener: (source: { targetId: string }) => void) => { debuggerDetached.push(listener); } },
+    },
+    scripting: {
+      // As Chrome runs them: in the tab's page, with the arguments passed as Chrome passes them (no null properties),
+      // answering what the script resolved to.
+      executeScript: async ({ target, world = 'ISOLATED', func, args = [], files }: { target: { tabId: number; frameIds?: number[] }; world?: string; func?: object; args?: unknown[]; files?: string[] }) => {
+        const { window } = pageOf(target.tabId);
+        for (const file of files ?? []) { pageScripts.push({ tabId: target.tabId, world, file }); window.eval(extensionFiles('https://account.gitspace.test')[file] ?? ''); }
+        if (!func) return [{ frameId: 0, result: null }];
+        const passed = z.array(z.unknown()).parse(JSON.parse(JSON.stringify(withoutNulls(args))));
+        const [, name, json] = passed;
+        const result: unknown = await window.eval(`(${String(func)})`)(...passed);
+        // A call that found no page script in the document (null) reached no function of it.
+        if (result !== null) pageScripts.push({ tabId: target.tabId, world, ...(typeof name === 'string' && typeof json === 'string' ? { name, command: z.record(z.string(), z.unknown()).parse(JSON.parse(json)) } : {}) });
+        return [{ frameId: 0, result: result === undefined ? null : JSON.parse(JSON.stringify(result)) }];
+      },
     },
     tabs: {
       get: async (id: number) => tabs.get(id),
@@ -425,12 +465,13 @@ export async function installed(options: { local?: Record<string, unknown>; live
   };
   /** Starts the service worker: a worker that stopped leaves no listener and no timer behind. */
   const start = async () => {
-    for (const registered of [listeners, tabUpdated, tabRemoved, debuggerDetached, tabActivated, timers]) registered.length = 0;
+    for (const registered of [listeners, tabUpdated, tabRemoved, debuggerDetached, tabActivated]) registered.length = 0;
+    for (const timer of timers.filter(entry => !entry.page)) timers.splice(timers.indexOf(timer), 1);
     const started = createContext({
       // The host's Date, so a test's setSystemTime moves the extension's clock too.
       chrome, crypto, TextEncoder, URL, atob, btoa, console, Uint8Array, WebSocket, OffscreenCanvas, fetch, Date,
       navigator: { userAgent: 'Chrome/140.0.0.0' },
-      setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run }); return timerId; },
+      setTimeout: (run: () => void, ms = 0) => { timerId++; timers.push({ id: timerId, at: clock + ms, run, page: false }); return timerId; },
       clearTimeout: (id: number) => { const index = timers.findIndex(timer => timer.id === id); if (index >= 0) timers.splice(index, 1); },
       indexedDB: { open() { const request = { result: database, onsuccess: () => {}, onerror: () => {} }; queueMicrotask(() => request.onsuccess()); return request; } },
       sent, notify,
@@ -520,9 +561,10 @@ export async function installed(options: { local?: Record<string, unknown>; live
     for (const listener of tabUpdated) listener(tabId, change, tab);
     await settle();
   };
-  /** You close a tab: Chrome removes it, and the debugger leaves it. */
+  /** You close a tab: Chrome removes it and its page, and the debugger leaves it. */
   const closeTab = async (tabId: number) => {
     tabs.delete(tabId);
+    pages.delete(tabId);
     for (const listener of tabRemoved) listener(tabId);
     for (const listener of debuggerDetached) listener({ targetId: `target-${tabId}` });
     await settle();
@@ -543,11 +585,14 @@ export async function installed(options: { local?: Record<string, unknown>; live
     await rendered();
     return { window, document: window.document, copied, rendered, close: () => window.happyDOM.close() };
   };
-  /** The methods the extension sent to tabs for the agent, without those that draw the overlay (its function, or a
-   * call of it with its command as JSON text). */
-  const sentCommands = () => commands.filter(({ method, params }) => !OVERLAY_METHODS[method] && !String(params.functionDeclaration ?? '').includes(browserOverlayFunction)).map(({ method }) => method);
-  /** What the extension asked the overlay of each tab to do, in order, as the overlay receives it. */
-  const overlays = (targetId: string) => commands.filter(command => command.targetId === targetId && String(command.params.functionDeclaration ?? '').includes(browserOverlayFunction)).flatMap(({ params }): Record<string, unknown>[] => { const sent = overlayCommand(params); return sent ? [sent] : []; });
+  /** The methods the extension sent to tabs through the debugger. */
+  const sentCommands = () => commands.map(({ method }) => method);
+  /** What the extension asked the overlay of each tab (`target-<tab id>`) to do, in order, as the overlay received it. */
+  const overlays = (targetId: string) => pageScripts.filter(script => `target-${script.tabId}` === targetId && script.name === 'overlay').flatMap(script => script.command ? [script.command] : []);
+  /** The extension's page world of a tab (`page.ts`) says something to the worker, as its overlay or capture bar does,
+   * from the tab's main frame unless `frameId` names another; resolves once what follows has happened, with the
+   * worker's reply to come (the page does not wait for it: a capture's start answers once its first frame came). */
+  const fromPage = async (tabId: number, payload: string, frameId = 0) => { const reply = deliver(listeners, { gitspaceOverlay: payload }, pageSender(tabId, frameId)); await settle(); return { reply }; };
   /** Whether a request to the account is authorized as the account requires: an upload's begin, a share request and a
    * comment request carry this Chrome's signature over their label, method, path, body hash, time and nonce; a request
    * to an upload's link carries no signature at all. */
@@ -561,7 +606,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
     return proof.pairingId === pairingId && proof.generation === 1 && crypto.subtle.verify('Ed25519', identity.publicKey, Buffer.from(proof.signature, 'base64'), new TextEncoder().encode(message));
   };
   return {
-    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, opened, stored: state,
+    grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, pageScripts, fromPage, page: pageOf, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, opened, stored: state,
     requests, uploads, uploaded, files, shares, pairingCodes, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
     commentThreads, commentRequests, workspaces, workspaceRequests, pairingId,
     execute, authorize, begin, signGrant, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor, restart,

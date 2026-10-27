@@ -10,41 +10,50 @@
  * tab's shares, and the comment tool (`comments.ts`). It draws nothing for your own pointer: while a share shows it to
  * its viewers, it says where it is instead (`report`), and each viewer draws it.
  *
- * A fixed function the extension calls in its own isolated world (`Runtime.callFunctionOn`), never in the page's. The
- * overlay leaves the page and what the agent reads alone: a closed shadow root under an `aria-hidden` host marked
- * `data-gitspace-overlay` (which the screenshot mask hides), styled inline only (no stylesheet a page's CSP could
- * refuse), nothing in the tab order, and pointer-transparent except the toolbar while your own pointer is over it and
- * the comment tool while it is on, so an agent's clicks and hit tests reach the page. Its buttons call the binding
- * named in `show` (added to this world only) with `stop`, `capture`, `captureStop`, `takeover`, `resume` or `everythingEnd`, and the
- * comment tool calls it with `comment <what> <json>`; while the agent acts (`run`, `step`), each trusted pointer or key
- * press on the page (not on the toolbar, and not while you comment) calls it with `take`: the agent's own input is
- * trusted too, which the extension tells apart. With `report`, your pointer calls the binding it names with
- * `pointer {"x":…,"y":…}` (fractions of the viewport) at most ten times a second, and `pointer null` once it leaves the
- * tab. Mouse events at the agent's cursor are the agent's, and are not reported.
+ * A fixed function the extension runs in its own isolated world, the content-script world of `page.js` (`page.ts`;
+ * `chrome.scripting.executeScript`), never in the page's. The overlay leaves the page and what the agent reads alone:
+ * a closed shadow root under an `aria-hidden` host marked `data-gitspace-overlay` (which the screenshot mask hides),
+ * styled inline only (no stylesheet a page's CSP could refuse), nothing in the tab order, and pointer-transparent
+ * except the toolbar while your own pointer is over it and the comment tool while it is on, so an agent's clicks and
+ * hit tests reach the page. It tells the extension through `__gitspaceSend` (`page.ts`, a runtime message from this
+ * world, which no page script reaches; it answers a promise of the extension's reply): its buttons send `stop`,
+ * `capture`, `captureStop`, `takeover`, `resume` or `everythingEnd`, and the comment tool `comment <what> <json>`; while
+ * the agent acts (`run`, `step`), each trusted pointer or key press on the page (not on the toolbar, and not while you
+ * comment) sends `take`: the agent's own input is trusted too, which the extension tells apart. With `report`, your
+ * pointer sends `pointer {"x":…,"y":…}` (fractions of the viewport) at most ten times a second, and `pointer null` once
+ * it leaves the tab. Mouse events at the agent's cursor are the agent's, and are not reported.
  *
- * One argument: `{ show?: { mode: 'run' | 'step' | 'capture' | 'you' | 'idle', workspace, agent, doing, binding,
+ * One argument: `{ show?: { mode: 'run' | 'step' | 'capture' | 'you' | 'idle', workspace, agent, doing,
  * capture: 'none' | 'ready' | 'recording', recording: { startedAt, sound, tracks } | null, comments, everything } | null, comment?:
- * CommentView | null, cursor?: { x, y, type }, pointers?: [{ id, name, color, x, y }], report?: string | null, conceal?:
+ * CommentView | null, cursor?: { x, y, type }, pointers?: [{ id, name, color, x, y }], report?: boolean, conceal?:
  * boolean, remove?: true }`. `agent` and `doing` (what it is doing) may be null; in `you`, `agent` is the paused agent;
  * `comments` says the account takes comments (Comment shows); `everything` is when Everything ends (an ISO time) while the
  * workspace's agent has it, else null (End now shows beside its time left). `show` installs the overlay where the document lacks it
  * (after a navigation) and refreshes it; `show: null` hides the toolbar, frame and cursor, leaving the pointers.
- * `comment` is the comment tool while it is on (`CommentView`, `comments.ts`), null to take it away. `pointers` (x and
- * y are fractions of the viewport) is everyone pointing now: each glides to its new place, eased, and one left out
- * leaves; they install the overlay too, as `report` does. An overlay not refreshed for 75 s removes itself, so one
- * whose debugger channel Chrome dropped does not stay. The cursor travels to each point along a curved path, eased,
- * overshooting slightly and settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms); it presses on
- * `mousePressed` (with a ripple) and fades after 5 s idle.
+ * `comment` is the comment tool (`CommentView`, `comments.ts`): a view turns it on or redraws it, null takes it away; a
+ * command without `comment` leaves it as it is. `pointers` (x and y are fractions of the viewport) is everyone pointing
+ * now: each glides to its new place, eased, and one left out leaves; they install the overlay too, as `report` and
+ * `comment` do. An overlay not refreshed for 75 s asks the extension (`refresh`), which draws it again or removes it;
+ * one whose extension is gone (updated or turned off) removes itself. The cursor travels to each point along a curved
+ * path, eased, overshooting slightly and settling, in the time Fitts's law gives a hand (260 + 170·log2(1 + d/22) ms);
+ * it presses on `mousePressed` (with a ripple) and fades after 5 s idle.
+ *
+ * One overlay per document: its host is the only `data-gitspace-overlay` element on the page besides the capture
+ * bar's (`capture-tracks.ts`; both register in this world's `__gitspaceHosts`). It removes any other, such as a toolbar
+ * an earlier version of the extension drew in a world of its own, when it installs and whenever one appears, and puts
+ * its own host back should anything else take it away.
  */
 export const browserOverlayFunction = `function(command) {
   const key = '__gitspaceOverlay';
-  // Removing also clears a toolbar another world left on the page (an earlier debugger session's, which Chrome took
-  // away or whose removal did not finish): the page keeps it after its world's session ends.
+  // Removing also clears a toolbar another world left on the page (an earlier version's, from a world of its own): the
+  // page keeps it after that world's extension is gone.
   if (command.remove) { if (globalThis[key]) globalThis[key].dispose(); for (const stale of document.querySelectorAll('[data-gitspace-overlay]')) stale.remove(); return true; }
   let overlay = globalThis[key];
-  if (!overlay && !command.show && !command.pointers?.length && !command.report) return false;
+  if (!overlay && !command.show && !command.pointers?.length && !command.report && !command.comment) return false;
   if (!overlay) {
-    for (const stale of document.querySelectorAll('[data-gitspace-overlay]')) stale.remove();
+    const ours = globalThis.__gitspaceHosts ??= new WeakSet();
+    const foreign = node => node instanceof Element && node.hasAttribute('data-gitspace-overlay') && !ours.has(node);
+    for (const stale of document.querySelectorAll('[data-gitspace-overlay]')) if (foreign(stale)) stale.remove();
     const BLUE = '#1a73e8', RED = '#dc2626';
     const svgns = 'http://www.w3.org/2000/svg';
     const make = (tag, css, parent) => { const el = document.createElement(tag); el.style.cssText = css; parent.appendChild(el); return el; };
@@ -55,10 +64,23 @@ export const browserOverlayFunction = `function(command) {
     host.setAttribute('data-gitspace-overlay', '');
     host.setAttribute('aria-hidden', 'true');
     host.style.cssText = 'all:initial;position:fixed;inset:0;display:block;pointer-events:none;z-index:2147483646;contain:layout style';
+    ours.add(host);
     const root = host.attachShadow({ mode: 'closed' });
-    // A world whose toolbar left the page (a later debugger session's overlay took its place, as after an extension
-    // update) lets go of the page at its next event, so its listeners never take your keys and clicks from the live one.
-    const gone = () => { if (host.isConnected) return false; overlay?.dispose(); return true; };
+    // An overlay whose host left the page, or whose extension is gone (updated or turned off: this world's
+    // \`chrome.runtime.id\` is no more), lets go of the page at its next event, so its listeners never take your keys
+    // and clicks.
+    const gone = () => { if (host.isConnected && globalThis.chrome?.runtime?.id) return false; overlay?.dispose(); return true; };
+    // What the overlay tells the extension (\`__gitspaceSend\`, \`page.ts\`): a promise of its reply, rejected when it
+    // cannot be told.
+    const send = text => { try { return Promise.resolve(globalThis.__gitspaceSend(text)); } catch (error) { return Promise.reject(error); } };
+    // Another toolbar appearing goes at once; this one's host comes back should anything else take it away.
+    const guard = new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) if (foreign(node)) node.remove();
+        for (const node of record.removedNodes) if (node === host && globalThis[key] === overlay) document.documentElement.appendChild(host);
+      }
+    });
+    guard.observe(document.documentElement, { childList: true });
     const font = 'font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:0;-webkit-font-smoothing:antialiased;';
     const frame = make('div', 'position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .4s ease', root);
     // The toolbar: mark or REC, who and what, then its buttons.
@@ -123,7 +145,7 @@ export const browserOverlayFunction = `function(command) {
     arrowPath.setAttribute('fill', BLUE);
     const label = make('span', labelCss + ';background:' + BLUE, cursor);
     const people = make('div', 'position:fixed;inset:0;pointer-events:none', root);
-    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, seen: Date.now(), binding: '', mode: null, capture: 'none', clock: 0, report: null, at: null, reported: 'null', reportedAt: 0, reportTimer: 0, everything: 0 };
+    const state = { x: null, y: null, target: null, frame: 0, fade: 0, side: 1, press: false, expiry: 0, mode: null, capture: 'none', tracked: false, clock: 0, report: false, at: null, reported: 'null', reportedAt: 0, reportTimer: 0, everything: 0 };
     const place = (x, y) => { state.x = x; state.y = y; cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)'; };
     const pressAt = () => {
       arrow.animate([{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }], { duration: 240, easing: 'ease-out' });
@@ -188,15 +210,15 @@ export const browserOverlayFunction = `function(command) {
     const report = at => {
       state.at = at;
       if (!state.report || state.reportTimer) return;
-      const send = () => {
+      const tell = () => {
         state.reportTimer = 0;
-        const text = JSON.stringify(state.at), call = globalThis[state.report];
-        if (!state.report || text === state.reported || typeof call !== 'function') return;
+        const text = JSON.stringify(state.at);
+        if (!state.report || text === state.reported) return;
         state.reported = text; state.reportedAt = Date.now();
-        call('pointer ' + text);
+        send('pointer ' + text).catch(() => {});
       };
       const wait = state.reportedAt + 100 - Date.now();
-      if (wait <= 0) send(); else state.reportTimer = setTimeout(send, wait);
+      if (wait <= 0) tell(); else state.reportTimer = setTimeout(tell, wait);
     };
     // Your own pointer over the toolbar makes it clickable; the agent's pointer (each point it is about to use) never
     // does, and is not reported.
@@ -214,17 +236,17 @@ export const browserOverlayFunction = `function(command) {
     document.addEventListener('visibilitychange', leave);
     // Nothing on the toolbar reaches the page, and pressing it never moves focus out of the page.
     for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) bar.addEventListener(type, event => { event.stopPropagation(); if (type !== 'click') event.preventDefault(); });
-    const press = command => { const call = globalThis[state.binding]; if (typeof call === 'function') call(command); return typeof call === 'function'; };
-    stop.addEventListener('click', () => { if (press('stop')) what.textContent = 'Stopping…'; });
-    takeOver.addEventListener('click', () => { if (press('takeover')) what.textContent = 'Taking over…'; });
-    resume.addEventListener('click', () => { if (press('resume')) what.textContent = 'Resuming…'; });
+    const press = command => { send(command).catch(() => {}); };
+    stop.addEventListener('click', () => { press('stop'); what.textContent = 'Stopping…'; });
+    takeOver.addEventListener('click', () => { press('takeover'); what.textContent = 'Taking over…'; });
+    resume.addEventListener('click', () => { press('resume'); what.textContent = 'Resuming…'; });
     // Your pointer or key press on the page while the agent acts there takes the tab; one on the toolbar does not, and
     // a page's own events (not trusted) never do.
     const take = event => { if (gone()) return; if (event.isTrusted && (state.mode === 'run' || state.mode === 'step') && !comments.on() && !event.composedPath().includes(host)) press('take'); };
     addEventListener('pointerdown', take, { capture: true, passive: true });
     addEventListener('keydown', take, { capture: true, passive: true });
-    capture.addEventListener('click', () => { if (press(state.capture === 'recording' ? 'captureStop' : 'capture')) captureLabel.data = state.capture === 'recording' ? 'Saving…' : 'Starting…'; });
-    endEverything.addEventListener('click', () => { if (press('everythingEnd')) endEverything.textContent = 'Ending…'; });
+    capture.addEventListener('click', () => { press(state.capture === 'recording' ? 'captureStop' : 'capture'); captureLabel.data = state.capture === 'recording' ? 'Saving…' : 'Starting…'; });
+    endEverything.addEventListener('click', () => { press('everythingEnd'); endEverything.textContent = 'Ending…'; });
     // ── Comments (CommentTool; comments.ts) ──
     // The toolbar's Comment, and comment mode on the tab: what is under your pointer is outlined (dashed purple, with
     // its role and name), a click anchors a new comment to that element and a drag to an area, and the draft asks for
@@ -232,9 +254,11 @@ export const browserOverlayFunction = `function(command) {
     // selector, else by its box where the page was scrolled then), which opens it with its replies, Reply and Resolve
     // or Reopen. Esc closes what is open, then leaves comment mode. While no agent acts on the tab your pointer goes to
     // the comment layer (a crosshair; the page sees none of it); while one acts the layer stands aside, so the agent's
-    // input and hit tests reach the page, and your own presses there are taken before the page sees them. It all calls
-    // the binding as \`comment <what> <json>\`, and each element picked stays in this world under its number for the
-    // extension to read (\`picked\`).
+    // input and hit tests reach the page, and your own presses there are taken before the page sees them. It all sends
+    // \`comment <what> <json>\`; the element under each number it sends (\`hover\` and \`pick\`) carries that number in its
+    // \`data-gitspace-pick\` attribute (the DOM is the page's and every world's) for the extension to read, until a later
+    // one of its kind takes its place or the draft closes. What you close (Esc, Done, Cancel, another pin) closes here at
+    // once, then the extension hears of it; a view of a comment mode you closed (its \`session\`) never opens it again.
     const PURPLE = '#a142f4';
     const MESSAGE_PLUS = 'M12 13.5v-6m-3 3h6M7 18v2.335c0 .533 0 .8.11.937a.5.5 0 0 0 .39.188c.176 0 .384-.167.8-.5l2.385-1.908c.487-.39.731-.585 1.002-.724.241-.122.497-.212.762-.267.299-.061.61-.061 1.235-.061H16.2c1.68 0 2.52 0 3.162-.327a3 3 0 0 0 1.311-1.311C21 15.72 21 14.88 21 13.2V7.8c0-1.68 0-2.52-.327-3.162a3 3 0 0 0-1.311-1.311C18.72 3 17.88 3 16.2 3H7.8c-1.68 0-2.52 0-3.162.327a3 3 0 0 0-1.311 1.311C3 5.28 3 6.12 3 7.8V14c0 .93 0 1.395.102 1.777a3 3 0 0 0 2.122 2.12C5.605 18 6.07 18 7 18Z';
     const icon = (parent, size, css) => path(svg(parent, size, size, '0 0 24 24', 'display:block;flex:none;' + css), { d: MESSAGE_PLUS, fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
@@ -272,15 +296,32 @@ export const browserOverlayFunction = `function(command) {
       for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'auxclick']) layer.addEventListener(type, event => { event.stopPropagation(); event.preventDefault(); if (type.startsWith('pointer')) pointer(event); });
       layer.addEventListener('pointerleave', () => { hovered = null; place(); });
       // \`view\`: what the extension says (\`CommentView\`); \`open\`: the draft or thread whose popover shows; \`writing\`:
-      // the write sent last, until the extension says how it ended.
-      let view = null, open = null, hovered = null, drag = null, writing = null, failed = null, field = null, focused = 0, seq = 0, placing = 0;
+      // the write sent last, until the extension says how it ended; \`closed\`: the session of the comment mode you
+      // closed here.
+      let view = null, open = null, hovered = null, drag = null, writing = null, failed = null, field = null, focused = 0, seq = 0, placing = 0, closed = null, listening = false;
       let pinned = [], outlined = [];
-      const picked = new Map();
-      const call = (what, value) => { const binding = globalThis[state.binding]; if (typeof binding === 'function') binding('comment ' + what + (value === undefined ? '' : ' ' + JSON.stringify(value))); };
+      // Each call is answered by the extension's reply; one nobody waits on fails quietly.
+      const call = (what, value) => { const sent = send('comment ' + what + (value === undefined ? '' : ' ' + JSON.stringify(value))); sent.catch(() => {}); return sent; };
       const width = () => document.documentElement.clientWidth || innerWidth, height = () => document.documentElement.clientHeight || innerHeight;
       const fraction = value => Math.min(1, Math.max(0, value));
       const layerOn = () => view !== null && state.mode !== 'run' && state.mode !== 'step';
-      const keep = element => { seq += 1; picked.set(seq, element); if (picked.size > 50) picked.delete(picked.keys().next().value); return seq; };
+      // The element under the latest number of each kind (\`hover\`, \`pick\`), marked in the page for the extension.
+      const PICK = 'data-gitspace-pick';
+      const marks = { hover: null, pick: null };
+      const unmark = kind => {
+        const mark = marks[kind];
+        marks[kind] = null;
+        if (!mark || !mark.element) return;
+        const rest = (mark.element.getAttribute(PICK) || '').split(' ').filter(n => n && n !== String(mark.seq));
+        if (rest.length) mark.element.setAttribute(PICK, rest.join(' ')); else mark.element.removeAttribute(PICK);
+      };
+      const keep = (kind, element) => {
+        unmark(kind);
+        seq += 1;
+        marks[kind] = { element, seq };
+        if (element) element.setAttribute(PICK, ((element.getAttribute(PICK) || '') + ' ' + seq).trim());
+        return seq;
+      };
       // The page's element under a point, past this overlay and the agent's cursor.
       const hit = (x, y) => (document.elementsFromPoint(x, y) || []).find(element => element !== host && !element.closest('[data-gitspace-overlay], gitspace-cursor')) ?? null;
       const page = element => element && element !== document.documentElement && element !== document.body ? element : null;
@@ -304,7 +345,8 @@ export const browserOverlayFunction = `function(command) {
       const hoverAt = (x, y) => {
         const element = page(hit(x, y));
         if (element === (hovered && hovered.element)) return;
-        hovered = element ? { element, seq: keep(element) } : null;
+        if (!element) unmark('hover');
+        hovered = element ? { element, seq: keep('hover', element) } : null;
         place();
         if (hovered) call('hover', { seq: hovered.seq });
       };
@@ -327,11 +369,11 @@ export const browserOverlayFunction = `function(command) {
           const left = Math.min(x0, x), top = Math.min(y0, y), right = Math.max(x0, x), bottom = Math.max(y0, y);
           let element = hit((left + right) / 2, (top + bottom) / 2);
           for (; page(element); element = element.parentElement) { const box = rectOf(element); if (box.left <= left && box.top <= top && box.right >= right && box.bottom >= bottom) break; }
-          const n = keep(page(element));
+          const n = keep('pick', page(element));
           open = { kind: 'draft', seq: n, element: page(element), area: true, rect: { left: left + scrollX, top: top + scrollY, right: right + scrollX, bottom: bottom + scrollY } };
           call('pick', { seq: n, area: { x: fraction(left / width()), y: fraction(top / height()), width: fraction((right - left) / width()), height: fraction((bottom - top) / height()) } });
         } else {
-          const element = page(hit(x0, y0)), n = keep(element);
+          const element = page(hit(x0, y0)), n = keep('pick', element);
           const rect = element ? rectOf(element) : { left: x0, top: y0, right: x0, bottom: y0 };
           open = { kind: 'draft', seq: n, element, area: false, rect: { left: rect.left + scrollX, top: rect.top + scrollY, right: rect.right + scrollX, bottom: rect.bottom + scrollY } };
           call('pick', { seq: n, at: { x: fraction(x0 / width()), y: fraction(y0 / height()), width: 0, height: 0 } });
@@ -347,28 +389,41 @@ export const browserOverlayFunction = `function(command) {
         if (event.type.startsWith('pointer')) pointer(event);
       };
       const INTERCEPTED = ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'auxclick'];
-      for (const type of INTERCEPTED) addEventListener(type, intercept, { capture: true });
       const escape = event => {
         if (gone() || !view || event.key !== 'Escape' || !event.isTrusted) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        if (!open) { call('off'); return; }
+        if (!open) { off(); return; }
         if (open.kind === 'draft') call('cancel', { seq: open.seq });
         open = null; failed = null; render();
       };
-      addEventListener('keydown', escape, { capture: true });
       const schedule = () => { if (view && !placing) placing = requestAnimationFrame(() => { placing = 0; place(); }); };
-      addEventListener('scroll', schedule, { capture: true, passive: true });
-      addEventListener('resize', schedule, { passive: true });
-      done.addEventListener('click', () => call('off'));
+      // The window's listeners are there only while comment mode is on.
+      const listen = on => {
+        if (on === listening) return;
+        listening = on;
+        const method = on ? 'addEventListener' : 'removeEventListener';
+        for (const type of INTERCEPTED) globalThis[method](type, intercept, { capture: true });
+        globalThis[method]('keydown', escape, { capture: true });
+        globalThis[method]('scroll', schedule, { capture: true, passive: true });
+        globalThis[method]('resize', schedule, { passive: true });
+      };
+      // Comment mode off here at once (Esc, Done), then the extension hears of it.
+      const off = () => { closed = view.session; tool.apply(null); call('off'); };
+      done.addEventListener('click', () => { if (view) off(); });
       commentButton.addEventListener('click', () => call('on'));
+      // Sending… until the extension says how the write ended (\`done\`); one it did not take (its reply says why, or
+      // none came) says so at once.
       const write = (kind, value) => {
         if (!open || !view || view.busy !== null || writing) return;
         seq += 1; failed = null;
-        writing = { seq, kind, key: popover.dataset.key };
-        call(kind, { seq, ...value });
+        const sent = writing = { seq, kind, key: popover.dataset.key };
+        call(kind, { seq, ...value }).then(reply => reply && reply.error ? String(reply.error) : null, error => error && error.message ? error.message : 'GitSpace did not answer').then(error => {
+          if (!error || writing !== sent) return;
+          failed = { key: sent.key, message: error }; writing = null; render();
+        });
         render();
       };
-      const send = () => {
+      const submit = () => {
         const text = field ? field.value.trim() : '';
         if (!text || !open) return;
         if (open.kind === 'draft') { if (view.draft && view.draft.seq === open.seq) write('post', { text }); }
@@ -416,10 +471,11 @@ export const browserOverlayFunction = `function(command) {
       const render = () => {
         layer.style.display = layerOn() ? 'block' : 'none';
         pins.replaceChildren(); areas.replaceChildren(); pinned = []; outlined = [];
-        if (!view) { open = null; hovered = null; drag = null; field = null; writing = null; failed = null; popover.replaceChildren(); popover.style.display = 'none'; strip.style.display = 'none'; place(); return; }
+        if (!open || open.kind !== 'draft') unmark('pick');
+        if (!view) { unmark('hover'); open = null; hovered = null; drag = null; field = null; writing = null; failed = null; popover.replaceChildren(); popover.style.display = 'none'; strip.style.display = 'none'; place(); placeBar(); return; }
         const count = view.threads.length;
         strip.style.display = view.bar ? 'flex' : 'none';
-        if (view.bar) bar.style.display = 'none';
+        placeBar();
         stripTitle.replaceChildren('Commenting', plain('span', 'font-weight:400;color:#737373', stripTitle, ' · ' + view.workspace));
         stripWhat.textContent = view.error ? view.error : 'Comment tool · click an element or drag an area · ' + count + (count === 1 ? ' comment' : ' comments');
         const thread = open && open.kind === 'thread' ? view.threads.find(entry => entry.id === open.id) : null;
@@ -444,7 +500,7 @@ export const browserOverlayFunction = `function(command) {
           if (thread && thread.resolved) plain('div', 'font-size:11px;line-height:16px;color:#737373', popover, 'Resolved by ' + thread.resolved);
           field = make('textarea', 'all:unset;' + font + 'display:block;box-sizing:border-box;width:100%;min-height:44px;max-height:160px;overflow:auto;padding:6px 8px;border-radius:8px;border:1px solid #d4d4d4;font-size:12px;line-height:16px;color:#262626;background:#fff;white-space:pre-wrap;cursor:text', popover);
           field.placeholder = draft ? 'Write a comment…' : 'Reply…'; field.rows = 2; field.maxLength = 4000; field.tabIndex = -1;
-          field.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send(); } });
+          field.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } });
           if (failed && failed.key === key) plain('div', 'font-size:11px;line-height:16px;color:' + RED, popover, failed.message);
           const footer = make('div', 'display:flex;align-items:center;gap:8px', popover);
           const busy = writing !== null && writing.key === key;
@@ -452,16 +508,19 @@ export const browserOverlayFunction = `function(command) {
           else action(footer, busy && writing.kind === 'resolve' ? 'Saving…' : thread.resolved ? 'Reopen' : 'Resolve', 'font-size:11px;line-height:16px;color:#737373').addEventListener('click', () => write('resolve', { threadId: thread.id, reopen: thread.resolved !== null }));
           make('span', 'flex:1', footer);
           const primary = action(footer, busy && writing.kind !== 'resolve' ? 'Sending…' : draft ? 'Comment' : 'Reply', 'padding:4px 10px;border-radius:8px;font-size:12px;line-height:16px;font-weight:500;color:#fff;background:' + BLUE + (draft && !ready ? ';opacity:.5;cursor:default' : ''));
-          primary.addEventListener('click', send);
+          primary.addEventListener('click', submit);
           if (kept) { field.value = kept.value; if (kept.focused) { field.focus(); field.setSelectionRange(kept.start, kept.end); } }
         }
         place();
       };
-      return {
+      const tool = {
         on: () => view !== null,
-        picked: n => picked.get(n) ?? null,
+        /** Its own bar shows, in place of the toolbar. */
+        strip: () => view !== null && view.bar,
         apply(next) {
+          if (next && next.session === closed) return;
           view = next;
+          listen(view !== null);
           if (view && view.focus && view.focus.seq !== focused) {
             focused = view.focus.seq;
             const thread = view.threads.find(entry => entry.id === view.focus.thread);
@@ -478,25 +537,30 @@ export const browserOverlayFunction = `function(command) {
         },
         dispose() {
           cancelAnimationFrame(placing);
-          for (const type of INTERCEPTED) removeEventListener(type, intercept, { capture: true });
-          removeEventListener('keydown', escape, { capture: true });
-          removeEventListener('scroll', schedule, { capture: true });
-          removeEventListener('resize', schedule);
+          listen(false);
+          unmark('hover'); unmark('pick');
         },
       };
+      return tool;
     })();
     // ── end Comments ──
     // A recording's time, counted here between refreshes.
     const elapsed = startedAt => { const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000)); return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0'); };
-    const expiry = setInterval(() => { if (Date.now() - state.seen > 75000) overlay.dispose(); }, 15000);
+    // Not refreshed for 75 s, the overlay asks the extension, which draws it again or removes it; one that cannot ask
+    // (its extension is gone) leaves.
+    const expire = () => { state.expiry = setTimeout(expire, 75000); send('refresh').catch(() => overlay.dispose()); };
+    // The toolbar shows while something uses the tab, unless a capture's own bar (\`capture-tracks.ts\`) or the comment
+    // tool's strip takes its place.
+    const placeBar = () => { bar.style.display = state.mode !== null && !(state.mode === 'capture' && state.tracked) && !comments.strip() ? 'flex' : 'none'; };
     const show = next => {
-      state.binding = next.binding; state.mode = next.mode; state.capture = next.capture;
+      state.mode = next.mode; state.capture = next.capture;
       const capturing = next.mode === 'capture', yours = next.mode === 'you', idle = next.mode === 'idle', recording = next.capture === 'recording' && next.recording ? next.recording : null;
       // A capture recording its steps (\`tracks\`) has its own bar (\`capture-tracks.ts\`): this one gives way to it, or sits
       // above it while the agent acts or you hold the tab.
       const tracked = recording?.tracks === true;
+      state.tracked = tracked;
       const tone = recording ? RED : BLUE;
-      bar.style.display = capturing && tracked ? 'none' : 'flex';
+      placeBar();
       bar.style.bottom = tracked ? '76px' : '16px';
       bar.style.boxShadow = '0 10px 30px rgba(0,0,0,.18)' + (yours && !recording ? '' : ', 0 0 0 1px ' + tone + '55');
       frame.style.boxShadow = yours && !recording ? 'inset 0 0 0 2px #a3a3a3' : 'inset 0 0 0 3px ' + tone + ', inset 0 0 ' + (recording ? '22px ' + tone + '40' : '26px ' + tone + '55');
@@ -566,17 +630,18 @@ export const browserOverlayFunction = `function(command) {
     };
     overlay = {
       apply(next) {
-        if (next.show !== undefined || next.pointers || next.report) { state.seen = Date.now(); if (!host.isConnected) document.documentElement.appendChild(host); }
+        if (next.show !== undefined || next.pointers || next.report || next.comment) { clearTimeout(state.expiry); state.expiry = setTimeout(expire, 75000); if (!host.isConnected) document.documentElement.appendChild(host); }
         if (next.show) show(next.show);
         if (next.comment !== undefined) comments.apply(next.comment);
-        if (next.show === null) { state.binding = ''; state.mode = null; clearInterval(state.clock); bar.style.display = 'none'; frame.style.opacity = '0'; cursor.style.opacity = '0'; }
+        if (next.show === null) { state.mode = null; clearInterval(state.clock); placeBar(); frame.style.opacity = '0'; cursor.style.opacity = '0'; }
         if (next.pointers) point(next.pointers);
         if (next.report !== undefined && next.report !== state.report) { clearTimeout(state.reportTimer); state.reportTimer = 0; state.report = next.report; state.reported = 'null'; }
         if (next.conceal !== undefined) host.style.visibility = next.conceal ? 'hidden' : 'visible';
         if (next.cursor) move(next.cursor.x, next.cursor.y, next.cursor.type);
       },
       dispose() {
-        cancelAnimationFrame(state.frame); clearTimeout(state.fade); clearInterval(expiry); clearInterval(state.clock); clearTimeout(state.reportTimer); clearTimeout(state.everything);
+        cancelAnimationFrame(state.frame); clearTimeout(state.fade); clearTimeout(state.expiry); clearInterval(state.clock); clearTimeout(state.reportTimer); clearTimeout(state.everything);
+        guard.disconnect();
         for (const pointer of pointers.values()) cancelAnimationFrame(pointer.frame);
         document.removeEventListener('mousemove', hover, { capture: true });
         document.removeEventListener('mouseout', leave, { capture: true });
@@ -586,7 +651,6 @@ export const browserOverlayFunction = `function(command) {
         comments.dispose();
         host.remove(); delete globalThis[key];
       },
-      picked: seq => comments.picked(seq),
     };
     globalThis[key] = overlay;
     document.documentElement.appendChild(host);
@@ -595,9 +659,8 @@ export const browserOverlayFunction = `function(command) {
   return true;
 }`;
 
-/** In the overlay's world: the element the comment tool picked under a number (`comment hover` and `comment pick`),
- * for the extension to read; null when it has none. */
-export const browserOverlayPickedFunction = `function(seq) {
-  const overlay = globalThis.__gitspaceOverlay;
-  return overlay ? overlay.picked(seq) : null;
+/** In any world of the page (the DOM is all of theirs): the element the comment tool marked with number `seq`
+ * (`data-gitspace-pick`, for `comment hover` and `comment pick`), for the extension to read; null when none has it. */
+export const browserPickedElementFunction = `function(seq) {
+  return document.querySelector('[data-gitspace-pick~="' + Number(seq) + '"]');
 }`;

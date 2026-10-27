@@ -13,7 +13,7 @@ it('installs account-targeted extension without opening a localhost relay or cre
   expect(status.endpoint).toBe('https://account.gitspace.test');
   expect(status.owned).toBe(false); expect(status.pairingCode).toBeNull();
   const manifest = JSON.parse(await readFile(join(installer.extensionPath, 'manifest.json'), 'utf8'));
-  expect(manifest.host_permissions).toEqual(['https://account.gitspace.test/*']);
+  expect(manifest.host_permissions).toEqual(['<all_urls>', 'https://account.gitspace.test/*']);
   await expect(installer.unpair()).rejects.toThrow('account Browser settings');
 });
 it('retains scoped CDP and origin admission at the extension boundary', () => {

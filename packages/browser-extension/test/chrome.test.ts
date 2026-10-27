@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, setSystemTime } from 'bun:test';
 import { browserBase64, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
-import { command, installed, overlayCommand, settle } from './installed.js';
+import { command, installed, settle } from './installed.js';
 
 afterEach(() => { setSystemTime(); });
 
@@ -135,18 +135,20 @@ describe('the toolbar icon', () => {
 });
 
 describe('the in-page overlay on a tab the agent uses', () => {
-  it('shows the group running a script, draws the cursor before each mouse event, and leaves before the debugger', async () => {
+  it('shows the group running a script, draws the cursor before each mouse event, and leaves when the script ends', async () => {
     const chrome = await installed();
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     // The overlay draws after the tab is open, without holding up the script.
     await settle();
-    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Running a script', binding: '__gitspaceStop', capture: 'none', recording: null, comments: false, everything: null } }]);
+    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Running a script', capture: 'none', recording: null, comments: false, everything: null }, pointers: [], report: false }]);
+    let cursor: unknown;
+    chrome.answer(({ method }) => { if (method === 'Input.dispatchMouseEvent') cursor = chrome.overlays('target-1').at(-1)?.cursor; return undefined; });
     await chrome.execute(command(attemptId, 'target-1', 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 60, button: 'left', clickCount: 1 }));
-    const methods = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? JSON.stringify(overlayCommand(params)?.cursor ?? null) : method);
-    expect(methods.slice(-2)).toEqual([JSON.stringify({ x: 40, y: 60, type: 'mousePressed' }), 'Input.dispatchMouseEvent']);
+    expect(cursor).toEqual({ x: 40, y: 60, type: 'mousePressed' });
     await chrome.execute({ operation: 'release', attemptId });
-    expect(chrome.overlays('target-1').at(-1)).toEqual({ remove: true });
+    await settle();
+    expect(chrome.page(1).window.document.querySelector('[data-gitspace-overlay]')).toBeNull();
     expect(chrome.detached).toEqual(['target-1']);
   });
 
@@ -154,24 +156,35 @@ describe('the in-page overlay on a tab the agent uses', () => {
     const chrome = await installed();
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    await settle();
+    const host = () => chrome.page(1).window.document.querySelector('[data-gitspace-overlay]');
+    let shot: string | undefined;
+    chrome.answer(({ method }) => { if (method === 'Page.captureScreenshot') shot = host()?.getAttribute('style') ?? ''; return undefined; });
     await chrome.execute(command(attemptId, 'target-1', 'Page.captureScreenshot', { format: 'png' }));
-    const sequence = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? `conceal:${overlayCommand(params)?.conceal ?? ''}` : method);
-    expect(sequence.slice(-3)).toEqual(['conceal:true', 'Page.captureScreenshot', 'conceal:false']);
+    await settle();
+    expect(shot).toContain('visibility: hidden');
+    expect(host()?.getAttribute('style')).toContain('visibility: visible');
   });
 
-  it('Stop there ends that group’s scripts; a call from another world does nothing and the session never hears it', async () => {
+  it('Stop on its toolbar ends that group’s scripts; only the extension’s own world of the tab’s main frame is heard, and the script never sees that world', async () => {
     const chrome = await installed();
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await settle();
-    const binding = chrome.commands.find(({ method }) => method === 'Runtime.addBinding')?.params;
-    expect(binding).toEqual({ name: '__gitspaceStop', executionContextId: 50 });
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: 'stop', executionContextId: 7 });
+    // Chrome tells the tab's session of the extension's world in the page as of any other.
+    chrome.sent.length = 0;
+    await chrome.pageEvent('target-1', 'Runtime.executionContextCreated', { context: { id: 9, origin: 'chrome-extension://extension', name: 'GitSpace Browser Relay', auxData: { type: 'isolated' } } });
+    await chrome.pageEvent('target-1', 'Runtime.executionContextCreated', { context: { id: 10, origin: 'https://app.example', name: '', auxData: { type: 'default' } } });
+    expect(chrome.sent.flatMap(message => 'params' in message ? [JSON.stringify(message.params)] : [])).toEqual([JSON.stringify({ context: { id: 10, origin: 'https://app.example', name: '', auxData: { type: 'default' } } })]);
+    // Another frame of the page is not the toolbar's.
+    await chrome.fromPage(1, 'stop', 3);
     await chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '1' }));
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: 'stop', executionContextId: 50 });
+    const stop = [...chrome.page(1).roots[0]?.querySelectorAll('button') ?? []].find(button => button.textContent === 'Stop');
+    if (!stop) throw new Error('No Stop');
+    stop.click();
+    await settle();
     await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '2' }))).rejects.toThrow('You stopped this script');
     expect(chrome.detached).toEqual(['target-1']);
-    expect(chrome.sent.some(message => 'method' in message && message.method === 'Runtime.bindingCalled')).toBe(false);
   });
 });
 

@@ -1,4 +1,5 @@
 import { BACKGROUND_SOURCE, OFFSCREEN_SOURCE, POPUP_FONT_ORIGIN, POPUP_SOURCE, POPUP_STYLES } from './bundle.generated.js';
+import { PAGE_SCRIPT } from './page.js';
 
 export { relayCommandAllowed, SCRIPT_TAKEN_REFUSAL, TAB_HELD_REFUSAL } from './commands.js';
 export { verifyRelayAuthorization } from './authorization.js';
@@ -10,7 +11,8 @@ export { browserCaptureRecorderFunction, CaptureTrackRecorder, captureTrackEvent
 const POPUP_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace</title><link rel="stylesheet" href="popup.css"></head><body><div id="root"></div><script src="popup.js"></script></body></html>';
 
 /** The unpacked extension for one account: the service worker reaches the account it was downloaded from; the
- * offscreen document records the tabs you capture; the popup's font comes from the account. */
+ * offscreen document records the tabs you capture; the page script draws GitSpace's UI in the tabs it is on; the
+ * popup's font comes from the account. */
 export function extensionFiles(accountUrl: string): Record<string, string> {
   const origin = new URL(accountUrl).origin;
   return {
@@ -19,7 +21,8 @@ export function extensionFiles(accountUrl: string): Record<string, string> {
     'popup.css': POPUP_STYLES.replaceAll(POPUP_FONT_ORIGIN, origin),
     'popup.html': POPUP_HTML,
     'offscreen.js': OFFSCREEN_SOURCE,
+    'page.js': PAGE_SCRIPT,
     'offscreen.html': '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace recorder</title></head><body><script src="offscreen.js"></script></body></html>',
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.12.5', minimum_chrome_version: '124', permissions: ['debugger', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen', 'favicon'], host_permissions: [`${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.13.0', minimum_chrome_version: '124', permissions: ['debugger', 'scripting', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen', 'favicon'], host_permissions: ['<all_urls>', `${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
   };
 }

@@ -8,7 +8,7 @@ import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 import { clickedName, NAMED_KEYS, scriptActivity, stepActivity } from './activity.ts';
 import { drawToolbarIcon, TOOLBAR_TONE } from './icon.ts';
-import { browserOverlayFunction, browserOverlayPickedFunction } from './overlay.ts';
+import { browserPickedElementFunction } from './overlay.ts';
 import { ChromeComments, commentRequest } from './comments.ts';
 import { base64Bytes, downloadBlobReadFunction, inputFilesChunkFunction, inputFilesPrepareFunction, inputFilesSetFunction } from './page-files.ts';
 import { SHARE_EXPIRIES_MINUTES, shareRequest, shareTargetFunction } from './share.ts';
@@ -21,6 +21,8 @@ import { workspaceRequest } from './workspaces.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 const ACCOUNT_ORIGIN = new URL(GITSPACE_ACCOUNT_URL).origin;
+/** The extension's own origin (`chrome-extension://<id>`), as Chrome names the contexts of its worlds in a page. */
+const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
 const allowed = relayCommandAllowed;
 const prepareScreenshot = browserScreenshotPrepareFunction;
 const restoreScreenshot = browserScreenshotRestoreFunction;
@@ -43,7 +45,8 @@ const activity = new Map();
 /** Scripts (`browser.run`) by attempt id, apart from each group's single-step authorization: a single step during a
  * script does not end it. `targets` are the tabs the script opened or attached to; `sites` the sites it may use
  * (`named` when it named them); `commands` and `refused` count what it sent and what the extension refused; `doing`
- * is what it is doing now (`activity.ts`). */
+ * is what it is doing now (`activity.ts`); `contexts` the execution contexts of each of its tabs it was given
+ * (`RunContexts`, by target id). */
 const runs = new Map();
 /** How recent scripts ended, so a stopped script's later commands say why they are refused. */
 const ended = new Map();
@@ -100,7 +103,7 @@ async function authorize(authorization) {
       try { sites = runSites(grant, command.args.sites); } catch (error) { if (!everything.on(grant, Date.now())) throw error; sites = []; }
       const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(command.args.script));
       const scriptSha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-      runs.set(body.scope.attemptId, { body, targets: new Set(), sites, named: command.args.sites !== undefined, scriptSha256, startedAt: new Date().toISOString(), commands: 0, refused: 0, doing: 'Running a script' });
+      runs.set(body.scope.attemptId, { body, targets: new Set(), sites, named: command.args.sites !== undefined, scriptSha256, startedAt: new Date().toISOString(), commands: 0, refused: 0, doing: 'Running a script', contexts: new Map() });
       activity.set(grant.groupId, { agent: body.scope.conversationKind, doing: 'Running a script' });
       await markRunning(grant.groupId);
       scheduleReport(grant.groupId);
@@ -350,7 +353,7 @@ async function collapseIdle() {
 }
 /**
  * Each tab's one debugger session (Chrome attaches an extension once per tab), by target id, with the tab's one
- * screencast and in-page overlay. The agent's channel of a group tab uses it, and so does each share watched on the
+ * screencast. The agent's channel of a group tab uses it, and so does each share watched on the
  * tab. A shared tab in no workspace group has a session but never a channel, so no agent command, script or event
  * reaches it: every agent path goes through `channels` and `check`.
  */
@@ -360,7 +363,7 @@ function debuggeeOf(target) {
   let debuggee = debuggees.get(target.id);
   if (!debuggee) {
     const source = { targetId: target.id };
-    const created = { targetId: target.id, tabId: target.tabId, source, screencast: new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)), overlay: undefined, swept: false, overlayQueue: undefined, pointed: false, reporting: false, world: null, viewport: '' };
+    const created = { targetId: target.id, tabId: target.tabId, source, screencast: new TabScreencast((method, params) => chrome.debugger.sendCommand(source, method, params)), world: null, viewport: '' };
     created.attached = (async () => { await releases.get(target.id); await chrome.debugger.attach(source, '1.3'); return created; })();
     void created.attached.catch(() => { if (debuggees.get(target.id) === created) debuggees.delete(target.id); });
     debuggees.set(target.id, created);
@@ -368,29 +371,35 @@ function debuggeeOf(target) {
   }
   return debuggee.attached;
 }
-/** Lets the debugger leave a tab: its overlay leaves the page first, since the page keeps it after the debugger. */
+/** Lets the debugger leave a tab. */
 async function detachTab(targetId, source) {
-  const debuggee = debuggees.get(targetId);
   debuggees.delete(targetId);
-  const release = (async () => { if (debuggee?.overlay) await overlayStep(debuggee, () => overlayCall(debuggee, { remove: true })); await chrome.debugger.detach(source); })().catch(() => {});
+  const release = chrome.debugger.detach(source).catch(() => {});
   releases.set(targetId, release);
   try { await release; } finally { if (releases.get(targetId) === release) releases.delete(targetId); }
 }
-/** Lets a tab's debugger channel go, and the debugger with it unless a share still watches the tab, which keeps it
- * without the script's painting, you hold it, whose toolbar keeps Resume agent, or it shows its workspace group's
- * toolbar (`toolbarTabs`). A capture recording the tab's screencast ends with what it recorded. */
+/** Whether anything still needs a tab's debugger session: the agent's channel, a share watched there, you holding it
+ * (Resume agent hands it back to the agent), a capture recording it (its navigations and requests), or the comment
+ * tool, which reads what you pick through it. Nothing the page shows needs it. */
+function debuggerUsed(targetId, tabId) {
+  return channels.has(targetId) || watchesOf(targetId).length > 0 || heldBy(targetId) !== undefined || captureOn(tabId) !== undefined || comments.on(targetId);
+}
+/** Lets the debugger leave a tab nothing uses any more (`debuggerUsed`). */
+async function releaseDebugger(targetId) {
+  const debuggee = debuggees.get(targetId);
+  if (debuggee && !debuggerUsed(targetId, debuggee.tabId)) await detachTab(targetId, debuggee.source);
+}
+/** Lets a tab's debugger channel go, and the debugger with it unless something else uses the tab (`debuggerUsed`); a
+ * share still watching it keeps it without the script's painting. A capture recording the tab's screencast ends with
+ * what it recorded. */
 async function revoke(id) {
   const channel = channels.get(id); channels.delete(id);
   if (!channel) return releases.get(id);
   channel.cancelNavigation?.();
   for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: GitSpace no longer uses this tab', true);
-  const debuggee = debuggees.get(id);
-  if (debuggee && (watchesOn(debuggee).length || heldBy(id) || toolbarTabs.has(id))) {
-    if (channel.painting) void channel.screencast.remove(channel.painting).catch(() => {});
-    void overlay(id);
-    return;
-  }
-  await detachTab(id, channel.source);
+  void overlay(id);
+  if (!debuggerUsed(id, channel.tabId)) { await detachTab(id, channel.source); return; }
+  if (channel.painting) void channel.screencast.remove(channel.painting).catch(() => {});
 }
 async function fence(id) { send({ targetId: id, fenced: true }); await revoke(id); }
 async function check(id, expected = channels.get(id)) {
@@ -496,14 +505,10 @@ function markRunning(groupId) {
     } catch {}
   });
 }
-/** The isolated world of the in-page overlay (`overlay.ts`), and the binding its buttons call there: `stop` (the
- * agent), `capture` and `captureStop`. */
-const OVERLAY_WORLD = 'gitspace-overlay';
-const OVERLAY_BINDING = '__gitspaceStop';
-/** The longest one overlay step may take: a page held by a dialog never answers, and the agent never waits on it. */
+/** The longest one page step may take: a page held by a dialog never answers, and the agent never waits on it. */
 const OVERLAY_STEP_MS = 1000;
-/** An overlay not refreshed for 75 s removes itself (`overlay.ts`); a script whose commands change nothing it shows (a
- * key every few seconds) refreshes it at least this often, so its toolbar, and your click that takes the tab, stay. */
+/** An overlay not refreshed for 75 s asks to be (`overlay.ts`); a script whose commands change nothing it shows (a key
+ * every few seconds) refreshes it at least this often, so its toolbar, and your click that takes the tab, stay. */
 const OVERLAY_REFRESH_MS = 30_000;
 /** What a tab's overlay shows for the agent's channel: a script running on it, a single step using it now, a capture
  * recording it, or nothing. A tab you hold shows `you` instead (`overlay`). */
@@ -513,71 +518,79 @@ function overlayMode(channel) {
   if (step?.targetId === channel.targetId && stepActs(step)) return 'step';
   return captureOn(channel.tabId) ? 'capture' : null;
 }
-/** Overlay steps of one tab run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing else. */
-function overlayStep(debuggee, operation) {
-  const step = (debuggee.overlayQueue ?? Promise.resolve()).then(() => {
+/**
+ * The tabs whose page this worker drew on, by target id: `{ tabId, shownAt }`. Only these are refreshed, and only from
+ * these is the overlay removed; a page an earlier worker drew on keeps what it shows until it asks (`refresh`), or
+ * this worker draws there.
+ */
+const pages = new Map();
+/** Page steps of one tab, by target id: they run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing
+ * else. */
+const pageSteps = new Map();
+function pageStep(targetId, operation) {
+  const step = (pageSteps.get(targetId) ?? Promise.resolve()).then(() => {
     const timeout = Promise.withResolvers();
     const timer = setTimeout(timeout.resolve, OVERLAY_STEP_MS);
     return Promise.race([operation(), timeout.promise]).finally(() => clearTimeout(timer));
   }).catch(() => {});
-  debuggee.overlayQueue = step;
+  pageSteps.set(targetId, step);
+  void step.then(() => { if (pageSteps.get(targetId) === step) pageSteps.delete(targetId); });
   return step;
 }
-/** Calls the overlay function (or another of the tracks', `declaration`) in the tab's overlay world, which a navigation
- * replaces; the world's Stop binding is added to that world alone, so no page script can call it. `gesture` runs the
- * call as your click would. */
-async function overlayCall(debuggee, command, declaration = browserOverlayFunction, gesture = false) {
-  const call = async () => {
-    if (!debuggee.overlay.contextId) {
-      const tree = await chrome.debugger.sendCommand(debuggee.source, 'Page.getFrameTree');
-      const world = await chrome.debugger.sendCommand(debuggee.source, 'Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: OVERLAY_WORLD });
-      await chrome.debugger.sendCommand(debuggee.source, 'Runtime.addBinding', { name: OVERLAY_BINDING, executionContextId: world.executionContextId });
-      debuggee.overlay.contextId = world.executionContextId;
-    }
-    // chrome.debugger drops every property whose value is null from a call's arguments, at any depth, and the overlay
-    // takes things away with null (`comment: null`, `show: null`, a view's `draft: null`): the command goes as JSON text.
-    return chrome.debugger.sendCommand(debuggee.source, 'Runtime.callFunctionOn', { functionDeclaration: `function(json) { return (${declaration}).call(this, JSON.parse(json)); }`, arguments: [{ value: JSON.stringify(command) }], executionContextId: debuggee.overlay.contextId, returnByValue: true, awaitPromise: true, ...(gesture ? { userGesture: true } : {}) });
-  };
-  // A context that a navigation destroyed: the next call makes the new document's world.
-  try { return await call(); } catch { debuggee.overlay.contextId = null; return call(); }
+/** Runs in a tab's page, in the extension's world (`chrome.scripting.executeScript`), so it uses nothing of this
+ * worker: one function of the page script (`page.ts`) by name, with its command as JSON text; null where the document
+ * has no page script of this version. */
+async function inPage(version, name, json) {
+  const page = globalThis.__gitspacePage;
+  return page && page.version === version ? { value: await page.call(name, json) } : null;
 }
-/** Brings the overlay of a tab with a debugger session up to date (`extra`: the agent's pointer, or hiding it for a
- * screenshot): the toolbar while the agent uses the tab (who acts and what it is doing), while you hold it (`you`,
- * whatever the agent does) or a capture records it, else `idle` on a tab of a workspace group while the account takes
- * comments (`toolbarTabs`), the comment tool while it is on (`comments.ts`), the pointers of the people watching its
- * shares, and your own pointer reported while a share watched there shows it to its viewers (`report`); removed when
- * none of these. Its Capture button shows only when the account saves captures, and Comment only when it takes
- * comments. */
+/** Runs the overlay (`overlay`), a capture's recorder (`recorder`) or its bar (`bar`) in a tab's main frame, in the
+ * extension's own isolated world, putting the page script there first where the document lacks it (a new document, or
+ * one an earlier version drew on), and answers its value. Chrome drops every property whose value is null from a
+ * script's arguments, at any depth, and the overlay takes things away with null (`comment: null`, `show: null`, a
+ * view's `draft: null`): the command goes as JSON text. */
+async function pageCall(tabId, name, command) {
+  const target = { tabId, frameIds: [0] };
+  const args = [chrome.runtime.getManifest().version, name, JSON.stringify(command)];
+  let answer = (await chrome.scripting.executeScript({ target, world: 'ISOLATED', func: inPage, args }))[0]?.result;
+  if (!answer) {
+    await chrome.scripting.executeScript({ target, world: 'ISOLATED', files: ['page.js'] });
+    answer = (await chrome.scripting.executeScript({ target, world: 'ISOLATED', func: inPage, args }))[0]?.result;
+  }
+  return answer?.value;
+}
+/** Brings the overlay of a tab up to date (`extra`: the agent's pointer, hiding it for a screenshot, or taking the
+ * comment tool away): the toolbar while the agent uses the tab (who acts and what it is doing), while you hold it
+ * (`you`, whatever the agent does) or a capture records it, else `idle` on a tab of a workspace group while the
+ * account takes comments (`toolbarTabs`), the comment tool while it is on (`comments.ts`), the pointers of the people
+ * watching its shares, and your own pointer reported while a share watched there shows it to its viewers (`report`);
+ * removed when none of these, or while GitSpace is off. Its Capture button shows only when the account saves captures,
+ * and Comment only when it takes comments. None of it needs the tab's debugger. */
 function overlay(targetId, extra = {}) {
-  const debuggee = debuggees.get(targetId);
-  if (!debuggee) return Promise.resolve();
-  return overlayStep(debuggee, async () => {
-    if (debuggees.get(targetId) !== debuggee) return;
+  return pageStep(targetId, async () => {
+    const tabId = pages.get(targetId)?.tabId ?? (await targetInfo(targetId)).tabId;
     const channel = channels.get(targetId);
     const held = heldBy(targetId);
-    const mode = held ? 'you' : (channel ? overlayMode(channel) : captureOn(debuggee.tabId) ? 'capture' : null) ?? (accountComments && (channel || toolbarTabs.has(targetId)) ? 'idle' : null);
-    const watches = watchesOn(debuggee);
+    const mode = held ? 'you' : (channel ? overlayMode(channel) : captureOn(tabId) ? 'capture' : null) ?? (accountComments && (channel || toolbarTabs.has(targetId)) ? 'idle' : null);
+    const watches = watchesOf(targetId);
     const pointers = watches.flatMap(watch => watch.pointers);
-    const reporting = watches.some(watch => watch.reportPointer);
-    // With nothing to show, the toolbar leaves; a new session removes, once, one an earlier session left (`overlay.ts`).
-    if (!mode && !pointers.length && !reporting && !captureTracks.shows(targetId) && !comments.on(targetId)) { if (debuggee.overlay || !debuggee.swept) { debuggee.overlay ??= { contextId: null }; debuggee.swept = true; try { await overlayCall(debuggee, { remove: true }); } finally { delete debuggee.overlay; debuggee.pointed = false; debuggee.reporting = false; } } return; }
-    debuggee.overlay ??= { contextId: null };
-    const recording = mode ? captureOn(debuggee.tabId) : undefined;
+    const report = watches.some(watch => watch.reportPointer);
+    const commenting = comments.view(targetId);
+    if (!enabled || (!mode && !pointers.length && !report && !captureTracks.shows(targetId) && !commenting)) {
+      if (pages.delete(targetId)) await pageCall(tabId, 'overlay', { remove: true });
+      return;
+    }
+    const recording = mode ? captureOn(tabId) : undefined;
     // While you hold the tab, the agent that acted on its group is the one paused (the main agent when none did).
     const acting = mode === 'run' || mode === 'step' ? activity.get(channel.grant.groupId) : held ? activity.get(held.groupId) ?? { agent: 'main', doing: null } : undefined;
-    const show = mode ? { mode, workspace: channel?.grant.groupName ?? toolbarTabs.get(targetId)?.workspace ?? '', agent: acting?.agent ?? null, doing: held ? null : acting?.doing ?? null, binding: OVERLAY_BINDING,
+    const show = mode ? { mode, workspace: channel?.grant.groupName ?? toolbarTabs.get(targetId)?.workspace ?? '', agent: acting?.agent ?? null, doing: held ? null : acting?.doing ?? null,
       capture: recording ? 'recording' : accountProtocol >= MEDIA_PROTOCOL ? 'ready' : 'none', recording: recording ? { startedAt: recording.startedAt, sound: recording.track === 'video', tracks: recording.tracked === true } : null, comments: accountComments,
       everything: channel ? everything.until(channel.grant.groupId, Date.now()) : null } : null;
-    // The comment tool goes along while it is on, and once more, null, to take it away.
-    const commenting = comments.view(targetId);
-    // Pointers go along while any are drawn, and once more, empty, to take the last ones away; reporting likewise.
-    const command = { show, ...(commenting || debuggee.commenting ? { comment: commenting } : {}), ...(pointers.length || debuggee.pointed ? { pointers } : {}), ...(reporting || debuggee.reporting ? { report: reporting ? OVERLAY_BINDING : null } : {}), ...extra };
-    debuggee.commenting = commenting !== null;
-    debuggee.pointed = pointers.length > 0;
-    debuggee.reporting = reporting;
-    await overlayCall(debuggee, command);
-    await captureTracks.draw(targetId, OVERLAY_BINDING);
-    debuggee.shownAt = Date.now();
+    // The comment tool goes along while it is on; it goes away only when it is turned off (`comment: null` in
+    // `extra`), so a page in comment mode that this worker does not know of (it started again since) keeps it.
+    pages.set(targetId, { tabId, shownAt: Date.now() });
+    await pageCall(tabId, 'overlay', { show, ...(commenting ? { comment: commenting } : {}), pointers, report, ...extra });
+    await captureTracks.draw(targetId);
   });
 }
 /** A tab as one script sees it: the script's sites, the site you dragged the tab in on when the script named none, and
@@ -587,8 +600,32 @@ function runTab(run, tab) {
   if (everything.on(grant, Date.now())) return { grant: { origins: EVERYTHING_ORIGINS }, stepsOnly: [], read: [], urls: tab.urls, everything: true };
   return { grant: { origins: tab.dragged && !run.named ? [...run.sites, tab.dragged] : run.sites }, stepsOnly: grant.stepsOnly, read: grant.read ?? [], urls: tab.urls };
 }
+/** The execution contexts of a tab a script was given (`RunContexts`), made empty on first use. */
+function runContexts(run, targetId) {
+  let contexts = run.contexts.get(targetId);
+  if (!contexts) { contexts = { ids: new Set(), unique: new Set() }; run.contexts.set(targetId, contexts); }
+  return contexts;
+}
+/** An execution context event of a tab, as it goes to the scripts driving it: each is given the context created, and
+ * loses one destroyed, or all of them when the page's are cleared. */
+function contextsTold(targetId, { method, params }) {
+  if (!method.startsWith('Runtime.executionContext')) return;
+  for (const run of runs.values()) {
+    if (!run.targets.has(targetId) || !live(run)) continue;
+    const contexts = runContexts(run, targetId);
+    if (method === 'Runtime.executionContextsCleared') { contexts.ids.clear(); contexts.unique.clear(); }
+    else if (method === 'Runtime.executionContextCreated') {
+      if (typeof params.context?.id === 'number') contexts.ids.add(params.context.id);
+      if (typeof params.context?.uniqueId === 'string') contexts.unique.add(params.context.uniqueId);
+    } else if (method === 'Runtime.executionContextDestroyed') {
+      contexts.ids.delete(params.executionContextId);
+      contexts.unique.delete(params.executionContextUniqueId);
+    }
+  }
+}
 /** Events of a script's tab go out in order; one membership check covers the events that arrived before it began.
- * While the tab is off the script's sites, or on one that allows single steps only, its events stay in your Chrome. */
+ * While the tab is off the script's sites, or on one that allows single steps only, its events stay in your Chrome.
+ * A context event counts as given (`contextsTold`) as it goes out, so a script names only contexts it heard of. */
 function forward(id, lease, event) {
   if (lease.forwarding) { lease.forwarding.push(event); return; }
   const pending = [event];
@@ -599,7 +636,7 @@ function forward(id, lease, event) {
         const count = pending.length;
         await check(id, lease);
         const shown = ![...runs.values()].some(run => run.targets.has(lease.targetId) && runTabRefusal(runTab(run, lease)));
-        for (const item of pending.splice(0, count)) if (shown) send(item);
+        for (const item of pending.splice(0, count)) if (shown) { contextsTold(lease.targetId, item); send(item); }
       }
     }
     catch {}
@@ -794,9 +831,10 @@ async function runCommand(message) {
   admissions.set(targetId, admitted.promise);
   let lease;
   let effect;
+  let run;
   try {
     await previous;
-    const run = await activeRun(attemptId);
+    run = await activeRun(attemptId);
     // You took the tab over: the script ends at this command, and its later commands say why.
     if (heldBy(targetId)) { await endRun(attemptId, 'taken'); throw new Error(SCRIPT_TAKEN_REFUSAL); }
     run.commands++;
@@ -806,11 +844,11 @@ async function runCommand(message) {
     try {
       lease = await check(targetId);
       if (lease.grant.groupId !== run.body.command.grant.body.groupId || !run.targets.has(targetId)) throw new Error('Tab not opened by this script');
-      verdict = relayRunCommand(method, params, { ...runTab(run, lease), targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy, account: ACCOUNT_ORIGIN });
+      verdict = relayRunCommand(method, params, { ...runTab(run, lease), targetId, session: lease.sessionId, sessionId, addedBy: lease.addedBy, account: ACCOUNT_ORIGIN, contexts: runContexts(run, targetId) });
       if ('refused' in verdict) throw new Error(verdict.refused);
     } catch (error) { run.refused++; throw error; }
     lastUsed.set(lease.grant.groupId, Date.now());
-    if (Date.now() - (debuggees.get(targetId)?.shownAt ?? 0) >= OVERLAY_REFRESH_MS) void overlay(targetId);
+    if (Date.now() - (pages.get(targetId)?.shownAt ?? 0) >= OVERLAY_REFRESH_MS) void overlay(targetId);
     if ('noop' in verdict) return {};
     if (method === 'Target.closeTarget' || method === 'Page.close') { await closeTab(lease); return method === 'Page.close' ? {} : { success: true }; }
     // What the script is doing now: the overlay calls of the cursor and of a screenshot carry it, and any other change
@@ -831,6 +869,8 @@ async function runCommand(message) {
   }
   let result;
   try { result = await effect; } finally { if (method === 'Page.captureScreenshot') void overlay(targetId, { conceal: false }); }
+  // A world the script made is one it was given, from its answer on, whichever of that and its event reaches it first.
+  if (method === 'Page.createIsolatedWorld' && typeof result?.executionContextId === 'number') runContexts(run, targetId).ids.add(result.executionContextId);
   await check(targetId, lease);
   return result;
 }
@@ -923,9 +963,9 @@ function captureOn(tabId) { for (const capture of captures.values()) if (capture
 /** One file of a capture, uploaded as it is recorded. */
 function captureUpload(capture, file, mediaType) { return new Upload(GITSPACE_ACCOUNT_URL, signUpload, { kind: 'capture', groupId: capture.groupId, captureId: capture.captureId, file, mediaType }); }
 /** The toolbar and the tab's in-page control show a capture starting or ending. */
-function capturesChanged(tabId) {
+function capturesChanged(capture) {
   updateToolbar();
-  for (const debuggee of debuggees.values()) if (debuggee.tabId === tabId) void overlay(debuggee.targetId);
+  void overlay(capture.targetId);
 }
 /** Records a tab's screencast frames through its one screencast (`TabScreencast`), and answers once the first frame
  * came (or `CAPTURE_FIRST_FRAME_MS` passed) with their size. `announce`: the extension started it, so it tells the
@@ -950,7 +990,7 @@ async function startFramesCapture(channel, captureId, announce) {
   }
   await captureTracksStart(capture);
   capture.timer = setTimeout(() => { void endCapture(capture, 'The capture reached 30 minutes', true); }, CAPTURE_MAX_MS);
-  capturesChanged(capture.tabId);
+  capturesChanged(capture);
   const waited = setTimeout(() => first.resolve(null), CAPTURE_FIRST_FRAME_MS);
   const frame = await first.promise;
   clearTimeout(waited);
@@ -994,7 +1034,7 @@ async function startCapture(tabId, fallback) {
   }
   await captureTracksStart(capture);
   capture.timer = setTimeout(() => { void endCapture(capture, 'The capture reached 30 minutes', true); }, CAPTURE_MAX_MS);
-  capturesChanged(tabId);
+  capturesChanged(capture);
   return { capture };
 }
 /**
@@ -1028,7 +1068,7 @@ function endCapture(capture, reason, announce, recorded) {
     const finished = await captureTracks.finish(capture).catch(() => null);
     if (finished) tracks = { ...tracks, ...finished.tracks };
     captures.delete(capture.captureId);
-    capturesChanged(capture.tabId);
+    capturesChanged(capture);
     if (capture.track === 'video' && ![...captures.values()].some(other => other.track === 'video')) await chrome.offscreen.closeDocument().catch(() => {});
     // A tab the debugger stayed on only for this capture is let go now that no script drives it.
     if (capture.channel?.heldForCapture && channels.get(capture.targetId) === capture.channel && ![...runs.values()].some(run => run.targets.has(capture.targetId))) await revoke(capture.targetId);
@@ -1041,12 +1081,11 @@ function endCapture(capture, reason, announce, recorded) {
 /** A button of a tab's in-page control, or your own input there: Stop (the agent's work on the group), Capture, Stop
  * capture, Take over and Resume agent; `take` is your first trusted pointer or key press on a tab the agent is using
  * (a script runs on it or a single step uses it), which takes it unless it is the agent's own input. */
-function overlayButton(debuggee, payload) {
-  if (captureTracks.binding(debuggee.targetId, payload)) return Promise.resolve();
-  const channel = channels.get(debuggee.targetId);
-  if (payload === 'resume') return handBack(debuggee.targetId);
-  if (payload === 'capture') return startCapture(debuggee.tabId, channel ?? null);
-  if (payload === 'captureStop') { const capture = captureOn(debuggee.tabId); return capture ? endCapture(capture, null, true) : Promise.resolve(); }
+function overlayButton(targetId, tabId, payload) {
+  const channel = channels.get(targetId);
+  if (payload === 'resume') return handBack(targetId);
+  if (payload === 'capture') return startCapture(tabId, channel ?? null);
+  if (payload === 'captureStop') { const capture = captureOn(tabId); return capture ? endCapture(capture, null, true) : Promise.resolve(); }
   // End now on Everything (`powers.ts`): ended in this Chrome at once, and the relay hears it.
   if (payload === 'everythingEnd') return channel ? everything.end(channel.grant.groupId) : Promise.resolve();
   if (!channel || heldBy(channel.targetId)) return Promise.resolve();
@@ -1070,8 +1109,7 @@ async function handBack(targetId) {
   const channel = channels.get(targetId);
   if (channel) { channel.refs.clear(); channel.names.clear(); }
   await holdersChanged(targetId, held.groupId);
-  const debuggee = debuggees.get(targetId);
-  if (debuggee && !channel && !watchesOn(debuggee).length && !toolbarTabs.has(targetId)) await detachTab(targetId, debuggee.source);
+  await releaseDebugger(targetId);
 }
 /** A tab's holder changed: kept for a restart, and the account (at once, not coalesced), the tab's toolbar, the
  * toolbar icon and the popup show it. */
@@ -1251,7 +1289,8 @@ const SHARE_FRAME_SIDE = 1280;
 const SHARE_FRAME_CHARACTERS = 1_500_000;
 const SHARE_CROP_QUALITY = 70;
 const SHARE_CROP_BYTES = 400 * 1024;
-/** The isolated world where the extension reads what is under a point of a shared tab. */
+/** The isolated world where the extension reads what is under a point of a shared tab, and what the comment tool
+ * picked. */
 const SHARE_WORLD = 'gitspace-share';
 /** Viewers of one share whose pointers are drawn, at most. */
 const SHARE_POINTERS = 20;
@@ -1263,7 +1302,7 @@ const SHARE_UNWATCHED = 'No one watches this share in this Chrome';
 const SHARE_NOTICES = { shares: true, sharePointers: true, shareEnded: true };
 /** Relay operations on one share, which run one at a time per share. */
 const SHARE_OPERATIONS = { shareWatch: true, shareUnwatch: true, shareHit: true, shareAnchor: true };
-function watchesOn(debuggee) { return [...watching.values()].filter(watch => watch.debuggee === debuggee); }
+function watchesOf(targetId) { return [...watching.values()].filter(watch => watch.debuggee.targetId === targetId); }
 /** A point on a tab's viewport, as fractions of it. */
 function isPoint(value) { return typeof value === 'object' && value !== null && [value.x, value.y].every(part => typeof part === 'number' && part >= 0 && part <= 1); }
 /** A share as the account describes it (`RuntimeBrowserShare`), as far as this Chrome uses it. */
@@ -1359,8 +1398,7 @@ async function watchShare({ shareId, targetId, maxWidth, maxHeight, reportPointe
   if (!watch) {
     watch = { shareId, debuggee: await debuggeeOf(await targetInfo(targetId)), consumer: { quality: SHARE_FRAME_QUALITY, maxWidth: 1, maxHeight: 1, frame: frame => shareFrame(shareId, frame) }, pending: null, timer: undefined, pointers: [], reportPointer: false };
     watching.set(shareId, watch);
-    // What the tab shows now: none of the agent's toolbar unless the agent uses it, which also clears one an earlier
-    // debugger session left on the page (the watch shows the page as it is).
+    // What the tab shows now: none of the agent's toolbar unless the agent uses it (the watch shows the page as it is).
     void overlay(targetId);
   }
   watch.consumer.maxWidth = Math.min(maxWidth, SHARE_FRAME_SIDE);
@@ -1406,8 +1444,8 @@ async function endWatch(watch) {
   const { debuggee } = watch;
   await debuggee.screencast.remove(watch.consumer).catch(() => {});
   if (debuggees.get(debuggee.targetId) !== debuggee) return;
-  if (channels.has(debuggee.targetId) || watchesOn(debuggee).length || heldBy(debuggee.targetId) || toolbarTabs.has(debuggee.targetId)) await overlay(debuggee.targetId);
-  else await detachTab(debuggee.targetId, debuggee.source);
+  await overlay(debuggee.targetId);
+  await releaseDebugger(debuggee.targetId);
 }
 /** The relay's share notices: this Chrome's live shares, the pointers of a watched share's viewers, a share ended. */
 async function shareNotice(message) {
@@ -1444,16 +1482,16 @@ async function remoteInput({ groupId, targetId, device, input }) {
   await chrome.debugger.sendCommand(debuggee.source, method, params);
   return {};
 }
-/** How the overlay's binding call starts when it reports your own pointer over the tab (`report`), followed by the
- * point as JSON (fractions of the viewport), or `null` once it left the tab. */
+/** How the overlay's message starts when it reports your own pointer over the tab (`report`), followed by the point
+ * as JSON (fractions of the viewport), or `null` once it left the tab. */
 const SHARER_POINTER = 'pointer ';
-/** Your own pointer over a watched tab, from its overlay's world: each share watched there whose account draws it for
- * the viewers (`reportPointer`) hears where it is (`share` `pointer`). It is never drawn on the tab, under your cursor. */
-function sharerPointer(debuggee, payload) {
+/** Your own pointer over a watched tab, from its page world: each share watched there whose account draws it for the
+ * viewers (`reportPointer`) hears where it is (`share` `pointer`). It is never drawn on the tab, under your cursor. */
+function sharerPointer(targetId, payload) {
   let at;
   try { at = JSON.parse(payload.slice(SHARER_POINTER.length)); } catch { return; }
   if (at !== null && !isPoint(at)) return;
-  for (const watch of watchesOn(debuggee)) if (watch.reportPointer) send({ share: { event: 'pointer', shareId: watch.shareId, at: at && { x: at.x, y: at.y } } });
+  for (const watch of watchesOf(targetId)) if (watch.reportPointer) send({ share: { event: 'pointer', shareId: watch.shareId, at: at && { x: at.x, y: at.y } } });
 }
 /** Runs `operation` with the tab's share world (`SHARE_WORLD`), made again once a navigation replaced it. */
 async function inShareWorld(debuggee, operation) {
@@ -1746,22 +1784,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   // The tab's one screencast feeds its consumers; no frame reaches a script or the relay as an event.
   if (method === 'Page.screencastFrame') { debuggee.screencast.frame(params); return; }
   if (method === 'Page.screencastVisibilityChanged') return;
-  // The extension's own worlds never reach a session.
-  if (method === 'Runtime.executionContextCreated' && (params.context?.name === OVERLAY_WORLD || params.context?.name === SHARE_WORLD)) return;
-  if (method === 'Page.frameNavigated' && !params.frame.parentId) { if (debuggee.overlay) debuggee.overlay.contextId = null; debuggee.world = null; }
+  // The extension's own worlds never reach a session: its page world (`page.ts`) and the share world.
+  if (method === 'Runtime.executionContextCreated' && (params.context?.origin === EXTENSION_ORIGIN || params.context?.name === SHARE_WORLD)) return;
+  if (method === 'Page.frameNavigated' && !params.frame.parentId) debuggee.world = null;
   if (method === 'Network.requestWillBeSent' || method === 'Page.frameNavigated') captureTracks.event(debuggee.targetId, method, params);
-  // A new document lacks the overlay until it is drawn again.
-  if (method === 'Page.loadEventFired' && debuggee.overlay) void overlay(debuggee.targetId);
-  // The overlay's buttons, your own input there and your own pointer over a watched tab, from the overlay's own world
-  // only, which no page script reaches. Neither they nor that world reach a session.
-  if (method === 'Runtime.bindingCalled' && params.name === OVERLAY_BINDING) {
-    if (typeof params.payload === 'string' && debuggee.overlay && params.executionContextId === debuggee.overlay.contextId) {
-      if (params.payload.startsWith(SHARER_POINTER)) sharerPointer(debuggee, params.payload);
-      else if (params.payload.startsWith(COMMENT_CALL)) void comments.binding(debuggee.targetId, params.payload).catch(() => {});
-      else void overlayButton(debuggee, params.payload).catch(() => {});
-    }
-    return;
-  }
   // Everything else is the agent's, on a tab it has a channel to; a tab only shares watch tells no one.
   const lease = channels.get(source.targetId);
   if (!lease) return;
@@ -1785,18 +1811,19 @@ chrome.debugger.onDetach.addListener(source => {
   const debuggee = debuggees.get(source.targetId);
   if (debuggee) {
     debuggees.delete(source.targetId);
-    captureTracks.forget(source.targetId);
-    for (const watch of watchesOn(debuggee)) { watching.delete(watch.shareId); clearTimeout(watch.timer); }
+    for (const watch of watchesOf(source.targetId)) { watching.delete(watch.shareId); clearTimeout(watch.timer); }
   }
   for (const [id, channel] of channels) if (channel.targetId === source.targetId) {
     channel.cancelNavigation?.(); channels.delete(id); send({ targetId: id, fenced: true });
     for (const capture of captures.values()) if (capture.channel === channel) void endCapture(capture, 'Recording stopped: Chrome’s debugger left this tab', true);
   }
+  // What the tab's page shows follows: the agent and the shares watched there are gone from it.
+  if (pages.has(source.targetId)) void overlay(source.targetId);
 });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   for (const [id] of channels) void check(id).catch(() => {});
-  // The overlay comes back on a page that loaded, whether or not its tab reports Page events.
-  if (change.status === 'complete') for (const debuggee of debuggees.values()) if (debuggee.tabId === tabId && debuggee.overlay) void overlay(debuggee.targetId);
+  // A new document lacks the overlay until it is drawn again, once it loaded.
+  if (change.status === 'complete') for (const [targetId, page] of pages) if (page.tabId === tabId) void overlay(targetId);
   // A page's icon arrives after its URL (`favIconUrl`), and is in Chrome's favicon store once the page loaded.
   if (change.url || change.title || change.favIconUrl || change.status === 'complete') for (const [targetId, sharedTabId] of sharedTabs) if (sharedTabId === tabId) void reportPages(targetId).catch(() => {});
   if ('groupId' in change) void join(tab, true).then(reconcileHolders).catch(() => {});
@@ -1810,12 +1837,11 @@ chrome.tabGroups.onRemoved.addListener(group => { void serially(async () => {
   for (const { key, record } of await groupRecords()) if (record.chromeGroupId === group.id) { await persist(key, null); scheduleReport(record.groupId); }
 }).then(async () => { for (const [id, channel] of channels) { try { await check(id,channel); } catch {} } await reconcileHolders(); }).catch(() => { socket?.close(); }); });
 // ── Comments (CommentTool): the in-page comment tool on tabs of workspace groups (`comments.ts`) ──
-/** Tabs of a workspace group with a debugger session for their toolbar (`idle` while nothing else uses them), kept
- * until they leave the group, by target id: `{ groupId, workspace, tabId }`. The tab you look at in a workspace group
- * gets one while the account takes comments, and so does a tab whose comment tool is on; a tab in no workspace group
- * never does. */
+/** Tabs of a workspace group that show its toolbar (`idle` while nothing else uses them), kept until they leave the
+ * group, by target id: `{ groupId, workspace, tabId }`. The tab you look at in a workspace group gets one while the
+ * account takes comments, and so does a tab whose comment tool is on; a tab in no workspace group never does. */
 const toolbarTabs = new Map();
-/** How the overlay's binding call starts when it is about comments (`comments.ts`). */
+/** How the overlay's message starts when it is about comments (`comments.ts`). */
 const COMMENT_CALL = 'comment ';
 const comments = new ChromeComments({
   async request(request) {
@@ -1824,15 +1850,17 @@ const comments = new ChromeComments({
     return commentRequest(GITSPACE_ACCOUNT_URL, identity, request);
   },
   draw(targetId) { void overlay(targetId); },
+  // Comment mode off: the comment tool leaves the page, and the debugger the tab unless something else uses it.
+  close(targetId) { void overlay(targetId, { comment: null }).then(() => releaseDebugger(targetId)); },
   group: tabGroup,
   picked: commentPicked,
-  async crop(targetId, area) { const debuggee = debuggees.get(targetId); return debuggee ? shareCrop(debuggee, await layoutViewport(debuggee), area) : null; },
+  async crop(targetId, area) { const debuggee = await debuggeeOf(await targetInfo(targetId)); return shareCrop(debuggee, await layoutViewport(debuggee), area); },
   async page(targetId) {
-    const debuggee = debuggees.get(targetId);
-    if (!debuggee) throw new Error('GitSpace no longer draws on this tab');
+    const debuggee = await debuggeeOf(await targetInfo(targetId));
     const [tab, viewport] = await Promise.all([chrome.tabs.get(debuggee.tabId), layoutViewport(debuggee)]);
     return { url: tab.url || '', title: tab.title || '', viewport: { w: Math.max(1, Math.round(viewport.clientWidth)), h: Math.max(1, Math.round(viewport.clientHeight)) }, scroll: { x: viewport.pageX, y: viewport.pageY } };
   },
+  async url(targetId) { return (await chrome.tabs.get((await targetInfo(targetId)).tabId)).url || ''; },
 });
 /** The workspace group holding a tab, which from then on keeps its toolbar (`toolbarTabs`); null for a tab in none. */
 async function tabGroup(targetId) {
@@ -1844,14 +1872,12 @@ async function tabGroup(targetId) {
   toolbarTabs.set(targetId, { ...group, tabId: tab.id });
   return group;
 }
-/** The element the overlay of a tab picked under `seq` (its own world keeps it: `browserOverlayPickedFunction`), read
- * as a share's hit test reads one (`targetRead`); null when there is none. */
+/** The element the comment tool of a tab marked with `seq` (`browserPickedElementFunction`), read through the tab's
+ * debugger session, attached for it, as a share's hit test reads one (`targetRead`); null when there is none. */
 async function commentPicked(targetId, seq) {
-  const debuggee = debuggees.get(targetId);
-  const executionContextId = debuggee?.overlay?.contextId;
-  if (!executionContextId) return null;
+  const debuggee = await debuggeeOf(await targetInfo(targetId));
   const tab = (method, params) => chrome.debugger.sendCommand(debuggee.source, method, params);
-  const { result } = await tab('Runtime.callFunctionOn', { functionDeclaration: browserOverlayPickedFunction, arguments: [{ value: seq }], executionContextId, returnByValue: false });
+  const { result } = await inShareWorld(debuggee, executionContextId => tab('Runtime.callFunctionOn', { functionDeclaration: browserPickedElementFunction, arguments: [{ value: seq }], executionContextId, returnByValue: false }));
   if (!result?.objectId) return null;
   try { const { node } = await tab('DOM.describeNode', { objectId: result.objectId }); return await targetRead(debuggee, await layoutViewport(debuggee), node.backendNodeId); }
   finally { await tab('Runtime.releaseObject', { objectId: result.objectId }).catch(() => {}); }
@@ -1861,7 +1887,6 @@ async function showGroupTab(tabId) {
   if (!accountComments || !enabled) return;
   const target = (await targets()).find(entry => entry.tabId === tabId);
   if (!target || !(await tabGroup(target.id))) return;
-  await debuggeeOf(target);
   await overlay(target.id);
 }
 /** Each window's tab in front gets its workspace group's toolbar (`showGroupTab`). */
@@ -1871,15 +1896,12 @@ async function showActiveGroupTabs() { for (const tab of await chrome.tabs.query
 async function releaseGroupTab(targetId) {
   toolbarTabs.delete(targetId);
   comments.stop(targetId, false);
-  const debuggee = debuggees.get(targetId);
-  if (!debuggee) return;
-  if (channels.has(targetId) || watchesOn(debuggee).length || heldBy(targetId)) await overlay(targetId);
-  else await detachTab(targetId, debuggee.source);
+  await overlay(targetId);
+  await releaseDebugger(targetId);
 }
 /** Show on page from GitSpace: the tab in comment mode with that thread open. */
 async function showThread(target, group, threadId) {
   toolbarTabs.set(target.id, { ...group, tabId: target.tabId });
-  await debuggeeOf(target);
   await comments.start(target.id, group);
   comments.focus(target.id, threadId);
 }
@@ -1903,17 +1925,42 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   // Another page: the comment tool lists its threads.
   else if (change.url) for (const { targetId } of kept) comments.navigated(targetId);
 });
-chrome.tabs.onRemoved.addListener(tabId => { for (const [targetId, entry] of toolbarTabs) if (entry.tabId === tabId) { toolbarTabs.delete(targetId); comments.stop(targetId, false); } });
+// A tab that closed shows nothing: its toolbar, comment tool and capture card go with it.
+chrome.tabs.onRemoved.addListener(tabId => {
+  for (const [targetId, entry] of toolbarTabs) if (entry.tabId === tabId) { toolbarTabs.delete(targetId); comments.stop(targetId, false); }
+  for (const [targetId, page] of pages) if (page.tabId === tabId) { pages.delete(targetId); captureTracks.forget(targetId); }
+});
+/**
+ * A message from the page world of one of this extension's tabs (`page.ts`; only this extension's own world of a tab's
+ * main frame sends them, which no page script reaches): the overlay's buttons and your input there (`overlayButton`),
+ * your pointer over a watched tab (`sharerPointer`), the comment tool (`comment …`), a capture's recorder and bar, and
+ * `refresh` from an overlay nothing refreshed for a while. Each tells this worker enough on its own, should it have
+ * started again since it drew there: the comment tool turns comment mode on again (`ChromeComments.message`), and
+ * `refresh` draws the overlay of the tab as this worker sees it (the toolbar of the tab's workspace group, say), or
+ * removes it when there is nothing to show.
+ */
+async function pageMessage(tabId, payload) {
+  const target = (await targets()).find(entry => entry.tabId === tabId);
+  if (!target) return;
+  if (payload === 'refresh') {
+    // Not connected yet (this worker just started), it cannot tell what the account shows; the page asks again.
+    if (!connected) return;
+    if (accountComments && enabled) await tabGroup(target.id);
+    await overlay(target.id);
+    if (!pages.has(target.id)) await pageStep(target.id, () => pageCall(tabId, 'overlay', { remove: true }));
+  } else if (payload.startsWith(SHARER_POINTER)) sharerPointer(target.id, payload);
+  else if (payload.startsWith(COMMENT_CALL)) await comments.message(target.id, payload);
+  else if (!captureTracks.message(target.id, payload)) await overlayButton(target.id, tabId, payload);
+}
 // ── end Comments ──
 // ── Capture tracks (CaptureRecord): steps and layout of your captures, their bar and saved card (`capture-tracks.ts`) ──
 const captureTracks = new CaptureTracksInChrome({
   account: GITSPACE_ACCOUNT_URL,
   upload: captureUpload,
   redraw(targetId) { void overlay(targetId); },
-  async call(targetId, declaration, argument, gesture) {
-    const debuggee = debuggees.get(targetId);
-    if (!debuggee?.overlay) return null;
-    return (await overlayCall(debuggee, argument, declaration, gesture))?.result?.value ?? null;
+  async call(targetId, name, argument) {
+    const page = pages.get(targetId);
+    return page ? await pageCall(page.tabId, name, argument) ?? null : null;
   },
   send,
   identity: () => stored('identity'),
@@ -1932,14 +1979,12 @@ const captureTracks = new CaptureTracksInChrome({
     if (!reply || reply.error) throw new Error(reply?.error ?? 'The recorder did not answer');
   },
   async release(targetId) {
-    const debuggee = debuggees.get(targetId);
-    if (!debuggee) return;
-    if (channels.has(targetId) || watchesOn(debuggee).length || heldBy(targetId) || groupTabs.has(targetId) || captureOn(debuggee.tabId) || captureTracks.shows(targetId)) await overlay(targetId);
-    else await detachTab(targetId, debuggee.source);
+    await overlay(targetId);
+    await releaseDebugger(targetId);
   },
 });
-/** A capture began: with an account that takes them, its steps and layout record in the tab's overlay world and from
- * its debugger session (attached now for a video capture of a tab nothing else uses), which tells its navigations and
+/** A capture began: with an account that takes them, its steps and layout record in the tab's page world and from its
+ * debugger session (attached now for a video capture of a tab nothing else uses), which tells its navigations and
  * requests. */
 async function captureTracksStart(capture) {
   if (!accountCaptureTracks) return;
@@ -2007,7 +2052,7 @@ function setEnabled(on, minutes) {
     const previous = socket; socket = undefined; connected = false;
     previous?.close();
     for (const channel of channels.values()) channel.cancelNavigation?.();
-    try { await Promise.allSettled([...queues.values()]); await reset(); await Promise.all([...debuggees.values()].map(debuggee => detachTab(debuggee.targetId, debuggee.source))); } finally { managingIdentity = false; updateToolbar(); }
+    try { await Promise.allSettled([...queues.values()]); await reset(); await Promise.all([...pages.keys()].map(targetId => overlay(targetId))); await Promise.all([...debuggees.values()].map(debuggee => detachTab(debuggee.targetId, debuggee.source))); } finally { managingIdentity = false; updateToolbar(); }
   });
   return identityOperations;
 }
@@ -2125,7 +2170,7 @@ async function connect() {
           void groupRecords().then(records => { for (const { record } of records) scheduleReport(record.groupId); }).catch(() => {});
           // The in-page controls show Capture once the account saves captures, and Comment once it takes comments: the
           // tab you look at in a workspace group gets its toolbar.
-          for (const targetId of debuggees.keys()) void overlay(targetId);
+          for (const targetId of pages.keys()) void overlay(targetId);
           void showActiveGroupTabs().catch(() => {});
         }
         return;
@@ -2314,6 +2359,11 @@ async function redeemPairingCode(text) {
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
 if (sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('offscreen.html')) return offscreenRequest(message, respond);
+// This extension's page world in a tab's main frame (`page.ts`): answered once handled.
+if (sender.id === chrome.runtime.id && Number.isInteger(sender.tab?.id) && sender.frameId === 0 && typeof message?.gitspaceOverlay === 'string') {
+  void pageMessage(sender.tab.id, message.gitspaceOverlay).then(() => respond({}), error => respond({ error: error instanceof Error ? error.message : String(error) }));
+  return true;
+}
 if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
 const request = popupRequest(message);
 if (request) { void request.then(respond, error => respond({ error: error.message })); return true; }
@@ -2356,17 +2406,16 @@ chrome.alarms.onAlarm.addListener(alarm => {
   for (const [id] of channels) void check(id).catch(() => {});
   for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId, 'deadline').catch(() => {});
   // Keeps each overlay from expiring, and takes down that of a single step that has ended.
-  for (const targetId of debuggees.keys()) void overlay(targetId);
+  for (const targetId of pages.keys()) void overlay(targetId);
   void collapseIdle().catch(() => {}); void connect();
 });
 // A group marked while scripts ran before this worker started has none running now.
 void groupRecords().then(records => { for (const { record } of records) void markRunning(record.groupId); }).catch(() => {});
-/** The tabs you hold show their toolbar (the debugger attached for it), after this worker starts or GitSpace is on
- * again; off, no tab has the debugger. */
+/** The tabs you hold show their toolbar, after this worker starts or GitSpace is on again; off, no tab shows one. */
 async function showHeld() {
   await switched;
   if (!enabled) return;
-  for (const targetId of holders.keys()) { try { await debuggeeOf(await targetInfo(targetId)); await overlay(targetId); } catch {} }
+  for (const targetId of holders.keys()) await overlay(targetId);
 }
 // Tabs you held before this worker started stay yours while they are in their group.
 void holdersRestored.then(reconcileHolders).then(showHeld).catch(() => {});

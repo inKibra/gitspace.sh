@@ -17,7 +17,7 @@ function page(html = '') {
   window.HTMLElement.prototype.attachShadow = function (init) { const root = attach.call(this, init); roots.push(root); return root; };
   Object.assign(window.Element.prototype, { animate: () => ({ finished: Promise.resolve() }) });
   const calls: string[] = [];
-  Object.assign(window, { __gitspaceStop: (payload: string) => { calls.push(payload); }, setTimeout: () => 0, setInterval: () => 0 });
+  Object.assign(window, { __gitspaceSend: (payload: string) => { calls.push(payload); }, setTimeout: () => 0, setInterval: () => 0 });
   window.document.body.innerHTML = html;
   const call = (declaration: string, argument?: unknown): unknown => window.eval(`(${declaration})`)(argument);
   /** Dispatches an event as your own input: trusted. */
@@ -40,7 +40,7 @@ const FORM = `<form>
 describe('the steps you take while capturing', () => {
   it('become Playwright locators computed in the page, with secrets masked, typing as one fill, and only your own input', () => {
     const { window, calls, call, you, element } = page(FORM);
-    call(browserCaptureRecorderFunction, { binding: '__gitspaceStop' });
+    call(browserCaptureRecorderFunction, { binding: '__gitspaceSend' });
     const type = (selector: string, value: string) => { const input = element(selector); Reflect.set(input, 'value', value); you(input, new window.Event('input', { bubbles: true })); };
     const click = (selector: string) => you(element(selector), new window.MouseEvent('click', { bubbles: true, button: 0 }));
     // Clicking into a field is no step; typing is one fill once the field changes.
@@ -80,7 +80,7 @@ describe('the steps you take while capturing', () => {
 
   it('a field still being typed in when the capture ends is its last step', () => {
     const { window, call, you, element } = page(FORM);
-    call(browserCaptureRecorderFunction, { binding: '__gitspaceStop' });
+    call(browserCaptureRecorderFunction, { binding: '__gitspaceSend' });
     Reflect.set(element('#name'), 'value', 'Grace');
     you(element('#name'), new window.Event('input', { bubbles: true }));
     expect(call(browserCaptureRecorderFunction, { flush: true })).toEqual({ kind: 'fill', url: 'https://shop.example/order?session=1', locator: "getByRole('textbox', { name: 'Customer name' })", value: 'Grace' });
@@ -147,7 +147,7 @@ describe('the capturing bar', () => {
 
   it('while capturing names the capture, its time, steps and comments, with Comment, the sound and Done; C comments outside a field', () => {
     const { window, roots, calls, call, you, element } = page('<input id="field">');
-    call(browserCaptureBarFunction, { binding: '__gitspaceStop', show: capturing });
+    call(browserCaptureBarFunction, { binding: '__gitspaceSend', show: capturing });
     const text = roots.at(-1)?.textContent ?? '';
     expect(text).toContain('Capturing · Order a pizza✎ · 0:14 · 5 steps · 1 comment');
     expect(text).toContain('REC 0:14 · tabCapture · with sound');
@@ -161,7 +161,7 @@ describe('the capturing bar', () => {
 
   it('in comment mode says how to comment and offers Back to doing and Done; frames have no sound to toggle', () => {
     const { roots, calls, call } = page();
-    call(browserCaptureBarFunction, { binding: '__gitspaceStop', show: { ...capturing, mode: 'comment', comments: 2, sound: null } });
+    call(browserCaptureBarFunction, { binding: '__gitspaceSend', show: { ...capturing, mode: 'comment', comments: 2, sound: null } });
     expect(roots.at(-1)?.textContent).toContain('Comment tool · click an element or drag an area · 2 comments');
     expect(roots.at(-1)?.textContent).toContain('REC 0:14 · frames · no sound');
     expect(shown(roots)).toEqual(['Back to doing (Esc)', 'Done']);
@@ -171,7 +171,7 @@ describe('the capturing bar', () => {
 
   it('saved, shows the card with the capture’s tracks and its actions; renaming says the new name', () => {
     const { window, roots, calls, call } = page();
-    call(browserCaptureBarFunction, { binding: '__gitspaceStop', show: { mode: 'saved', name: 'Order a pizza', workspace: 'Cross-machine browser relay', pills: ['5 steps', '1 comment', 'video 0:14 · sound', 'page layout'], mention: 'Copy mention', share: 'Share', replay: 'Replay steps', notice: null } });
+    call(browserCaptureBarFunction, { binding: '__gitspaceSend', show: { mode: 'saved', name: 'Order a pizza', workspace: 'Cross-machine browser relay', pills: ['5 steps', '1 comment', 'video 0:14 · sound', 'page layout'], mention: 'Copy mention', share: 'Share', replay: 'Replay steps', notice: null } });
     const text = roots.at(-1)?.textContent ?? '';
     expect(text).toContain('Capture saved: Order a pizza✎');
     expect(text).toContain('In the Browser tab of Cross-machine browser relay · not in the repository');
@@ -191,10 +191,10 @@ describe('the capturing bar', () => {
   it('the agent’s toolbar gives way to it while a capture records its steps, and rises above it while the agent acts', () => {
     const { roots, call } = page();
     const recording = { startedAt: Date.now(), sound: true, tracks: true };
-    call(browserOverlayFunction, { show: { mode: 'capture', workspace: 'Checkout', agent: null, doing: null, binding: '__gitspaceStop', capture: 'recording', recording } });
+    call(browserOverlayFunction, { show: { mode: 'capture', workspace: 'Checkout', agent: null, doing: null, capture: 'recording', recording } });
     const bar = roots[0]?.querySelector('div[style*="bottom"]');
     expect(bar?.getAttribute('style')).toContain('display: none');
-    call(browserOverlayFunction, { show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Clicking', binding: '__gitspaceStop', capture: 'recording', recording } });
+    call(browserOverlayFunction, { show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Clicking', capture: 'recording', recording } });
     expect(bar?.getAttribute('style')).toContain('bottom: 76px');
     expect([...roots[0]?.querySelectorAll('button') ?? []].filter(button => button.style.display !== 'none').map(button => button.textContent?.trim())).not.toContain('Stop capture');
   });
@@ -210,8 +210,8 @@ describe('a capture on your Chrome', () => {
       account: 'https://account.gitspace.test',
       upload: (_capture, file) => ({ write: async bytes => { uploads.set(file, [...uploads.get(file) ?? [], bytes]); }, complete: async () => { completed.push(file); }, abort: async () => {} }),
       redraw: () => {},
-      call: async (_targetId, declaration, argument) => {
-        if (declaration === browserCaptureBarFunction && argument && typeof argument === 'object' && 'copy' in argument && typeof argument.copy === 'string') { copied.push(argument.copy); return true; }
+      call: async (_targetId, name, argument) => {
+        if (name === 'bar' && argument && typeof argument === 'object' && 'copy' in argument && typeof argument.copy === 'string') { copied.push(argument.copy); return true; }
         return null;
       },
       send: message => { sent.push(message); },
@@ -234,16 +234,16 @@ describe('a capture on your Chrome', () => {
     tracks.start(capture, true);
     expect(tracks.shows('tab')).toBe(true);
     jest.advanceTimersByTime(3000);
-    tracks.binding('tab', `step ${JSON.stringify({ kind: 'fill', locator: "getByLabel('Name')", value: 'Ada', url: capture.url })}`);
-    tracks.binding('tab', `layout ${JSON.stringify({ viewport: { w: 800, h: 600 }, scroll: { x: 0, y: 0 }, elements: [] })}`);
+    tracks.message('tab', `step ${JSON.stringify({ kind: 'fill', locator: "getByLabel('Name')", value: 'Ada', url: capture.url })}`);
+    tracks.message('tab', `layout ${JSON.stringify({ viewport: { w: 800, h: 600 }, scroll: { x: 0, y: 0 }, elements: [] })}`);
     tracks.event('tab', 'Network.requestWillBeSent', { type: 'Fetch', request: { method: 'POST', url: 'https://shop.example/api/orders' } });
-    tracks.binding('tab', 'captureComment');
+    tracks.message('tab', 'captureComment');
     await settle();
     const mode = modes.at(-1);
     if (!mode) throw new Error('Comment mode did not start');
     expect(mode).toMatchObject({ captureId: capture.captureId, startedAt: capture.startedAt });
     mode.saved(); mode.ended();
-    tracks.binding('tab', 'captureDone');
+    tracks.message('tab', 'captureDone');
     await settle();
     expect(stopped).toEqual([capture.captureId]);
 
@@ -265,7 +265,7 @@ describe('a capture on your Chrome', () => {
       return Response.json({ status: 'ok', value: { captureShare: { link: 'https://account.gitspace.test/c/share#secret' } } });
     }, { preconnect: realFetch.preconnect });
     try {
-      for (const command of ['captureMention', 'captureShare', 'captureReplay', 'captureOpen']) { tracks.binding('tab', command); await settle(); const loop = Promise.withResolvers<void>(); setImmediate(loop.resolve); await loop.promise; await settle(); }
+      for (const command of ['captureMention', 'captureShare', 'captureReplay', 'captureOpen']) { tracks.message('tab', command); await settle(); const loop = Promise.withResolvers<void>(); setImmediate(loop.resolve); await loop.promise; await settle(); }
     } finally { globalThis.fetch = realFetch; }
     expect(copied).toEqual([`capture://${capture.captureId}`, 'https://account.gitspace.test/c/share#secret']);
     expect(fetches).toEqual([{ url: 'https://account.gitspace.test/api/browser-relay/capture-shares', body: { op: 'create', captureId: capture.captureId, groupId: capture.groupId, comment: true, expiresInMinutes: 10_080 } }]);

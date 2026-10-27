@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { Window, type Element, type ShadowRoot } from 'happy-dom';
 import { browserScreenshotPrepareFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import type { CommentPin, CommentView } from '../src/comments.js';
-import { browserOverlayFunction, browserOverlayPickedFunction } from '../src/overlay.js';
+import { browserOverlayFunction, browserPickedElementFunction } from '../src/overlay.js';
 
-const idle = { show: { mode: 'idle', workspace: 'Checkout', agent: null, doing: null, binding: '__gitspaceStop', capture: 'ready', recording: null, comments: true } };
+const idle = { show: { mode: 'idle', workspace: 'Checkout', agent: null, doing: null, capture: 'ready', recording: null, comments: true } };
 const at = new Date(Date.now() - 180_000).toISOString();
 const phone: CommentPin = {
   id: 'thread-1', n: 1, label: 'textbox “Telephone:”', area: false, box: { x: 0.5, y: 0.25, w: 0.25, h: 0.05 }, selector: '#phone',
@@ -15,12 +15,13 @@ const sizes: CommentPin = {
   id: 'thread-2', n: 2, label: 'area around group “Pizza Size”', area: true, box: { x: 0.125, y: 0.5, w: 0.25, h: 0.125 }, selector: '',
   scroll: { x: 0, y: 0 }, viewport: { w: 1024, h: 768 }, resolved: 'Bradley', comments: [{ who: 'Ana', agent: false, guest: true, at, text: 'Make Medium the default.' }],
 };
-const view = (change: Partial<CommentView> = {}): CommentView => ({ bar: true, name: 'Bradley', workspace: 'Checkout', threads: [phone, sizes], hover: null, draft: null, busy: null, done: null, focus: null, error: null, ...change });
+const view = (change: Partial<CommentView> = {}): CommentView => ({ session: 'session-1', bar: true, name: 'Bradley', workspace: 'Checkout', threads: [phone, sizes], hover: null, draft: null, busy: null, done: null, focus: null, error: null, ...change });
 
 const windows: Window[] = [];
 afterEach(async () => { for (const window of windows.splice(0)) await window.happyDOM.close(); });
 
-/** A 1024×768 page with the overlay as the extension calls it in its own world; the binding's calls are kept, the
+/** A 1024×768 page with the overlay as the extension calls it in its own world, whose extension is there
+ * (`chrome.runtime.id`); what it sends is kept, and answered by `reply` (the extension's reply to each message), the
  * overlay's closed shadow root is kept for the test (a page never gets it), and `under` says which element is at each
  * point, as Chrome's hit testing would. */
 function page() {
@@ -32,7 +33,9 @@ function page() {
   Object.assign(window.Element.prototype, { animate: () => ({ finished: Promise.resolve() }) });
   const calls: string[] = [];
   const pageEvents: string[] = [];
-  Object.assign(window, { __gitspaceStop: (payload: string) => { calls.push(payload); } });
+  const runtime: { id?: string } = { id: 'extension' };
+  let reply: (payload: string) => Promise<unknown> = async () => ({});
+  Object.assign(window, { chrome: { runtime }, __gitspaceSend: (payload: string) => { calls.push(payload); return reply(payload); } });
   for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'keydown']) window.document.addEventListener(type, () => { pageEvents.push(type); });
   let under: (x: number, y: number) => Element[] = () => [];
   Object.assign(window.document, { elementsFromPoint: (x: number, y: number) => under(x, y) });
@@ -62,7 +65,7 @@ function page() {
   };
   /** Where each pin sits: its number and its top-left corner. */
   const pins = () => buttons().filter(element => /^\d+$/.test(element.textContent)).map(element => `${element.textContent}@${element.style.transform}`);
-  return { window, root, call, calls, pageEvents, buttons, button, layer, pointer, key, element, pins, under: (find: typeof under) => { under = find; } };
+  return { window, root, call, calls, pageEvents, buttons, button, layer, pointer, key, element, pins, runtime, under: (find: typeof under) => { under = find; }, reply: (answer: typeof reply) => { reply = answer; } };
 }
 /** Whether an element of the overlay shows: neither it nor anything holding it is `display: none`. */
 function visible(element: Element): boolean {
@@ -91,9 +94,20 @@ describe('the in-page comment tool', () => {
     tab.key('Escape');
     expect(tab.calls).toEqual(['comment on', 'comment off']);
     expect(tab.pageEvents).toEqual(['keydown']);
-    tab.call(browserOverlayFunction, { comment: null });
+    // Off at once, before the extension says so: no layer, pins or strip, and the toolbar is back.
     expect(visible(tab.layer())).toBe(false);
     expect(tab.pins()).toEqual([]);
+    expect(tab.buttons().map(button => button.textContent)).toEqual(['Comment', 'Capture']);
+    // A view of the comment mode you closed, drawn before the extension heard of it, does not open it again; the
+    // extension turning it on again does.
+    tab.call(browserOverlayFunction, { comment: view() });
+    expect(visible(tab.layer())).toBe(false);
+    tab.call(browserOverlayFunction, { comment: null });
+    tab.call(browserOverlayFunction, { comment: view({ session: 'session-2' }) });
+    expect(visible(tab.layer())).toBe(true);
+    tab.button('Done (Esc)').click();
+    expect(tab.calls.at(-1)).toBe('comment off');
+    expect(visible(tab.layer())).toBe(false);
     // Without an account that takes comments, there is no Comment.
     tab.call(browserOverlayFunction, { show: { ...idle.show, comments: false } });
     expect(tab.buttons().map(button => button.textContent)).toEqual(['Capture']);
@@ -121,9 +135,13 @@ describe('the in-page comment tool', () => {
       { seq: 3, area: { x: 0.125, y: 0.5, width: 0.25, height: 0.125 } },
     ]);
     expect(tab.calls.map(call => call.split(' ')[1])).toEqual(['hover', 'pick', 'cancel', 'pick']);
-    // The extension reads each picked element in the overlay's world: the button clicked, the form around the area.
-    expect(tab.call(browserOverlayPickedFunction, 2)).toBe(pay);
-    expect(tab.call(browserOverlayPickedFunction, 3)).toBe(form);
+    // The extension reads the element under each number from the page: what is under your pointer, the button
+    // clicked, the form around the area; a later pick takes the number of the one before off the page.
+    expect(tab.call(browserPickedElementFunction, 1)).toBe(pay);
+    expect(tab.call(browserPickedElementFunction, 2)).toBeNull();
+    expect(tab.call(browserPickedElementFunction, 3)).toBe(form);
+    tab.key('Escape');
+    expect(tab.call(browserPickedElementFunction, 3)).toBeNull();
     expect(tab.pageEvents).toEqual([]);
   });
 
@@ -153,6 +171,48 @@ describe('the in-page comment tool', () => {
     tab.button('Cancel').click();
     expect(tab.calls.at(-1)).toBe('comment cancel {"seq":3}');
     expect(tab.root().querySelector('textarea')).toBeNull();
+  });
+
+  it('a comment the extension did not take, or that got no answer, says why at once', async () => {
+    const tab = page();
+    const pay = tab.element('pay', { left: 100, top: 200, right: 300, bottom: 240 });
+    tab.under(() => [pay]);
+    tab.call(browserOverlayFunction, idle);
+    tab.call(browserOverlayFunction, { comment: view({ threads: [] }) });
+    tab.pointer('pointerdown', 150, 220);
+    tab.pointer('pointerup', 150, 220);
+    tab.call(browserOverlayFunction, { comment: view({ threads: [], draft: { seq: 1, label: 'button “Pay now”', area: false } }) });
+    const field = tab.root().querySelector('textarea');
+    if (!field) throw new Error('No field');
+    field.value = 'Pay now is hidden on phones';
+    tab.reply(async () => { throw new Error('The message port closed before a response was received.'); });
+    tab.button('Comment').click();
+    expect(tab.buttons().map(button => button.textContent)).toContain('Sending…');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(tab.root().textContent).toContain('The message port closed before a response was received.');
+    expect(tab.buttons().map(button => button.textContent)).toContain('Comment');
+    // Sending again is offered, and the extension's own refusal says why too.
+    tab.reply(async () => ({ error: 'Human pairing required' }));
+    tab.button('Comment').click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(tab.root().textContent).toContain('Human pairing required');
+  });
+
+  it('once its extension is gone (updated or turned off), your next key or press reaches the page and the tool leaves it', () => {
+    const tab = page();
+    const pay = tab.element('pay', { left: 100, top: 200, right: 300, bottom: 240 });
+    tab.under(() => [pay]);
+    tab.call(browserOverlayFunction, { show: { ...idle.show, mode: 'run', agent: 'main', doing: 'Running a script' } });
+    tab.call(browserOverlayFunction, { comment: view({ threads: [] }) });
+    delete tab.runtime.id;
+    tab.key('Escape');
+    expect(tab.pageEvents).toEqual(['keydown']);
+    const press = new tab.window.PointerEvent('pointerdown', { bubbles: true, composed: true, clientX: 150, clientY: 220, button: 0 });
+    Object.defineProperty(press, 'isTrusted', { value: true });
+    pay.dispatchEvent(press);
+    expect(tab.pageEvents).toEqual(['keydown', 'pointerdown']);
+    expect(tab.calls).toEqual([]);
+    expect(tab.window.document.querySelector('[data-gitspace-overlay]')).toBeNull();
   });
 
   it('puts each thread’s numbered pin at its anchor: its element where the page has it, else its box where the page was scrolled then', () => {

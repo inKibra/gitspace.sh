@@ -5,8 +5,8 @@
  * group has no toolbar, so no comment mode. Comment mode shows the page's threads as numbered pins where their anchors
  * are, outlines what is under your pointer, and anchors a new comment to the element you click or the area you drag.
  *
- * The overlay picks the element under your pointer past its own layer and keeps it under a number (`picked`); the
- * extension reads it as a share's hit test reads one (box, accessible role and name, selectors) and crops a JPEG of
+ * The overlay picks the element under your pointer past its own layer and marks it in the page with a number
+ * (`data-gitspace-pick`); the extension reads it through the debugger, attached for it, as a share's hit test reads one (box, accessible role and name, selectors) and crops a JPEG of
  * the element or the dragged area. Threads are the workspace's: listed for the tab's page when comment mode turns on,
  * when the page changes and when the account says they changed (its `comments` notice), and written with requests
  * signed by this Chrome's pairing key (`POST /api/browser-relay/comments`, label `comment`). While a capture records the
@@ -45,13 +45,18 @@ export type CommentHost = {
   request(request: RuntimeBrowserCommentChromeRequest): Promise<unknown>;
   /** Draws the tab's overlay again, with `view`. */
   draw(targetId: string): void;
+  /** Takes the comment tool off the tab's overlay. */
+  close(targetId: string): void;
   /** The workspace group holding the tab; null for a tab in none. */
   group(targetId: string): Promise<CommentGroup | null>;
   /** The element the tab's overlay picked under `seq`; null when it has none or it cannot be read. */
   picked(targetId: string, seq: number): Promise<CommentTarget | null>;
   /** A base64 JPEG of an area of the tab without the overlay; null when Chrome draws none. */
   crop(targetId: string, area: CommentArea): Promise<string | null>;
+  /** The tab's page now, read through the debugger. */
   page(targetId: string): Promise<CommentPage>;
+  /** The URL of the tab's page now. */
+  url(targetId: string): Promise<string>;
 };
 
 /** One comment of a thread as the overlay shows it: who (an agent as `main` or `agent`), when, what. */
@@ -63,20 +68,21 @@ export type CommentPin = {
   scroll: { x: number; y: number } | null; viewport: { w: number; h: number } | null; resolved: string | null; comments: CommentLine[];
 };
 /**
- * What the overlay draws in comment mode: its own bar (none while a capture's bar shows), your name and the workspace,
+ * What the overlay draws in comment mode, of one `session` (each time it turns on: the overlay never lets a view of one
+ * you closed open it again): its own bar (none while a capture's bar shows), your name and the workspace,
  * the page's threads, the label of what is under your pointer (`hover`, for the overlay's pick `seq`), the comment
  * being written (`draft`, once its anchor is read), the write in flight (`busy`, by the overlay's `seq`) and the last
  * one finished (`done`, with its error), a thread to open once (`focus`), and why the threads could not be listed.
  */
 export type CommentView = {
-  bar: boolean; name: string; workspace: string; threads: CommentPin[];
+  session: string; bar: boolean; name: string; workspace: string; threads: CommentPin[];
   hover: { seq: number; label: string } | null; draft: { seq: number; label: string; area: boolean } | null;
   busy: number | null; done: { seq: number; error: string | null } | null; focus: { thread: string; seq: number } | null; error: string | null;
 };
 
 type CommentRequest = Extract<RuntimeBrowserCommentChromeRequest, { op: 'comment' }>;
 type Tab = CommentGroup & {
-  capture: CommentCapture | null; threads: RuntimeBrowserCommentThread[]; name: string; error: string | null;
+  session: string; capture: CommentCapture | null; threads: RuntimeBrowserCommentThread[]; name: string; error: string | null;
   hover: CommentView['hover']; hovering: { running: boolean; next: number | null };
   draft: { seq: number; label: string; request: Omit<CommentRequest, 'text' | 'capture'> } | null;
   busy: number | null; done: CommentView['done']; focus: CommentView['focus']; listed: number;
@@ -105,7 +111,7 @@ export class ChromeComments {
   async start(targetId: string, group: CommentGroup, capture: CommentCapture | null = null): Promise<void> {
     const current = this.tabs.get(targetId);
     if (current?.groupId === group.groupId) { current.capture = capture; this.host.draw(targetId); return; }
-    const tab: Tab = { ...group, capture, threads: [], name: '', error: null, hover: null, hovering: { running: false, next: null }, draft: null, busy: null, done: null, focus: null, listed: 0 };
+    const tab: Tab = { ...group, session: crypto.randomUUID(), capture, threads: [], name: '', error: null, hover: null, hovering: { running: false, next: null }, draft: null, busy: null, done: null, focus: null, listed: 0 };
     this.tabs.set(targetId, tab);
     this.host.draw(targetId);
     await this.list(targetId, tab);
@@ -117,7 +123,7 @@ export class ChromeComments {
     if (!tab) return;
     this.tabs.delete(targetId);
     if (fromPage) tab.capture?.ended();
-    this.host.draw(targetId);
+    this.host.close(targetId);
   }
 
   /** Opens a thread's popover on a tab in comment mode (Show on page in GitSpace). */
@@ -159,22 +165,28 @@ export class ChromeComments {
       }];
     });
     const draft = tab.draft && { seq: tab.draft.seq, label: tab.draft.label, area: tab.draft.request.anchor.area === true };
-    return { bar: tab.capture === null, name: tab.name, workspace: tab.workspace, threads, hover: tab.hover, draft, busy: tab.busy, done: tab.done, focus: tab.focus, error: tab.error };
+    return { session: tab.session, bar: tab.capture === null, name: tab.name, workspace: tab.workspace, threads, hover: tab.hover, draft, busy: tab.busy, done: tab.done, focus: tab.focus, error: tab.error };
   }
 
   /**
-   * A call of the overlay's binding about comments, `comment <what> <json>`: `on` and `off` (the toolbar's Comment,
-   * Done, Esc), `hover` (what is under your pointer now), `pick` (a click, `at` as an empty area there, or a dragged
-   * `area`), `cancel` (the draft), `post`, `reply` and `resolve` (each with the overlay's `seq`, which `busy` and `done`
-   * name).
+   * A message of the overlay about comments, `comment <what> <json>`: `on` and `off` (the toolbar's Comment, Done,
+   * Esc), `hover` (what is under your pointer now), `pick` (a click, `at` as an empty area there, or a dragged `area`),
+   * `cancel` (the draft), `post`, `reply` and `resolve` (each with the overlay's `seq`, which `busy` and `done` name).
+   * Any but `off` from a tab not in comment mode here, which the page still is in (this service worker started again
+   * since), turns it on for the tab's workspace group first, as `on` does.
    */
-  async binding(targetId: string, payload: string): Promise<void> {
+  async message(targetId: string, payload: string): Promise<void> {
     const [, what = '', json = ''] = /^comment (\w+) ?(.*)$/s.exec(payload) ?? [];
     let value: unknown;
     try { value = JSON.parse(json || '{}'); } catch { return; }
     const args = typeof value === 'object' && value !== null ? value : {};
-    if (what === 'on') { const group = await this.host.group(targetId); if (group) await this.start(targetId, group); return; }
     if (what === 'off') { this.stop(targetId, true); return; }
+    if (what === 'on' || !this.tabs.has(targetId)) {
+      const group = await this.host.group(targetId);
+      if (!group) return;
+      await this.start(targetId, group, this.tabs.get(targetId)?.capture ?? null);
+      if (what === 'on') return;
+    }
     const tab = this.tabs.get(targetId);
     const seq = 'seq' in args && typeof args.seq === 'number' && Number.isSafeInteger(args.seq) ? args.seq : null;
     if (!tab || seq === null) return;
@@ -248,7 +260,7 @@ export class ChromeComments {
   private async list(targetId: string, tab: Tab): Promise<void> {
     const listed = ++tab.listed;
     try {
-      const { url } = await this.host.page(targetId);
+      const url = await this.host.url(targetId);
       const value = await this.host.request({ op: 'list', groupId: tab.groupId, url: url.slice(0, 8192) });
       if (typeof value !== 'object' || value === null || !('threads' in value) || !Array.isArray(value.threads) || !value.threads.every(isThread)) throw new Error('The account answered the comments with an unexpected reply');
       if (this.tabs.get(targetId) !== tab || tab.listed !== listed) return;

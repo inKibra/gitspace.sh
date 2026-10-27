@@ -11,13 +11,13 @@
 //
 // Chrome must not already run on that profile. Posting writes real comments to the workspace's page comments on
 // https://httpbin.org/, each saying it came from this check. Exits 0 when every check passes.
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import puppeteer, { type CDPSession, type Page, type Protocol } from 'puppeteer-core';
 import { z } from 'zod';
 import { extensionFiles } from '../src/index.ts';
-import { browserOverlayFunction } from '../src/overlay.ts';
 
 const { values } = parseArgs({ options: { chrome: { type: 'string' }, profile: { type: 'string' }, extension: { type: 'string' }, account: { type: 'string' }, workspace: { type: 'string', default: '' }, port: { type: 'string', default: '9339' } } });
 if (!values.chrome || !values.profile || !values.extension || !values.account) throw new Error('Pass --chrome, --profile, --extension and --account');
@@ -70,6 +70,18 @@ async function visibleButton(cdp: CDPSession, label: string) {
   for (const node of buttons) if (await cdp.send('DOM.getBoxModel', { backendNodeId: node.backendNodeId }).catch(() => null)) return node;
   return undefined;
 }
+/** The text GitSpace draws on the page (under `data-gitspace-overlay` hosts, closed shadow roots included). */
+async function overlayText(cdp: CDPSession) {
+  const texts: string[] = [];
+  const walk = (node: DomNode) => { if (node.nodeType === 3 && node.nodeValue.trim()) texts.push(node.nodeValue.trim()); for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) walk(child); };
+  for (const host of await find(cdp, node => (node.attributes ?? []).includes('data-gitspace-overlay'))) walk(host);
+  return texts.join(' | ');
+}
+/** Whether a text field is drawn on the page (it has a box). */
+async function visibleField(cdp: CDPSession) {
+  for (const node of await find(cdp, node => node.nodeName === 'TEXTAREA')) if (await cdp.send('DOM.getBoxModel', { backendNodeId: node.backendNodeId }).catch(() => null)) return true;
+  return false;
+}
 /** A real click at the middle of an element. */
 async function click(page: Page, cdp: CDPSession, node: DomNode) {
   const { model } = await cdp.send('DOM.getBoxModel', { backendNodeId: node.backendNodeId });
@@ -80,6 +92,16 @@ async function click(page: Page, cdp: CDPSession, node: DomNode) {
 async function until(check: () => Promise<boolean>, ms = 4000) {
   for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(150)) if (await check()) return true;
   return check();
+}
+/** The middle of each numbered pin drawn now. */
+async function pinCentres(cdp: CDPSession) {
+  const centres: { x: number; y: number }[] = [];
+  for (const node of await find(cdp, node => node.nodeName === 'BUTTON' && /^\d+$/.test((node.children ?? []).map(child => child.nodeValue).join('')))) {
+    const box = await cdp.send('DOM.getBoxModel', { backendNodeId: node.backendNodeId }).catch(() => null);
+    const [x1 = 0, y1 = 0, x2 = 0, , , y3 = 0] = box?.model.content ?? [];
+    if (box) centres.push({ x: (x1 + x2) / 2, y: (y1 + y3) / 2 });
+  }
+  return centres;
 }
 /** Comment mode shows its strip, whose button says Done (Esc). */
 const commentMode = async (cdp: CDPSession) => Boolean(await visibleButton(cdp, 'Done (Esc)'));
@@ -120,14 +142,23 @@ async function restartWorker() {
   await browserSession.send('Target.closeTarget', { targetId: (await worker()).targetId });
   await Bun.sleep(1000);
 }
-/** A toolbar in comment mode that an earlier session drew in a world of its own, its session gone. */
+/** The toolbar of extension 5.12.5, which drew it in a CDP isolated world of its own through the debugger: the
+ * toolbar an earlier version leaves on a page when the extension updates. */
+const EARLIER_OVERLAY = await (async () => {
+  const source = Bun.spawnSync(['git', 'show', '83e133d1:packages/browser-extension/src/overlay.ts'], { cwd: import.meta.dir });
+  if (!source.success) throw new Error('git show of the 5.12.5 overlay failed');
+  const file = join(await mkdtemp(join(tmpdir(), 'gitspace-overlay-')), 'overlay.ts');
+  await writeFile(file, source.stdout);
+  return z.object({ browserOverlayFunction: z.string() }).parse(await import(file)).browserOverlayFunction;
+})();
+/** A toolbar in comment mode that an earlier version drew in a world of its own, its session gone. */
 async function staleToolbar() {
   const session = await page.createCDPSession();
   const { frameTree } = await session.send('Page.getFrameTree');
   const world = await session.send('Page.createIsolatedWorld', { frameId: frameTree.frame.id, worldName: 'earlier-session' });
   const show = { mode: 'idle', workspace: workspace?.name ?? '', agent: null, doing: null, binding: '__earlierSession', capture: 'ready', recording: null, comments: true };
   const view = { bar: true, name: 'You', workspace: workspace?.name ?? '', threads: [], hover: null, draft: null, busy: null, done: null, focus: null, error: null };
-  for (const command of [{ show }, { comment: view }]) await session.send('Runtime.callFunctionOn', { functionDeclaration: browserOverlayFunction, arguments: [{ value: command }], executionContextId: world.executionContextId, returnByValue: true });
+  for (const command of [{ show }, { comment: view }]) await session.send('Runtime.callFunctionOn', { functionDeclaration: `function(json) { return (${EARLIER_OVERLAY}).call(this, JSON.parse(json)); }`, arguments: [{ value: JSON.stringify(command) }], executionContextId: world.executionContextId, returnByValue: true });
   await session.detach();
 }
 
@@ -158,23 +189,38 @@ for (const scenario of scenarios) {
     record(scenario.name, 'Done leaves comment mode', await until(async () => !await commentMode(cdp)));
 
     await commenting();
-    const pins = async () => (await find(cdp, node => node.nodeName === 'BUTTON' && /^\d+$/.test((node.children ?? []).map(child => child.nodeValue).join('')))).length;
-    const before = await pins();
-    // A spot no earlier check's thread holds: its pin would open that thread instead of a new comment.
-    await page.mouse.click(120 + Math.floor(Math.random() * 900), 330 + Math.floor(Math.random() * 300));
+    // The page's threads as the comment tool counts them ("· 16 comments"): it shows at once and changes when the
+    // extension's list of them comes.
+    const threads = async () => Number(/· (\d+) comments?/.exec(await overlayText(cdp))?.[1] ?? -1);
+    // A spot away from every pin an earlier check left (a click on one opens that thread instead of a new comment).
+    const taken = await pinCentres(cdp);
+    let spot = { x: 0, y: 0 };
+    for (let attempt = 0; attempt < 200; attempt++) {
+      spot = { x: 120 + Math.floor(Math.random() * 900), y: 330 + Math.floor(Math.random() * 300) };
+      if (taken.every(pin => Math.hypot(pin.x - spot.x, pin.y - spot.y) > 48)) break;
+    }
+    await page.mouse.click(spot.x, spot.y);
     let posted = false;
-    if (await until(async () => (await find(cdp, node => node.nodeName === 'TEXTAREA')).length > 0)) {
-      const [field] = await find(cdp, node => node.nodeName === 'TEXTAREA');
-      if (field) await click(page, cdp, field);
+    // The draft's field, clicked once it is drawn (each redraw of the popover draws it anew).
+    const fieldClicked = async () => {
+      for (const field of await find(cdp, node => node.nodeName === 'TEXTAREA')) if (await click(page, cdp, field).then(() => true, () => false)) return true;
+      return false;
+    };
+    if (await until(fieldClicked)) {
       await page.keyboard.type(`End-to-end check (${scenario.name}) ${new Date().toISOString()}`);
       // The draft is ready once the extension read what was clicked: its line names it instead of "On …".
       await until(async () => (await find(cdp, node => node.nodeType === 3 && node.nodeValue.startsWith('On ') && !node.nodeValue.startsWith('On …'))).length > 0, 8000);
+      // The threads before posting, once their list came (a service worker that started again lists them anew).
+      let before = await threads();
+      for (let steady = Date.now(); Date.now() - steady < 1500; await Bun.sleep(150)) { const now = await threads(); if (now !== before) { before = now; steady = Date.now(); } }
       const post = await visibleButton(cdp, 'Comment');
       if (post) await click(page, cdp, post);
-      // Posted: the draft closed and the page has one more thread's pin.
-      posted = await until(async () => (await find(cdp, node => node.nodeName === 'TEXTAREA')).length === 0 && await pins() === before + 1, 10_000);
+      // Posted: the draft closed and the page has one more thread.
+      posted = await until(async () => !await visibleField(cdp) && await threads() === before + 1, 10_000);
     }
     record(scenario.name, 'a comment posts', posted);
+    // What GitSpace's toolbar showed instead, the draft and any failure it said among it.
+    if (!posted) console.log(`      ${JSON.stringify(await overlayText(cdp))}`);
     await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
   } finally { await cdp.detach().catch(() => {}); }
 }

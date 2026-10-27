@@ -2,7 +2,7 @@ import { createModels, lazyStream, type Api, type Model, type Context, type Tran
 import { z } from 'zod';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { isModelType } from '@earendil-works/pi-ai';
-import type { ProviderResponse } from '@earendil-works/pi-ai';
+import type { Credential, ProviderResponse } from '@earendil-works/pi-ai';
 import { applyProviderCatalog, limitContextWindows } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
@@ -269,12 +269,17 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       throw new Error('Account retry invariant violated');
     }
     async function available(providerId?: string): Promise<AnyModel[]> {
-      const enabled = new Set((await options.vault.list(options.profileId, providerId)).map(account => account.provider));
-      return list.filter(provider => enabled.has(provider.id) && (providerId === undefined || provider.id === providerId)).flatMap(provider => {
+      const kinds = new Map<string, Set<CredentialAccount['type']>>();
+      for (const account of await options.vault.list(options.profileId, providerId)) kinds.set(account.provider, (kinds.get(account.provider) ?? new Set()).add(account.type));
+      return list.filter(provider => kinds.has(provider.id) && (providerId === undefined || provider.id === providerId)).flatMap(provider => {
         const models = provider.getAllModels?.() ?? provider.getModels();
-        if (provider.filterAllModels) return [...provider.filterAllModels(models, undefined)];
+        // A provider narrows its models by the kind of credential (a ChatGPT sign-in reaches no OpenAI classifier): a
+        // model is available when one of the profile's accounts for it can use it. The stand-in carries the kind only.
+        const usable = [...kinds.get(provider.id) ?? []].map((kind): Credential => kind === 'oauth' ? { type: 'oauth', access: '', refresh: '', expires: 0 } : { type: 'api_key' });
+        if (provider.filterAllModels) { const kept = new Set(usable.flatMap(credential => provider.filterAllModels?.(models, credential) ?? [])); return models.filter(model => kept.has(model)); }
         const chat = models.filter(model => isModelType(model, 'chat'));
-        return [...(provider.filterModels?.(chat, undefined) ?? chat), ...models.filter(model => !isModelType(model, 'chat'))];
+        const keptChat = new Set(usable.flatMap(credential => provider.filterModels?.(chat, credential) ?? chat));
+        return [...chat.filter(model => keptChat.has(model)), ...models.filter(model => !isModelType(model, 'chat'))];
       });
     }
     const facade: Models = {

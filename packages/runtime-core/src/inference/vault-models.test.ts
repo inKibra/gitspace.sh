@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createAssistantMessageEventStream,
   InMemoryModelsStore,
+  isModelType,
   type Api,
   type AssistantMessage,
   type ClassifierModel,
@@ -59,7 +60,12 @@ async function fixture(options: {
   settings?: VaultModelsOptions['settings'];
   chats?: readonly Model<Api>[];
   gate?: RequestGate;
+  /** The provider narrows its models by the kind of credential, as OpenAI's does. */
+  filterAllModels?: Provider['filterAllModels'];
+  /** The kind of the profile's accounts (OAuth sign-ins unless said). */
+  accountType?: CredentialAccount['type'];
 } = {}) {
+  const accounts = pool.map(account => ({ ...account, type: options.accountType ?? account.type }));
   const effects: RequestEffect[] = [];
   const resolutions: { accountId: string; refresh: boolean }[] = [];
   const imageEffects: string[] = [];
@@ -70,7 +76,7 @@ async function fixture(options: {
   const vault: VaultAccess = {
     async list(profileId, provider) {
       if (profileId !== 'profile') throw new Error('Unexpected profile');
-      return provider === undefined || provider === providerId ? pool.map(account => ({ ...account, cooldownUntil: out.get(account.id) ?? 0 })) : [];
+      return provider === undefined || provider === providerId ? accounts.map(account => ({ ...account, cooldownUntil: out.get(account.id) ?? 0 })) : [];
     },
     async recordFailure(input) {
       failures.push(input);
@@ -138,6 +144,7 @@ async function fixture(options: {
     } } },
     getModels: () => [...options.chats ?? [chat]],
     getAllModels: () => [...options.chats ?? [chat], image, classifier],
+    ...(options.filterAllModels ? { filterAllModels: options.filterAllModels } : {}),
     stream: transport,
     streamSimple: transport,
     async generateImages(model, _context, request) {
@@ -180,6 +187,16 @@ const classifierContext = {
 };
 
 describe('vault-bound provider dispatch', () => {
+  it('offers only models one of the profile\'s accounts can use: a classifier a sign-in cannot reach is not available, and is with an API key', async () => {
+    // As OpenAI's provider: a ChatGPT sign-in reaches its chat models but none of its classifiers.
+    const filterAllModels: Provider['filterAllModels'] = (models, credential) => credential?.type === 'oauth' ? models.filter(model => !isModelType(model, 'classifier')) : models;
+    const signedIn = await fixture({ filterAllModels });
+    expect((await signedIn.models.getAvailableOfType('classifier')).map(model => model.id)).toEqual([]);
+    expect((await signedIn.models.getAvailable()).map(model => model.id)).toEqual([chat.id]);
+    const keyed = await fixture({ filterAllModels, accountType: 'api_key' });
+    expect((await keyed.models.getAvailableOfType('classifier')).map(model => model.id)).toEqual([classifier.id]);
+  });
+
   it('disables legacy Codex even with profile overrides while retaining supported OpenAI', () => {
     const settings = { 'providers.models': { 'openai-codex': { name: 'Re-enabled legacy Codex' } } };
     const providers = describeCloudProviders(settings);

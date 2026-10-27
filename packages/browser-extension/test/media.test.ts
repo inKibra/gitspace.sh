@@ -192,7 +192,7 @@ describe('Capture', () => {
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await settle();
     expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { capture: 'ready' } });
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: 'capture', executionContextId: 50 });
+    await chrome.fromPage(1, 'capture');
     await chrome.pageEvent('target-1', 'Page.screencastFrame', { data: FRAME, sessionId: 1, metadata: {} });
     expect(chrome.streamIds).toEqual([{ targetTabId: 1 }]);
     expect(chrome.offscreenCreated).toEqual([]);
@@ -200,7 +200,7 @@ describe('Capture', () => {
     expect(start).toMatchObject({ event: 'start', targetId: 'target-1', track: 'frames', sound: false });
     expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'run', capture: 'recording' } });
 
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: 'captureStop', executionContextId: 50 });
+    await chrome.fromPage(1, 'captureStop');
     await chrome.waitFor(() => chrome.sent.some(message => typeof message.capture === 'object' && message.capture !== null && 'event' in message.capture && message.capture.event === 'end'));
     expect(chrome.sent.filter(message => message.capture).at(-1)).toMatchObject({ capture: { event: 'end', state: 'saved', reason: null, tracks: { frames: { path: 'frames.bin', index: 'frames.json', count: 1, width: 32, height: 16 } } } });
     // The script still drives the tab, which keeps painting.
@@ -213,17 +213,17 @@ describe('Capture', () => {
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await settle();
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: 'capture', executionContextId: 50 });
+    await chrome.fromPage(1, 'capture');
     await chrome.pageEvent('target-1', 'Page.screencastFrame', { data: FRAME, sessionId: 1, metadata: {} });
-    // The tab's navigations and requests come from its debugger session; the recorder runs in the overlay's world.
+    // The tab's navigations and requests come from its debugger session; the recorder runs in the extension's world of the page.
     expect(chrome.commands.filter(entry => entry.targetId === 'target-1' && ['Page.enable', 'Network.enable'].includes(entry.method)).map(entry => entry.method)).toContain('Network.enable');
     expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { capture: 'recording', recording: { tracks: true } } });
-    expect(chrome.commands.some(entry => entry.targetId === 'target-1' && String(entry.params.functionDeclaration).includes('__gitspaceCaptureRecorder'))).toBe(true);
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: `step ${JSON.stringify({ kind: 'click', locator: "getByRole('button', { name: 'Order' })", url: 'https://app.example/' })}`, executionContextId: 50 });
+    expect(chrome.pageScripts.some(script => script.tabId === 1 && script.name === 'recorder' && script.command?.binding !== undefined)).toBe(true);
+    await chrome.fromPage(1, `step ${JSON.stringify({ kind: 'click', locator: "getByRole('button', { name: 'Order' })", url: 'https://app.example/' })}`);
     await chrome.pageEvent('target-1', 'Network.requestWillBeSent', { type: 'XHR', request: { method: 'PUT', url: 'https://app.example/api/cart?token=t' } });
-    // From another world, a page cannot add steps.
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: `step ${JSON.stringify({ kind: 'click', url: 'https://app.example/' })}`, executionContextId: 99 });
-    await chrome.pageEvent('target-1', 'Runtime.bindingCalled', { name: '__gitspaceStop', payload: 'captureDone', executionContextId: 50 });
+    // From a frame of the page other than its main one, nothing adds steps.
+    await chrome.fromPage(1, `step ${JSON.stringify({ kind: 'click', url: 'https://app.example/' })}`, 3);
+    await chrome.fromPage(1, 'captureDone');
     await chrome.waitFor(() => chrome.sent.some(message => typeof message.capture === 'object' && message.capture !== null && 'event' in message.capture && message.capture.event === 'end'));
     const end = chrome.sent.filter(message => message.capture).at(-1);
     expect(end).toMatchObject({ capture: { event: 'end', state: 'saved', tracks: { frames: { count: 1 }, steps: { path: 'steps.json', count: 3 }, comments: { count: 0 } } } });
