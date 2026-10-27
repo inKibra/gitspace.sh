@@ -27,7 +27,7 @@ const DEFAULT_PERMISSIONS: Record<string, 'read' | 'write'> = {
   metadata: 'read', contents: 'write', workflows: 'write', pull_requests: 'write', issues: 'write', checks: 'write', statuses: 'write',
 };
 /** Installation events reach every App without subscribing, so they are not listed. */
-const DEFAULT_EVENTS = ['pull_request', 'issue_comment', 'pull_request_review_comment', 'issues', 'push', 'check_suite'];
+const DEFAULT_EVENTS = ['pull_request', 'pull_request_review', 'issue_comment', 'pull_request_review_comment', 'issues', 'push', 'check_suite'];
 /** GitHub remotes as projects record them: https, scp-style SSH and ssh:// URLs, with or without `.git`. */
 
 const GitHubAccountPayloadSchema = z.object({ login: GitHubLoginSchema, type: z.string() });
