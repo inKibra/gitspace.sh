@@ -1,6 +1,6 @@
 # Automations: when something happens in a project, do something
 
-> **Status: Draft for planning (2026-10-20).** Decisions from the 2026-10-20 discussion; the UI follows the Oct 17 mock (`packages/account-web/src/AutomationsMock.tsx`).
+> **Status: Draft for planning (2026-10-20).** Decisions from the 2026-10-20 discussion; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
 
 ## 1. Summary
 
