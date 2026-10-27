@@ -1,6 +1,6 @@
 # Automations: when something happens in a project, do something
 
-> **Status: Draft for planning (2026-10-20).** Decisions from the 2026-10-20 discussion; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
+> **Status: Draft for planning (2026-10-20; subject links, mentions, label triggers and replay decided 2026-10-27).** Decisions from the 2026-10-20 and 2026-10-27 discussions; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
 
 ## 1. Summary
 
@@ -29,16 +29,24 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
 
 ## 4. Concepts
 
-- **Automation:** name, enabled, trigger, conditions, action, and what to do when the same subject comes again.
-- **Trigger:** a GitHub event with chosen actions (`pull_request` `opened`/`ready_for_review`/`synchronize`/..., `issues`, `issue_comment`, `pull_request_review`, `push`, `check_suite`), a schedule (cron expression, as project crons today), or manual only.
+- **Automation:** name, enabled, trigger, conditions and action. Automations start new work; activity on a subject that already has a workspace goes to it through its subject link (below), with no automation.
+- **Trigger:** a GitHub event with chosen actions (`pull_request` `opened`/`ready_for_review`/`synchronize`/..., `issues`, `issue_comment`, `pull_request_review`, `push`, `check_suite`), a **label** added to an issue or pull request (the starter automations use `gitspace:plan`, `gitspace:code` and `gitspace:review`, starting a workspace in that mode), a schedule (cron expression, as project crons today), or manual only.
 - **Conditions:** field, operator, value: base branch, head branch, author, draft, label, changed paths; `is`, `is not`, `matches`. All must pass.
-- **Subject:** what an event is about: a pull request, an issue, or a commit. One subject has at most one workspace per automation.
+- **Subject:** what an event is about: a pull request, an issue, or a branch (a commit's or a check's subject is its branch, or the pull requests GitHub names on it).
+- **Subject link:** per project, a subject has at most one workspace. A link is made, strongest first:
+  1. by a workspace's agent or the project agent, with a tool (link this workspace, or a named one, to a pull request, issue or branch; unlink), or by a person on the workspace (**Link a pull request or issue**);
+  2. when GitSpace starts a workspace for the subject (an automation, a label, the project agent);
+  3. by branch: a pull request whose head branch is a workspace's branch, and an issue the pull request closes ("Fixes #388").
+
+  A stronger link replaces a weaker one; two workspaces on one branch resolve to the one active most recently, and the run records the choice. A link to a closed workspace reopens it.
+- **Follow-through:** an event on a linked subject goes to its workspace without an automation, within the round cap (§6). Proposed (to decide): human review comments, mentions of the tenant's bot and failed checks wake the agent; approvals, merged or closed, and passing checks are notices that do not.
+- **Mentions:** a comment mentioning the tenant's own bot (`@gitspace-<handle>`, e.g. `@gitspace-bradleat`; there is no shared GitSpace bot) goes to the subject's linked workspace; with no link, to the project agent, which may start or link one.
 - **Action:**
   - *Start a workspace for the subject*: mode (Plan, Code, Review), agent, and an instruction template (`{{pull_request.html_url}}`, `{{pull_request.base.ref}}`, ...). The rendered instruction plus the event is the workspace's first message.
   - *Message the subject's workspace*, *message a workspace*, or *message the project agent*.
   - *Ask the project agent*: the event and its provenance (§6) go to the project agent, which decides with its tools to start a workspace, message one, or skip. For judgement calls ("is this release worth a blog post?"); it costs one agent turn per event.
-- **Same subject again:** send the event to the subject's workspace (the default), or ignore it.
-- **Run:** one event as seen by one automation: the event, which conditions passed, the outcome (started, sent, queued, skipped and why, failed and why) and a timeline. Every event is recorded, skipped ones included.
+- **Run:** one event as seen by one automation or by a subject link: the event, which conditions passed, the outcome (started, sent, queued, skipped and why, failed and why) and a timeline. Every event is recorded, skipped ones included.
+- **Replay:** **Test with a past event** runs an automation's trigger and conditions against a recorded delivery and shows the run it would make (rendered instruction, target workspace) without acting; **Run it** acts on that event once.
 
 ## 5. Trust
 
@@ -77,20 +85,20 @@ One-time migration: every project cron becomes an automation with a schedule tri
 
 ## 10. Storage
 
-- `ProjectAutomationsDO` (one per project) replaces `ProjectCronsDO`: automations, runs (the last N per automation), the trust list, per-subject round counts and the subject→workspace map. One alarm drives schedules and the queue.
+- `ProjectAutomationsDO` (one per project) replaces `ProjectCronsDO`: automations, runs (the last N per automation), the trust list, per-subject round counts and the subject links. One alarm drives schedules and the queue.
 - `GitHubAppDO` keeps recording deliveries and routes each one to the projects whose `repositoryReference` matches the delivery's repository.
-- Runs hold their event payload trimmed to the fields conditions and templates read.
+- Runs hold their event payload trimmed to the fields conditions and templates read; replay reads the delivery GitHubAppDO recorded.
 
 ## 11. UI
 
-As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs.
+As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. Removed from the mock: "Same subject again" (subject links replace it), automations defined in repository files (out of scope), and a schedule run failing on an offline machine (runs execute in the cloud).
 
 ## 12. Milestones
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
 | **A0** | Schedules | `ProjectAutomationsDO`; crons migrated; schedule and manual triggers; message the project agent / a workspace; runs and history; Automations page replaces Crons. |
-| **A1** | GitHub events | Deliveries routed to projects; triggers and conditions; start a workspace for the subject; same-subject routing; trust and approval; concurrency and queue. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped with Approve. |
+| **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch) and follow-through; mentions of the tenant's bot; trust and approval; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped with Approve; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
 | **A2** | Loops and decisions | Provenance; round and daily caps; *ask the project agent*. Golden test: CI fails on a run's PR, the workspace is told, the fix pushes, CI passes; a release produced by a run does not start a new run. |
 | **A3** | Lifecycle | Subject-closed notices; 7-day auto-close and checkout release. |
 
@@ -99,3 +107,5 @@ As the mock: summary (on, working now, queued, failed today), automation cards (
 1. Should approving an untrusted run also allow later events on the same subject?
 2. Template language: plain `{{path}}` substitution, or a few helpers (truncate, join labels)?
 3. Do runs need a cost cap of their own (inference spend per run), or is concurrency enough?
+4. Follow-through: which events on a linked subject wake its agent and which are notices only (proposed in §4), and is it one switch per project?
+5. Pull requests as the requester: author mode (`docs/GITHUB-INTEGRATION-DESIGN.md` §6) is decided but not built, so every pull request is the bot's; its tenant default and per-project setting need a place in the UI (Settings → GitHub).
