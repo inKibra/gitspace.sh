@@ -534,7 +534,9 @@ async function overlayCall(debuggee, command, declaration = browserOverlayFuncti
       await chrome.debugger.sendCommand(debuggee.source, 'Runtime.addBinding', { name: OVERLAY_BINDING, executionContextId: world.executionContextId });
       debuggee.overlay.contextId = world.executionContextId;
     }
-    return chrome.debugger.sendCommand(debuggee.source, 'Runtime.callFunctionOn', { functionDeclaration: declaration, arguments: [{ value: command }], executionContextId: debuggee.overlay.contextId, returnByValue: true, awaitPromise: true, ...(gesture ? { userGesture: true } : {}) });
+    // chrome.debugger drops every property whose value is null from a call's arguments, at any depth, and the overlay
+    // takes things away with null (`comment: null`, `show: null`, a view's `draft: null`): the command goes as JSON text.
+    return chrome.debugger.sendCommand(debuggee.source, 'Runtime.callFunctionOn', { functionDeclaration: `function(json) { return (${declaration}).call(this, JSON.parse(json)); }`, arguments: [{ value: JSON.stringify(command) }], executionContextId: debuggee.overlay.contextId, returnByValue: true, awaitPromise: true, ...(gesture ? { userGesture: true } : {}) });
   };
   // A context that a navigation destroyed: the next call makes the new document's world.
   try { return await call(); } catch { debuggee.overlay.contextId = null; return call(); }

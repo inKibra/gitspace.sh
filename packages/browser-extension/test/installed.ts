@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { expect } from 'bun:test';
 import { createContext, runInContext } from 'node:vm';
 import { Window } from 'happy-dom';
@@ -53,6 +54,20 @@ export const FRAME = browserBase64(Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0x00
 export const png = (n: number) => Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, n]);
 /** The icon `_favicon` serves for a page Chrome has no icon of. */
 const DEFAULT_FAVICON = png(0);
+/** The command an overlay call (`Runtime.callFunctionOn` of the overlay's function, sent as JSON text) gives the
+ * overlay as the page receives it; undefined for any other call. */
+export function overlayCommand(params: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!String(params.functionDeclaration ?? '').includes(browserOverlayFunction) || !Array.isArray(params.arguments)) return undefined;
+  const value = z.object({ value: z.unknown() }).parse(params.arguments[0]).value;
+  return z.record(z.string(), z.unknown()).parse(typeof value === 'string' ? JSON.parse(value) : value);
+}
+/** A value as chrome.debugger passes it in a call's arguments: without the properties whose value is null, at any
+ * depth (arrays keep their nulls). */
+function withoutNulls(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutNulls);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== null).map(([key, entry]) => [key, withoutNulls(entry)]));
+}
 
 /** The installed service worker on a Chrome whose workspace group (Chrome group 7) holds an agent tab on each of
  * app.example, a.docs.example and bank.example; the grant has bank.example at interact (single steps only) and
@@ -343,7 +358,13 @@ export async function installed(options: { local?: Record<string, unknown>; live
       getTargets: async () => [...tabs.values()].map(tab => ({ id: `target-${tab.id}`, tabId: tab.id, type: 'page', title: 'Page', url: tab.url })),
       attach: async (source: { targetId: string }) => { attached.push(source.targetId); },
       detach: async (source: { targetId: string }) => { detached.push(source.targetId); },
-      sendCommand: async (source: { targetId: string }, method: string, params: Record<string, unknown> = {}) => { const command = { targetId: source.targetId, method, params }; commands.push(command); return answer(command) ?? ANSWERS[method] ?? {}; },
+      sendCommand: async (source: { targetId: string }, method: string, params: Record<string, unknown> = {}) => {
+        // As Chrome's chrome.debugger does: properties whose value is null leave a call's arguments, at any depth.
+        const sent = method === 'Runtime.callFunctionOn' && Array.isArray(params.arguments) ? { ...params, arguments: params.arguments.map(argument => withoutNulls(argument)) } : params;
+        const command = { targetId: source.targetId, method, params: sent };
+        commands.push(command);
+        return answer(command) ?? ANSWERS[method] ?? {};
+      },
       onEvent: { addListener: (listener: DebuggerEvent) => { debuggerEvent = listener; } }, onDetach: { addListener: (listener: (source: { targetId: string }) => void) => { debuggerDetached.push(listener); } },
     },
     tabs: {
@@ -522,10 +543,11 @@ export async function installed(options: { local?: Record<string, unknown>; live
     await rendered();
     return { window, document: window.document, copied, rendered, close: () => window.happyDOM.close() };
   };
-  /** The methods the extension sent to tabs for the agent, without those that draw the overlay. */
-  const sentCommands = () => commands.filter(({ method, params }) => !OVERLAY_METHODS[method] && params.functionDeclaration !== browserOverlayFunction).map(({ method }) => method);
-  /** What the extension asked the overlay of each tab to do, in order. */
-  const overlays = (targetId: string) => commands.filter(command => command.targetId === targetId && command.params.functionDeclaration === browserOverlayFunction).map(({ params }) => Array.isArray(params.arguments) ? params.arguments[0]?.value : undefined);
+  /** The methods the extension sent to tabs for the agent, without those that draw the overlay (its function, or a
+   * call of it with its command as JSON text). */
+  const sentCommands = () => commands.filter(({ method, params }) => !OVERLAY_METHODS[method] && !String(params.functionDeclaration ?? '').includes(browserOverlayFunction)).map(({ method }) => method);
+  /** What the extension asked the overlay of each tab to do, in order, as the overlay receives it. */
+  const overlays = (targetId: string) => commands.filter(command => command.targetId === targetId && String(command.params.functionDeclaration ?? '').includes(browserOverlayFunction)).flatMap(({ params }): Record<string, unknown>[] => { const sent = overlayCommand(params); return sent ? [sent] : []; });
   /** Whether a request to the account is authorized as the account requires: an upload's begin, a share request and a
    * comment request carry this Chrome's signature over their label, method, path, body hash, time and nonce; a request
    * to an upload's link carries no signature at all. */

@@ -1,9 +1,10 @@
+import { z } from 'zod';
 import { describe, expect, it } from 'bun:test';
 import type { RuntimeBrowserCommentChromeRequest, RuntimeBrowserCommentThread } from '@gitspace/protocol-runtime';
 import { ChromeComments, type CommentCapture, type CommentView } from '../src/comments.js';
 import { browserOverlayPickedFunction } from '../src/overlay.js';
 import { shareTargetFunction } from '../src/share.js';
-import { type DebuggerCommand, installed, settle } from './installed.js';
+import { type DebuggerCommand, installed, overlayCommand, settle } from './installed.js';
 
 /** The tab's layout viewport: 1024×512, scrolled 300 px down. */
 const viewport = { cssLayoutViewport: { pageX: 0, pageY: 300, clientWidth: 1024, clientHeight: 512 } };
@@ -74,8 +75,8 @@ describe('the in-page comment tool on your Chrome', () => {
     await binding('comment pick {"seq":1,"at":{"x":0.3,"y":0.3,"width":0,"height":0}}');
     expect(chrome.overlays('target-1').at(-1)?.comment).toMatchObject({ draft: { seq: 1, label: 'button “Pay now”', area: false } });
     // The crop is taken with the overlay hidden, of the element where the page is scrolled to.
-    const shots = chrome.commands.filter(({ targetId, method, params }) => targetId === 'target-1' && (method === 'Page.captureScreenshot' || (method === 'Runtime.callFunctionOn' && Array.isArray(params.arguments) && params.arguments[0]?.value?.conceal !== undefined)));
-    expect(shots.map(({ method, params }) => method === 'Page.captureScreenshot' ? params.clip : Array.isArray(params.arguments) ? params.arguments[0]?.value?.conceal : null)).toEqual([true, { x: 256, y: 428, width: 256, height: 128, scale: 1 }, false]);
+    const shots = chrome.commands.filter(({ targetId, method, params }) => targetId === 'target-1' && (method === 'Page.captureScreenshot' || (method === 'Runtime.callFunctionOn' && overlayCommand(params)?.conceal !== undefined)));
+    expect(shots.map(({ method, params }) => method === 'Page.captureScreenshot' ? params.clip : overlayCommand(params)?.conceal)).toEqual([true, { x: 256, y: 428, width: 256, height: 128, scale: 1 }, false]);
     await binding('comment post {"seq":5,"text":"Pay now is hidden on phones"}');
     await chrome.waitFor(() => chrome.commentRequests.length === 2);
     expect(chrome.commentRequests.at(-1)).toEqual({
@@ -108,7 +109,7 @@ describe('the in-page comment tool on your Chrome', () => {
     const [thread] = [...chrome.commentThreads.values()];
     if (!thread) throw new Error('No thread');
     const threadId = thread.root.id;
-    const shown = () => chrome.overlays('target-1').at(-1)?.comment?.threads?.[0];
+    const shown = () => z.object({ comment: z.object({ threads: z.array(z.object({ comments: z.array(z.unknown()), resolved: z.unknown() }).loose()) }).nullish() }).loose().parse(chrome.overlays('target-1').at(-1)).comment?.threads[0];
 
     await binding(`comment reply {"seq":3,"threadId":"${threadId}","text":"  Also on tablets  "}`);
     await chrome.waitFor(() => thread.replies.length === 1);

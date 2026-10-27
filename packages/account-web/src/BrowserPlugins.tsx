@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { BROWSER_POWER_LABELS, BROWSER_POWERS, type RuntimeAccountBrowserPairingCode, type RuntimeAccountBrowserRelayStatus, type RuntimeProjectBrowserPreferences, type RuntimeProjectBrowserSettings } from '@gitspace/protocol-runtime';
-import { Badge, Button, Card, CardDescription, CardFooter, CardGroup, CardHeader, CardMedia, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Switch } from '@gitspace/ui';
+import { Badge, Button, Card, CardDescription, CardFooter, CardGroup, CardHeader, CardMedia, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputCopy, InputField, InputGroup, Switch } from '@gitspace/ui';
 import { Cloud01, Monitor01, Plus, Trash01 } from '@untitledui/icons';
 import { accountBrowserStatus, confirmAccountBrowser, downloadAccountBrowserExtension, pairAccountBrowser, projectBrowserSettings, unpairAccountBrowser, updateAccountBrowser, updateProjectBrowserSettings } from './browser-relay-client.js';
 import { approveChrome, projectApprovals, withPower } from './browser-approvals.js';
@@ -9,16 +9,9 @@ import { glyph } from './glyph.js';
 import { formatClock } from './capture/CapturePlayer.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
-/** chrome://extensions, which a web page cannot open: a click copies it to paste into the address bar. */
-function ChromeExtensionsLink() {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 4000);
-    return () => clearTimeout(timer);
-  }, [copied]);
-  return <button type="button" className="font-mono text-foreground underline decoration-dotted underline-offset-2 hover:decoration-solid" title="Copy chrome://extensions: Chrome opens it only from the address bar"
-    onClick={() => { void navigator.clipboard.writeText('chrome://extensions').then(() => setCopied(true), () => {}); }}>chrome://extensions{copied ? <span className="ml-1 font-sans text-muted-foreground no-underline">(copied: paste it into the address bar)</span> : null}</button>;
+/** chrome://extensions to copy: a web page cannot open it, Chrome's address bar can. */
+function ChromeExtensionsCopy() {
+  return <InputCopy value="chrome://extensions" label="Chrome's extensions page" size="compact" className="max-w-xs" />;
 }
 
 type Pairing = RuntimeAccountBrowserRelayStatus['pairings'][number];
@@ -210,8 +203,8 @@ function ManageChromeDialog({ pairing, projects, browsers, onClose }: { pairing:
     <DialogHeader><DialogTitle>{pairing.name}</DialogTitle><DialogDescription>{pairing.pairedAt ? `Paired ${day(pairing.pairedAt)} · fingerprint ` : 'Fingerprint '}<span className="font-mono" title={`SHA-256 ${pairing.pairedKeyFingerprint}`}>{shortFingerprint(pairing.pairedKeyFingerprint)}</span> · {seen}</DialogDescription></DialogHeader>
     <div className="flex max-h-[60dvh] flex-col gap-5 overflow-y-auto">
       <InputGroup><InputField index={0} label="Name" value={name} onChange={setName} disabled={pending !== null} /><InputField index={1} label="Note for agents" value={note} onChange={setNote} placeholder="The account it is signed in to, say" disabled={pending !== null} /></InputGroup>
-      {pairing.extension?.updateRequired ? <p className="text-caption text-destructive">This GitSpace release refuses the extension as too old. Download it again and reload it in <ChromeExtensionsLink />.</p>
-        : pairing.connected && !powersSupported ? <p className="text-caption text-[#b45309]">Update the extension in this Chrome to 5.11 for powers to work: the ones you turn on are kept, but this version cannot enforce them. Download it again and reload it in <ChromeExtensionsLink />.</p> : null}
+      {pairing.extension?.updateRequired ? <div className="flex flex-col gap-2"><p className="text-caption text-destructive">This GitSpace release refuses the extension as too old. Download it again and reload it on Chrome&apos;s extensions page (paste this in the address bar):</p><ChromeExtensionsCopy /></div>
+        : pairing.connected && !powersSupported ? <div className="flex flex-col gap-2"><p className="text-caption text-[#b45309]">Update the extension in this Chrome to 5.11 for powers to work: the ones you turn on are kept, but this version cannot enforce them. Download it again and reload it on Chrome&apos;s extensions page (paste this in the address bar):</p><ChromeExtensionsCopy /></div> : null}
       <section className="flex flex-col gap-2" aria-label="Projects">
         <div><h3 className="text-body font-medium text-foreground">Projects</h3><p className="text-caption text-muted-foreground">Approving is your personal permission, not a repository setting. Each workspace gets its own tab group; the project&apos;s approved sites still apply. The default answers requests that don&apos;t name a Chrome. Powers give agents in that project more on this Chrome.</p></div>
         {projects.length === 0 ? <p className="text-caption text-muted-foreground">Create a project first.</p> : <div className="flex flex-col divide-y divide-border rounded-xl border border-border">{projects.map(project => {
@@ -318,9 +311,12 @@ export function PairChromeDialog({ request, projects, browsers, onClose }: { req
     <DialogHeader><DialogTitle>Pair a Chrome</DialogTitle><DialogDescription>One pass from install to an agent-ready Chrome. Nothing is usable until you confirm the fingerprint.</DialogDescription></DialogHeader>
     <ol className="flex max-h-[60dvh] flex-col gap-2 overflow-y-auto">
       <PairStep number={1} title="Install the GitSpace extension" done={pairingId !== null}>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'download'} onClick={() => void run('download', browsers.downloadExtension)}>Download extension</Button>
-          <p className="text-caption text-muted-foreground">Unzip it, then <ChromeExtensionsLink /> → Developer mode → Load unpacked.</p>
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'download'} onClick={() => void run('download', browsers.downloadExtension)}>Download extension</Button>
+            <p className="text-caption text-muted-foreground">Unzip it, open Chrome&apos;s extensions page (paste this in the address bar), turn on Developer mode, then Load unpacked.</p>
+          </div>
+          <ChromeExtensionsCopy />
         </div>
       </PairStep>
       <PairStep number={2} title="Type this code into the extension's popup" done={answered !== null}>

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, setSystemTime } from 'bun:test';
 import { browserBase64, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
-import { command, installed, settle } from './installed.js';
+import { command, installed, overlayCommand, settle } from './installed.js';
 
 afterEach(() => { setSystemTime(); });
 
@@ -143,7 +143,7 @@ describe('the in-page overlay on a tab the agent uses', () => {
     await settle();
     expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Running a script', binding: '__gitspaceStop', capture: 'none', recording: null, comments: false, everything: null } }]);
     await chrome.execute(command(attemptId, 'target-1', 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 60, button: 'left', clickCount: 1 }));
-    const methods = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? JSON.stringify(Array.isArray(params.arguments) ? params.arguments[0]?.value?.cursor : null) : method);
+    const methods = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? JSON.stringify(overlayCommand(params)?.cursor ?? null) : method);
     expect(methods.slice(-2)).toEqual([JSON.stringify({ x: 40, y: 60, type: 'mousePressed' }), 'Input.dispatchMouseEvent']);
     await chrome.execute({ operation: 'release', attemptId });
     expect(chrome.overlays('target-1').at(-1)).toEqual({ remove: true });
@@ -155,7 +155,7 @@ describe('the in-page overlay on a tab the agent uses', () => {
     const attemptId = await chrome.begin();
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     await chrome.execute(command(attemptId, 'target-1', 'Page.captureScreenshot', { format: 'png' }));
-    const sequence = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? `conceal:${Array.isArray(params.arguments) ? params.arguments[0]?.value?.conceal : ''}` : method);
+    const sequence = chrome.commands.filter(({ targetId }) => targetId === 'target-1').map(({ method, params }) => method === 'Runtime.callFunctionOn' ? `conceal:${overlayCommand(params)?.conceal ?? ''}` : method);
     expect(sequence.slice(-3)).toEqual(['conceal:true', 'Page.captureScreenshot', 'conceal:false']);
   });
 
