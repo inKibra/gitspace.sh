@@ -33,6 +33,10 @@ interface Automation {
   then: ReactNode;
   modes: readonly Mode[];
   last: { at: string; status: RunStatus } | null;
+  /** Sends events on a linked pull request or issue to its workspace. */
+  linked?: true;
+  /** Installed with the project's GitHub App; editable and removable like any other. */
+  builtIn?: true;
   /** Made by the project agent and not yet switched on by a person. */
   proposed?: { at: string; asked: string; reason: string; tested: readonly { event: string; result: string; runs: boolean }[] };
 }
@@ -89,6 +93,34 @@ const AUTOMATIONS: readonly Automation[] = [
     then: <>Start a workspace for the branch with agent {code('default')} · starts in <strong className="font-semibold">Code</strong></>,
     modes: ['Code'], last: { at: '3 d ago', status: 'finished' },
   },
+  {
+    id: 'feedback', name: 'Review feedback to its workspace', enabled: true, linked: true, builtIn: true,
+    when: <>GitHub · pull request review {code('submitted')}, review comment {code('created')}</>,
+    onlyIf: [<>the pull request is linked</>, <>author is a person, not a bot</>],
+    then: <>Send to its linked workspace · <strong className="font-semibold">wakes the agent</strong></>,
+    modes: [], last: { at: '3 min ago', status: 'running' },
+  },
+  {
+    id: 'checks', name: 'Failed checks to its workspace', enabled: true, linked: true, builtIn: true,
+    when: <>GitHub · check suite {code('completed')}</>,
+    onlyIf: [<>the branch is linked</>, <>conclusion is {code('failure')}</>],
+    then: <>Send to its linked workspace · <strong className="font-semibold">wakes the agent</strong></>,
+    modes: [], last: { at: '2 d ago', status: 'finished' },
+  },
+  {
+    id: 'mentions', name: `Mentions of ${BOT}`, enabled: true, linked: true, builtIn: true,
+    when: <>GitHub · comment {code('created')} on an issue or pull request</>,
+    onlyIf: [<>mentions {code(BOT)}</>],
+    then: <>Send to its linked workspace, or to the project agent when it has none · <strong className="font-semibold">wakes the agent</strong></>,
+    modes: [], last: { at: '41 min ago', status: 'finished' },
+  },
+  {
+    id: 'closed', name: 'Merged or closed', enabled: true, linked: true, builtIn: true,
+    when: <>GitHub · pull request {code('closed')}, issue {code('closed')}</>,
+    onlyIf: [<>it is linked</>],
+    then: <>Send to its linked workspace as a notice · the agent stays asleep</>,
+    modes: [], last: { at: '1 h ago', status: 'finished' },
+  },
 ];
 
 type LinkSource = 'started' | 'agent' | 'person' | 'branch' | 'closes';
@@ -112,19 +144,6 @@ const LINKS: readonly SubjectLink[] = [
   { subject: 'PR #1131 · Storybook JIT server memory', workspace: 'storybook-jit', source: 'person', detail: 'Bradley Leatherwood', activity: 'Checks passed · 1 h ago' },
 ];
 
-type Delivery = 'wake' | 'notice' | 'ignore';
-const DELIVERY_LABEL: Record<Delivery, string> = { wake: 'Wakes the agent', notice: 'Notice only', ignore: 'Not sent' };
-const DELIVERIES: readonly Delivery[] = ['wake', 'notice', 'ignore'];
-const FOLLOW_THROUGH: readonly { event: ReactNode; delivery: Delivery }[] = [
-  { event: 'Review comments and reviews from people', delivery: 'wake' },
-  { event: <>Comments mentioning {code(BOT)}</>, delivery: 'wake' },
-  { event: 'Failed checks', delivery: 'wake' },
-  { event: 'Comments from bots', delivery: 'notice' },
-  { event: 'Approvals', delivery: 'notice' },
-  { event: 'Merged, closed or reopened', delivery: 'notice' },
-  { event: 'Passing checks', delivery: 'notice' },
-];
-
 interface Run {
   id: string;
   project: string;
@@ -138,7 +157,6 @@ interface Run {
   at: string;
   checks: readonly { label: string; passed: boolean | null }[];
   timeline: readonly { at: string; label: string }[];
-  untrusted?: string;
 }
 
 const REVIEW_CHECKS = (draft: boolean | null, author: boolean | null) => [
@@ -152,7 +170,7 @@ const RUNS: readonly Run[] = [
     timeline: [{ at: '14:02:11', label: 'Delivery received' }, { at: '14:02:11', label: 'Author has write access' }, { at: '14:02:11', label: 'Conditions passed' }, { at: '14:02:11', label: 'Queued: 2 of 2 runs working' }],
   },
   {
-    id: 'r8', project: 'inkibra core', status: 'running', by: 'Linked', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
+    id: 'r8', project: 'inkibra core', status: 'running', by: 'Review feedback to its workspace', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
     workspace: 'session-recovery', outcome: 'Review comment from @dana: woke its agent', at: '3 min ago', checks: [],
     timeline: [{ at: '13:59:02', label: 'Delivery received' }, { at: '13:59:02', label: 'Linked to session-recovery (same branch)' }, { at: '13:59:02', label: 'Review comment from a person: wakes the agent' }, { at: '13:59:03', label: 'Round 2 of 5 today on this pull request' }, { at: '13:59:03', label: 'Sent; agent working' }],
   },
@@ -163,11 +181,11 @@ const RUNS: readonly Run[] = [
   },
   {
     id: 'r6', project: 'inkibra core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1144 · Faster tone detection',
-    workspace: null, outcome: 'Author not trusted: @outside-dev', at: '20 min ago', checks: REVIEW_CHECKS(true, true), untrusted: '@outside-dev',
+    workspace: null, outcome: 'Author not trusted: @outside-dev', at: '20 min ago', checks: REVIEW_CHECKS(true, true),
     timeline: [{ at: '13:42:15', label: 'Delivery received' }, { at: '13:42:15', label: 'Skipped: @outside-dev has no write access and is not on the trust list' }],
   },
   {
-    id: 'r5', project: 'inkibra core', status: 'finished', by: 'Mention', event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
+    id: 'r5', project: 'inkibra core', status: 'finished', by: `Mentions of ${BOT}`, event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
     workspace: 'plan-issue-391', outcome: 'No linked workspace: the project agent linked it to plan-issue-391', at: '41 min ago', checks: [],
     timeline: [{ at: '13:21:08', label: 'Delivery received' }, { at: '13:21:08', label: `Comment by @bradleat mentions ${BOT}` }, { at: '13:21:08', label: 'Issue #392 has no linked workspace: sent to the project agent' }, { at: '13:21:40', label: 'Project agent linked Issue #392 to plan-issue-391 and sent it the comment' }],
   },
@@ -177,9 +195,9 @@ const RUNS: readonly Run[] = [
     timeline: [{ at: '13:24:19', label: 'Delivery received' }, { at: '13:24:19', label: 'Skipped: the pull request is a draft' }],
   },
   {
-    id: 'r3', project: 'inkibra core', status: 'finished', by: 'Linked', event: 'check_suite.completed · success', subject: 'PR #1131 · Storybook JIT server memory',
-    workspace: 'storybook-jit', outcome: 'Checks passed: notice only', at: '1 h ago', checks: [],
-    timeline: [{ at: '12:58:51', label: 'Delivery received' }, { at: '12:58:51', label: 'Linked to storybook-jit (linked by you)' }, { at: '12:58:51', label: 'Passing checks: notice only, the agent stays asleep' }],
+    id: 'r3', project: 'inkibra core', status: 'finished', by: 'Merged or closed', event: 'pull_request.closed · merged', subject: 'PR #1131 · Storybook JIT server memory',
+    workspace: 'storybook-jit', outcome: 'Merged: a notice to its workspace; the agent stays asleep', at: '1 h ago', checks: [],
+    timeline: [{ at: '12:58:51', label: 'Delivery received' }, { at: '12:58:51', label: 'Linked to storybook-jit (linked by you)' }, { at: '12:58:51', label: 'Notice added; the agent stays asleep' }],
   },
   {
     id: 'r2', project: 'inkibra core', status: 'finished', by: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
@@ -195,17 +213,17 @@ const RUNS: readonly Run[] = [
 
 const OTHER_RUNS: readonly Run[] = [
   {
-    id: 'g2', project: 'GitSpace', status: 'running', by: 'Linked', event: 'check_suite.completed · failure', subject: 'PR #212 · Extension 5.13.0',
+    id: 'g2', project: 'GitSpace', status: 'running', by: 'Failed checks to its workspace', event: 'check_suite.completed · failure', subject: 'PR #212 · Extension 5.13.0',
     workspace: 'cross-machine-browser-relay', outcome: 'Failed checks: woke its agent', at: '6 min ago', checks: [],
     timeline: [{ at: '13:56:10', label: 'Delivery received' }, { at: '13:56:10', label: 'Linked to cross-machine-browser-relay (same branch)' }, { at: '13:56:11', label: 'Failed checks: wakes the agent' }],
   },
 ];
 
-const PROJECTS: readonly { name: string; on: string; waiting: number; failed: number }[] = [
-  { name: 'inkibra core', on: '4 of 5 on · 1 proposed', waiting: 1, failed: 1 },
-  { name: 'GitSpace', on: 'No automations · 1 linked pull request', waiting: 0, failed: 0 },
-  { name: 'Golconda IDF Data Vault', on: 'No automations', waiting: 0, failed: 0 },
-  { name: 'Golconda PPVA Enrollment', on: 'No automations', waiting: 0, failed: 0 },
+const PROJECTS: readonly { name: string; on: string; failed: number }[] = [
+  { name: 'inkibra core', on: '8 of 10 on · 1 proposed', failed: 1 },
+  { name: 'GitSpace', on: '4 defaults on · 1 linked pull request', failed: 0 },
+  { name: 'Golconda IDF Data Vault', on: 'No automations · GitHub App not installed', failed: 0 },
+  { name: 'Golconda PPVA Enrollment', on: 'No automations · GitHub App not installed', failed: 0 },
 ];
 const ALL_PROJECTS = 'All projects';
 
@@ -265,6 +283,7 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
     <CardHeader>
       <CardTitle><span className="flex flex-wrap items-center gap-2">{automation.name}
         {automation.modes.map(mode => <Badge key={mode} size="compact" color={MODE_COLOR[mode]}>{mode}</Badge>)}
+        {automation.builtIn ? <Badge size="compact" color="gray">Default</Badge> : null}
       </span></CardTitle>
       <CardDescription><span className="flex flex-wrap items-center gap-1.5">
         {automation.proposed ? <><Badge size="compact" color="amber">Proposed</Badge><span>by the project agent · {automation.proposed.at}</span></>
@@ -353,33 +372,12 @@ function LinksTable({ onLink }: { onLink(): void }): ReactElement {
   </>;
 }
 
-function FollowThrough(): ReactElement {
-  const shape = useShape();
-  const [choices, setChoices] = useState<readonly Delivery[]>(FOLLOW_THROUGH.map(row => row.delivery));
-  return <div className={`${shape.container} flex flex-col bg-surface-2 shadow-surface-1`}>
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-3">
-      <strong className="text-body font-semibold">When a linked pull request or issue changes</strong>
-      <Badge size="compact" color="amber">Proposed</Badge>
-    </div>
-    <ul className="flex flex-col divide-y divide-border">
-      {FOLLOW_THROUGH.map((row, index) => <li key={index} className="grid grid-cols-1 items-center gap-2 px-5 py-2 sm:grid-cols-[minmax(0,1fr)_11rem] sm:gap-3">
-        <span className="text-body">{row.event}</span>
-        <Select value={DELIVERY_LABEL[choices[index] ?? row.delivery]} onValueChange={value => {
-          const picked = DELIVERIES.find(key => DELIVERY_LABEL[key] === value) ?? row.delivery;
-          setChoices(current => current.map((choice, at) => at === index ? picked : choice));
-        }}><SelectTrigger aria-label="Delivery" />{options(DELIVERIES.map(key => DELIVERY_LABEL[key]))}</Select>
-      </li>)}
-    </ul>
-    <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">At most 5 rounds on one pull request or issue a day; past that its workspace is told to ask you. Waking an agent counts as a run and holds a slot while it works.</p>
-  </div>;
-}
-
 function TrustList(): ReactElement {
   const shape = useShape();
   const [trusted, setTrusted] = useState<readonly string[]>(['@mira-contract', '@renovate[bot]']);
   const [draft, setDraft] = useState('');
   return <div className={`${shape.container} flex flex-col gap-3 bg-surface-2 px-5 py-4 shadow-surface-1`}>
-    <p className="text-body text-muted-foreground">An event runs only if its author has write access to <span className="font-mono text-caption text-foreground">inKibra/inkibra-core</span> (6 people, checked through the GitHub App when the event arrives) or is listed here. For a comment, the author is the commenter. Schedules and manual runs are always trusted.</p>
+    <p className="text-body text-muted-foreground">An event runs only if its author has write access to <span className="font-mono text-caption text-foreground">inKibra/inkibra-core</span> (6 people, checked through the GitHub App when the event arrives) or is listed here. For a comment, the author is the commenter. Events from anyone else do not match any automation; they show as skipped in recent runs. Schedules and manual runs are always trusted.</p>
     <div className="flex flex-wrap gap-2">{trusted.map(login => <span key={login} className={`${shape.input} flex items-center gap-1 border border-border bg-background py-0.5 pl-2 pr-0.5`}>
       <span className="font-mono text-caption">{login}</span>
       <Button variant="ghost" size="icon" type="button" aria-label={`Stop trusting ${login}`} onClick={() => setTrusted(current => current.filter(entry => entry !== login))}><XCircle width={14} height={14} strokeWidth={1.5} /></Button>
@@ -440,14 +438,10 @@ function RunDetail({ run }: { run: Run }): ReactElement {
           <span className="w-16 shrink-0 font-mono text-caption tabular-nums text-muted-foreground">{step.at}</span><span>{step.label}</span>
         </li>)}</ol>
       </section>
-      {run.untrusted ? <p className="text-caption text-muted-foreground">Approving runs this event once. Trusting {run.untrusted} lets their later events run too.</p> : null}
     </div>
     <DialogFooter>
       <Button variant="secondary" type="button">View event payload</Button>
-      {run.untrusted ? <>
-        <Button variant="secondary" type="button">Trust author</Button>
-        <Button variant="primary" type="button">Approve this run</Button>
-      </> : run.workspace ? <Button variant="primary" type="button">Open {run.workspace}</Button> : null}
+      {run.workspace ? <Button variant="primary" type="button">Open {run.workspace}</Button> : null}
     </DialogFooter>
   </>;
 }
@@ -480,24 +474,29 @@ function TestWithPastEvent(): ReactElement {
   </section>;
 }
 
-type FilterKind = 'base' | 'head' | 'branch' | 'author' | 'draft' | 'labels' | 'paths' | 'conclusion' | 'review';
+type FilterKind = 'linked' | 'mentions' | 'base' | 'head' | 'branch' | 'author' | 'draft' | 'labels' | 'paths' | 'conclusion' | 'review';
 interface Filter { kind: FilterKind; mode: string; values: readonly string[] }
 const FILTER_LABEL: Record<FilterKind, string> = {
+  linked: 'Linked', mentions: 'Mentions',
   base: 'Base branch', head: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', labels: 'Labels', paths: 'Changed files', conclusion: 'Conclusion', review: 'Review',
 };
 const FILTER_MODES: Record<FilterKind, readonly string[]> = {
+  linked: ['Is linked', 'Is not linked'], mentions: [`Mentions ${BOT}`],
   base: ['is one of', 'is not one of'], head: ['is one of', 'is not one of'], branch: ['is one of', 'is not one of'], author: ['is one of', 'is not one of'],
   draft: ['Not a draft', 'Only drafts'], labels: ['has any of', 'has none of'], paths: ['touch any of', 'touch none of'], conclusion: ['is one of'], review: ['is one of'],
 };
 /** In the product these come from the repository through the GitHub App: its branches, labels and recent authors. */
 const FILTER_SUGGESTIONS: Record<FilterKind, readonly string[]> = {
+  linked: [], mentions: [],
   base: ['main', 'develop', 'release/*'], head: ['dependabot/*', 'renovate/*', 'gitspace/*'], branch: ['main', 'develop'], author: ['dependabot[bot]', 'renovate[bot]', 'bradleat', 'dana'],
   draft: [], labels: ['bug', 'wontfix', 'needs-design', 'gitspace:plan'], paths: ['**/package.json', 'docs/**', 'packages/account-web/**'], conclusion: ['failure', 'timed_out', 'cancelled'], review: ['approved', 'changes_requested', 'commented'],
 };
 const FILTERS_BY_EVENT: Record<string, readonly FilterKind[]> = {
-  'Pull request': ['base', 'head', 'author', 'draft', 'labels', 'paths'], 'Pull request review': ['base', 'author', 'review'], 'Issue': ['author', 'labels'],
-  'Issue comment': ['author', 'labels'], 'Push': ['branch', 'author', 'paths'], 'Check suite': ['branch', 'conclusion'],
+  'Pull request': ['linked', 'base', 'head', 'author', 'draft', 'labels', 'paths'], 'Pull request review': ['linked', 'mentions', 'base', 'author', 'review'], 'Issue': ['linked', 'author', 'labels'],
+  'Issue comment': ['linked', 'mentions', 'author', 'labels'], 'Push': ['linked', 'branch', 'author', 'paths'], 'Check suite': ['linked', 'branch', 'conclusion'],
 };
+/** Filters chosen from a list, with no values to enter. */
+const CHOICE_ONLY: Partial<Record<FilterKind, true>> = { linked: true, mentions: true, draft: true };
 const EVENT_NOUN: Record<string, string> = {
   'Pull request': 'pull requests', 'Pull request review': 'reviews', 'Issue': 'issues', 'Issue comment': 'comments', 'Push': 'pushes', 'Check suite': 'check suites',
 };
@@ -506,6 +505,8 @@ function filterPhrase(filter: Filter): string {
   const values = filter.values.join(' or ');
   const negative = filter.mode.includes('not') || filter.mode.includes('none');
   switch (filter.kind) {
+    case 'linked': return filter.mode === 'Is linked' ? 'on a linked pull request or issue' : 'with no linked workspace';
+    case 'mentions': return `mentioning ${BOT}`;
     case 'base': return negative ? `not into ${values}` : `into ${values}`;
     case 'head': return negative ? `not from ${values}` : `from ${values}`;
     case 'branch': return negative ? `not on ${values}` : `on ${values}`;
@@ -544,7 +545,7 @@ function Filters({ event }: { event: string }): ReactElement {
   const shown = filters.filter(filter => offered.includes(filter.kind));
   const unused = offered.filter(kind => !filters.some(filter => filter.kind === kind));
   const update = (kind: FilterKind, change: Partial<Filter>) => setFilters(current => current.map(filter => filter.kind === kind ? { ...filter, ...change } : filter));
-  const complete = shown.filter(filter => filter.kind === 'draft' || filter.values.length);
+  const complete = shown.filter(filter => CHOICE_ONLY[filter.kind] || filter.values.length);
   return <section className="flex flex-col gap-3">
     <strong className="text-body font-semibold">Only if</strong>
     <p className="text-body">Runs for {EVENT_NOUN[event] ?? 'events'}{complete.length ? ' ' : ''}{complete.map(filterPhrase).join(', ')}{complete.length ? '' : ' of every kind'}.</p>
@@ -554,7 +555,7 @@ function Filters({ event }: { event: string }): ReactElement {
         <div className="col-span-2 row-start-2 flex min-w-0 flex-col items-stretch gap-2 sm:col-span-1 sm:col-start-2 sm:row-start-1">
           {FILTER_MODES[filter.kind].length > 1 ? <div className="w-44 max-w-full"><Select value={filter.mode} onValueChange={mode => update(filter.kind, { mode })}><SelectTrigger aria-label={`${FILTER_LABEL[filter.kind]} rule`} />{options(FILTER_MODES[filter.kind])}</Select></div>
             : <span className="pt-1.5 text-body text-muted-foreground">{FILTER_MODES[filter.kind][0]}</span>}
-          {filter.kind === 'draft' ? null : <ChipsInput kind={filter.kind} values={filter.values} onChange={values => update(filter.kind, { values })} />}
+          {CHOICE_ONLY[filter.kind] ? null : <ChipsInput kind={filter.kind} values={filter.values} onChange={values => update(filter.kind, { values })} />}
         </div>
         <Button variant="ghost" size="icon" type="button" className="col-start-2 row-start-1 sm:col-start-3" aria-label={`Remove the ${FILTER_LABEL[filter.kind]} filter`}
           onClick={() => setFilters(current => current.filter(entry => entry.kind !== filter.kind))}><Trash01 width={14} height={14} strokeWidth={1.5} /></Button>
@@ -566,7 +567,7 @@ function Filters({ event }: { event: string }): ReactElement {
         {unused.map((kind, index) => <MenuItem key={kind} index={index} label={FILTER_LABEL[kind]} onSelect={() => setFilters(current => [...current, { kind, mode: FILTER_MODES[kind][0] ?? '', values: [] }])} />)}
       </DropdownContent>
     </DropdownMenu></div> : null}
-    <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">release/*</span>, <span className="font-mono">docs/**</span>. Authors without write access who are not on the trust list are skipped, with Approve this run.</p>
+    <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">release/*</span>, <span className="font-mono">docs/**</span>. Events from authors without write access who are not on the trust list never match.</p>
   </section>;
 }
 
@@ -578,6 +579,7 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
   const [actions, setActions] = useState<ReadonlySet<string>>(new Set(['opened', 'ready_for_review']));
   const [then, setThen] = useState('Start a workspace for the subject');
   const [mode, setMode] = useState<string>('Review');
+  const [delivery, setDelivery] = useState('Wakes the agent');
   const [agent, setAgent] = useState('reviewer');
   const [prompt, setPrompt] = useState('Review {{pull_request.html_url}} against {{pull_request.base.ref}}. Leave one review with inline comments; request changes only for correctness or security problems.');
   return <>
@@ -607,11 +609,12 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
 
       <section className="flex flex-col gap-3">
         <strong className="text-body font-semibold">Then</strong>
-        <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(['Start a workspace for the subject', 'Message a workspace', 'Message the project agent', 'Ask the project agent'])}</Select></Field>
+        <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(['Start a workspace for the subject', 'Send to the linked workspace', 'Message a workspace', 'Message the project agent', 'Ask the project agent'])}</Select></Field>
         {then === 'Start a workspace for the subject' ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Starts in"><Select value={mode} onValueChange={setMode}><SelectTrigger aria-label="Starts in" />{options(['Plan', 'Code', 'Review'])}</Select></Field>
           <Field label="Agent"><Select value={agent} onValueChange={setAgent}><SelectTrigger aria-label="Agent" />{options(['default', 'reviewer', 'scout'])}</Select></Field>
         </div> : null}
+        {then === 'Send to the linked workspace' ? <Field label="Delivery"><Select value={delivery} onValueChange={setDelivery}><SelectTrigger aria-label="Delivery" />{options(['Wakes the agent', 'A notice; the agent stays asleep'])}</Select></Field> : null}
         {then === 'Ask the project agent' ? <p className="text-caption text-muted-foreground">The project agent gets the event and decides: start a workspace, link it to one that already covers it, message one, or skip. One agent turn per event.</p> : null}
         <Field label="Instruction">
           <textarea rows={4} value={prompt} onChange={e => setPrompt(e.currentTarget.value)}
@@ -666,7 +669,6 @@ function AllProjects({ onPick, onOpen }: { onPick(project: string): void; onOpen
         {PROJECTS.map(entry => <li key={entry.name}><button type="button" className="flex w-full flex-wrap items-center justify-between gap-2 px-5 py-3 text-left" onClick={() => onPick(entry.name)}>
           <span className="flex flex-col gap-0.5"><span className="text-body font-medium">{entry.name}</span><span className="text-caption text-muted-foreground">{entry.on}</span></span>
           <span className="flex gap-1.5">
-            {entry.waiting ? <Badge size="compact" color="amber">{entry.waiting} waiting for approval</Badge> : null}
             {entry.failed ? <Badge size="compact" color="red">{entry.failed} failed today</Badge> : null}
           </span>
         </button></li>)}
@@ -694,10 +696,10 @@ function AutomationsMock(): ReactElement {
 
       {empty ? null : <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
         <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">
-          <Stat value="4 of 5" label="On · 1 proposed" />
+          <Stat value={all ? '12 of 14' : '8 of 10'} label="On · 1 proposed" />
           <Stat value={all ? '3 / 4' : '2 / 2'} label="Working now" />
           <Stat value={1} label="Queued" />
-          <Stat value={1} label="Waiting for approval" />
+          <Stat value={1} label="Failed today" />
         </div>
         <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">{all ? 'Each project runs at most 2 at once.' : 'At most 2 runs work at once.'} A run holds a slot only while its agent works; a workspace waiting for you does not.</p>
       </section>}
@@ -705,21 +707,26 @@ function AutomationsMock(): ReactElement {
       {all ? <AllProjects onPick={setProject} onOpen={setRun} />
         : empty ? <div className={`${shape.container} flex flex-col items-start gap-3 bg-surface-2 px-5 py-6 shadow-surface-1`}>
           <strong className="text-body font-semibold">No automations in {project}</strong>
-          <p className="max-w-xl text-body text-muted-foreground">Start work when a pull request opens, an issue is labeled, or on a schedule. You can also ask the project agent to set one up; what it proposes waits here until you switch it on.</p>
+          <p className="max-w-xl text-body text-muted-foreground">Start work when a pull request opens, an issue is labeled, or on a schedule. Installing the GitSpace GitHub App on its repository adds the default automations that send review feedback, failed checks and mentions to linked workspaces. You can also ask the project agent to set one up; what it proposes waits here until you switch it on.</p>
           <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>
         </div>
         : <>
-          <Section title="Automations">
+          <Section title="Start work">
             <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-              {AUTOMATIONS.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
+              {AUTOMATIONS.filter(automation => !automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
+            </CardGroup>
+          </Section>
+
+          <Section title="Sent to linked workspaces" aside={<span className="text-caption text-muted-foreground">Events on a linked pull request or issue that no automation matches are not sent</span>}>
+            <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
+              {AUTOMATIONS.filter(automation => automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
             </CardGroup>
           </Section>
 
           <Section title="Linked pull requests and issues"
             aside={<Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Link01)} onClick={() => setLinking(true)}>Link a pull request or issue</Button>}>
-            <p className="text-caption text-muted-foreground">Each has one workspace in this project, linked when GitSpace starts the workspace for it, when an agent or you link it, or by branch. Mention {code(BOT)} in a comment to reach its workspace; with no link, the mention goes to the project agent.</p>
+            <p className="text-caption text-muted-foreground">Each has one workspace in this project, linked when GitSpace starts the workspace for it, when an agent or you link it, or by branch. What reaches the workspace is set by the automations under Sent to linked workspaces.</p>
             <LinksTable onLink={() => setLinking(true)} />
-            <FollowThrough />
           </Section>
 
           <Section title="Trusted authors">

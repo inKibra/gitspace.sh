@@ -39,11 +39,11 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
   3. by branch: a pull request whose head branch is a workspace's branch, and an issue the pull request closes ("Fixes #388").
 
   A stronger link replaces a weaker one; two workspaces on one branch resolve to the one active most recently, and the run records the choice. A link to a closed workspace reopens it.
-- **Follow-through:** an event on a linked subject goes to its workspace without an automation, within the round cap (§6). Proposed (to decide): human review comments, mentions of the tenant's bot and failed checks wake the agent; approvals, merged or closed, and passing checks are notices that do not.
-- **Mentions:** a comment mentioning the tenant's own bot (`@gitspace-<handle>`, e.g. `@gitspace-bradleat`; there is no shared GitSpace bot) goes to the subject's linked workspace; with no link, to the project agent, which may start or link one.
+- **Linked workspaces get events through automations** (decided 2026-10-27): *Send to the linked workspace* is an action, either waking its agent or adding a notice that leaves it asleep, and *linked* is a filter. Installing the GitHub App adds four default automations to the project, editable and removable like any other: review feedback from people (reviews and review comments) wakes the agent; failed checks on a linked branch wake it; comments mentioning the tenant's bot wake it; merged or closed adds a notice. An event on a linked subject that no automation matches is not sent.
+- **Mentions:** the tenant's own bot (`@gitspace-<handle>`, e.g. `@gitspace-bradleat`; there is no shared GitSpace bot). *Mentions the bot* is a filter on comment and review events; the default mentions automation sends the comment to the subject's linked workspace, or to the project agent when it has none, which may start or link one.
 - **Action:**
   - *Start a workspace for the subject*: mode (Plan, Code, Review), agent, and an instruction template (`{{pull_request.html_url}}`, `{{pull_request.base.ref}}`, ...). The rendered instruction plus the event is the workspace's first message.
-  - *Message the subject's workspace*, *message a workspace*, or *message the project agent*.
+  - *Send to the linked workspace* (wakes its agent, or a notice), *message a workspace*, or *message the project agent*.
   - *Ask the project agent*: the event and its provenance (§6) go to the project agent, which decides with its tools to start a workspace, message one, or skip. For judgement calls ("is this release worth a blog post?"); it costs one agent turn per event.
 - **Run:** one event as seen by one automation or by a subject link: the event, which conditions passed, the outcome (started, sent, queued, skipped and why, failed and why) and a timeline. Every event is recorded, skipped ones included.
 - **Replay:** **Test with a past event** runs an automation's trigger and conditions against a recorded delivery and shows the run it would make (rendered instruction, target workspace) without acting; **Run it** acts on that event once.
@@ -54,7 +54,7 @@ Outsiders' text must not reach an agent that has write tools, secrets or your ma
 
 - An event runs only if its **actor** has write access to the repository (checked through the GitHub App when the event arrives) or is on the project's **trust list** (GitHub logins kept in GitSpace).
 - The actor is the author for an issue or pull request, and the commenter for a comment: a comment on a trusted pull request from an untrusted account is untrusted.
-- An untrusted event is recorded as "Skipped: author not trusted" with **Approve this run** and **Trust this author**.
+- An untrusted event matches no automation (decided 2026-10-27: there is no approval step). It appears in recent runs as "Skipped: author not trusted"; to let that author's events run, add them to the trust list.
 - Schedules and manual runs are trusted.
 
 ## 5a. Agents and automations (decided 2026-10-27)
@@ -81,7 +81,7 @@ Some loops are the point (CI fails, the agent fixes it, pushes, CI runs again); 
 - Runs execute in the cloud runtime: the project agent, an existing workspace, or a new workspace. A workspace that needs a machine (a build, a browser on your Chrome) attaches one as usual.
 - **Concurrency:** at most N runs work at once per project (2 by default). A run holds a slot only while its agent works; a workspace waiting for you does not. Further runs queue; a queued run older than 24 hours is skipped.
 - Submission reuses the cron path: the run's request id makes a submission idempotent.
-- **Cost:** each new workspace is a runtime object plus inference. Runs count toward the storage watchdog and appear in the spend digest; the concurrency limit bounds them.
+- **Cost:** no cap per run (decided 2026-10-27); each new workspace is a runtime object plus inference. Runs count toward the storage watchdog and appear in the spend digest; the concurrency limit bounds them.
 
 ## 8. Lifecycle
 
@@ -100,21 +100,18 @@ One-time migration: every project cron becomes an automation with a schedule tri
 
 ## 11. UI
 
-A top-level page that replaces Crons in the sidebar, with the project chosen in its header; **All projects** shows the summary and recent runs of every project, and choosing a project shows its automations, links, trust list and runs. The sidebar item shows a count of runs waiting for approval or failed. As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. The page adds a Linked pull requests and issues section (links, how each was made, and the follow-through settings) and a Trusted authors section; at phone width its tables become stacked lists.
+A top-level page that replaces Crons in the sidebar, with the project chosen in its header; **All projects** shows the summary and recent runs of every project, and choosing a project shows its automations, links, trust list and runs. The sidebar item shows a count of runs that failed. As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. The page groups automations into Start work and Sent to linked workspaces (the defaults), and adds a Linked pull requests and issues section (links and how each was made) and a Trusted authors section; at phone width its tables become stacked lists.
 
 ## 12. Milestones
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
 | **A0** | Schedules | `ProjectAutomationsDO`; crons migrated; schedule and manual triggers; message the project agent / a workspace; runs and history; Automations page replaces Crons. |
-| **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch) and follow-through; mentions of the tenant's bot; trust and approval; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped with Approve; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
+| **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch); Send to the linked workspace and the four default automations; mentions of the tenant's bot; trust and approval; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped as not trusted; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
 | **A2** | Loops and decisions | Provenance; round and daily caps; *ask the project agent*. Golden test: CI fails on a run's PR, the workspace is told, the fix pushes, CI passes; a release produced by a run does not start a new run. |
 | **A3** | Lifecycle | Subject-closed notices; 7-day auto-close and checkout release. |
 
 ## 13. Open questions
 
-1. Should approving an untrusted run also allow later events on the same subject?
-2. Template language: plain `{{path}}` substitution, or a few helpers (truncate, join labels)?
-3. Do runs need a cost cap of their own (inference spend per run), or is concurrency enough?
-4. Follow-through: which events on a linked subject wake its agent and which are notices only (proposed in §4), and is it one switch per project?
-5. Pull requests as the requester: author mode (`docs/GITHUB-INTEGRATION-DESIGN.md` §6) is decided but not built, so every pull request is the bot's; its tenant default and per-project setting need a place in the UI (Settings → GitHub).
+1. Template language: plain `{{path}}` substitution, a few helpers (truncate, join labels), or none (the event is attached to every message)?
+2. Pull requests as the requester: author mode (`docs/GITHUB-INTEGRATION-DESIGN.md` §6) is decided but not built, so every pull request is the bot's; its tenant default and per-project setting need a place in the UI (Settings → GitHub).
