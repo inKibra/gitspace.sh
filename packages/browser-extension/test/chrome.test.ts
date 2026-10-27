@@ -16,6 +16,17 @@ describe('group reports', () => {
   });
 });
 
+describe('a script that finished', () => {
+  it('tells the relay its tabs’ channel went, so single steps there attach the tab again', async () => {
+    const chrome = await installed();
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    chrome.sent.length = 0;
+    await chrome.execute({ operation: 'release', attemptId });
+    expect(chrome.sent.filter(message => 'fenced' in message)).toEqual([{ targetId: 'target-1', fenced: true }]);
+  });
+});
+
 describe('a tab preview', () => {
   it('is a small JPEG of a group tab the agent is using, once per signed request', async () => {
     const chrome = await installed();

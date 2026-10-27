@@ -160,6 +160,9 @@ export class AccountBrowserRuntime {
     // Scripts never reach the tool runtime: the workspace's browser session object runs them, on either browser.
     if (args.action === 'run') throw new Error('Browser scripts run in the workspace’s browser session');
     let tab = args.targetId ? this.tabs.get(args.targetId) : undefined;
+    // A tab on your Chrome whose channel the extension ended (a script on it finished, or the Chrome reconnected) is
+    // attached again below: the extension checks it is still in the group and on its sites.
+    if (tab?.stale && grant.source === 'relay' && tab.grant.groupId === grant.groupId) { tab.unsubscribe(); this.tabs.delete(tab.targetId); tab = undefined; }
     if (tab && (tab.grant.groupId !== grant.groupId || tab.stale)) throw new Error('Browser target stale or outside group');
     if (tab) tab.grant = grant;
     if (args.action === 'open' || !tab && grant.source === 'relay') {

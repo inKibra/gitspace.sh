@@ -450,7 +450,10 @@ async function endRun(attemptId, reason) {
       if (reason !== 'released' && reason !== 'taken') send({ targetId, fenced: true });
       continue;
     }
-    await (reason === 'released' || reason === 'taken' ? revoke(targetId) : fence(targetId));
+    // Single steps share the channel: as it goes the relay hears (`fenced`), so their next step attaches the tab again
+    // instead of using a session that no longer exists. A script you took over is not told: its next command says why
+    // it stopped.
+    await (reason === 'taken' ? revoke(targetId) : fence(targetId));
   }
   // Each tab of the group shows what still acts there; a tab a single step still uses keeps its overlay, without the
   // script's glow.
