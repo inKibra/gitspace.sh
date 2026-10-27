@@ -241,17 +241,19 @@ async function groupRecord(grant, establish = false) {
   if (record) { try { await chrome.tabGroups.get(record.chromeGroupId); } catch { await persist(key, null); return { key, browserEpoch }; } }
   return { key, record, browserEpoch };
 }
-/** After a Chrome restart the record names a group and tabs that no longer exist, and Chrome has restored the group
- * under a new id: the record adopts it (`restoredGroup`) with each of its tabs as one you dragged in, or is dropped. */
+/** In a new browser epoch the record names a group it last saw in another one: after an extension reload (an update)
+ * that group and its tabs still exist under the same ids and the record keeps them; after a Chrome restart Chrome has
+ * restored the group under a new id and the record adopts it (`restoredGroup`) with each of its tabs as one you dragged
+ * in. Otherwise the record is dropped. */
 function readopt(key, grant, browserEpoch) {
   return serially(async () => {
     const current = await stored(key);
     if (current?.groupId !== grant.groupId) return undefined;
     if (current.browserEpoch === browserEpoch) return current;
     const bound = (await groupRecords()).filter(other => other.key !== key && other.record.browserEpoch === browserEpoch).map(other => other.record.chromeGroupId);
-    const chromeGroupId = restoredGroup(await chrome.tabGroups.query({}), grant.groupName, groupColor(grant.workspaceId), bound);
+    const chromeGroupId = restoredGroup(await chrome.tabGroups.query({}), grant.groupName, groupColor(grant.workspaceId), bound, current.chromeGroupId);
     if (chromeGroupId === null) { await persist(key, null); return undefined; }
-    const adopted = { groupId: grant.groupId, chromeGroupId, browserEpoch, members: restoredMembers(await chrome.tabs.query({ groupId: chromeGroupId })) };
+    const adopted = { groupId: grant.groupId, chromeGroupId, browserEpoch, members: restoredMembers(await chrome.tabs.query({ groupId: chromeGroupId }), chromeGroupId === current.chromeGroupId ? current.members : {}) };
     await persist(key, adopted);
     scheduleReport(grant.groupId);
     return adopted;

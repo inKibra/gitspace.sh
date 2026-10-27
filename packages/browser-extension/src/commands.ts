@@ -34,21 +34,26 @@ export type ChromeTabGroup = { id: number; title?: string; color: string };
 export type GroupMember = { by: 'agent' | 'page' | 'you'; site: string | null };
 
 /**
- * The Chrome group a workspace's record adopts after Chrome restored it under a new id: the one group with the
- * workspace group's name and colour that no live record of another workspace holds (`bound`). None when there is no
- * such group or more than one; a new group starts then.
+ * The Chrome group a workspace's record adopts in a new browser epoch. After an extension reload (an update) Chrome
+ * keeps its group ids, so the record's own group (`previous`) is kept while it still carries the workspace group's name
+ * and colour, however many other groups share them. After a Chrome restart the ids are new: it is the one group with
+ * that name and colour that no live record of another workspace holds (`bound`); none when there is no such group or
+ * more than one, and a new group starts then.
  */
-export function restoredGroup(groups: ChromeTabGroup[], title: string, color: string, bound: number[]): number | null {
+export function restoredGroup(groups: ChromeTabGroup[], title: string, color: string, bound: number[], previous?: number): number | null {
   // A group restored while a script ran still carries the running mark.
-  const [match, ...others] = groups.filter(group => groupTitle(group.title ?? '', false) === title && group.color === color && !bound.includes(group.id));
+  const candidates = groups.filter(group => groupTitle(group.title ?? '', false) === title && group.color === color && !bound.includes(group.id));
+  if (previous !== undefined && candidates.some(group => group.id === previous)) return previous;
+  const [match, ...others] = candidates;
   return match && !others.length ? match.id : null;
 }
 
-/** The members of an adopted group. Chrome does not keep which tabs the agent opened, so each counts as one you
- * dragged in: usable on the site it shows, never closed for you. */
-export function restoredMembers(tabs: { id?: number; url?: string }[]): Record<number, GroupMember> {
+/** The members of an adopted group. What the record knew of a tab still in the group stays (`known`, after an
+ * extension reload); Chrome does not keep which other tabs the agent opened, so each counts as one you dragged in:
+ * usable on the site it shows, never closed for you. */
+export function restoredMembers(tabs: { id?: number; url?: string }[], known: Record<number, GroupMember> = {}): Record<number, GroupMember> {
   const members: Record<number, GroupMember> = {};
-  for (const tab of tabs) if (tab.id !== undefined) members[tab.id] = { by: 'you', site: siteOf(tab.url) };
+  for (const tab of tabs) if (tab.id !== undefined) members[tab.id] = known[tab.id] ?? { by: 'you', site: siteOf(tab.url) };
   return members;
 }
 
