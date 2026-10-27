@@ -496,6 +496,20 @@ const FILTERS_BY_EVENT: Record<string, readonly FilterKind[]> = {
   'Issue comment': ['linked', 'mentions', 'author', 'labels'], 'Push': ['linked', 'branch', 'author', 'paths'], 'Check suite': ['linked', 'branch', 'conclusion'],
 };
 /** Filters chosen from a list, with no values to enter. */
+/** Fields an instruction can insert, per event; in the product they come from the event's schema. */
+const EVENT_FIELDS: Record<string, readonly { path: string; label: string }[]> = {
+  'Pull request': [
+    { path: 'pull_request.html_url', label: 'Link' }, { path: 'pull_request.title', label: 'Title' }, { path: 'pull_request.number', label: 'Number' },
+    { path: 'pull_request.user.login', label: 'Author' }, { path: 'pull_request.base.ref', label: 'Base branch' }, { path: 'pull_request.head.ref', label: 'Head branch' },
+    { path: 'pull_request.body', label: 'Description' },
+  ],
+  'Pull request review': [{ path: 'review.html_url', label: 'Link' }, { path: 'review.user.login', label: 'Reviewer' }, { path: 'review.state', label: 'State' }, { path: 'review.body', label: 'Review text' }],
+  'Issue': [{ path: 'issue.html_url', label: 'Link' }, { path: 'issue.title', label: 'Title' }, { path: 'issue.number', label: 'Number' }, { path: 'issue.user.login', label: 'Author' }, { path: 'issue.body', label: 'Description' }],
+  'Issue comment': [{ path: 'comment.html_url', label: 'Link' }, { path: 'comment.user.login', label: 'Commenter' }, { path: 'comment.body', label: 'Comment' }, { path: 'issue.title', label: 'Issue title' }],
+  'Push': [{ path: 'ref', label: 'Branch' }, { path: 'head_commit.message', label: 'Commit message' }, { path: 'compare', label: 'Compare link' }],
+  'Check suite': [{ path: 'check_suite.head_branch', label: 'Branch' }, { path: 'check_suite.conclusion', label: 'Conclusion' }, { path: 'check_suite.head_sha', label: 'Commit' }],
+};
+
 const CHOICE_ONLY: Partial<Record<FilterKind, true>> = { linked: true, mentions: true, draft: true };
 const EVENT_NOUN: Record<string, string> = {
   'Pull request': 'pull requests', 'Pull request review': 'reviews', 'Issue': 'issues', 'Issue comment': 'comments', 'Push': 'pushes', 'Check suite': 'check suites',
@@ -620,6 +634,15 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
           <textarea rows={4} value={prompt} onChange={e => setPrompt(e.currentTarget.value)}
             className={`${shape.input} w-full resize-y border border-border bg-surface-2 p-2 text-body text-foreground outline-none`} />
         </Field>
+        {trigger === 'GitHub event' ? <div className="flex flex-wrap items-center gap-2">
+          <DropdownMenu>
+            <DropdownTrigger render={<Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Plus)}>Insert a field</Button>} />
+            <DropdownContent align="start" className="min-w-[280px] w-[280px]">
+              {(EVENT_FIELDS[event] ?? []).map((field, index) => <MenuItem key={field.path} index={index} label={`${field.label} · {{${field.path}}}`} onSelect={() => setPrompt(current => `${current}{{${field.path}}}`)} />)}
+            </DropdownContent>
+          </DropdownMenu>
+          <span className="text-caption text-muted-foreground">A field in <span className="font-mono">{'{{…}}'}</span> is replaced by the event's value; Test with a past event shows the result.</span>
+        </div> : null}
         <p className="text-caption text-muted-foreground">The event arrives with the instruction as the workspace's first message, and the workspace is linked to the pull request.</p>
       </section>
 

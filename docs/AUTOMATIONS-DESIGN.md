@@ -42,7 +42,8 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
 - **Linked workspaces get events through automations** (decided 2026-10-27): *Send to the linked workspace* is an action, either waking its agent or adding a notice that leaves it asleep, and *linked* is a filter. Installing the GitHub App adds four default automations to the project, editable and removable like any other: review feedback from people (reviews and review comments) wakes the agent; failed checks on a linked branch wake it; comments mentioning the tenant's bot wake it; merged or closed adds a notice. An event on a linked subject that no automation matches is not sent.
 - **Mentions:** the tenant's own bot (`@gitspace-<handle>`, e.g. `@gitspace-bradleat`; there is no shared GitSpace bot). *Mentions the bot* is a filter on comment and review events; the default mentions automation sends the comment to the subject's linked workspace, or to the project agent when it has none, which may start or link one.
 - **Action:**
-  - *Start a workspace for the subject*: mode (Plan, Code, Review), agent, and an instruction template (`{{pull_request.html_url}}`, `{{pull_request.base.ref}}`, ...). The rendered instruction plus the event is the workspace's first message.
+  - *Start a workspace for the subject*: mode (Plan, Code, Review), agent, and an instruction. The rendered instruction plus the event is the workspace's first message.
+- **Instructions** (decided 2026-10-27): plain text with placeholders naming a field of the event, `{{pull_request.html_url}}`, `{{pull_request.base.ref}}`; no helpers. The editor's **Insert a field** lists the chosen event's fields; a placeholder naming a field the event does not have is refused when the automation is saved. Test with a past event shows the rendered instruction.
   - *Send to the linked workspace* (wakes its agent, or a notice), *message a workspace*, or *message the project agent*.
   - *Ask the project agent*: the event and its provenance (§6) go to the project agent, which decides with its tools to start a workspace, message one, or skip. For judgement calls ("is this release worth a blog post?"); it costs one agent turn per event.
 - **Run:** one event as seen by one automation or by a subject link: the event, which conditions passed, the outcome (started, sent, queued, skipped and why, failed and why) and a timeline. Every event is recorded, skipped ones included.
@@ -113,5 +114,4 @@ A top-level page that replaces Crons in the sidebar, with the project chosen in 
 
 ## 13. Open questions
 
-1. Template language: plain `{{path}}` substitution, a few helpers (truncate, join labels), or none (the event is attached to every message)?
-2. Pull requests as the requester: author mode (`docs/GITHUB-INTEGRATION-DESIGN.md` §6) is decided but not built, so every pull request is the bot's; its tenant default and per-project setting need a place in the UI (Settings → GitHub).
+1. Pull requests as the requester: author mode (`docs/GITHUB-INTEGRATION-DESIGN.md` §6) is decided but not built, so every pull request is the bot's; its tenant default and per-project setting need a place in the UI (Settings → GitHub).
