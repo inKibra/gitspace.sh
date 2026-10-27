@@ -239,17 +239,20 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `browserRelay.setup`<br>`browserRelay.start`<br>`browserRelay.stop` | `rpc.write` | F | T | T | F | Excluded | Installs/configures/starts/stops browser tooling. Browser control requires a separate workspace grant and user consent. |
 | `browserRelay.unpair` | `rpc.write`, account-scoped browser | F | T | F | F | Excluded | Human-only Forget paired browser action. Deletes the saved public key, disconnects the old identity, and issues fresh pairing details. Client devices and agent callers cannot invoke this route. |
 
-### crons
+### automations
 
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
-| `crons.list`<br>`crons.history` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. Secrets/private keys must not enter outputs; status is not a live probe unless explicitly documented. |
-| `crons.create` | `rpc.write` | F | F | F | F | Tool | Adds a scheduled agent job; its later runs can modify the workspace and external systems. |
-| `crons.update`<br>`crons.delete` | `rpc.write` | F | T | T | F | Tool | Replaces or removes a schedule, changing delayed effects. Deleting a schedule does not imply a running job stopped. |
-| `crons.runNow` | `rpc.write` | F | T | F | T | Tool | Queues a manual agent run that can modify the workspace and external systems. Returns a run record, not completed output. |
-| `crons.cancelRun` | `rpc.write` | F | T | T | F | Tool | Withdraws only the selected queued submission. If the cron has started, requires `confirmStopWorkspaceAgent: true` to stop the shared workspace agent and its children. Never auto-confirm after a queue-to-running race. |
+| `automations.list`<br>`automations.runs`<br>`automations.overview` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. The overview reads the account index's pushed summaries and opens no project object. |
+| `automations.test` | `rpc.read` | T | - | - | F | Tool | Validates a draft and returns its next three UTC run times, or that a manual automation runs only when started, and the instruction rendered with sample values. Saves and runs nothing. |
+| `automations.create` | `rpc.write` | F | F | F | F | Tool | Adds an automation that takes effect at once; its later runs message an agent and can modify the workspace and external systems. |
+| `automations.approve` | `rpc.write` | F | F | T | F | Tool | Switches on an automation the project agent proposed, at the revision the person reviewed; a stale revision is refused. Its later runs message an agent and can modify the workspace and external systems. |
+| `automations.update`<br>`automations.delete` | `rpc.write` | F | T | T | F | Tool | Replaces or removes an automation, changing delayed effects. Deleting skips its queued runs; a run already working in its workspace finishes. |
+| `automations.runNow` | `rpc.write` | F | T | F | T | Tool | Queues a manual run that messages an agent and can modify the workspace and external systems. Returns a run record, not completed output. |
+| `automations.cancelRun` | `rpc.write` | F | T | T | F | Tool | Skips a queued run, or withdraws a submission its workspace has not started; once its agent has started, stops the shared workspace agent and its children. |
+| `automations.updateSettings` | `rpc.write` | F | F | T | F | Tool | Changes the project's concurrency and daily run cap, which every automation runs under. |
 
-Only one run per cron may be queued or running. Queue time does not count as execution time. A queued run expires after the shorter of its schedule interval and 24 hours; the scheduler withdraws that submission and records “Skipped: workspace busy.” After one hour of execution, it records an overdue notice in history and the workspace transcript without stopping the agent. The eventual terminal receipt supplies the final outcome.
+At most `concurrency` runs work at once per project; more queue, and a run queued for 24 hours is recorded as "Skipped: waited more than a day for a slot". Past the daily run cap (per automation, per UTC day) a run is recorded as "Skipped: daily run cap". A run's submission carries request id `automation:<run>`, so a lost reply cannot submit twice; its workspace reports when the run's turn starts and ends (or stops to ask a person), and nothing polls it. People act at once through these tools; only the project agent's own `space_automations` tool proposes, and a proposal does not run until approved.
 
 ### skills
 
@@ -363,7 +366,7 @@ These are observed implementation behaviors, not hypothetical naming concerns:
 | `inference.list`, `inference.events`, `providers.list` | [Inference and provider handlers](../packages/account-worker/src/account-cloud-rpc.ts) can initialize or migrate inference state. | One-time initialization and migration are housekeeping; advertised read-only and require `rpc.read`, including for bounded events. |
 | `mcp.discover` | [Discovery](../packages/account-machine/src/local-mcp.ts) reloads a live session or creates a temporary one. Stdio integrations may launch processes. | Requires read and write authority; advertised as non-read-only, destructive, and open-world. |
 
-The annotation table classifies these by caller-visible effect: one-time initialization, migration, and reconciliation toward recorded desired state stay read-only, while reloading or launching integrations on the caller's behalf (`mcp.discover`) does not. Inspect the complete effect chain, including event-driven work and delayed cron execution, before changing an annotation.
+The annotation table classifies these by caller-visible effect: one-time initialization, migration, and reconciliation toward recorded desired state stay read-only, while reloading or launching integrations on the caller's behalf (`mcp.discover`) does not. Inspect the complete effect chain, including event-driven work and delayed automation runs, before changing an annotation.
 
 ### 2. Human provenance is not an input enum
 
@@ -425,7 +428,7 @@ Verified in this checkout, without deploying:
 
 ## Source map and verification
 
-- [Account router](../packages/account-worker/src/account-cloud-rpc.ts), [configuration/MCP/crons](../packages/account-worker/src/account-configuration-rpc.ts), [Inspector](../packages/account-worker/src/account-inspector-rpc.ts), [typed Inspector authority](../packages/account-worker/src/space-context.ts).
+- [Account router](../packages/account-worker/src/account-cloud-rpc.ts), [configuration/MCP/automations](../packages/account-worker/src/account-configuration-rpc.ts), [Inspector](../packages/account-worker/src/account-inspector-rpc.ts), [typed Inspector authority](../packages/account-worker/src/space-context.ts).
 - [Machine router](../packages/account-machine/src/rpc-router.ts), [environment runtime](../packages/account-machine/src/workspace-environment.ts), [integration runtime](../packages/account-machine/src/local-mcp.ts).
 - [Device capabilities and scopes](../packages/protocol/src/device-grant.ts), [signed machine dispatch](../packages/account-machine/src/signed-rpc.ts), [Inspector input schemas](../packages/protocol/src/inspector-contract.ts).
 - [Original SDK design](FLEET.md#L906) and [parity roadmap](FLEET.md#L1043).

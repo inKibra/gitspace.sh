@@ -446,6 +446,8 @@ export async function deleteCloudProject(env: Env, userId: string, projectId: st
   }
   await authority.deleteProject(expectedRevision);
   await code.deleteRepository(artifactsProjectRepository(projectId));
+  // Its automations stop with it: their alarm goes, so no schedule fires into the deleted project.
+  await env.PROJECT_AUTOMATIONS.getByName(`${userId}:${projectId}`).erase();
   await env.USER_PROJECTS.getByName(userId).remove(projectId);
   // Every drive, workspace and LFS object of the project becomes unreadable with its scope's key.
   for (const scope of [`lfs:${projectId}`, `space:${projectId}`, ...workspaces.map(workspace => `space:${workspace.id}`)]) await forgetTenantScope(env, scope);

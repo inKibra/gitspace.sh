@@ -9,7 +9,7 @@ interface Env {
   FLEET_CATALOG: DurableObjectNamespace<import('./src/index').FleetCatalogDO>;
   USER_SETTINGS: DurableObjectNamespace<import('./src/index').UserSettingsDO>;
   PROJECT_SECRETS: DurableObjectNamespace<import('./src/index').ProjectSecretsDO>;
-  PROJECT_CRONS: DurableObjectNamespace<import('./src/index').ProjectCronsDO>;
+  PROJECT_AUTOMATIONS: DurableObjectNamespace<import('./src/index').ProjectAutomationsDO>;
   SPACE_CONTEXT: DurableObjectNamespace<import('./src/index').SpaceContextDO>;
   USER_SKILLS: DurableObjectNamespace<import('./src/index').UserSkillsDO>;
   USER_PROJECTS: DurableObjectNamespace<import('./src/index').UserProjectIndexDO>;

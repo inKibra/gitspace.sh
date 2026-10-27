@@ -27,6 +27,8 @@ export function createWorkspaceMetadataTables(storage: DurableObjectStorage): vo
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_source_checkpoint(id INTEGER PRIMARY KEY CHECK (id = 1), checkpoint TEXT NOT NULL)');
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_report(id INTEGER PRIMARY KEY CHECK (id = 1), report TEXT NOT NULL)');
   storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_project_watch(id INTEGER PRIMARY KEY CHECK (id = 1), record TEXT NOT NULL)');
+  // Automation runs submitted here whose turn's end has not reached the project's automations (automation-turns.ts).
+  storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_automation_turns(request_id TEXT PRIMARY KEY, started INTEGER NOT NULL DEFAULT 0)');
 }
 
 /** A workspace created from another workspace starts from that workspace's whole checkpoint, uncommitted edits included. */

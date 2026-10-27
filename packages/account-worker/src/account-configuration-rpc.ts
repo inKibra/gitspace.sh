@@ -1,4 +1,4 @@
-import { skillUpdateSchema, type GitSpaceRpcContext, type ProjectCronDraft, type McpConnection, type McpConnectionDraft, type ProjectMcpGrant } from '@gitspace/protocol';
+import { skillUpdateSchema, type GitSpaceRpcContext, type McpConnection, type McpConnectionDraft, type ProjectMcpGrant } from '@gitspace/protocol';
 import {
   listProjectSecretsContract,
   putProjectSecretContract,
@@ -28,13 +28,17 @@ import {
   listComposioPluginToolsContract,
   updateComposioPluginToolsContract,
   disconnectComposioPluginContract,
-  listProjectCronsContract,
-  createProjectCronContract,
-  updateProjectCronContract,
-  deleteProjectCronContract,
-  runProjectCronNowContract,
-  cancelProjectCronRunContract,
-  projectCronHistoryContract,
+  listAutomationsContract,
+  createAutomationContract,
+  updateAutomationContract,
+  deleteAutomationContract,
+  approveAutomationContract,
+  runAutomationNowContract,
+  cancelAutomationRunContract,
+  automationRunsContract,
+  testAutomationContract,
+  updateAutomationSettingsContract,
+  automationsOverviewContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
@@ -42,7 +46,7 @@ import { ProjectAuthorityDO, UserProjectIndexDO, ProjectMcpGrantNotFoundError, P
 import { ProjectSecretsDO } from './project-secrets.js';
 import { UserSkillsDO, SkillRevisionConflict } from './user-skills.js';
 import { UserMcpConnectionsDO, McpConnectionNotFoundError, McpConnectionRevisionConflictError, McpConnectionValidationError, validateComposioToolPolicy } from './local-mcp.js';
-import { ProjectCronsDO, ProjectCronValidationError, ProjectCronNotFoundError, ProjectCronAlreadyRunningError } from './project-crons.js';
+import { automationFailureMessage } from './project-automations.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import { signComposioState, type CredentialVaultDO } from './application.js';
 import { requireRuntimeAccess } from './account-runtime-rpc.js';
@@ -88,9 +92,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     return { ...value, transport: value.transport };
   };
   const gateway = async () => new ComposioPluginGateway(env, await vault.getProviderSecret('composio'));
-  const validateCronTarget = async (projectId: string, draft: ProjectCronDraft) => {
-    if (draft.target.scope === 'workspace' && await projects.locateWorkspace(draft.target.spaceId) !== projectId) throw new ProjectCronValidationError('target', 'Cron workspace does not belong to its owning project');
-  };
   const listSecrets = server.implement(listProjectSecretsContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId); return ok(await secrets.list(input.projectId));
@@ -324,68 +325,133 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'disconnect', message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  const listCrons = server.implement(listProjectCronsContract).handler(async ({ input, errors }) => {
+  const automations = (projectId: string) => env.PROJECT_AUTOMATIONS.getByName(`${userId}:${projectId}`);
+  /** The person who connected this device, as a run's `requested_by` names them. */
+  const person = async () => {
+    const { profile } = await env.USER_SETTINGS.getByName(userId).get(deviceId);
+    return profile.displayName.trim() || profile.handle || 'a person';
+  };
+  const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
+  const listAutomations = server.implement(listAutomationsContract).handler(async ({ input, errors }) => {
     try {
-      await project(input.projectId); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).list(input.projectId));
+      await project(input.projectId); return ok(await automations(input.projectId).list(input.projectId));
     } catch (error) {
-      return err(errors.OperationFailed({ operation: 'listCrons', message: error instanceof Error ? error.message : String(error) }));
+      return err(errors.OperationFailed({ operation: 'listAutomations', message: failure(error) }));
     }
   });
-  const createCron = server.implement(createProjectCronContract).handler(async ({ input, errors }) => {
-    try {
-      await project(input.projectId); await validateCronTarget(input.projectId, input.draft); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).create(input));
-    } catch (error) {
-      if (error instanceof ProjectCronValidationError) return err(errors.CronInvalid({ field: error.field, message: error.message }));
-      return err(errors.OperationFailed({ operation: 'createCron', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-  const updateCron = server.implement(updateProjectCronContract).handler(async ({ input, errors }) => {
-    try {
-      await project(input.projectId); await validateCronTarget(input.projectId, input.draft); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).update(input));
-    } catch (error) {
-      if (error instanceof ProjectCronValidationError) return err(errors.CronInvalid({ field: error.field, message: error.message }));
-      if (error instanceof ProjectCronNotFoundError) return err(errors.CronNotFound({ projectId: error.projectId, cronId: error.cronId }));
-      return err(errors.OperationFailed({ operation: 'updateCron', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-  const deleteCron = server.implement(deleteProjectCronContract).handler(async ({ input, errors }) => {
-    try {
-      await project(input.projectId); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).delete(input));
-    } catch (error) {
-      if (error instanceof ProjectCronNotFoundError) return err(errors.CronNotFound({ projectId: error.projectId, cronId: error.cronId }));
-      return err(errors.OperationFailed({ operation: 'deleteCron', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-  const runNow = server.implement(runProjectCronNowContract).handler(async ({ input, errors }) => {
-    try {
-      await project(input.projectId); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).runNow(input));
-    } catch (error) {
-      if (error instanceof ProjectCronNotFoundError) return err(errors.CronNotFound({ projectId: error.projectId, cronId: error.cronId }));
-      if (error instanceof ProjectCronAlreadyRunningError) return err(errors.CronAlreadyRunning({ cronId: error.cronId, runId: error.runId, state: error.state }));
-      return err(errors.OperationFailed({ operation: 'runNow', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-  const cancelRun = server.implement(cancelProjectCronRunContract).handler(async ({ input, errors }) => {
+  const createAutomation = server.implement(createAutomationContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId);
-      return ok(await env.PROJECT_CRONS.getByName(JSON.stringify([userId, input.projectId])).cancelRun(input));
+      const outcome = await automations(input.projectId).create(input);
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      return err(refused.kind === 'invalid' ? errors.AutomationInvalid({ field: refused.field, message: refused.message }) : errors.OperationFailed({ operation: 'createAutomation', message: automationFailureMessage(refused) }));
     } catch (error) {
-      return err(errors.OperationFailed({ operation: 'cancelRun', message: error instanceof Error ? error.message : String(error) }));
+      return err(errors.OperationFailed({ operation: 'createAutomation', message: failure(error) }));
     }
   });
-  const history = server.implement(projectCronHistoryContract).handler(async ({ input, errors }) => {
+  const updateAutomation = server.implement(updateAutomationContract).handler(async ({ input, errors }) => {
     try {
-      await project(input.projectId); return ok(await (env.PROJECT_CRONS as DurableObjectNamespace<ProjectCronsDO>).getByName(JSON.stringify([userId, input.projectId])).history(input));
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).update(input);
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      if (refused.kind === 'invalid') return err(errors.AutomationInvalid({ field: refused.field, message: refused.message }));
+      if (refused.kind === 'notFound') return err(errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }));
+      return err(errors.OperationFailed({ operation: 'updateAutomation', message: automationFailureMessage(refused) }));
     } catch (error) {
-      if (error instanceof ProjectCronNotFoundError) return err(errors.CronNotFound({ projectId: error.projectId, cronId: error.cronId }));
-      return err(errors.OperationFailed({ operation: 'history', message: error instanceof Error ? error.message : String(error) }));
+      return err(errors.OperationFailed({ operation: 'updateAutomation', message: failure(error) }));
+    }
+  });
+  const deleteAutomation = server.implement(deleteAutomationContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).delete(input);
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      return err(refused.kind === 'notFound' ? errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }) : errors.OperationFailed({ operation: 'deleteAutomation', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'deleteAutomation', message: failure(error) }));
+    }
+  });
+  const approveAutomation = server.implement(approveAutomationContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).approve(input);
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      if (refused.kind === 'invalid') return err(errors.AutomationInvalid({ field: refused.field, message: refused.message }));
+      if (refused.kind === 'notFound') return err(errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }));
+      return err(errors.OperationFailed({ operation: 'approveAutomation', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'approveAutomation', message: failure(error) }));
+    }
+  });
+  const runAutomationNow = server.implement(runAutomationNowContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).runNow({ ...input, requestedBy: await person() });
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      if (refused.kind === 'notFound') return err(errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }));
+      if (refused.kind === 'alreadyRunning') return err(errors.AutomationAlreadyRunning({ automationId: refused.automationId, runId: refused.runId }));
+      return err(errors.OperationFailed({ operation: 'runAutomationNow', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'runAutomationNow', message: failure(error) }));
+    }
+  });
+  const cancelAutomationRun = server.implement(cancelAutomationRunContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).cancelRun(input);
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      return err(refused.kind === 'runNotFound' ? errors.RunNotFound({ projectId: input.projectId, runId: refused.runId }) : errors.OperationFailed({ operation: 'cancelAutomationRun', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'cancelAutomationRun', message: failure(error) }));
+    }
+  });
+  const automationRuns = server.implement(automationRunsContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).runs(input);
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      return err(refused.kind === 'notFound' ? errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }) : errors.OperationFailed({ operation: 'automationRuns', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'automationRuns', message: failure(error) }));
+    }
+  });
+  const testAutomation = server.implement(testAutomationContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).testDraft({ ...input, requestedBy: await person() });
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      return err(refused.kind === 'invalid' ? errors.AutomationInvalid({ field: refused.field, message: refused.message }) : errors.OperationFailed({ operation: 'testAutomation', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'testAutomation', message: failure(error) }));
+    }
+  });
+  const updateAutomationSettings = server.implement(updateAutomationSettingsContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId); return ok(await automations(input.projectId).updateSettings(input));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'updateAutomationSettings', message: failure(error) }));
+    }
+  });
+  const automationsOverview = server.implement(automationsOverviewContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(await projects.automationOverview(input.limit ?? 50));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'automationsOverview', message: failure(error) }));
     }
   });
   return {
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
-    crons: { list: listCrons, create: createCron, update: updateCron, delete: deleteCron, runNow, cancelRun, history },
+    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, updateSettings: updateAutomationSettings, overview: automationsOverview },
     mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

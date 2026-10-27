@@ -120,7 +120,7 @@ export * from './sandbox-provisioner.js';
 export * from './machine-providers.js';
 export * from './project-secrets.js';
 export * from './user-skills.js';
-export * from './project-crons.js';
+export * from './project-automations.js';
 export * from './space-context.js';
 export * from './local-mcp.js';
 export * from './composio-plugins.js';

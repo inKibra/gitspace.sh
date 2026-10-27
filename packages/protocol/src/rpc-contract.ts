@@ -23,11 +23,14 @@ import { StreamCursorCodec, streamCodec } from './stream-codec.js';
 import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
 import { DRIVE_FILE_MAX_BYTES } from './artifact-storage.js';
 import {
-  ProjectCronDraftCodec,
-  ProjectCronRunViewCodec,
-  ProjectCronViewCodec,
-  projectCronErrors,
-} from './cron-contract.js';
+  AutomationDraftCodec,
+  AutomationProjectSummaryCodec,
+  AutomationRunViewCodec,
+  AutomationSettingsCodec,
+  AutomationTestResultCodec,
+  AutomationViewCodec,
+  automationErrors,
+} from './automations-contract.js';
 import {
   AppendJournalEntryInputCodec,
   AppendReviewMessageInputCodec,
@@ -950,7 +953,9 @@ export const getMcpConnectionStatusContract = gitspaceRpc
   .query();
 
 /** A Durable Object whose storage was quarantined (it wrote past its budget, or the platform's watchdog stopped it) or
- * whose writes passed the platform's alert threshold. */
+ * that passed one of the watchdog's alert thresholds. `resolvedAt` is null while the incident is active: an alert
+ * resolves when a later watchdog run finds the object back under every threshold, or when it is dismissed; a
+ * quarantine resolves only when the object is resumed. */
 export const StorageIncidentCodec = wire.object({
   objectId: wire.string,
   className: wire.string,
@@ -958,15 +963,17 @@ export const StorageIncidentCodec = wire.object({
   kind: wire.enum(['quarantine', 'alert']),
   reason: wire.string,
   at: wire.string,
+  resolvedAt: wire.nullable(wire.string),
 });
 export type StorageIncidentView = InputOf<typeof StorageIncidentCodec>;
+/** The active storage incidents and those resolved in the last seven days, oldest first. */
 export const storageIncidentsListContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
   .output(wire.array(StorageIncidentCodec))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
-/** Resumes a quarantined object and clears its incident, or dismisses an alert. Requires account administration. */
+/** Resumes a quarantined object and resolves its incident, or dismisses an alert. Requires account administration. */
 export const storageIncidentsResumeContract = gitspaceRpc
   .procedure()
   .input(wire.object({ objectId: wire.string }))
@@ -1467,54 +1474,91 @@ export const stopWorkspaceTerminalContract = gitspaceRpc
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, TerminalNotFound: rpcErrors.terminalNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+const automationProject = { projectId: wire.string };
+const automationTarget = { projectId: wire.string, automationId: wire.string };
 
-export const listProjectCronsContract = gitspaceRpc
+/** A project's automations and the limits they run under. */
+export const listAutomationsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string }))
-  .output(wire.array(ProjectCronViewCodec))
+  .input(wire.object(automationProject))
+  .output(wire.object({ automations: wire.array(AutomationViewCodec), settings: AutomationSettingsCodec }))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
-export const createProjectCronContract = gitspaceRpc
+/** A person's automation takes effect at once (the web app, MCP). */
+export const createAutomationContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, draft: ProjectCronDraftCodec }))
-  .output(ProjectCronViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronInvalid: projectCronErrors.cronInvalid, OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object({ ...automationProject, draft: AutomationDraftCodec }))
+  .output(AutomationViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const updateProjectCronContract = gitspaceRpc
+export const updateAutomationContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, cronId: wire.string, draft: ProjectCronDraftCodec }))
-  .output(ProjectCronViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, CronInvalid: projectCronErrors.cronInvalid, OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object({ ...automationTarget, draft: AutomationDraftCodec }))
+  .output(AutomationViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const deleteProjectCronContract = gitspaceRpc
+/** Also dismisses a proposal. */
+export const deleteAutomationContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, cronId: wire.string }))
-  .output(wire.object({ projectId: wire.string, cronId: wire.string, deleted: wire.boolean }))
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object(automationTarget))
+  .output(wire.object({ projectId: wire.string, automationId: wire.string, deleted: wire.boolean }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const runProjectCronNowContract = gitspaceRpc
+/** Switches on a proposal from the project agent. */
+export const approveAutomationContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, cronId: wire.string }))
-  .output(ProjectCronRunViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, CronAlreadyRunning: projectCronErrors.cronAlreadyRunning, OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object({ ...automationTarget, revision: wire.integer({ min: 1 }) }))
+  .output(AutomationViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const cancelProjectCronRunContract = gitspaceRpc
+export const runAutomationNowContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, runId: wire.string }))
-  .output(ProjectCronRunViewCodec)
+  .input(wire.object(automationTarget))
+  .output(AutomationRunViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationAlreadyRunning: automationErrors.automationAlreadyRunning, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const cancelAutomationRunContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, runId: wire.string }))
+  .output(AutomationRunViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, RunNotFound: automationErrors.runNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Recent runs of a project, or of one automation, newest first. */
+export const automationRunsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, automationId: wire.optional(wire.string), limit: wire.optional(wire.integer({ min: 1, max: 200 })) }))
+  .output(wire.array(AutomationRunViewCodec))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** What a draft would do, without running it: its coming schedule times and its rendered instruction. */
+export const testAutomationContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, draft: AutomationDraftCodec }))
+  .output(wire.object({ results: wire.array(AutomationTestResultCodec), instruction: wire.string }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const updateAutomationSettingsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, settings: AutomationSettingsCodec }))
+  .output(AutomationSettingsCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-export const projectCronHistoryContract = gitspaceRpc
+/** Every project's counts and recent runs, read from the account's index (it opens no project object). */
+export const automationsOverviewContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, cronId: wire.string, limit: wire.optional(wire.integer({ min: 1, max: 200 })) }))
-  .output(wire.array(ProjectCronRunViewCodec))
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, CronNotFound: projectCronErrors.cronNotFound, OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object({ limit: wire.optional(wire.integer({ min: 1, max: 200 })) }))
+  .output(wire.object({ projects: wire.array(AutomationProjectSummaryCodec), runs: wire.array(AutomationRunViewCodec) }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 
 const inspectorSpaceRequestCodec = wire.object({
@@ -2247,14 +2291,18 @@ export const gitspaceContract = gitspaceRpc.contract({
     },
     discover: discoverProjectMcpToolsContract,
   },
-  crons: {
-    list: listProjectCronsContract,
-    create: createProjectCronContract,
-    update: updateProjectCronContract,
-    delete: deleteProjectCronContract,
-    runNow: runProjectCronNowContract,
-    cancelRun: cancelProjectCronRunContract,
-    history: projectCronHistoryContract,
+  automations: {
+    list: listAutomationsContract,
+    create: createAutomationContract,
+    update: updateAutomationContract,
+    delete: deleteAutomationContract,
+    approve: approveAutomationContract,
+    runNow: runAutomationNowContract,
+    cancelRun: cancelAutomationRunContract,
+    runs: automationRunsContract,
+    test: testAutomationContract,
+    updateSettings: updateAutomationSettingsContract,
+    overview: automationsOverviewContract,
   },
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {

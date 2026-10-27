@@ -144,6 +144,29 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
   });
 });
 
+test('only the project agent manages automations: a workspace agent is refused every method', async () => {
+  const draft = { name: 'Nightly audit', trigger: { kind: 'schedule', cron: '0 6 * * *' }, action: { kind: 'messageProjectAgent', instruction: 'Audit dependencies.' } };
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`automations-workspace:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx);
+    try {
+      for (const args of [{ method: 'list' }, { method: 'test', draft }, { method: 'propose', draft, asked: 'Audit nightly', reason: 'Requested' }]) {
+        const refused = await invoke('space_automations', args);
+        expect(refused.status).toBe('failed');
+        expect(text(refused)).toContain('Only the project agent can change automations');
+      }
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  const projectId = `automations-project-${crypto.randomUUID()}`;
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`automations-project:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
+    try {
+      const listed = await invoke('space_automations', { method: 'list' });
+      expect(listed.status, text(listed)).toBe('completed');
+      expect(JSON.parse(text(listed))).toEqual({ automations: [], settings: { concurrency: 2, dailyRunCap: 50 } });
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
 test('grep runs only on an attached machine and points at code_search without one', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`grep-machine:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, services, root, invoke, text, identity, checkpoint } = await ownerFixture(ctx);

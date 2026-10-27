@@ -278,7 +278,7 @@ it('keeps canonical phases and source metadata for released, offline, and unknow
   ]);
   expect(directory.b?.workspaces.find((space) => space.id === 'b-offline')?.definition).toMatchObject({ sourceKind: 'workspace', sourceRef: 'b-work' });
   await refresh();
-  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'b', workspaceId: 'b-offline' }} view="inbox" />); });
+  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'b', workspaceId: 'b-offline' }} view="monitoring" />); });
   expect(directory.a?.workspaces[0]?.definition?.phase).toBe('plan');
   expect(directory.b?.workspaces.map((space) => space.id)).toEqual(['b-work', 'b-offline', 'b-unknown']);
   expect(directory.b?.workspaces.find((space) => space.id === 'b-offline')?.summary?.holder).toEqual({ kind: 'held', machineId: 'laptop', label: 'Laptop' });

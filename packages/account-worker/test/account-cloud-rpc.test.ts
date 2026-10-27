@@ -315,7 +315,7 @@ describe('account cloud RPC without machines', () => {
     expect((await SELF.fetch(reader.request(single('secrets.account.put', { name: 'TOKEN', value: 'denied' })))).status).toBe(403);
   });
 
-  it('manages plugins and project-owned cron queues through the cloud alone', async () => {
+  it('manages plugins and project automations through the cloud alone', async () => {
     const fixture = await account();
     const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
     const rpc = async (path: string, input: unknown = {}) => {
@@ -329,15 +329,17 @@ describe('account cloud RPC without machines', () => {
     expect(await rpc('mcp.grants.list', { projectId })).toMatchObject({ status: 'ok', value: [] });
     expect(await rpc('mcp.grants.put', { projectId, connectionId: 'plugin', enabled: true, projectSpaceEnabled: false, workspacesEnabled: true, expectedRevision: 0 })).toMatchObject({ status: 'ok', value: { projectId, workspacesEnabled: true, projectSpaceEnabled: false, revision: 1 } });
     expect(await rpc('mcp.grants.put', { projectId: 'foreign', connectionId: 'plugin', enabled: true, projectSpaceEnabled: true, workspacesEnabled: true, expectedRevision: 0 })).toMatchObject({ status: 'error' });
-    const cronDraft = { name: 'Review', schedule: 'every 1h', description: '', prompt: 'Review the changes', target: { scope: 'workspace', projectId, spaceId }, readScopes: [], writeScopes: [], enabled: false };
-    const created = await rpc('crons.create', { projectId, draft: cronDraft }) as { status: string; value: { id: string; revision: number } };
-    expect(created.status).toBe('ok');
-    expect(await rpc('crons.list', { projectId })).toMatchObject({ status: 'ok', value: [{ id: created.value.id }] });
-    expect(await rpc('crons.create', { projectId, draft: { ...cronDraft, target: { ...cronDraft.target, spaceId: 'foreign' } } })).toMatchObject({ status: 'error' });
-    const queued = await rpc('crons.runNow', { projectId, cronId: created.value.id });
-    expect(queued).toMatchObject({ status: 'ok', value: { projectId, cronId: created.value.id, prompt: cronDraft.prompt } });
-    expect(await rpc('crons.history', { projectId, cronId: created.value.id })).toMatchObject({ status: 'ok', value: [{ id: queued.value.id, projectId, cronId: created.value.id, prompt: cronDraft.prompt }] });
-    expect(await env.PROJECT_CRONS.getByName(JSON.stringify([fixture.userId, projectId])).list(projectId)).toMatchObject([{ id: created.value.id }]);
+    const automationDraft = { name: 'Review', trigger: { kind: 'manual' }, action: { kind: 'messageWorkspace', workspaceId: spaceId, instruction: 'Review what {{requested_by}} asked for' }, enabled: true };
+    const created = z.object({ status: z.literal('ok'), value: z.object({ id: z.string(), projectId: z.string(), revision: z.number(), createdBy: z.string(), proposal: z.null() }) }).parse(await rpc('automations.create', { projectId, draft: automationDraft }));
+    expect(created.value).toMatchObject({ projectId, revision: 1, createdBy: 'person' });
+    expect(await rpc('automations.list', { projectId })).toMatchObject({ status: 'ok', value: { automations: [{ id: created.value.id }], settings: { concurrency: 2, dailyRunCap: 50 } } });
+    // A workspace that is not one of the project's is refused, naming the field.
+    expect(await rpc('automations.create', { projectId, draft: { ...automationDraft, name: 'Foreign', action: { ...automationDraft.action, workspaceId: 'foreign' } } })).toMatchObject({ status: 'error', error: { data: { field: 'action.workspaceId' } } });
+    expect(await rpc('automations.list', { projectId: 'foreign' })).toMatchObject({ status: 'error' });
+    const queued = z.object({ status: z.literal('ok'), value: z.object({ id: z.string() }) }).parse(await rpc('automations.runNow', { projectId, automationId: created.value.id }));
+    expect(await rpc('automations.runs', { projectId, automationId: created.value.id })).toMatchObject({ status: 'ok', value: [{ id: queued.value.id, projectId, automationId: created.value.id, trigger: 'manual', workspaceId: spaceId }] });
+    // The overview reads the account index, which the project's automations object updated.
+    expect(await rpc('automations.overview', {})).toMatchObject({ status: 'ok', value: { projects: expect.arrayContaining([expect.objectContaining({ projectId, total: 1, on: 1 })]), runs: expect.arrayContaining([expect.objectContaining({ id: queued.value.id })]) } });
     expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
   });
 

@@ -88,7 +88,7 @@ function openSmokeRuntime(ctx: DurableObjectState, storage: DurableObjectStorage
     code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], changedSnapshotPaths: unsupported, reader: () => ({ readTree: async oid => definitionTrees.get(oid) ?? null, readBlob: async oid => oid === 'c'.repeat(40) ? new Blob([repositoryDefinition]) : null, close: async () => {} }) },
     initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
-    tools: { invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', authorizeCronTool: unsupported, preflight: async () => {} },
+    tools: { invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', preflight: async () => {} },
     operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
     onReport: error => console.error('RUNTIME_REPORT', String(error)),
     admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },

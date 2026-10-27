@@ -20,7 +20,7 @@ const completed: ToolServices['invoke'] = async input => ({ status: 'completed',
 const services: ToolServices = {
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
-  question: async () => 'answered', instructions: async () => '', authorizeCronTool: unused, preflight: async () => {},
+  question: async () => 'answered', instructions: async () => '', preflight: async () => {},
   async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
 };
 const samples: Record<string, ToolCall['arguments']> = {
@@ -28,7 +28,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   edit: { path: 'src/main.ts', edits: [{ oldText: 'old', newText: 'new' }] }, apply_patch: { patch: '*** Begin Patch\n*** Add File: new.ts\n+export {};\n*** End Patch' },
   bash: { command: 'pwd' }, grep: { pattern: 'needle', path: 'src' }, code_search: { pattern: 'needle', path: 'src' }, find: { pattern: '*.ts', path: 'src' }, codemode: { code: 'return 1;' },
   agents: { op: 'list' }, proc: { op: 'list' }, machines: { op: 'list' }, environment: { method: 'get' }, sync: { method: 'status' }, workspace_status: {},
-  space_goal: { method: 'get' }, space_phase: { phase: 'code' }, space_workspace: { method: 'current' }, space_artifacts: { method: 'list' },
+  space_goal: { method: 'get' }, space_phase: { phase: 'code' }, space_workspace: { method: 'current' }, space_automations: { method: 'list' }, space_artifacts: { method: 'list' },
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
   web_search: { query: 'TypeScript documentation' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },

@@ -455,41 +455,61 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": false,
     "openWorldHint": true
   },
-  "crons.list": {
+  "automations.list": {
     "readOnlyHint": true,
     "openWorldHint": false
   },
-  "crons.create": {
+  "automations.create": {
     "readOnlyHint": false,
     "destructiveHint": false,
     "idempotentHint": false,
     "openWorldHint": false
   },
-  "crons.update": {
+  "automations.update": {
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "crons.delete": {
+  "automations.delete": {
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "crons.runNow": {
+  "automations.approve": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "automations.runNow": {
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": false,
     "openWorldHint": true
   },
-  "crons.cancelRun": {
+  "automations.cancelRun": {
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": true,
     "openWorldHint": false
   },
-  "crons.history": {
+  "automations.runs": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "automations.test": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "automations.updateSettings": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "automations.overview": {
     "readOnlyHint": true,
     "openWorldHint": false
   },

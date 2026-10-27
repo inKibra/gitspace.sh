@@ -385,7 +385,7 @@ const API_CLIENT_TTLS: ReadonlyArray<{ value: string; label: string; ms: number 
 ];
 const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: string; description: string }> = [
   { id: 'rpc.read', label: 'Read', description: 'Queries and event streams' },
-  { id: 'rpc.write', label: 'Write', description: 'Create and change workspaces, settings, crons' },
+  { id: 'rpc.write', label: 'Write', description: 'Create and change workspaces, settings, automations' },
   { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt, steer, and answer' },
   { id: 'fleet.control', label: 'Fleet', description: 'Create, stop, start, destroy machines' },
   { id: 'deployment.control', label: 'Deployment', description: 'Select cloud images and control GitSpace runtime releases (account scope required)' },

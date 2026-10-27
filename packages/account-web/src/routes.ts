@@ -1,4 +1,4 @@
-export type AppView = 'agent' | 'kanban' | 'projects' | 'inference' | 'plugins' | 'skills' | 'crons' | 'secrets' | 'inbox';
+export type AppView = 'agent' | 'kanban' | 'projects' | 'inference' | 'plugins' | 'skills' | 'automations' | 'secrets' | 'monitoring';
 export type ProductRoute = AppView | 'settings';
 
 export const PRODUCT_ROUTE_LABELS: Record<ProductRoute, string> = {
@@ -8,9 +8,9 @@ export const PRODUCT_ROUTE_LABELS: Record<ProductRoute, string> = {
   inference: 'Inference',
   plugins: 'Plugins',
   skills: 'Skills',
-  crons: 'Crons',
+  automations: 'Automations',
   secrets: 'Secrets & values',
-  inbox: 'Inbox',
+  monitoring: 'Monitoring',
   settings: 'Account settings',
 };
 
@@ -25,12 +25,15 @@ const PATH_BY_ROUTE: Record<ProductRoute, string> = {
   inference: '/inference',
   plugins: '/plugins',
   skills: '/skills',
-  crons: '/crons',
+  automations: '/automations',
   secrets: '/secrets',
-  inbox: '/inbox',
+  monitoring: '/monitoring',
   settings: '/settings',
 };
 const ROUTE_BY_PATH: Record<string, ProductRoute> = Object.fromEntries(Object.entries(PATH_BY_ROUTE).map(([route, path]) => [path, route as ProductRoute]));
+
+/** The project chosen on the Automations page; absent, it shows every project. */
+export const AUTOMATIONS_PROJECT_PARAM = 'for';
 
 export function productRouteFromLocation(location: Pick<Location, 'pathname' | 'search'>): ProductRoute {
   const pathname = location.pathname.length > 1 ? location.pathname.replace(/\/+$/, '') : location.pathname;
@@ -48,6 +51,7 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   if (route !== 'settings') url.searchParams.delete('mode');
   if (route !== 'inference') url.searchParams.delete('profile');
   if (route !== 'plugins') { url.searchParams.delete('tab'); url.searchParams.delete('pair'); url.searchParams.delete('manage'); }
+  if (route !== 'automations') url.searchParams.delete(AUTOMATIONS_PROJECT_PARAM);
   if (isGlobalView(route)) {
     url.searchParams.delete('project');
     url.searchParams.delete('workspace');
@@ -61,6 +65,14 @@ export function browserPluginsUrl(pairFor?: string): URL {
   const url = setProductRoute(new URL(window.location.href), 'plugins');
   url.searchParams.set('tab', 'browsers');
   if (pairFor) url.searchParams.set('pair', pairFor);
+  return url;
+}
+
+/** Automations with `projectId` chosen in its header, or every project when null. */
+export function automationsUrl(projectId: string | null): URL {
+  const url = setProductRoute(new URL(window.location.href), 'automations');
+  if (projectId) url.searchParams.set(AUTOMATIONS_PROJECT_PARAM, projectId);
+  else url.searchParams.delete(AUTOMATIONS_PROJECT_PARAM);
   return url;
 }
 

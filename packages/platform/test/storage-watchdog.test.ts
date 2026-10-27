@@ -101,6 +101,30 @@ test('a problem is reported once, and again only if it still holds six hours lat
   expect(asked.filter(item => item.action === 'alert')).toHaveLength(2);
 });
 
+test('a tenant\'s alert is reported healthy once the object is back under every threshold, and alerted again at once when the problem returns', async () => {
+  const awake = { [object('6')]: { activeHours: 22.9, rowsRead: 0 } };
+  mockCloudflare({ [object('3')]: 1_500_000 }, { rowsWritten: 0 }, awake);
+  const { asked, emails, run } = platform();
+  await run();
+  expect(asked).toEqual([
+    expect.objectContaining({ objectId: object('3'), action: 'alert' }),
+    expect.objectContaining({ objectId: object('6'), action: 'alert' }),
+  ]);
+
+  // Object 3 now writes under the alert threshold; object 6 is still awake.
+  mockCloudflare({ [object('3')]: 900_000 }, { rowsWritten: 0 }, awake);
+  await run(scheduledTime + 10 * 60_000);
+  expect(asked.slice(2)).toEqual([{ objectId: object('3'), className: 'SpaceAuthorityDO', action: 'healthy' }]);
+  await run(scheduledTime + 20 * 60_000);
+  expect(asked).toHaveLength(3);
+
+  // Its writes return within six hours: no second email, but its tenant is alerted again.
+  mockCloudflare({ [object('3')]: 1_500_000 }, { rowsWritten: 0 }, awake);
+  await run(scheduledTime + 30 * 60_000);
+  expect(asked.slice(3)).toEqual([expect.objectContaining({ objectId: object('3'), action: 'alert', reason: expect.stringContaining('1,500,000 rows') })]);
+  expect(emails).toHaveLength(1);
+});
+
 test('the watchdog reports the day\'s top writer once Durable Objects cost $20 today', async () => {
   mockCloudflare({ [object('5')]: 10_000 }, { rowsWritten: 25_000_000 });
   const costly = platform();

@@ -149,7 +149,7 @@ test('real durable authority completes a caught denied read after an effect with
         if (input.tool === 'write') effects++;
         return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [] };
       },
-      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', authorizeCronTool: noModel, preflight: async () => {},
+      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', preflight: async () => {},
     };
     const jobs: Parameters<typeof createRuntimeTools>[1] = { execute: noModel, reconcile: noModel, cancel: noModel, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: noModel, wakeAt: noModel, deliverConversationEvent: noModel, observeProcess: noModel, stopProcess: noModel };
     const tools = createRuntimeTools(services, jobs, (id, context) => harness.abortTask(id, context), async call => {

@@ -71,7 +71,7 @@ function noticeEvent(entry: EntryRecord): TranscriptEventInput | undefined {
   const ordinal = Number(entry.id) * ENTRY_ORDINALS + (entry.model?.length ?? 0);
   if (entry.kind === WORKSPACE_REPORT_ENTRY) return entry.model?.length ? undefined : { sessionId: '', ordinal, kind: 'message_end', payload: { message: workspaceReportMessage(entry) } };
   const data = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) ? entry.data : undefined;
-  const text = entry.kind === 'gitspace.model-fallback' ? data?.message : entry.kind === 'gitspace.cron-overdue' ? data?.text : undefined;
+  const text = entry.kind === 'gitspace.model-fallback' ? data?.message : undefined;
   if (text === undefined) return undefined;
   return { sessionId: '', ordinal, kind: 'message_end', payload: { message: { role: 'custom', customType: entry.kind, display: true, content: typeof text === 'string' ? text : '' } } };
 }

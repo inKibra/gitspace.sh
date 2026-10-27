@@ -7,7 +7,7 @@ export * from './machine-pairing.js';
 export * from './client.js';
 export * from './routed-transport.js';
 export * from './deployment.js';
-export * from './cron-contract.js';
+export * from './automations-contract.js';
 export * from './inspector-contract.js';
 export * from './mcp-contract.js';
 export * from './rpc-contract.js';

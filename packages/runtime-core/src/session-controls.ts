@@ -15,7 +15,6 @@ import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } fro
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
-import { cronHasOutstanding } from './cron.js';
 import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
 
 const ThinkingSchema = modelRoleThinkingSchema.unwrap();
@@ -284,8 +283,7 @@ export function createSessionControls(services: SessionControlServices) {
           const model = await services.admitInference({ conversationId: String(target.id), requestId, selection });
           await services.configureModel(target.id, model);
           await applyInferenceThinking(target, model);
-          const cronOutstanding = await target.commit(tx => cronHasOutstanding(tx, target.id), ctx);
-          await target.submit({ type: 'input', requestId, content: command.images?.length ? [{ type: 'text', text: command.text }, ...command.images] : command.text, whenBusy: cronOutstanding ? 'followUp' : command.streamingBehavior ?? 'followUp' }, ctx);
+          await target.submit({ type: 'input', requestId, content: command.images?.length ? [{ type: 'text', text: command.text }, ...command.images] : command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
         });
         break;
       }
@@ -338,7 +336,6 @@ export function createSessionControls(services: SessionControlServices) {
       case 'promoteQueuedMessage': {
         const { index } = command;
         await services.lifecycle.runWhileActive(String(target.id), () => target.commit(async tx => {
-          if (await cronHasOutstanding(tx, target.id)) throw new Error('Cannot steer a queued user message into an isolated cron generation');
           const inbox = await tx.doc(InboxDoc, target.id);
           const selected = inbox.items.filter(item => item.mode === 'followUp')[index];
           if (!selected || selected.mode !== 'followUp') throw new Error('Queued message not found');

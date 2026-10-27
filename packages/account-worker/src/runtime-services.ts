@@ -8,7 +8,8 @@ import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } fr
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
-import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
+import { RuntimeAutomationsArgumentsSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
+import { automationValue } from './project-automations.js';
 import { confirmMachinePresence } from './machine-notices.js';
 import { readInspectorContext, InspectorCloudArtifacts } from './account-inspector-data.js';
 import { workspaceDrive } from './workspace-drive.js';
@@ -189,44 +190,6 @@ export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
       return {};
     },
   };
-}
-
-/** Cron grants name resources, not shell privileges. Opaque effects cannot be
- * proven to remain inside a resource grant and therefore are not admitted. */
-export async function authorizeCronTool(input: { tool: string; args: Invocation['args']; readScopes: readonly string[]; writeScopes: readonly string[] }): Promise<void> {
-  const args = object.parse(input.args);
-  let resource: string;
-  let write = false;
-  if (['read', 'write', 'edit', 'grep', 'code_search', 'find', 'ast_grep'].includes(input.tool)) {
-    const path = z.string().min(1).parse(args.path ?? (input.tool === 'find' || input.tool === 'grep' || input.tool === 'code_search' ? '.' : undefined));
-    if (path.startsWith('drive://')) {
-      const uri = new URL(path);
-      const segments = decodeURIComponent(uri.pathname).split('/').filter(Boolean);
-      if (!['base', 'workspace'].includes(uri.hostname) || segments.some(segment => segment === '..' || segment === '.')) throw new Error('Cron resource escapes its artifact scope');
-      resource = `drive://${uri.hostname}/${segments.join('/')}`;
-    } else {
-      if (path.startsWith('/') || path.includes('\\') || path.split('/').some(segment => segment === '..')) throw new Error('Cron repository paths must stay relative to their checkout');
-      resource = `repository/${path.split('/').filter(segment => segment && segment !== '.').join('/')}`;
-    }
-    write = input.tool === 'write' || input.tool === 'edit';
-  } else if (input.tool === 'space_artifacts' && args.method === 'read') {
-    const uri = new URL(z.string().url().parse(args.url));
-    const segments = decodeURIComponent(uri.pathname).split('/').filter(Boolean);
-    if (uri.protocol !== 'drive:' || !['base', 'workspace'].includes(uri.hostname) || segments.some(segment => segment === '..' || segment === '.')) throw new Error('Cron resource escapes its artifact scope');
-    resource = `drive://${uri.hostname}/${segments.join('/')}`;
-  } else if (input.tool === 'space_artifacts' && args.method === 'readCode') {
-    const path = z.string().min(1).parse(args.path);
-    if (path.startsWith('/') || path.split('/').some(segment => segment === '..')) throw new Error('Cron code path escapes the repository');
-    resource = `repository/${path}`;
-  } else {
-    throw new Error(`Cron resource grants do not authorize ${input.tool}; shell, lifecycle and management authority cannot be inferred from file scopes`);
-  }
-  const scopes = write ? input.writeScopes : input.readScopes;
-  const allowed = scopes.some(scope => {
-    const escaped = scope.split('**').map(part => part.split('*').map(literal => literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('[^/]*')).join('.*');
-    return new RegExp(`^(?:${escaped})$`, 'u').test(resource);
-  });
-  if (!allowed) throw new Error(`Cron ${write ? 'write' : 'read'} scope does not authorize ${resource}`);
 }
 
 /** First in every main agent's instructions. Models follow written rules literally, so nothing GitSpace or a repository
@@ -721,6 +684,20 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           default: return completed(input, await changeAgentWorkspace(env, identity, args));
         }
       }
+      if (input.tool === 'space_automations') {
+        // Only the project agent manages automations: a workspace an automation started cannot make more.
+        if (identity.workspaceId !== baseWorkspaceId) throw new Error('Only the project agent can change automations');
+        const args = RuntimeAutomationsArgumentsSchema.parse(input.args);
+        const automations = env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+        const projectId = identity.projectId;
+        switch (args.method) {
+          case 'list': return completed(input, await automations.list(projectId));
+          case 'test': return completed(input, automationValue(await automations.testDraft({ projectId, draft: { ...args.draft, enabled: true }, requestedBy: 'a person' })));
+          case 'propose': return completed(input, automationValue(await automations.propose({ projectId, automationId: args.automationId, draft: { ...args.draft, enabled: false }, conversationId: input.conversationId, asked: args.asked, reason: args.reason })));
+          case 'disable': return completed(input, automationValue(await automations.disable({ projectId, automationId: args.automationId })));
+          case 'delete': return completed(input, automationValue(await automations.delete({ projectId, automationId: args.automationId })));
+        }
+      }
       if (input.tool === 'space_phase') {
         const { phase } = RuntimeSpacePhaseArgumentsSchema.parse(input.args);
         // The canonical definition enforces the dependency ceiling; the runtime's workspace document drives this agent.
@@ -868,7 +845,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   return {
     browser: browser.manage,
-    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, authorizeCronTool,
+    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab,
       // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.

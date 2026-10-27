@@ -1,3 +1,4 @@
+import { automationErrors } from '@gitspace/protocol/automations-contract';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { isTaggedError } from 'result-rpc';
 
@@ -27,6 +28,9 @@ const domainMessages: Readonly<Record<string, string>> = {
   [rpcErrors.skillConflict.tag]: 'This skill changed since you loaded it. Refresh before saving again.',
   [rpcErrors.mcpRevisionConflict.tag]: 'This integration changed since you loaded it. Refresh before saving again.',
   [rpcErrors.mcpNotFound.tag]: 'This integration connection or grant is no longer available. Refresh integrations.',
+  [automationErrors.automationNotFound.tag]: 'This automation is no longer available. Refresh the page.',
+  [automationErrors.automationAlreadyRunning.tag]: 'This automation is already running. Its run is in Recent runs.',
+  [automationErrors.runNotFound.tag]: 'This run is no longer available. Refresh the page.',
 };
 
 /** Presentation only: keep the original tagged error for policy, identity, and diagnostics. */

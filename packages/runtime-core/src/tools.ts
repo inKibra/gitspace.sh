@@ -5,9 +5,8 @@ import type { JsonValue, Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
 import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
+import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
-import { cronToolScopes } from './cron.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS } from './subagent-state.js';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
@@ -25,7 +24,6 @@ export type ToolServices = {
   prepareBrowser(input: Parameters<ToolServices['invoke']>[0]): Promise<RuntimeBrowserApprovalCard>;
   question(id: string, api: ToolExecutionApi, context: Context): Promise<JsonValue>;
   instructions(conversationId: string, context: Context): Promise<string>;
-  authorizeCronTool(input: { tool: string; args: JsonValue; readScopes: readonly string[]; writeScopes: readonly string[] }): Promise<void>;
   /** Throws before any approval question when an effect cannot run (e.g. a machine tool with no machine attached). */
   preflight(input: Parameters<ToolServices['invoke']>[0]): Promise<void>;
   /** The tab an ask_takeover call names, on your Chrome or the cloud browser, as its card shows it; throws why it
@@ -46,6 +44,7 @@ const spaceSchemas = {
   space_guide: z.union([get, describe, putChangeGuideInputSchema.omit(owned).extend({ method: z.literal('put'), workspaceId }), markGuideSectionReadInputSchema.omit({ ...owned, reviewerId: true }).extend({ method: z.literal('markRead'), workspaceId })]),
   space_review: z.union([list.extend(review), describe, createReviewThreadInputSchema.omit(owned).extend({ method: z.literal('create'), ...review }), appendReviewMessageInputSchema.omit(owned).extend({ method: z.literal('append'), ...review }), resolveReviewThreadInputSchema.omit(owned).extend({ method: z.literal('resolve'), ...review })]),
   space_workspace: RuntimeWorkspaceArgumentsSchema,
+  space_automations: RuntimeAutomationsArgumentsSchema,
 };
 type ArgumentIssue = z.core.$ZodIssue;
 const SELECTORS = ['method', 'op'];
@@ -99,6 +98,7 @@ const contracts = {
   space_goal: contract(spaceSchemas.space_goal, 'Read or update the workspace goal and attach requirement evidence. Mutations require the current expectedRevision. describe returns an operation schema. Omit workspaceId for this workspace.'),
   space_phase: contract(Arguments.RuntimeSpacePhaseArgumentsSchema, 'Set the current workspace phase to plan, code, review or ship. Phase changes do not waive human workflow gates.'),
   space_workspace: contract(spaceSchemas.space_workspace, 'Inspect current/project workspaces and operations, read workspace status reports (status: stored, opens nothing; with workspaceId also ahead/behind the base), create a workspace from an explicit source, open/restore it, update dependency relations, or (project agent only) start a workspace by sending its agent an instruction: the turn it starts reports once to the project conversation when it finishes, fails or stops to ask (onDone wake makes that report start your next turn; default quiet), progress shows that turn while it runs, and a person writing in the workspace ends the watch. Read the current generation/revision before management. Agents cannot close or archive their own workspace.'),
+  space_automations: contract(spaceSchemas.space_automations, 'Project agent only: the project\'s automations, which message the project agent or a workspace on a schedule (a five-field cron expression in UTC) or when a person starts one. list them with their recent state; test a draft (its next run times and its instruction as it would be sent); propose a new automation, or a change to one by automationId, with what the user asked and why: it waits, Proposed, until a person approves it on the Automations page, and then runs; disable or delete one at once. Instructions may name {{automation.name}}, and {{scheduled_for}} on a schedule or {{requested_by}} when started by hand.'),
   space_artifacts: contract(Arguments.RuntimeSpaceArtifactsArgumentsSchema, 'List workspace artifacts, scopes or promotions; read an artifact URL or a repository path at an immutable commit. Move files between the drive and the attached machine, up to 1 GiB: toMachine copies a drive:// file to a machine path, fromMachine publishes a machine file to a drive:// URL this session may write. Machine paths are relative to the checkout or absolute under /tmp. Use them for binary files (zips, fonts, images, builds), which read returns as metadata only. Public sharing requires an explicit human action and is not exposed here.'),
   space_workflow: contract(spaceSchemas.space_workflow, 'Read or replace the typed workspace workflow at the current expectedRevision. describe returns the put schema. Clearing a human gate is the user\'s action and is not available here.'),
   space_rubric: contract(spaceSchemas.space_rubric, 'Read or replace the typed workspace rubric at the current expectedRevision. describe returns the put schema. Human judgment is not an agent action.'),
@@ -242,7 +242,6 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       if (child && !isSubagentToolCallAllowed(name, args, child.tools)) throw new Error(`Subagent ${child.name} cannot use ${name} this way`);
       const run = async () => {
         context.abortSignal?.throwIfAborted();
-        for (const scope of await cronToolScopes(api, context)) await services.authorizeCronTool({ tool: name, args, ...scope });
         const attemptId = await api.memo('gitspace.attempt', `tool:${api.taskId}`, context);
         const invocation = { tool: name, args, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: api.callId, attemptId, replay: safe ? 'safe' as const : 'unsafe' as const, signal: context.abortSignal };
         if (name === 'browser' && !(args && typeof args === 'object' && !Array.isArray(args) && typeof args.action === 'string' && Object.hasOwn(BROWSERLESS_ACTIONS, args.action))) await services.prepareBrowser(invocation);

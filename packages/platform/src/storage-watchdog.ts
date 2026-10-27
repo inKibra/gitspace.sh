@@ -18,9 +18,11 @@ import { platformObjectStorage } from './storage-quarantine.js';
  *   only for a deadline, the heartbeat that resumes in-flight work, or a retry with backoff. The limit sits above a
  *   running conversation's 30 s heartbeat (about 120 alarms an hour) and below the slowest polling loop seen in
  *   production (one alarm every 6.5 s, about 550 an hour).
- * Reports go by email (`WATCHDOG_EMAIL`) and, for a tenant's object, to its Inbox. A report is sent once, and again
- * only if the problem still holds `WATCHDOG_REPEAT_MS` later; quarantines are reported each time. After
- * `WATCHDOG_BLIND_RUNS` runs in a row without analytics, the watchdog reports that it is blind.
+ * Reports go by email (`WATCHDOG_EMAIL`) and, for a tenant's object, to its Monitoring page as an alert. An email is
+ * sent once, and again only if the problem still holds `WATCHDOG_REPEAT_MS` later; quarantines are reported each time.
+ * A tenant's alert stays open until a run finds the object back under every alert threshold and reports it `healthy`;
+ * a problem that returns after that is alerted again at once. After `WATCHDOG_BLIND_RUNS` runs in a row without
+ * analytics, the watchdog reports that it is blind.
  * Each object's own breaker trips first at 2M rows per ten minutes; this catches what writes more slowly, and objects
  * the breaker does not cover.
  */
@@ -35,7 +37,8 @@ const WATCHDOG_BLIND_RUNS = 3;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 const OBJECT_LIMIT = 100;
-/** What has been reported and when, and how many runs in a row failed; written only when it changes. */
+/** What has been reported and when, the tenant objects with an open alert, and how many runs in a row failed; written
+ * only when it changes. */
 const STATE_KEY = 'storage-watchdog/state.json';
 
 /** Workers Paid list prices of Durable Objects, without the monthly allowances: the estimate errs high. */
@@ -59,11 +62,15 @@ const daySchema = z.object({
 const objectDayGroupsSchema = z.array(z.object({ dimensions: z.object({ namespaceId: z.string(), objectId: z.string() }), sum: z.object({ activeTime: z.number(), rowsRead: z.number() }) }));
 const objectDaySchema = z.object({ awake: objectDayGroupsSchema, reading: objectDayGroupsSchema });
 const breakerStatusSchema = z.object({ quarantined: z.boolean(), resumedAt: z.string().nullable() });
-const stateSchema = z.object({ reported: z.record(z.string(), z.number()), failedRuns: z.number() });
+const stateSchema = z.object({
+  reported: z.record(z.string(), z.number()),
+  alerted: z.record(z.string(), z.object({ tenant: z.string(), className: z.string() })),
+  failedRuns: z.number(),
+});
 
 interface Owner { className: string; tenant: string | null; script: string | null }
-type Control = { action: 'status' } | { action: 'quarantine' | 'alert'; reason: string };
-/** One line of a report; `inbox` is posted to the owning tenant's Inbox with the email. */
+type Control = { action: 'status' } | { action: 'quarantine' | 'alert'; reason: string } | { action: 'healthy' };
+/** One line of a report; `inbox` is posted to the owning tenant's Monitoring page as an alert. */
 interface Finding { key: string; line: string; inbox: { objectId: string; owner: Owner; reason: string } | null }
 
 export async function runStorageWatchdog(env: Env, scheduledTime: number): Promise<void> {
@@ -73,7 +80,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
   }
   const stored = await env.RELEASES.get(STATE_KEY).then(object => object?.json()).catch(() => null);
   const parsedState = stateSchema.safeParse(stored);
-  const state = parsedState.success ? parsedState.data : { reported: {}, failedRuns: 0 };
+  const state: z.infer<typeof stateSchema> = parsedState.success ? parsedState.data : { reported: {}, alerted: {}, failedRuns: 0 };
   const saveState = () => env.RELEASES.put(STATE_KEY, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
   const integer = new Intl.NumberFormat('en-US');
   const end = new Date(scheduledTime).toISOString();
@@ -136,9 +143,10 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
     return { className: namespace?.className ?? `namespace ${namespaceId}`, script, tenant: script?.startsWith(tenantPrefix) ? script.slice(tenantPrefix.length) : null };
   };
   // A tenant's object through its worker's platform route; any other object is tried as one of the platform's own.
-  const control = async (objectId: string, who: Owner, input: Control): Promise<z.infer<typeof breakerStatusSchema> | null> => {
+  // `healthy` answers no breaker status.
+  const control = async (objectId: string, who: Pick<Owner, 'className' | 'tenant'>, input: Control): Promise<z.infer<typeof breakerStatusSchema> | null> => {
     if (who.tenant === null) {
-      if (input.action === 'alert') return null;
+      if (input.action === 'alert' || input.action === 'healthy') return null;
       return platformObjectStorage(env, { objectId, action: input.action, ...(input.action === 'quarantine' ? { reason: input.reason } : {}) });
     }
     const response = await env.DISPATCHER.get(`${tenantPrefix}${who.tenant}`).fetch(new Request(`https://${who.tenant}.gitspace.sh/__platform/storage`, {
@@ -147,14 +155,18 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
       body: JSON.stringify({ objectId, className: who.className, ...input }),
     }));
     if (!response.ok) throw new Error(`Tenant ${who.tenant} answered ${response.status} to ${input.action}`);
+    if (input.action === 'healthy') return null;
     const status = breakerStatusSchema.safeParse(await response.json());
     if (!status.success) throw new Error(`Tenant ${who.tenant} answered ${input.action} without a breaker status`);
     return status.data;
   };
   const describe = (who: Owner, objectId: string) => `${who.className} ${objectId.slice(0, 12)}… (${who.tenant ? `GitSpace tenant ${who.tenant}` : who.script ?? 'unknown script'})`;
+  // Every object past an alert threshold in this run, whether or not a finding about it could be made.
+  const over = new Set<string>();
 
   for (const { dimensions: { namespaceId, objectId }, sum: { rowsWritten } } of hour.objects) {
     if (rowsWritten < WATCHDOG_ALERT_ROWS) break;
+    over.add(objectId);
     const who = await owner(namespaceId);
     const subject = { objectId, namespaceId, className: who.className, script: who.script, rowsWritten };
     const rows = integer.format(rowsWritten);
@@ -168,7 +180,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
         if (status && !resumedWithinHour) {
           await control(objectId, who, { action: 'quarantine', reason: `wrote ${rows} rows in the last hour (watchdog limit ${integer.format(WATCHDOG_QUARANTINE_ROWS)})` });
           console.error(JSON.stringify({ event: 'storage-watchdog-quarantined', ...subject }));
-          findings.push({ key: `quarantine:${objectId}:${scheduledTime}`, line: `PAUSED ${describe(who, objectId)}: wrote ${rows} rows in the last hour. It refuses all storage until resumed from the Inbox.`, inbox: null });
+          findings.push({ key: `quarantine:${objectId}:${scheduledTime}`, line: `PAUSED ${describe(who, objectId)}: wrote ${rows} rows in the last hour. It refuses all storage until resumed from Monitoring.`, inbox: null });
           continue;
         }
       }
@@ -187,6 +199,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
     .filter(({ sum }) => sum.activeTime >= WATCHDOG_AWAKE_HOURS * HOUR_MS * 1000 || sum.rowsRead >= WATCHDOG_READ_ROWS)
     .map(group => [group.dimensions.objectId, group]));
   for (const { dimensions: { namespaceId, objectId }, sum } of sleepless.values()) {
+    over.add(objectId);
     const who = await owner(namespaceId);
     const hours = (sum.activeTime / (HOUR_MS * 1000)).toFixed(1);
     const reason = `was awake ${hours} of the last 24 hours and read ${integer.format(sum.rowsRead)} rows (alert at ${WATCHDOG_AWAKE_HOURS} hours or ${integer.format(WATCHDOG_READ_ROWS)} rows); an idle object should sleep`;
@@ -196,6 +209,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
 
   for (const { dimensions: { namespaceId, objectId }, sum: { requests } } of hour.alarms) {
     if (requests <= WATCHDOG_ALARMS_PER_HOUR) break;
+    over.add(objectId);
     const who = await owner(namespaceId);
     const reason = `ran ${integer.format(requests)} alarms in the last hour (alert above ${WATCHDOG_ALARMS_PER_HOUR}); an object should wake only for a deadline, the heartbeat of in-flight work, or a retry with backoff`;
     console.error(JSON.stringify({ event: 'storage-watchdog-alarms', objectId, namespaceId, className: who.className, script: who.script, alarms: requests }));
@@ -210,6 +224,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
   console.log(JSON.stringify({ event: 'storage-watchdog', usdToday: Math.round(usd * 100) / 100, topHourRowsWritten: hour.objects[0]?.sum.rowsWritten ?? 0, topHourObjectId: hour.objects[0]?.dimensions.objectId ?? null }));
   const top = day.top[0];
   if (usd >= WATCHDOG_ALERT_DAILY_USD && top) {
+    over.add(top.dimensions.objectId);
     const who = await owner(top.dimensions.namespaceId);
     const reason = `Durable Objects across the Cloudflare account cost about $${usd.toFixed(2)} today (alert at $${WATCHDOG_ALERT_DAILY_USD}); this object wrote the most: ${integer.format(top.sum.rowsWritten)} rows`;
     console.error(JSON.stringify({ event: 'storage-watchdog-daily-cost', usd: Math.round(usd * 100) / 100, ...periodic, requests, top: { ...top.dimensions, className: who.className, script: who.script } }));
@@ -217,12 +232,29 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
   }
 
   const sent = await report(env, state, findings, scheduledTime);
-  for (const finding of sent) {
-    if (!finding.inbox) continue;
-    await control(finding.inbox.objectId, finding.inbox.owner, { action: 'alert', reason: finding.inbox.reason })
-      .catch((error: unknown) => console.error(JSON.stringify({ event: 'storage-watchdog-failed', objectId: finding.inbox?.objectId, message: error instanceof Error ? error.message : String(error) })));
+  let changed = sent.length > 0 || recovered;
+  for (const finding of findings) {
+    const inbox = finding.inbox;
+    if (!inbox || inbox.owner.tenant === null || (state.alerted[inbox.objectId] && !sent.includes(finding))) continue;
+    try {
+      await control(inbox.objectId, inbox.owner, { action: 'alert', reason: inbox.reason });
+      state.alerted[inbox.objectId] = { tenant: inbox.owner.tenant, className: inbox.owner.className };
+      changed = true;
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'storage-watchdog-failed', objectId: inbox.objectId, message: error instanceof Error ? error.message : String(error) }));
+    }
   }
-  if (sent.length || recovered) await saveState();
+  for (const [objectId, who] of Object.entries(state.alerted)) {
+    if (over.has(objectId)) continue;
+    try {
+      await control(objectId, who, { action: 'healthy' });
+      delete state.alerted[objectId];
+      changed = true;
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'storage-watchdog-failed', objectId, message: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+  if (changed) await saveState();
 }
 
 /**

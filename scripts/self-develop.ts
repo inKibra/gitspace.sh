@@ -170,7 +170,7 @@ const control = new Miniflare({
     USER_SETTINGS: { className: 'UserSettingsDO', useSQLite: true },
     USER_HANDLES: { className: 'HandleRegistryDO', useSQLite: true },
     PROJECT_SECRETS: { className: 'ProjectSecretsDO', useSQLite: true },
-    PROJECT_CRONS: { className: 'ProjectCronsDO', useSQLite: true },
+    PROJECT_AUTOMATIONS: { className: 'ProjectAutomationsDO', useSQLite: true },
     SPACE_CONTEXT: { className: 'SpaceContextDO', useSQLite: true },
     USER_SKILLS: { className: 'UserSkillsDO', useSQLite: true },
     USER_PROJECTS: { className: 'UserProjectIndexDO', useSQLite: true },

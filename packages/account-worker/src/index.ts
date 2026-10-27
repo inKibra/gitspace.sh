@@ -63,7 +63,7 @@ import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject, platformStorageControl } from './storage-quarantine.js';
 export {
   AccountStateDO, CredentialVaultDO, FleetCatalogDO, GitHubAppDO, HostedRouteRegistryDO,
-  ProjectAuthorityDO, ProjectCronsDO, ProjectSecretsDO, SpaceAuthorityDO,
+  ProjectAuthorityDO, ProjectAutomationsDO, ProjectSecretsDO, SpaceAuthorityDO,
   SpaceContextDO, TenantReleasesDO, UserMcpConnectionsDO, UserProjectIndexDO,
   UserSettingsDO, UserSkillsDO, UserStorageDO,
 } from './application.js';

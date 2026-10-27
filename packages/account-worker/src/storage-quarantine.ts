@@ -7,8 +7,8 @@ import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 
 /** Something the account should know about one Durable Object's storage: it quarantined itself or was quarantined
- * (`quarantine`), or the platform saw it write past the alert threshold (`alert`). */
-export const StorageIncidentSchema = z.object({
+ * (`quarantine`), or the platform's watchdog found it past one of its alert thresholds (`alert`). */
+export const StorageIncidentReportSchema = z.object({
   objectId: z.string().regex(/^[0-9a-f]{64}$/u),
   className: z.string(),
   name: z.string().nullable(),
@@ -16,6 +16,9 @@ export const StorageIncidentSchema = z.object({
   reason: z.string(),
   at: z.string(),
 });
+export type StorageIncidentReport = z.infer<typeof StorageIncidentReportSchema>;
+/** A recorded storage incident; `resolvedAt` is null while it is active. */
+export const StorageIncidentSchema = StorageIncidentReportSchema.extend({ resolvedAt: z.string().nullable() });
 export type StorageIncident = z.infer<typeof StorageIncidentSchema>;
 
 /** Every Durable Object class of the account. The storage breaker is installed before the class touches its storage;
@@ -42,7 +45,7 @@ export abstract class BudgetedDurableObject extends DurableObject<Env> {
 
 /** The stub of the object `objectId` names, in whichever of the account's namespaces issued it. */
 export function budgetedObject(env: Env, objectId: string): DurableObjectStub<BudgetedDurableObject> | null {
-  const namespaces: DurableObjectNamespace<BudgetedDurableObject>[] = [env.RELAY, env.CREDENTIALS, env.USER_STORAGE, env.SPACE_AUTHORITY, env.FLEET_CATALOG, env.USER_SETTINGS, env.PROJECT_SECRETS, env.PROJECT_CRONS, env.SPACE_CONTEXT, env.USER_SKILLS, env.USER_PROJECTS, env.PROJECT_AUTHORITY, env.USER_MCP_CONNECTIONS, env.TENANT_RELEASES, env.HOSTED_ROUTES, env.ACCOUNT_STATE, env.GITHUB_APP, env.BROWSER_SESSION, env.STORAGE_MIGRATION];
+  const namespaces: DurableObjectNamespace<BudgetedDurableObject>[] = [env.RELAY, env.CREDENTIALS, env.USER_STORAGE, env.SPACE_AUTHORITY, env.FLEET_CATALOG, env.USER_SETTINGS, env.PROJECT_SECRETS, env.PROJECT_AUTOMATIONS, env.SPACE_CONTEXT, env.USER_SKILLS, env.USER_PROJECTS, env.PROJECT_AUTHORITY, env.USER_MCP_CONNECTIONS, env.TENANT_RELEASES, env.HOSTED_ROUTES, env.ACCOUNT_STATE, env.GITHUB_APP, env.BROWSER_SESSION, env.STORAGE_MIGRATION];
   for (const namespace of namespaces) {
     try { return namespace.get(namespace.idFromString(objectId)); }
     catch { /* Another namespace's id. */ }
@@ -55,12 +58,14 @@ const PlatformStorageRequestSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('quarantine'), objectId: z.string(), reason: z.string().min(1).max(500), className: z.string().max(100) }),
   z.object({ action: z.literal('resume'), objectId: z.string() }),
   z.object({ action: z.literal('alert'), objectId: z.string(), reason: z.string().min(1).max(500), className: z.string().max(100) }),
+  z.object({ action: z.literal('healthy'), objectId: z.string() }),
 ]);
 
 /**
  * The platform's control of this account's Durable Objects (`POST /__platform/storage`, platform token): its usage
- * watchdog alerts on and quarantines objects by id. It answers without the account's own authority object, so a
- * quarantined `AccountStateDO` can still be resumed here.
+ * watchdog alerts on and quarantines objects by id, and reports an alerted object `healthy` once it is back under
+ * every alert threshold. It answers without the account's own authority object, so a quarantined `AccountStateDO`
+ * can still be resumed here.
  */
 export async function platformStorageControl(request: Request, env: Env): Promise<Response> {
   const parsed = PlatformStorageRequestSchema.safeParse(await request.json().catch(() => null));
@@ -68,7 +73,7 @@ export async function platformStorageControl(request: Request, env: Env): Promis
   const input = parsed.data;
   const object = budgetedObject(env, input.objectId);
   if (!object) return Response.json({ error: 'No Durable Object of this account has that id' }, { status: 404 });
-  const incident = (kind: StorageIncident['kind'], reason: string, className: string) => env.ACCOUNT_STATE.getByName('account')
+  const incident = (kind: StorageIncidentReport['kind'], reason: string, className: string) => env.ACCOUNT_STATE.getByName('account')
     .recordStorageIncident({ objectId: input.objectId, className, name: null, kind, reason, at: new Date().toISOString() })
     .catch((error: unknown) => console.error(JSON.stringify({ event: 'storage_incident_unrecorded', objectId: input.objectId, error: error instanceof Error ? error.message : String(error) })));
   switch (input.action) {
@@ -84,8 +89,13 @@ export async function platformStorageControl(request: Request, env: Env): Promis
     }
     case 'resume': {
       const status = await object.resumeStorage();
-      await env.ACCOUNT_STATE.getByName('account').clearStorageIncident(input.objectId).catch(() => {});
+      await env.ACCOUNT_STATE.getByName('account').resolveStorageIncident(input.objectId, 'cleared').catch(() => {});
       return Response.json(status);
+    }
+    // A failure answers 500: the watchdog keeps the alert open and reports it healthy again on its next run.
+    case 'healthy': {
+      await env.ACCOUNT_STATE.getByName('account').resolveStorageIncident(input.objectId, 'healthy');
+      return new Response(null, { status: 204 });
     }
   }
 }
@@ -103,7 +113,7 @@ export function storageIncidentProcedures(env: Env, requireAdministration: () =>
       await requireAdministration();
       const object = budgetedObject(env, input.objectId);
       const resumed = object ? !(await object.resumeStorage()).quarantined : false;
-      await account.clearStorageIncident(input.objectId);
+      await account.resolveStorageIncident(input.objectId, 'cleared');
       return ok({ resumed });
     } catch (error) { return err(errors.OperationFailed({ operation: 'resume storage', message: error instanceof Error ? error.message : String(error) })); }
   });

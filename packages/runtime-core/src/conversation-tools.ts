@@ -2,8 +2,6 @@ import { AgentDoc, defineDoc, type Harness, type Storage, type Conversation, typ
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
-import { CronScopeDoc } from './documents.js';
-import { cronTaskScopes } from './cron.js';
 import { SessionControlsDoc, definitionRoleChain, parseCloudAgentDefinition, resolveAgentDefinitions, type SessionControlServices } from './session-controls.js';
 import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc, SUBAGENT_QUEUED, SubagentRunQueueDoc, type SubagentMetadata } from './subagent-state.js';
@@ -97,11 +95,9 @@ export function createConversationTools(options: ConversationToolOptions) {
           let owner;
           do { const page = await tx.scanTasks({ conversationId: target.id }, 128, cursor); owner = page.items.find(task => String(task.id) === input.taskId); cursor = page.next; } while (!owner && cursor);
           if (!owner) throw new Error('Subagent spawning task not found');
-          const inheritedScopes = await cronTaskScopes(tx, target.id, owner.id);
           const anchorTask = args.background ? await tx.createTask(options.backgroundAgentTask, { spawningTask: owner.id, attemptId: input.attemptId }, { ownership: { kind: 'conversation' }, conversationId: target.id, background: true }) : owner.id;
           const created = await tx.createConversation({ ownership: { kind: 'task', taskId: anchorTask } });
           if (args.background) (await tx.doc(BackgroundAgentsDoc, target.id)).children[input.attemptId] = { conversationId: created.id, owner: anchorTask };
-          (await tx.doc(CronScopeDoc, created.id)).inherited = inheritedScopes;
           const childControls = await tx.doc(SessionControlsDoc, created.id);
           childControls.role = roleId;
           childControls.selection = selection;

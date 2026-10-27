@@ -5,13 +5,15 @@ import { z } from 'zod';
 import { tenantPlatformJson } from './tenant-platform.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
-import { StorageIncidentSchema, type StorageIncident } from './storage-quarantine.js';
-import { BudgetedDurableObject } from './storage-quarantine.js';
+import { BudgetedDurableObject, StorageIncidentReportSchema, StorageIncidentSchema, type StorageIncident, type StorageIncidentReport } from './storage-quarantine.js';
 import { FiledIssueListInputSchema, FiledIssueResolveInputSchema, FiledIssueSchema, type FiledIssue, type FiledIssueListInput, type FiledIssueResolveInput } from '@gitspace/protocol-runtime/workspace-controls';
 
-/** Storage incidents the account keeps, newest last. */
+/** Storage incidents the account keeps, oldest first: past this, the oldest resolved ones are dropped. An object has at
+ * most one active incident, and active ones are always kept. */
 const STORAGE_INCIDENT_LIMIT = 50;
-/** After an incident is cleared, the object's alerts stay silent this long (a quarantine still shows). */
+/** Resolved storage incidents stay listed this long. */
+const STORAGE_INCIDENT_HISTORY_MS = 7 * 24 * 60 * 60_000;
+/** After an incident is cleared (resumed or dismissed), the object's alerts stay silent this long (a quarantine still shows). */
 const STORAGE_ALERT_SNOOZE_MS = 6 * 60 * 60_000;
 /** Filed issues the account keeps: filing past this evicts the oldest resolved one, and is refused when all are open. */
 const FILED_ISSUE_LIMIT = 500;
@@ -112,31 +114,45 @@ export class AccountStateDO extends BudgetedDurableObject {
    return signRuntimeBrowserAuthorityCertificate(body, (await runtimeBrowserKey(this.ctx.storage)).privateKey);
   }
 
-  /** Records a storage incident, one per object: a later one replaces it, and a quarantine is not replaced by an alert.
-   * Alerts of an object whose incident was cleared within `STORAGE_ALERT_SNOOZE_MS` are dropped. */
-  async recordStorageIncident(raw: StorageIncident): Promise<void> {
-    const incident = StorageIncidentSchema.parse(raw);
+  /** Records a storage incident as the object's active one: it replaces an active alert, and an active quarantine is not
+   * replaced by an alert. Alerts of an object whose incident was cleared within `STORAGE_ALERT_SNOOZE_MS` are dropped. */
+  async recordStorageIncident(raw: StorageIncidentReport): Promise<void> {
+    const incident = StorageIncidentReportSchema.parse(raw);
     const incidents = await this.listStorageIncidents();
-    const previous = incidents.find(item => item.objectId === incident.objectId);
-    if (previous?.kind === 'quarantine' && incident.kind === 'alert') return;
+    const active = incidents.find(item => item.objectId === incident.objectId && item.resolvedAt === null);
+    if (active?.kind === 'quarantine' && incident.kind === 'alert') return;
     if (incident.kind === 'alert' && ((await this.storageAlertSnoozes())[incident.objectId] ?? 0) > Date.now()) return;
-    const next = [...incidents.filter(item => item.objectId !== incident.objectId), { ...incident, name: incident.name ?? previous?.name ?? null }].slice(-STORAGE_INCIDENT_LIMIT);
-    await this.ctx.storage.put('storage-incidents', next);
-    await notifyBrowsers(this.env, [{ ...accountLiveKey('storage-incidents'), version: Date.now() }]);
+    await this.saveStorageIncidents([...incidents.filter(item => item !== active), { ...incident, name: incident.name ?? active?.name ?? null, resolvedAt: null }]);
   }
 
+  /** The active storage incidents and those resolved within `STORAGE_INCIDENT_HISTORY_MS`, oldest first. */
   async listStorageIncidents(): Promise<StorageIncident[]> {
     const parsed = z.array(StorageIncidentSchema).safeParse(await this.ctx.storage.get('storage-incidents'));
-    return parsed.success ? parsed.data : [];
+    const since = Date.now() - STORAGE_INCIDENT_HISTORY_MS;
+    return parsed.success ? parsed.data.filter(item => item.resolvedAt === null || Date.parse(item.resolvedAt) > since) : [];
   }
 
-  async clearStorageIncident(objectId: string): Promise<void> {
+  /**
+   * Resolves the object's active incident. `healthy`: the watchdog found the object back under every alert threshold,
+   * which resolves an alert; a quarantine stays until the object is resumed. `cleared`: the object was resumed or its
+   * alert dismissed, which resolves either kind; its alerts then stay silent for `STORAGE_ALERT_SNOOZE_MS`.
+   */
+  async resolveStorageIncident(objectId: string, cause: 'healthy' | 'cleared'): Promise<void> {
     const now = Date.now();
-    const snoozes = Object.fromEntries(Object.entries(await this.storageAlertSnoozes()).filter(([, until]) => until > now));
-    await this.ctx.storage.put('storage-alert-snoozes', { ...snoozes, [objectId]: now + STORAGE_ALERT_SNOOZE_MS });
+    if (cause === 'cleared') {
+      const snoozes = Object.fromEntries(Object.entries(await this.storageAlertSnoozes()).filter(([, until]) => until > now));
+      await this.ctx.storage.put('storage-alert-snoozes', { ...snoozes, [objectId]: now + STORAGE_ALERT_SNOOZE_MS });
+    }
     const incidents = await this.listStorageIncidents();
-    if (!incidents.some(item => item.objectId === objectId)) return;
-    await this.ctx.storage.put('storage-incidents', incidents.filter(item => item.objectId !== objectId));
+    const active = incidents.find(item => item.objectId === objectId && item.resolvedAt === null);
+    if (!active || (cause === 'healthy' && active.kind === 'quarantine')) return;
+    await this.saveStorageIncidents(incidents.map(item => item === active ? { ...item, resolvedAt: new Date(now).toISOString() } : item));
+  }
+
+  /** Stores the incidents, dropping the oldest resolved ones past `STORAGE_INCIDENT_LIMIT`, and tells the browsers. */
+  private async saveStorageIncidents(incidents: StorageIncident[]): Promise<void> {
+    const evicted = new Set(incidents.filter(item => item.resolvedAt !== null).slice(0, Math.max(0, incidents.length - STORAGE_INCIDENT_LIMIT)));
+    await this.ctx.storage.put('storage-incidents', incidents.filter(item => !evicted.has(item)));
     await notifyBrowsers(this.env, [{ ...accountLiveKey('storage-incidents'), version: Date.now() }]);
   }
 

@@ -29,7 +29,7 @@ import { ChevronDown, CpuChip01, RefreshCcw01 } from '@untitledui/icons';
 import { useEffect, useState, type ReactNode } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
-import { formatProjectCronTime } from './ProjectCronsPage.js';
+import { formatRelativeTime } from './relative-time.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type ProvidersUsageStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -88,7 +88,7 @@ export function formatUsageReset(resetsAt: string | null, now = Date.now()): str
   const at = new Date(resetsAt);
   if (Number.isNaN(at.getTime())) return null;
   if (at.getTime() - now < 60_000) return 'resets now';
-  return `resets ${formatProjectCronTime(at, now)}`;
+  return `resets ${formatRelativeTime(at, now)}`;
 }
 
 function UsageLimitRow({ limit, now }: { limit: ProviderUsageLimit; now: number }) {

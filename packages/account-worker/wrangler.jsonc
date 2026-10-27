@@ -46,8 +46,8 @@
         "class_name": "ProjectSecretsDO"
       },
       {
-        "name": "PROJECT_CRONS",
-        "class_name": "ProjectCronsDO"
+        "name": "PROJECT_AUTOMATIONS",
+        "class_name": "ProjectAutomationsDO"
       },
       {
         "name": "SPACE_CONTEXT",
@@ -146,6 +146,11 @@
     {
       "tag": "account-v6-storage-migration",
       "new_sqlite_classes": ["StorageMigrationDO"]
+    },
+    {
+      "tag": "account-v7-automations",
+      "new_sqlite_classes": ["ProjectAutomationsDO"],
+      "deleted_classes": ["ProjectCronsDO"]
     }
   ],
   "vars": {

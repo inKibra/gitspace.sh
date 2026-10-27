@@ -8,6 +8,8 @@ import { createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime
 import type { WorkspaceTurnReport } from '@gitspace/blocks';
 import { projectProgress, projectWatchHooks, startFromProject } from '../src/project-watch.js';
 import { createWorkspaceMetadataTables } from '../src/workspace-metadata.js';
+import { automationTurnHooks, submitAutomationTurn } from '../src/automation-turns.js';
+import type { AutomationTurnReport } from '../src/project-automations.js';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -43,10 +45,12 @@ async function watchFixture(ctx: DurableObjectState) {
   const hooks = projectWatchHooks(ctx.storage, identity, (report, onDone) => { reports.push({ report, onDone }); reported.resolve(); reported = Promise.withResolvers(); });
   const waits: Promise<unknown>[] = [];
   const failures: unknown[] = [];
+  const automationReports: AutomationTurnReport[] = [];
+  const automationTurns = automationTurnHooks(ctx.storage, identity, async report => { automationReports.push(report); }, (_label, promise) => { waits.push(promise); });
   const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: 'e'.repeat(40) });
   const runtime: WorkspaceRuntime = await createWorkspaceRuntime({
     storage: ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
-    tools: { invoke: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool} ran` }] }), prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => '', authorizeCronTool: async () => {}, preflight: async () => {} },
+    tools: { invoke: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool} ran` }] }), prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => '', preflight: async () => {} },
     operations: { execute: unsupported, reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: async () => {} },
     code: { readFile: async () => null, listSnapshotPaths: async () => [], changedSnapshotPaths: unsupported, mergeSnapshot: unsupported, writeSnapshot: unsupported, reader: () => ({ readTree: async () => [], readBlob: async () => null, close: async () => {} }) },
     initialCheckpoint: async () => checkpoint,
@@ -56,7 +60,9 @@ async function watchFixture(ctx: DurableObjectState) {
     session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },
     onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async () => {},
-    published: (_snapshot, report) => hooks.published(report), turnChanged: hooks.turnChanged, personPrompted: hooks.personPrompted,
+    published: (_snapshot, report) => { hooks.published(report); automationTurns.published(report); },
+    turnChanged: (requestId, turn) => { hooks.turnChanged(requestId, turn); automationTurns.turnChanged(requestId, turn); },
+    personPrompted: hooks.personPrompted,
   });
   const root = await runtime.harness.root(BACKGROUND_CONTEXT);
   /** Every turn done and every hook it set off delivered. */
@@ -67,7 +73,8 @@ async function watchFixture(ctx: DurableObjectState) {
   };
   const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}` }, { name: 'FEAT-33', onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
-  return { identity, runtime, root, reply, call, requests, reports, reported: () => reported.promise, settle, start, submit, progress: () => projectProgress(ctx.storage, async () => runtime) };
+  const automate = (requestId: string, text: string) => submitAutomationTurn(ctx.storage, runtime, { requestId, text });
+  return { identity, runtime, root, reply, call, requests, reports, automationReports, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
 }
 
 const room = () => env.SPACE_AUTHORITY.getByName(`project-watch:${crypto.randomUUID()}`);
@@ -89,6 +96,27 @@ test('only the turn the project agent started reports, once; later turns, a pers
       await f.submit('machine', 'Sync finished on Darktop.');
       await f.settle();
       expect(f.reports).toHaveLength(1);
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('an automation run reports its turn to the project\'s automations as it starts and once as it ends; no other turn does', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    try {
+      f.reply('Audit clean.');
+      await f.automate('automation:run-1', 'Run the audit.');
+      await f.settle();
+      const run = { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, requestId: 'automation:run-1' };
+      expect(f.automationReports).toEqual([{ ...run, state: 'running' }, { ...run, state: 'ended', outcome: 'finished', text: 'Audit clean.' }]);
+      // A retried submission delivers nothing new, and a person's turn is not an automation's.
+      await f.automate('automation:run-1', 'Run the audit.');
+      f.reply('Done with your edit.');
+      await f.submit('person', 'Rename the bucket too.', 'device-1');
+      await f.settle();
+      expect(f.requests.filter(text => text === 'Run the audit.')).toHaveLength(1);
+      expect(f.automationReports).toHaveLength(2);
+      expect(f.reports).toEqual([]);
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
@@ -140,7 +168,7 @@ test('an instruction queued behind a running turn reports its own turn, not the 
     const held = Promise.withResolvers<void>();
     try {
       const earlier = f.reply('Earlier work done.', held.promise);
-      await f.submit('cron', 'Nightly cleanup.');
+      await f.submit('earlier', 'Nightly cleanup.');
       await earlier.requested.promise;
       f.reply('Queued work done.');
       await f.start('start:queued', 'Then write the tests.');

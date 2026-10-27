@@ -430,7 +430,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   return server.router({
     runtime: runtimeCloudProcedures(env, userId, deviceId),
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign },
-    secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
+    secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, automations: configuration.automations,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
     machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote }, ...lifecycle.project },
     space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },

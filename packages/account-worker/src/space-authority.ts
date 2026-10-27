@@ -32,6 +32,8 @@ import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environ
 import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { projectProgress, startFromProject, type ProjectProgress } from './project-watch.js';
+import { cancelAutomationTurn, submitAutomationTurn } from './automation-turns.js';
+import { AUTOMATION_REQUEST_PREFIX } from './project-automations.js';
 import { workspaceTurnReportSchema, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { z } from 'zod';
 import type { CloudProjectSummary, CloudWorkspaceDefinition, ProjectLifecycle, WorkspaceLifecycle } from '@gitspace/protocol';
@@ -1071,31 +1073,18 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return { attachment };
   }
 
-
-  async runtimeCronSubmit(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1), text: z.string().min(1), readScopes: z.array(z.string()), writeScopes: z.array(z.string()) }).parse(raw);
+  /** An automation run's instruction, submitted once per request id; the turn it starts reports its start and end to
+   * the project's automations. */
+  async runtimeAutomationSubmit(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1) }).parse(raw);
     await this.runtimeAccess(input, true);
-    return (await this.getRuntime(input)).cronSubmit(input);
+    return submitAutomationTurn(this.ctx.storage, await this.getRuntime(input), { requestId: input.requestId, text: input.text });
   }
 
-  async runtimeRequestStatus(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
-    return (await this.getRuntime(input)).requestStatus(input.requestId);
-  }
-
-  async runtimeCronWithdraw(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
-    return (await this.getRuntime(input)).cronWithdraw(input.requestId);
-  }
-
-  async runtimeCronCancel(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
-    return (await this.getRuntime(input)).cronCancel(input.requestId);
-  }
-
-  async runtimeCronNotifyOverdue(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().min(1) }).parse(raw);
-    return (await this.getRuntime(input)).cronNotifyOverdue(input.requestId);
+  /** A person's cancel of an automation run: withdrawn before it starts, or the workspace agent stopped. */
+  async runtimeAutomationCancel(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX) }).parse(raw);
+    return cancelAutomationTurn(this.ctx.storage, await this.getRuntime(input), input.requestId);
   }
 
   async runtimeTranscript(raw: unknown, format: 'json' | 'ndjson' = 'json', range: unknown = {}): Promise<Response> {

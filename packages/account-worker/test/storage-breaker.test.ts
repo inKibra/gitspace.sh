@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from 'cloudflare:test';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { STORAGE_BREAKER_ROWS } from '@gitspace/protocol/storage-breaker';
 import type { UserSettingsDO } from '../src/user-settings.js';
 
@@ -16,6 +16,11 @@ async function rejection(work: () => unknown): Promise<string> {
 async function restart(stub: DurableObjectStub<UserSettingsDO>): Promise<DurableObjectStub<UserSettingsDO>> {
   await rejection(() => runInDurableObject(stub, (_instance, state) => { state.abort('restart'); }));
   return env.USER_SETTINGS.get(stub.id);
+}
+
+/** The platform's storage route, as its watchdog calls it. */
+function platformStorage(body: object, token = env.PLATFORM_TOKEN): Promise<Response> {
+  return SELF.fetch('https://tenant.test/__platform/storage', { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
 }
 
 test('an object that writes past its budget refuses all storage, stays quarantined across restarts, and tells the account', async () => {
@@ -59,26 +64,51 @@ test('a quarantine tripped inside a transaction outlives the transaction it abor
   expect(await (await restart(stub)).storageBreakerStatus()).toMatchObject({ quarantined: true });
 });
 
-test('the platform quarantines and resumes an object by id, and a resume silences its alerts', async () => {
-  const stub = env.PROJECT_CRONS.getByName(crypto.randomUUID());
+test('the platform quarantines and resumes an object by id: the quarantine outlasts a healthy report, and a resume resolves it and silences its alerts', async () => {
+  const stub = env.PROJECT_AUTOMATIONS.getByName(crypto.randomUUID());
   const id = stub.id.toString();
-  const control = (body: object, token = env.PLATFORM_TOKEN) => SELF.fetch('https://tenant.test/__platform/storage', { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  const incidents = async () => (await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).filter(item => item.objectId === id);
 
-  expect((await control({ action: 'status', objectId: id }, 'wrong')).status).toBe(401);
-  expect((await control({ action: 'quarantine', objectId: id, reason: 'wrote 6,000,000 rows in an hour', className: 'ProjectCronsDO' })).status).toBe(200);
+  expect((await platformStorage({ action: 'status', objectId: id }, 'wrong')).status).toBe(401);
+  expect((await platformStorage({ action: 'quarantine', objectId: id, reason: 'wrote 6,000,000 rows in an hour', className: 'ProjectAutomationsDO' })).status).toBe(200);
   expect(await stub.storageBreakerStatus()).toMatchObject({ quarantined: true, reason: 'wrote 6,000,000 rows in an hour' });
-  expect(await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).toContainEqual(expect.objectContaining({ objectId: id, kind: 'quarantine' }));
-  // An alert never hides a quarantine.
-  await control({ action: 'alert', objectId: id, reason: 'wrote 1,200,000 rows in an hour', className: 'ProjectCronsDO' });
-  expect(await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).toContainEqual(expect.objectContaining({ objectId: id, kind: 'quarantine' }));
+  expect(await incidents()).toEqual([expect.objectContaining({ kind: 'quarantine', resolvedAt: null })]);
+  // An alert never hides a quarantine, and the watchdog finding the object under its thresholds does not resolve it.
+  await platformStorage({ action: 'alert', objectId: id, reason: 'wrote 1,200,000 rows in an hour', className: 'ProjectAutomationsDO' });
+  expect((await platformStorage({ action: 'healthy', objectId: id })).status).toBe(204);
+  expect(await incidents()).toEqual([expect.objectContaining({ kind: 'quarantine', resolvedAt: null })]);
 
-  const resumed = await control({ action: 'resume', objectId: id });
+  const resumed = await platformStorage({ action: 'resume', objectId: id });
   expect(await resumed.json()).toMatchObject({ quarantined: false });
-  expect(await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).not.toContainEqual(expect.objectContaining({ objectId: id }));
+  expect(await incidents()).toEqual([expect.objectContaining({ kind: 'quarantine', resolvedAt: expect.any(String) })]);
   // The hour that tripped the watchdog still counts after the resume; its alerts stay silent.
-  await control({ action: 'alert', objectId: id, reason: 'wrote 6,000,000 rows in the last hour', className: 'ProjectCronsDO' });
-  expect(await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).not.toContainEqual(expect.objectContaining({ objectId: id }));
-  expect((await control({ action: 'status', objectId: 'f'.repeat(64) })).status).toBe(404);
+  await platformStorage({ action: 'alert', objectId: id, reason: 'wrote 6,000,000 rows in the last hour', className: 'ProjectAutomationsDO' });
+  expect(await incidents()).toEqual([expect.objectContaining({ kind: 'quarantine', resolvedAt: expect.any(String) })]);
+  expect((await platformStorage({ action: 'status', objectId: 'f'.repeat(64) })).status).toBe(404);
+});
+
+test('an alert resolves when the watchdog finds the object healthy, and stays listed as resolved for seven days', async () => {
+  const id = env.USER_SETTINGS.getByName(crypto.randomUUID()).id.toString();
+  const incidents = async () => (await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).filter(item => item.objectId === id);
+  const alert = (reason: string) => platformStorage({ action: 'alert', objectId: id, reason, className: 'UserSettingsDO' });
+
+  await alert('was awake 22.9 of the last 24 hours');
+  expect(await incidents()).toEqual([expect.objectContaining({ kind: 'alert', reason: 'was awake 22.9 of the last 24 hours', resolvedAt: null })]);
+  expect((await platformStorage({ action: 'healthy', objectId: id })).status).toBe(204);
+  const [resolved] = await incidents();
+  expect(resolved).toMatchObject({ kind: 'alert', reason: 'was awake 22.9 of the last 24 hours', resolvedAt: expect.any(String) });
+
+  // The problem returns: a new alert opens, and the resolved one stays as history.
+  await alert('ran 3,500 alarms in the last hour');
+  expect(await incidents()).toEqual([
+    expect.objectContaining({ reason: 'was awake 22.9 of the last 24 hours', resolvedAt: resolved?.resolvedAt }),
+    expect.objectContaining({ reason: 'ran 3,500 alarms in the last hour', resolvedAt: null }),
+  ]);
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(Date.parse(resolved?.resolvedAt ?? '') + 7 * 24 * 60 * 60_000 + 1);
+    expect(await incidents()).toEqual([expect.objectContaining({ reason: 'ran 3,500 alarms in the last hour', resolvedAt: null })]);
+  } finally { vi.useRealTimers(); }
 });
 
 test('a resume sets again the alarm the quarantine cancelled', async () => {

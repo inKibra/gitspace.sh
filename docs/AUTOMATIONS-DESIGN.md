@@ -30,7 +30,7 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
 ## 4. Concepts
 
 - **Automation:** name, enabled, trigger, conditions and action. Automations start new work; activity on a subject that already has a workspace goes to it through its subject link (below), with no automation.
-- **Trigger:** a GitHub event with chosen actions (`pull_request` `opened`/`ready_for_review`/`synchronize`/..., `issues`, `issue_comment`, `pull_request_review`, `push`, `check_suite`), a **label** added to an issue or pull request (the starter automations use `gitspace:plan`, `gitspace:code` and `gitspace:review`, starting a workspace in that mode), a schedule (cron expression, as project crons today), or manual only.
+- **Trigger:** a GitHub event with chosen actions (`pull_request` `opened`/`ready_for_review`/`synchronize`/..., `issues`, `issue_comment`, `pull_request_review`, `push`, `check_suite`), a **label** added to an issue or pull request (the starter automations use `gitspace:plan`, `gitspace:code` and `gitspace:review`, starting a workspace in that mode), a schedule (a cron expression in UTC), or manual only.
 - **Conditions (filters):** each event offers its own filters, at most one of each: a pull request has base branch, head branch, author, draft, labels and changed files; an issue or comment has author and labels; a push has branch, author and changed files; a check suite has branch and conclusion; a review has base branch, author and review state. Branches and authors are *one of* / *not one of* a list, labels *any of* / *none of*, changed files *touch any of* / *touch none of*; values may be patterns (`release/*`, `docs/**`) and are suggested from the repository through the GitHub App. All must pass. The editor reads them back as a sentence ("Runs for pull requests into main, not drafts, not by dependabot[bot].").
 - **Subject:** what an event is about: a pull request, an issue, or a branch (a commit's or a check's subject is its branch, or the pull requests GitHub names on it).
 - **Subject link:** per project, a subject has at most one workspace. A link is made, strongest first:
@@ -89,9 +89,11 @@ Some loops are the point (CI fails, the agent fixes it, pushes, CI runs again); 
 - When the subject closes (pull request merged or closed, issue closed) its workspace gets a notice and stays open.
 - An automation-made workspace with no activity for 7 days after its subject closed is closed, and its machine checkout is released.
 
-## 9. Crons become schedule automations
+## 9. Crons are deleted (decided 2026-10-27)
 
-One-time migration: every project cron becomes an automation with a schedule trigger, no conditions, and the action *message the project agent* or *message a workspace* (its target), keeping name, schedule, prompt, scopes and enabled state. Cron run history moves to runs. The Crons page is removed; the Automations page replaces it.
+No project has a cron, so nothing migrates: `ProjectCronsDO` is deleted (a `deleted_classes` migration), with `project-crons.ts`, `cron-contract.ts`, the `crons.*` operations and MCP tools, and the Crons page. Cron runs carried read and write scopes that admitted only file and drive tools (no bash, so no builds or tests); automations have no scopes, and the scope machinery in runtime-core (`CronScopeDoc`, generation binding, `authorizeCronTool`) is deleted with them. Request tracking (idempotent submission by request id, status, withdraw, cancel) stays, renamed for automation runs. A run learns that its turn ended from the workspace (as a project agent's `start` does), never by polling.
+
+**Schedules** are five-field cron expressions in UTC (`0 6 * * *`), with presets in the editor (every hour, every day at, every week on, custom), a plain-words readback and the next run time.
 
 ## 10. Storage
 

@@ -709,3 +709,23 @@ export const RuntimeWorkspaceArgumentsSchema = z.union([
   RuntimeWorkspaceStartArgumentsSchema,
   RuntimeWorkspaceMutationArgumentsSchema,
 ]);
+/** An automation as the project agent drafts it (`AutomationDraft` without `enabled`: a person's approval turns it on). */
+export const RuntimeAutomationDraftSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  trigger: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('schedule'), cron: z.string().trim().min(1) }).strict(),
+    z.object({ kind: z.literal('manual') }).strict(),
+  ]),
+  action: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('messageProjectAgent'), instruction: z.string().trim().min(1).max(16_000) }).strict(),
+    z.object({ kind: z.literal('messageWorkspace'), workspaceId: z.string().min(1), instruction: z.string().trim().min(1).max(16_000) }).strict(),
+  ]),
+}).strict();
+/** The project agent's automations (docs/AUTOMATIONS-DESIGN.md §5a). What it proposes, new or a change, waits for a person
+ * to approve it before it runs; switching one off or deleting it takes effect at once. */
+export const RuntimeAutomationsArgumentsSchema = z.union([
+  z.object({ method: z.literal('list') }).strict(),
+  z.object({ method: z.literal('propose'), automationId: z.string().min(1).optional(), draft: RuntimeAutomationDraftSchema, asked: z.string().trim().min(1).max(4_000), reason: z.string().trim().min(1).max(4_000) }).strict(),
+  z.object({ method: z.literal('test'), draft: RuntimeAutomationDraftSchema }).strict(),
+  z.object({ method: z.enum(['delete', 'disable']), automationId: z.string().min(1) }).strict(),
+]);

@@ -24,7 +24,7 @@ const keySchema = z.string().min(40).max(64);
 export const deviceCapabilitySchema = z.enum([
   /** Queries and subscriptions. */
   'rpc.read',
-  /** Mutations that change projects, workspaces, settings, or crons. */
+  /** Mutations that change projects, workspaces, settings, or automations. */
   'rpc.write',
   /** Talk to agents: prompt, steer, answer questions. */
   'session.prompt',

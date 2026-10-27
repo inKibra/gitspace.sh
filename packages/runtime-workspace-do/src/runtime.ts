@@ -13,7 +13,7 @@ import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
-import { createCronRuntime, type RuntimeCronInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
+import { createAutomationRequests, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord';
 import { createSessionHistory } from './session-history.js';
 import { createReplicaStore, replicaEvents } from './replica-store.js';
@@ -93,11 +93,10 @@ export type WorkspaceRuntime = {
   snapshotCommit(input: RuntimeSnapshotCommitInput): Promise<RuntimeSnapshotCommitResult>;
   lfsRoots(): RuntimeSnapshotCommitInput['checkpoint'][];
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
-  cronSubmit(input: RuntimeCronInput): Promise<{ conversationId: string }>;
-  requestStatus(requestId: string): Promise<RuntimeRequestStatus>;
-  cronWithdraw(requestId: string): Promise<RuntimeRequestStatus>;
-  cronCancel(requestId: string): Promise<RuntimeRequestStatus>;
-  cronNotifyOverdue(requestId: string): Promise<void>;
+  /** An automation run's instruction to the main conversation, submitted once per request id; its turn reports through `turnChanged`. */
+  automationSubmit(input: RuntimeAutomationInput): Promise<{ conversationId: string }>;
+  /** A person's cancel: withdraws the instruction, or stops the workspace agent once it has started. */
+  automationCancel(requestId: string): Promise<RuntimeRequestStatus>;
   transcript(conversationId?: string, format?: RuntimeTranscriptFormat, range?: RuntimeTranscriptRange): Promise<Response>;
   publish(): void;
 };
@@ -292,7 +291,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   const history = createSessionHistory(options.storage, storage, withdrawn);
   const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference });
   const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
-  const cron = createCronRuntime({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
+  const automations = createAutomationRequests({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
   const drafts = new WorkspaceDraftStore({
     read: async () => { const value = replica.draft(); return value === undefined ? undefined : JSON.parse(value); },
@@ -570,11 +569,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       options.storage.sql.exec('UPDATE runtime_management SET result=? WHERE request_id=?', JSON.stringify(result), input.requestId);
       return result;
     },
-    cronSubmit: input => runtime.lifecycle.runWhileActive(String(runtime.root.id), () => cron.submit(input)),
-    requestStatus: cron.status,
-    cronWithdraw: cron.withdraw,
-    cronCancel: cron.cancel,
-    cronNotifyOverdue: cron.notifyOverdue,
+    automationSubmit: input => runtime.lifecycle.runWhileActive(String(runtime.root.id), () => automations.submit(input)),
+    automationCancel: automations.cancel,
     async transcript(conversationId, format, range) {
       return transcriptResponse(storage, await conversation(conversationId), withdrawn, format, range);
     },

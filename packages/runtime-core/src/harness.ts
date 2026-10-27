@@ -16,7 +16,6 @@ import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-co
 import { z } from 'zod';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { ConversationLifecycleDoc, createConversationLifecycle, type ConversationLifecycle } from './conversation-lifecycle.js';
-import { bindCronGeneration } from './cron.js';
 import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
 import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/inference';
 import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_REQUEST_IMAGES } from './inference/image-limits.js';
@@ -124,7 +123,6 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     // Before binding, so a refused request is not bound afterwards.
     const form = resetAttempt(options, `turn:${String(runtime.conversationId)}`, signal, 'This turn\'s model request');
     if (form === 'refused') return undefined;
-    await bindCronGeneration(harness, runtime, context);
     const live = await runtime.snapshot(LiveDoc, runtime.conversationId, context);
     const ids = live?.run?.inputs ?? [];
     const requests = new Map<string, string>();

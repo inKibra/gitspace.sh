@@ -11,10 +11,9 @@ import { glyph } from './glyph.js';
 import { browserPluginsUrl, navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
-import { StorageIncidents } from './StorageIncidents.js';
 
 export interface AccountWorkPagesProps {
-  view: 'kanban' | 'projects' | 'inbox';
+  view: 'kanban' | 'projects';
   projects: readonly ProjectLifecycleView[];
   directory: Directory;
   loading: boolean;
@@ -123,8 +122,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <DirectoryCoverage projects={projects} directory={directory} loading={loading} onRefresh={onRefresh} />
     {view === 'kanban' ? <KanbanView workspaces={activeWorkspaces} onOpen={open} onSetRelations={actions.onSetWorkspaceRelations} onNewWorkspace={actions.onCreateWorkspace ? setNewWorkspacePhase : undefined} />
-      : view === 'projects' ? <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />
-        : <InboxView projects={activeProjects} directory={directory} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} />}
+      : <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />}
     <Dialog open={newWorkspacePhase !== null && newWorkspaceProject === null} onOpenChange={(next) => { if (!next) clearCreate(); }}>
       <DialogContent><DialogHeader><DialogTitle>Choose a project</DialogTitle><DialogDescription>Choose which project the new {newWorkspacePhase ? PHASE_LABEL[newWorkspacePhase].toLowerCase() : ''} workspace belongs to.</DialogDescription></DialogHeader>
         <CardGroup orientation="inline" border="outlined" separated>{activeProjects.filter((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only').map((project, index) => <Card key={project.id} index={index} onClick={() => setNewWorkspaceProject(project.id)} label={`Create workspace in ${project.name}`}><CardHeader><CardTitle>{project.name}</CardTitle><CardDescription>{project.baseBranch}</CardDescription></CardHeader></Card>)}</CardGroup>
@@ -149,31 +147,6 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
   </div>;
 }
 
-function InboxView({ projects, directory, onOpenWorkspace, onOpenProject }: Pick<AccountWorkPagesProps, 'projects' | 'directory' | 'onOpenWorkspace' | 'onOpenProject'>) {
-  const scopes = projects.flatMap((project) => [
-    { key: `base:${project.id}`, name: `${project.name} · Base agent`, summary: directory[project.id]?.baseSummary, open: () => onOpenProject(project.id) },
-    ...(directory[project.id]?.workspaces ?? []).filter((workspace) => !workspace.closedAt).map((workspace) => ({ key: workspace.id, name: `${project.name} · ${workspace.name}`, summary: workspace.summary, open: () => onOpenWorkspace(project.id, workspace.id) })),
-  ]);
-  const attention = scopes.flatMap((scope) => {
-    const status = scope.summary?.status;
-    if (!status) return [];
-    const reasons = [
-      status.agents.orange ? `${status.agents.orange} ${status.agents.orange === 1 ? 'agent needs' : 'agents need'} permission` : null,
-      status.agents.blue ? `${status.agents.blue} agent${status.agents.blue === 1 ? '' : 's'} waiting` : null,
-      status.agents.red ? `${status.agents.red} agent error${status.agents.red === 1 ? '' : 's'}` : null,
-      status.sync.conflicts ? `${status.sync.conflicts} sync conflict${status.sync.conflicts === 1 ? '' : 's'}` : null,
-    ].filter(Boolean);
-    return reasons.length ? [{ ...scope, reasons }] : [];
-  });
-  const incomplete = scopes.filter((scope) => !scope.summary?.status || summaryFreshness(scope.summary) !== 'fresh');
-  return <PageCanvas>
-    <PageHeader kicker="Attention" title="Inbox" description="Recorded approvals, waits, failures and sync conflicts across project and workspace agents." actions={<span className="text-caption text-muted-foreground tabular-nums">{attention.length} {attention.length === 1 ? 'space' : 'spaces'} with recorded attention</span>} />
-    <StorageIncidents />
-    {attention.length ? <CardGroup orientation="inline" border="outlined" separated>{attention.map((item, index) => <Card key={item.key} index={index} onClick={item.open} label={`Open ${item.name}`}><CardHeader><CardTitle>{item.name}</CardTitle><CardDescription>{item.reasons.join(' · ')}</CardDescription></CardHeader><CardContent><Badge size="compact" color={summaryFreshness(item.summary) === 'fresh' ? 'amber' : 'gray'}>{summaryFreshness(item.summary) === 'fresh' ? 'Recorded attention' : summaryFreshness(item.summary) === 'stale' ? 'Last recorded · stale' : 'Freshness unknown'}</Badge></CardContent></Card>)}</CardGroup>
-      : <EmptyState title="No attention recorded" description={incomplete.length || projects.some((project) => !directory[project.id] || directory[project.id]?.error) ? 'Status coverage is incomplete. Unavailable or stale reports cannot establish that nothing needs attention.' : 'The available status summaries contain no recorded waits or errors.'} />}
-    {incomplete.length ? <section className="flex flex-col gap-3 pt-8"><h2 className="text-subtitle font-semibold text-foreground">Status coverage</h2><p className="text-body text-muted-foreground">These spaces have unknown or stale reports; their current agents and sync have not been confirmed.</p><CardGroup orientation="inline" border="outlined" separated>{incomplete.map((scope, index) => <Card key={scope.key} index={index} onClick={scope.open} label={`Inspect ${scope.name}`}><CardHeader><CardTitle>{scope.name}</CardTitle><CardDescription>{summaryFreshness(scope.summary) === 'stale' ? 'Stale status · last recorded only' : 'Status unknown'}{scope.summary?.detail ? ` · ${scope.summary.detail}` : ''}</CardDescription></CardHeader></Card>)}</CardGroup></section> : null}
-  </PageCanvas>;
-}
 function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { workspaces: readonly AccountWorkspace[]; onOpen: (workspace: AccountWorkspace) => void; onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations']; onNewWorkspace?: (phase: WorkspaceView['phase']) => void }) {
   const [graph, setGraph] = useState(false);
   const blocked = workspaces.filter((workspace) => workspace.stack?.blockedBy.length).length;

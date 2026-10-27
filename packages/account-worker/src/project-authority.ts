@@ -38,6 +38,8 @@ import { gitLfsObjectKey } from './git-lfs-store.js';
 import { tenantStore } from './tenant-store.js';
 import { behindOrigin } from './cloud-stack-status.js';
 import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } from './guide-shares.js';
+import { AutomationRunRecordSchema, automationRunView, utcDay, type AutomationRunRecord } from './project-automations.js';
+import type { AutomationProjectSummary, AutomationRunView } from '@gitspace/protocol/automations-contract';
 import { z } from 'zod';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 import type { WorkspaceServiceUrl } from './workspace-service-urls.js';
@@ -376,6 +378,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
         CREATE TABLE IF NOT EXISTS environment_values(name TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS workspace_statuses(workspace_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,summary TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS workspace_statuses_project ON workspace_statuses(project_id);
+        CREATE TABLE IF NOT EXISTS automation_summaries(project_id TEXT PRIMARY KEY,total INTEGER NOT NULL,on_count INTEGER NOT NULL,proposed INTEGER NOT NULL,working INTEGER NOT NULL,queued INTEGER NOT NULL,failed_today INTEGER NOT NULL,failed_day INTEGER NOT NULL,runs_json TEXT NOT NULL);
       `);
       for (const column of ['role TEXT', 'source_json TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
@@ -431,6 +434,28 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   private workspaceStatuses(): WorkspaceStatusRow[] {
     return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string }>('SELECT workspace_id,project_id,summary FROM workspace_statuses').toArray()
       .map(row => workspaceStatusRowSchema.parse({ projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary) }));
+  }
+
+  /** A project's automation counts and newest runs, pushed by its automations object on every change; `day` is the UTC
+   * day `failedToday` counts. */
+  setAutomationSummary(input: { summary: AutomationProjectSummary; day: number; runs: AutomationRunRecord[] }): void {
+    const { summary, day } = input;
+    if (!this.ctx.storage.sql.exec('SELECT 1 FROM user_projects WHERE project_id=?', summary.projectId).toArray().length) return;
+    const runs = JSON.stringify(z.array(AutomationRunRecordSchema).parse(input.runs));
+    this.ctx.storage.sql.exec(`INSERT INTO automation_summaries(project_id,total,on_count,proposed,working,queued,failed_today,failed_day,runs_json) VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(project_id) DO UPDATE SET total=excluded.total,on_count=excluded.on_count,proposed=excluded.proposed,working=excluded.working,queued=excluded.queued,failed_today=excluded.failed_today,failed_day=excluded.failed_day,runs_json=excluded.runs_json`,
+    summary.projectId, summary.total, summary.on, summary.proposed, summary.working, summary.queued, summary.failedToday, day, runs);
+  }
+
+  /** Every project's automation counts and the newest runs across projects, from the pushed rows alone: no project's
+   * automations object opens. Failures counted on an earlier UTC day read as none today. */
+  automationOverview(limit: number): { projects: AutomationProjectSummary[]; runs: AutomationRunView[] } {
+    const today = utcDay(Date.now());
+    const rows = this.ctx.storage.sql.exec<{ project_id: string; total: number; on_count: number; proposed: number; working: number; queued: number; failed_today: number; failed_day: number; runs_json: string }>('SELECT * FROM automation_summaries ORDER BY project_id').toArray();
+    return {
+      projects: rows.map(row => ({ projectId: row.project_id, total: row.total, on: row.on_count, proposed: row.proposed, working: row.working, queued: row.queued, failedToday: row.failed_day === today ? row.failed_today : 0 })),
+      runs: rows.flatMap(row => z.array(AutomationRunRecordSchema).parse(JSON.parse(row.runs_json))).sort((left, right) => right.scheduledFor - left.scheduledFor).slice(0, limit).map(automationRunView),
+    };
   }
 
   /** The live object: forwards each notice to the tabs watching its key (sockets admitted as user-scoped devices with
@@ -725,6 +750,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_projects(project_id) VALUES(?)', projectId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', projectId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_statuses WHERE project_id=?', projectId);
+    this.ctx.storage.sql.exec('DELETE FROM automation_summaries WHERE project_id=?', projectId);
     return this.ctx.storage.sql.exec(
       'DELETE FROM user_projects WHERE project_id=? RETURNING project_id',
       projectId,

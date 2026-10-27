@@ -97,7 +97,7 @@ Exit tracking and conversation Stop keep the original process identity. They use
 
 ## Configure account and project access
 
-**Skills**, **Plugins**, **Secrets**, and **Crons** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.
+**Skills**, **Plugins**, **Secrets**, and **Automations** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.
 
 **Inference** loads provider and model catalogs for the selected profile. Until the model catalog is ready, saved model choices stay visible but cannot be changed in the model picker. A loading catalog does not mean that a model or provider is missing.
 
@@ -109,15 +109,11 @@ Account secrets are shared only through explicit project grants. Each grant choo
 
 Use account values for non-secret defaults and project values for overrides. Lifecycle values resolve from bundle default to account, project, then workspace value. See [Lifecycle reference](/lifecycle-reference) for profile requirements and secret resolution.
 
-Crons list schedules across the account. Choose the owning project when creating one. You can manage schedules and read their history without opening that project; execution still needs an eligible online runner.
+**Automations** belong to a project. Each one messages the project agent or one of the project's workspaces on a schedule (a five-field expression in UTC, such as `0 6 * * *`) or when you start it with **Run now**. Its instruction may name `{{automation.name}}`, plus `{{scheduled_for}}` on a schedule or `{{requested_by}}` when started by hand; any other field is refused when you save. Runs execute in the cloud: a run is the workspace agent's next turn, and that agent attaches a machine only when its work needs one.
 
-A cron submits its prompt to the existing root conversation, not a new conversation for each run. Scheduled prompts run one at a time. The schedule's read and write scopes constrain its own turns and work spawned from them, not unrelated user turns.
+At most a project's **concurrency** (2 by default) runs work at once; more wait in a queue, and a run queued for 24 hours is recorded as **Skipped: waited more than a day for a slot**. Past an automation's **daily run cap** (50 by default) in a UTC day, its runs are recorded as **Skipped: daily run cap**. A run ends when its workspace's turn ends, or when that turn stops to ask you something.
 
-Queue time does not count toward the one-hour runtime warning. A run that waits longer than one schedule interval or 24 hours, whichever is shorter, is withdrawn and recorded as **Skipped: workspace busy**. The next due run starts fresh.
-
-After an hour of execution, GitSpace marks the run **overdue** and posts a notice without stopping the workspace agent. History records the real result when the turn ends.
-
-In **Run history**, **Cancel queued run** withdraws only that submission. For a running cron, **Stop workspace agent** requires confirmation because it also interrupts child agents and other workspace work.
+The project agent can propose an automation, or a change to one, from its conversation. A proposal does nothing until you approve it on the Automations page; switching one off or deleting it needs no approval. **Cancel run** in a queued run's details skips it.
 
 ## Manage workspaces from an agent
 

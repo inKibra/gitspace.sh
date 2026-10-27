@@ -4,7 +4,6 @@ import { useBrowserPlugins } from './BrowserPlugins.js';
 import type { InspectorView, RuntimeSettingValue, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { DEFAULT_INFERENCE_PROFILE_ID, inferenceSettingMetadata } from '@gitspace/protocol/inference';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
-import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import type { MachineDiscardConfirmation } from '@gitspace/protocol/machine-discard';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
@@ -25,7 +24,7 @@ import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
-import { ACCOUNT_DIRECTORY_CHANGED, PRODUCT_ROUTE_LABELS, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
+import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
@@ -33,7 +32,8 @@ import { ServiceAccessApproval } from './ServiceAccessApproval.js';
 import { SkillsPage } from './SkillsPage.js';
 import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
-import { ProjectCronsPage, type ProjectCronTargetOption } from './ProjectCronsPage.js';
+import { AUTOMATIONS_OVERVIEW_INPUT, AutomationsPage } from './AutomationsPage.js';
+import { MonitoringPage } from './MonitoringPage.js';
 import { AccountDirectoryContext, useWorkspaceProjection } from './useAccountDirectory.js';
 import { useOriginCheck } from './useOriginCheck.js';
 import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRetainedRead.js';
@@ -479,6 +479,9 @@ function AccountFrame({ children }: { children: ReactNode }) {
   }), [projectValues, directory, acceptRuntime, projects.state]);
   const lfsTransition = useLfsTransition();
   const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm);
+  const automationOverview = useResultQuery(rpcClient.automations.overview, AUTOMATIONS_OVERVIEW_INPUT);
+  useEventRefresh(useLiveChanges(accountLiveKey('automations')), () => automationOverview.refetch());
+  const automationSummaries = useRetainedQueryValue(automationOverview, 'automations-overview')?.projects ?? [];
   const runSidebarAction = async (operation: () => void | Promise<void>): Promise<void> => {
     setSidebarActionError(null);
     try { await operation(); }
@@ -505,6 +508,8 @@ function AccountFrame({ children }: { children: ReactNode }) {
         onRestore={(spaceId) => runSidebarAction(() => actions.onRestoreWorkspace(spaceId))}
         onNewWorkspace={(id) => { setCreateError(null); setNewWorkspaceProject(id); }}
         onOpenProjectSettings={(id) => { setSettingsProjectId(id); navigate('projects'); }}
+        onOpenProjectAutomations={(id) => navigateProductUrl(automationsUrl(id))}
+        failedAutomationRuns={automationSummaries.reduce((sum, summary) => sum + summary.failedToday, 0)}
       />
       <SidebarInset className="min-w-0 overflow-hidden">
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
@@ -1166,11 +1171,11 @@ function DeviceGate({ children }: { children: ReactNode }) {
   return <AccountConnectPage error={state.error} onRecover={(handle, key) => { void recover(handle, key); }} onEnroll={value => { void redeem(value); }} />;
 }
 
-type ConfigurationView = 'skills' | 'plugins' | 'secrets' | 'crons';
+type ConfigurationView = 'skills' | 'plugins' | 'secrets';
 type ConfigurationProject = { id: string; name: string; lifecycle: string };
 
 function isConfigurationView(view: ProductRoute): view is ConfigurationView {
-  return view === 'skills' || view === 'plugins' || view === 'secrets' || view === 'crons';
+  return view === 'skills' || view === 'plugins' || view === 'secrets';
 }
 
 async function configurationResult<T>(request: Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>): Promise<T> {
@@ -1279,7 +1284,7 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
   return actions;
 }
 
-function AccountWork({ view }: { view: 'kanban' | 'projects' | 'inbox' }) {
+function AccountWork({ view }: { view: 'kanban' | 'projects' }) {
   const account = useContext(AccountDirectoryContext);
   const actions = useContext(AccountWorkActionsContext);
   const projectSettings = useContext(ProjectSettingsContext);
@@ -1296,8 +1301,7 @@ function AccountConfiguration({ view }: { view: ConfigurationView }) {
     {read.error ? <p role="alert" className="px-8 pt-4 text-caption text-destructive">Project assignments: {rpcErrorMessage(read.error, 'project.list')}<Button variant="ghost" onClick={() => void projects.refetch()}>Retry projects</Button></p> : null}
     {view === 'skills' ? <AccountSkills projects={values} />
       : view === 'plugins' ? <AccountPlugins projects={values} />
-        : view === 'secrets' ? <ProjectSecretsPage {...accountSecretsApi} projects={values} />
-          : <AccountCrons projects={values} projectsLoading={read.initialLoading} />}
+        : <ProjectSecretsPage {...accountSecretsApi} projects={values} />}
   </>;
 }
 
@@ -1371,74 +1375,18 @@ function AccountPlugins({ projects }: { projects: readonly ConfigurationProject[
   />;
 }
 
-function AccountCrons({ projects, projectsLoading }: { projects: readonly ConfigurationProject[]; projectsLoading: boolean }) {
-  const [crons, setCrons] = useState<ProjectCronView[]>([]);
-  const [targets, setTargets] = useState<ProjectCronTargetOption[]>([]);
-  const [holders, setHolders] = useState<Record<string, string>>({});
-  const savedCrons = useRef(new Map<string, readonly ProjectCronView[]>());
-  const savedContexts = useRef(new Map<string, InspectorView>());
-  const [loaded, setLoaded] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshToken, setRefreshToken] = useState(0);
-  const projectKey = projects.map((project) => `${project.id}:${project.lifecycle}`).join('|');
-  useEffect(() => {
-    if (projectsLoading) return;
-    let cancelled = false;
-    setLoading(true);
-    for (const id of savedCrons.current.keys()) if (!projects.some((project) => project.id === id)) savedCrons.current.delete(id);
-    for (const id of savedContexts.current.keys()) if (!projects.some((project) => project.id === id && project.lifecycle !== 'cloud-only')) savedContexts.current.delete(id);
-    const load = async (): Promise<void> => {
-      const failures: string[] = [];
-      const lists = await Promise.all(projects.map(async (project) => {
-        try {
-          const value = await configurationResult(rpcClient.crons.list({ projectId: project.id }));
-          if (!cancelled) savedCrons.current.set(project.id, value);
-          return value;
-        } catch (cause) {
-          failures.push(rpcErrorMessage(cause, `${project.name} schedules`));
-          if (!cancelled && invalidatesRead(cause)) savedCrons.current.delete(project.id);
-          return savedCrons.current.get(project.id) ?? [];
-        }
-      }));
-      if (cancelled) return;
-      setCrons(lists.flat());
-      setLoaded(true);
-      setLoading(false);
-      setError(failures.join(' · ') || null);
-      const contexts = await Promise.all(projects.filter((project) => project.lifecycle !== 'cloud-only').map(async (project) => {
-        try {
-          const value = await configurationResult(rpcClient.inspector.view({ projectId: project.id, workspaceId: null }));
-          if (!cancelled) savedContexts.current.set(project.id, value);
-          return value;
-        } catch (cause) {
-          failures.push(rpcErrorMessage(cause, `${project.name} workspace targets`));
-          if (!cancelled && invalidatesRead(cause)) savedContexts.current.delete(project.id);
-          return savedContexts.current.get(project.id) ?? null;
-        }
-      }));
-      if (cancelled) return;
-      setTargets(contexts.flatMap((context) => context ? context.workspaces.filter((workspace) => workspace.kind !== 'base' && !workspace.archivedAt).map((workspace) => ({ target: { scope: 'workspace' as const, projectId: workspace.projectId, spaceId: workspace.id }, label: `Workspace agent · ${workspace.name}`, description: workspace.branch })) : []));
-      setHolders(Object.fromEntries(contexts.flatMap((context) => context?.placement?.machineId ? [[context.identity.spaceId, context.placement.machineId]] : [])));
-      setError(failures.join(' · ') || null);
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [projectKey, projectsLoading, refreshToken]);
-  return <><div className="flex justify-end px-8 pt-4"><Button variant="ghost" onClick={() => setRefreshToken((current) => current + 1)} disabled={loading}>Refresh schedules</Button></div><ProjectCronsPage
-    projects={projects}
-    crons={crons.filter((cron) => projects.some((project) => project.id === cron.projectId))}
-    targetOptions={targets.filter((option) => projects.some((project) => project.id === option.target.projectId))}
-    holders={holders}
-    loading={projectsLoading || (loading && !loaded)}
-    loadError={error}
-    onCreateCron={(draft) => configurationResult(rpcClient.crons.create({ projectId: draft.target.projectId, draft }))}
-    onUpdateCron={(projectId, cronId, draft) => configurationResult(rpcClient.crons.update({ projectId, cronId, draft }))}
-    onDeleteCron={async (projectId, cronId) => { await configurationResult(rpcClient.crons.delete({ projectId, cronId })); }}
-    onRunNow={(projectId, cronId) => configurationResult(rpcClient.crons.runNow({ projectId, cronId }))}
-    onListRuns={(projectId, cronId) => configurationResult(rpcClient.crons.history({ projectId, cronId }))}
-    onCancelRun={(projectId, runId) => configurationResult(rpcClient.crons.cancelRun({ projectId, runId }))}
-  /></>;
+function AccountAutomations() {
+  const location = useProductLocation();
+  const account = useContext(AccountDirectoryContext);
+  if (!account) throw new Error('Automations require the account directory');
+  const projects = account.projects.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting').map((project) => ({
+    id: project.id,
+    name: project.name,
+    workspaces: (account.directory[project.id]?.workspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.name, active: !workspace.closedAt })),
+  }));
+  return <AutomationsPage projects={projects} projectId={location.searchParams.get(AUTOMATIONS_PROJECT_PARAM)}
+    onSelectProject={(projectId) => navigateProductUrl(automationsUrl(projectId))}
+    onOpenWorkspace={(projectId, workspaceId) => selectInspection(projectId, workspaceId === projectId ? null : workspaceId)} />;
 }
 
 function AccountProductRoute() {
@@ -1451,8 +1399,10 @@ function AccountProductRoute() {
     }
   }, [location.href, route]);
   const page = isConfigurationView(route) ? <AccountConfiguration view={route} />
-    : route === 'kanban' || route === 'projects' || route === 'inbox' ? <AccountWork view={route} />
-      : <GitSpaceProduct />;
+    : route === 'kanban' || route === 'projects' ? <AccountWork view={route} />
+      : route === 'automations' ? <AccountAutomations />
+        : route === 'monitoring' ? <MonitoringPage />
+          : <GitSpaceProduct />;
   return <>
     {page}
     {updated ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto flex w-fit max-w-full items-center gap-2 rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">GitSpace was updated. Reload to load the new version.<Button variant="primary" size="compact" onClick={() => window.location.reload()}>Reload</Button></div> : null}

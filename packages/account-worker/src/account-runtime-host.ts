@@ -15,6 +15,7 @@ import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceReport, storeWorkspaceStatus } from './workspace-metadata.js';
 import { projectWatchHooks, reconcileProjectWatch } from './project-watch.js';
+import { automationTurnHooks, reconcileAutomationTurns } from './automation-turns.js';
 import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
@@ -115,6 +116,7 @@ export async function createAccountWorkspaceRuntime(
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
   const qa = createRuntimeQaServices(env, identity);
   const watch = projectWatchHooks(ctx.storage, identity, (report, onDone) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: identity.projectId }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, error }))));
+  const automationTurns = automationTurnHooks(ctx.storage, identity, report => env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runTurnChanged(report), waitUntil);
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
@@ -125,9 +127,10 @@ export async function createAccountWorkspaceRuntime(
       if (storeWorkspaceStatus(ctx.storage, status)) waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       storeWorkspaceReport(ctx.storage, report);
       watch.published(report);
+      automationTurns.published(report);
       waitUntil('browser notice', notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
     },
-    turnChanged: watch.turnChanged,
+    turnChanged: (requestId, turn) => { watch.turnChanged(requestId, turn); automationTurns.turnChanged(requestId, turn); },
     personPrompted: watch.personPrompted,
     snapshotChanged: machineIds => {
       waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
@@ -169,6 +172,7 @@ export async function createAccountWorkspaceRuntime(
   });
   waitUntil('wake', runtime.wake());
   waitUntil('project watch', reconcileProjectWatch(ctx.storage, runtime, watch).catch((error: unknown) => console.error('Project watch was not reconciled', { workspaceId: identity.workspaceId, error })));
+  waitUntil('automation turns', reconcileAutomationTurns(ctx.storage, runtime, automationTurns).catch((error: unknown) => console.error('Automation turns were not reconciled', { workspaceId: identity.workspaceId, error })));
   return runtime;
 }
 

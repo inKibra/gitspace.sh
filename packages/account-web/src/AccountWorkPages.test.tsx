@@ -10,8 +10,7 @@ import type { SidebarWorkspace } from './AppSidebar.js';
 import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
 const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn() }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh } }, storageIncidents: { list: 'storage-incidents', resume: vi.fn() } } }));
-vi.mock('result-rpc/react', async () => ({ ...await vi.importActual<object>('result-rpc/react'), useResultQuery: () => ({ state: 'success', value: [], refetch: async () => {} }) }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh } } } }));
 
 const stamp = '2026-09-12T00:00:00.000Z';
 const projects: ProjectLifecycleView[] = [
@@ -179,29 +178,4 @@ it('changes a project base branch from Settings at its current revision and keep
   });
   await act(() => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
   expect(setBaseBranch).toHaveBeenCalledWith('beta', 7, 'release');
-});
-
-
-it('includes base-agent waits, failures and sync conflicts across projects while identifying incomplete coverage', async () => {
-  directory.alpha!.baseSummary = { holder: { kind: 'held', machineId: 'remote', label: 'Remote' }, closedAt: null, freshness: 'fresh', status: { ...idle, primaryColor: 'orange', agents: { green: 0, blue: 1, orange: 1, red: 0 } } };
-  directory.beta!.workspaces[0]!.summary = { holder: { kind: 'released' }, closedAt: null, freshness: 'stale', status: { ...idle, primaryColor: 'red', agents: { green: 0, blue: 0, orange: 0, red: 1 }, sync: { conflicts: 2, problems: 0 } } };
-  await render('inbox');
-  expect(container.textContent).toContain('1 agent needs permission');
-  expect(container.textContent).toContain('1 agent waiting');
-  expect(container.textContent).toContain('1 agent error');
-  expect(container.textContent).toContain('2 sync conflicts');
-  expect(container.textContent).toContain('Last recorded · stale');
-  expect(container.querySelector('[aria-label="Inspect Beta · Base agent"]')).not.toBeNull();
-  expect(container.querySelector('[aria-label="Inspect Alpha · alpha-work"]')).not.toBeNull();
-  await click('Open Alpha · Base agent');
-  await click('Open Beta · beta-release');
-  expect(onOpenProject).toHaveBeenCalledWith('alpha');
-  expect(onOpenWorkspace).toHaveBeenCalledWith('beta', 'beta-release');
-});
-
-it('does not claim an empty inbox is healthy when directory or status coverage is unavailable', async () => {
-  delete directory.beta;
-  await render('inbox');
-  expect(container.querySelector('[aria-live="polite"]')?.textContent).toContain('Beta');
-  expect(container.querySelector('[aria-label="Inspect Beta · Base agent"]')).not.toBeNull();
 });

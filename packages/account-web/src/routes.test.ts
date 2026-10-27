@@ -9,9 +9,9 @@ describe('stable product routes', () => {
     expect(productPath('inference')).toBe('/inference');
     expect(productPath('plugins')).toBe('/plugins');
     expect(productPath('skills')).toBe('/skills');
-    expect(productPath('crons')).toBe('/crons');
+    expect(productPath('automations')).toBe('/automations');
     expect(productPath('secrets')).toBe('/secrets');
-    expect(productPath('inbox')).toBe('/inbox');
+    expect(productPath('monitoring')).toBe('/monitoring');
     expect(productPath('settings')).toBe('/settings');
     expect(productRouteFromLocation({ pathname: '/plugins/', search: '?project=project-a' })).toBe('plugins');
     expect(productRouteFromLocation({ pathname: '/inference', search: '?profile=client-a' })).toBe('inference');
