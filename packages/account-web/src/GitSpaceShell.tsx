@@ -292,8 +292,8 @@ function BehindOrigin({ branch, kind, checkedAt, onUpdate }: { branch: string; k
 }
 
 export function PageHeader({ kicker, title, description, actions }: { kicker?: ReactNode; title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
-  return <header className="flex items-end justify-between gap-6 pb-6">
-    <div className="flex min-w-0 flex-col gap-1">
+  return <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 pb-6">
+    <div className="flex min-w-0 flex-[1_1_20rem] flex-col gap-1">
       {kicker ? <span className="text-caption text-muted-foreground">{kicker}</span> : null}
       <h1 className="text-display font-semibold tracking-tight text-foreground">{title}</h1>
       {description ? <p className="max-w-2xl text-body text-muted-foreground">{description}</p> : null}

@@ -34,7 +34,7 @@ interface Automation {
   modes: readonly Mode[];
   last: { at: string; status: RunStatus } | null;
   /** Made by the project agent and not yet switched on by a person. */
-  proposed?: { at: string; reason: string };
+  proposed?: { at: string; asked: string; reason: string; tested: readonly { event: string; result: string; runs: boolean }[] };
 }
 
 const AUTOMATIONS: readonly Automation[] = [
@@ -72,7 +72,15 @@ const AUTOMATIONS: readonly Automation[] = [
     onlyIf: [<>author is {code('dependabot[bot]')}</>, <>changed paths match {code('**/package.json')}</>],
     then: <>Start a workspace for the pull request with agent {code('reviewer')} · starts in <strong className="font-semibold">Review</strong></>,
     modes: ['Review'], last: null,
-    proposed: { at: '2 h ago', reason: 'You asked that dependency bumps be built and smoke-tested before anyone merges them; Dependabot opens about 6 a week here.' },
+    proposed: {
+      at: '2 h ago', asked: 'Can dependency bumps get built and smoke-tested before we merge them?',
+      reason: 'Dependabot opens about 6 pull requests a week here. Bumps that change only workflow files need no build, so they are left out.',
+      tested: [
+        { event: 'PR #1137 · Bump vite to 7.3.6', result: 'Would start a Review workspace', runs: true },
+        { event: 'PR #1135 · Bump zod to 4.4.3', result: 'Would start a Review workspace', runs: true },
+        { event: 'PR #1136 · Bump actions/checkout to 5', result: 'Skipped: changes only .github/workflows/ci.yml', runs: false },
+      ],
+    },
   },
   {
     id: 'ci', name: 'Fix failing CI on main', enabled: false,
@@ -251,7 +259,7 @@ function CheckList({ checks }: { checks: Run['checks'] }): ReactElement {
   </li>)}</ul>;
 }
 
-function AutomationCard({ automation, index, onEdit }: { automation: Automation; index: number; onEdit(): void }): ReactElement {
+function AutomationCard({ automation, index, onEdit, onAsk }: { automation: Automation; index: number; onEdit(): void; onAsk(text: string): void }): ReactElement {
   const [enabled, setEnabled] = useState(automation.enabled);
   return <Card index={index}>
     <CardHeader>
@@ -267,11 +275,12 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
           <Switch label={enabled ? 'On' : 'Off'} checked={enabled} onToggle={() => setEnabled(value => !value)} />
           <DropdownMenu>
             <DropdownTrigger render={<Button variant="ghost" size="icon" type="button" aria-label={`Actions for ${automation.name}`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></Button>} />
-            <DropdownContent align="end" className="min-w-[220px] w-[220px]">
+            <DropdownContent align="end" className="min-w-[260px] w-[260px]">
               <MenuItem index={0} icon={glyph(Play)} label="Run now" onSelect={() => undefined} />
               <MenuItem index={1} icon={glyph(RefreshCcw01)} label="Test with a past event" onSelect={onEdit} />
               <MenuItem index={2} icon={glyph(Edit03)} label="Edit" onSelect={onEdit} />
-              <MenuItem index={3} icon={glyph(Trash01)} label="Delete" onSelect={() => undefined} />
+              <MenuItem index={3} icon={glyph(MessageChatCircle)} label="Ask the project agent to change it" onSelect={() => onAsk(`Change “${automation.name}”: `)} />
+              <MenuItem index={4} icon={glyph(Trash01)} label="Delete" onSelect={() => undefined} />
             </DropdownContent>
           </DropdownMenu>
         </div>
@@ -286,7 +295,15 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
       </dl>
     </CardContent>
     {automation.proposed ? <CardFooter><div className="flex w-full flex-col gap-3">
-      <p className="flex items-start gap-2 text-body text-muted-foreground"><MessageChatCircle className="mt-0.5 shrink-0" width={16} height={16} strokeWidth={1.5} />{automation.proposed.reason}</p>
+      <p className="flex items-start gap-2 text-body"><MessageChatCircle className="mt-0.5 shrink-0 text-muted-foreground" width={16} height={16} strokeWidth={1.5} /><span><span className="text-muted-foreground">You asked: </span>“{automation.proposed.asked}”</span></p>
+      <p className="text-body text-muted-foreground">{automation.proposed.reason}</p>
+      <div className="flex flex-col gap-1.5">
+        <strong className="text-caption font-medium text-muted-foreground">Tested against {automation.proposed.tested.length} recent events</strong>
+        <ul className="flex flex-col gap-1">{automation.proposed.tested.map(test => <li key={test.event} className="flex items-start gap-2 text-body">
+          {test.runs ? <CheckCircle className="mt-0.5 shrink-0 text-success" width={16} height={16} strokeWidth={1.5} /> : <MinusCircle className="mt-0.5 shrink-0 text-muted-foreground" width={16} height={16} strokeWidth={1.5} />}
+          <span className="min-w-0">{test.event}<span className="text-muted-foreground"> · {test.result}</span></span>
+        </li>)}</ul>
+      </div>
       <div className="flex flex-wrap gap-2">
         <Button variant="primary" size="compact" type="button">Switch on</Button>
         <Button variant="secondary" size="compact" type="button" onClick={onEdit}>Edit first</Button>
@@ -633,6 +650,36 @@ function LinkDialog({ onClose }: { onClose(): void }): ReactElement {
   </>;
 }
 
+function DescribeDialog({ initial, onClose }: { initial: string; onClose(): void }): ReactElement {
+  const shape = useShape();
+  const [text, setText] = useState(initial);
+  const [sent, setSent] = useState(false);
+  return <>
+    <DialogHeader>
+      <DialogTitle>Describe an automation</DialogTitle>
+      <DialogDescription>The project agent sets it up, tests it against recent events, and proposes it here. Nothing runs until you switch it on.</DialogDescription>
+    </DialogHeader>
+    {sent ? <div className="flex flex-col gap-2">
+      <p className="text-body">Sent to the project agent. Its proposal appears on this page as Proposed; you can follow along or answer its questions in its conversation.</p>
+      <blockquote className={`${shape.input} border border-border bg-surface-2 p-2 text-body text-muted-foreground`}>{text}</blockquote>
+    </div> : <div className="flex flex-col gap-2">
+      <textarea rows={5} value={text} onChange={e => setText(e.currentTarget.value)} aria-label="What should happen"
+        placeholder="e.g. When someone with write access opens a pull request into main, review it. Skip drafts and Dependabot."
+        className={`${shape.input} w-full resize-y border border-border bg-background p-2 text-body text-foreground outline-none`} />
+      <p className="text-caption text-muted-foreground">Say what should start the work, what to leave out, and what the agent should do. It asks in its conversation if something is unclear.</p>
+    </div>}
+    <DialogFooter>
+      {sent ? <>
+        <Button variant="secondary" type="button" onClick={onClose}>Close</Button>
+        <Button variant="primary" type="button" leadingIcon={glyph(MessageChatCircle)}>Open conversation</Button>
+      </> : <>
+        <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" type="button" disabled={!text.trim()} onClick={() => setSent(true)}>Send to the project agent</Button>
+      </>}
+    </DialogFooter>
+  </>;
+}
+
 function ProjectPicker({ project, onPick }: { project: string; onPick(project: string): void }): ReactElement {
   return <DropdownMenu>
     <DropdownTrigger render={<button type="button" className="-ml-1 flex items-center gap-1 rounded px-1 text-caption font-medium text-muted-foreground hover:text-foreground" aria-label="Project">{project}<ChevronDown width={14} height={14} strokeWidth={1.5} /></button>} />
@@ -667,6 +714,7 @@ function AutomationsMock(): ReactElement {
   const [project, setProject] = useState('inkibra core');
   const [editing, setEditing] = useState(false);
   const [linking, setLinking] = useState(false);
+  const [describing, setDescribing] = useState<string | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const all = project === ALL_PROJECTS;
   const empty = project !== ALL_PROJECTS && project !== 'inkibra core';
@@ -674,7 +722,10 @@ function AutomationsMock(): ReactElement {
     <PageCanvas>
       <PageHeader kicker={<ProjectPicker project={project} onPick={setProject} />} title="Automations"
         description={all ? 'Every project\'s automations and runs. Choose a project to change its automations, links and trusted authors.' : 'When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace.'}
-        actions={all || empty ? undefined : <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>} />
+        actions={all || empty ? undefined : <>
+          <Button variant="secondary" type="button" leadingIcon={glyph(MessageChatCircle)} onClick={() => setDescribing('')}>Describe it</Button>
+          <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>
+        </>} />
 
       {empty ? null : <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
         <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">
@@ -689,13 +740,16 @@ function AutomationsMock(): ReactElement {
       {all ? <AllProjects onPick={setProject} onOpen={setRun} />
         : empty ? <div className={`${shape.container} flex flex-col items-start gap-3 bg-surface-2 px-5 py-6 shadow-surface-1`}>
           <strong className="text-body font-semibold">No automations in {project}</strong>
-          <p className="max-w-xl text-body text-muted-foreground">Start work when a pull request opens, an issue is labeled, or on a schedule. The project agent can propose automations too; they wait here until you switch them on.</p>
-          <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>
+          <p className="max-w-xl text-body text-muted-foreground">Start work when a pull request opens, an issue is labeled, or on a schedule. Describe what you want and the project agent sets it up and proposes it here; nothing runs until you switch it on.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="primary" type="button" leadingIcon={glyph(MessageChatCircle)} onClick={() => setDescribing('')}>Describe it</Button>
+            <Button variant="secondary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>Set it up yourself</Button>
+          </div>
         </div>
         : <>
           <Section title="Automations">
             <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-              {AUTOMATIONS.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
+              {AUTOMATIONS.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} onAsk={setDescribing} />)}
             </CardGroup>
           </Section>
 
@@ -717,6 +771,9 @@ function AutomationsMock(): ReactElement {
 
       <Dialog open={editing} onOpenChange={open => { if (!open) setEditing(false); }}>
         <DialogContent size="lg"><Editor onClose={() => setEditing(false)} /></DialogContent>
+      </Dialog>
+      <Dialog open={describing !== null} onOpenChange={open => { if (!open) setDescribing(null); }}>
+        <DialogContent>{describing !== null ? <DescribeDialog initial={describing} onClose={() => setDescribing(null)} /> : null}</DialogContent>
       </Dialog>
       <Dialog open={linking} onOpenChange={open => { if (!open) setLinking(false); }}>
         <DialogContent><LinkDialog onClose={() => setLinking(false)} /></DialogContent>

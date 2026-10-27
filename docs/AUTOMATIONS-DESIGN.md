@@ -63,6 +63,7 @@ Outsiders' text must not reach an agent that has write tools, secrets or your ma
 - An automation the project agent creates is **Proposed**: it does nothing until a person switches it on. Its card names the agent, its reason and a link to the conversation. An agent's edit to an approved automation returns it to Proposed; turning one off or deleting it needs no approval.
 - Only people change the trust list and the limits (concurrency, daily run cap, rounds per subject). Every automation runs under them, whoever made it.
 - A mention of the tenant's bot by a trusted person ("audit dependencies nightly") reaches the project agent, which may propose an automation.
+- **Describe it** (decided 2026-10-27): beside New automation, a person describes an automation in words and it goes to the project agent's conversation; the agent builds the trigger, filters and action, tests them against recent recorded events (`automations.test`, the replay in §4), and proposes it. The proposal shows what was asked, the agent's explanation and the test results (which events would run, which would be skipped and why), so it is approved on evidence. **Ask the project agent to change it** on an automation sends a change request the same way. There is no separate model in the editor: the project agent is the one place that turns words into automations.
 
 ## 6. Loops
 
