@@ -91,7 +91,7 @@ One-time migration: every project cron becomes an automation with a schedule tri
 
 ## 11. UI
 
-As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. Removed from the mock: "Same subject again" (subject links replace it), automations defined in repository files (out of scope), and a schedule run failing on an offline machine (runs execute in the cloud).
+As the mock: summary (on, working now, queued, failed today), automation cards (when / only if / then, last run), recent runs with a detail dialog (checks and timeline), and the editor (When, Only if, Then, instruction). Additions: the trust list and **Approve this run** on untrusted runs; **Test with a past event** in the editor; a workspace's linked pull requests and issues, with **Link a pull request or issue**. The page adds a Linked pull requests and issues section (links, how each was made, and the follow-through settings) and a Trusted authors section; at phone width its tables become stacked lists.
 
 ## 12. Milestones
 

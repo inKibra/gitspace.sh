@@ -1,12 +1,12 @@
-// Throwaway design mock for the Automations page. Static data only; not part of the app.
+// Throwaway design mock for the Automations page (docs/AUTOMATIONS-DESIGN.md). Static data only; not part of the app.
 import {
   Badge, Button, Card, CardAction, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle,
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-  DropdownContent, DropdownMenu, DropdownTrigger, IconProvider, InputField, InputGroup, MenuItem,
+  DropdownContent, DropdownMenu, DropdownTrigger, IconProvider, MenuItem,
   Select, SelectContent, SelectItem, SelectTrigger, ShapeProvider, SizeProvider, Switch,
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TooltipProvider, untitledIcons, useShape,
 } from '@gitspace/ui';
-import { CheckCircle, DotsHorizontal, Edit03, File02, MinusCircle, Play, Plus, Trash01, XCircle } from '@untitledui/icons';
+import { CheckCircle, DotsHorizontal, Edit03, Link01, LinkBroken01, MinusCircle, Play, Plus, RefreshCcw01, Trash01, XCircle } from '@untitledui/icons';
 import { StrictMode, useState, type ReactElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@gitspace/ui/fluid-theme.css';
@@ -15,62 +15,103 @@ import { glyph } from './glyph.js';
 import { PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { restoreAppearance } from './appearance.js';
 
+const BOT = '@gitspace-bradleat';
+
 type RunStatus = 'running' | 'queued' | 'finished' | 'skipped' | 'failed';
 type Mode = 'Plan' | 'Code' | 'Review';
 const STATUS_COLOR: Record<RunStatus, 'blue' | 'gray' | 'green' | 'amber' | 'red'> = { running: 'blue', queued: 'amber', finished: 'green', skipped: 'gray', failed: 'red' };
 const MODE_COLOR: Record<Mode, 'indigo' | 'emerald' | 'violet'> = { Plan: 'indigo', Code: 'emerald', Review: 'violet' };
 
+const code = (text: string) => <code className="font-mono text-caption">{text}</code>;
+
 interface Automation {
   id: string;
   name: string;
   enabled: boolean;
-  source: { kind: 'account' } | { kind: 'repository'; path: string; branch: string };
   when: ReactNode;
   onlyIf: readonly ReactNode[];
   then: ReactNode;
-  mode?: Mode;
-  again: string;
+  modes: readonly Mode[];
   last: { at: string; status: RunStatus };
 }
 
-const code = (text: string) => <code className="font-mono text-caption">{text}</code>;
-
 const AUTOMATIONS: readonly Automation[] = [
   {
-    id: 'review', name: 'Review pull requests', enabled: true, source: { kind: 'account' },
-    when: <>GitHub · pull request {code('opened')}, {code('ready_for_review')}, {code('synchronize')}</>,
+    id: 'review', name: 'Review pull requests', enabled: true,
+    when: <>GitHub · pull request {code('opened')}, {code('ready_for_review')}</>,
     onlyIf: [<>base branch is {code('main')}</>, <>not a draft</>, <>author is not {code('dependabot[bot]')}</>],
-    then: <>Start a workspace for the pull request with agent {code('reviewer')}</>, mode: 'Review',
-    again: 'Send the event to its workspace', last: { at: '4 min ago', status: 'running' },
+    then: <>Start a workspace for the pull request with agent {code('reviewer')} · starts in <strong className="font-semibold">Review</strong></>,
+    modes: ['Review'], last: { at: '1 min ago', status: 'queued' },
+  },
+  {
+    id: 'labels', name: 'Start work from labels', enabled: true,
+    when: <>GitHub · label {code('gitspace:plan')}, {code('gitspace:code')} or {code('gitspace:review')} added to an issue or pull request</>,
+    onlyIf: [],
+    then: <>Start a workspace for it in the label's mode, with agent {code('default')}</>,
+    modes: ['Plan', 'Code', 'Review'], last: { at: '9 min ago', status: 'running' },
   },
   {
     id: 'triage', name: 'Triage new issues', enabled: true,
-    source: { kind: 'repository', path: '.gitspace/automations/triage-issues.md', branch: 'main' },
     when: <>GitHub · issue {code('opened')}</>,
     onlyIf: [<>no label {code('wontfix')}</>],
-    then: <>Start a workspace for the issue with agent {code('default')}</>, mode: 'Plan',
-    again: 'Send the event to its workspace', last: { at: '12 min ago', status: 'running' },
+    then: <>Ask the project agent: it starts a workspace, links the issue to one that already covers it, or skips</>,
+    modes: [], last: { at: '2 h ago', status: 'finished' },
   },
   {
-    id: 'audit', name: 'Nightly dependency audit', enabled: true, source: { kind: 'account' },
+    id: 'audit', name: 'Nightly dependency audit', enabled: true,
     when: <>Schedule · {code('0 6 * * *')} · daily 06:00 UTC · next in 9 h</>,
     onlyIf: [],
     then: <>Message the project agent</>,
-    again: 'Every tick is a new message', last: { at: '7 h ago', status: 'failed' },
+    modes: [], last: { at: '7 h ago', status: 'failed' },
   },
   {
-    id: 'ci', name: 'Fix failing CI on main', enabled: false, source: { kind: 'account' },
+    id: 'ci', name: 'Fix failing CI on main', enabled: false,
     when: <>GitHub · check suite {code('completed')}</>,
     onlyIf: [<>conclusion is {code('failure')}</>, <>branch is {code('main')}</>],
-    then: <>Start a workspace for the commit with agent {code('default')}</>, mode: 'Code',
-    again: 'Send the event to its workspace', last: { at: '3 d ago', status: 'finished' },
+    then: <>Start a workspace for the branch with agent {code('default')} · starts in <strong className="font-semibold">Code</strong></>,
+    modes: ['Code'], last: { at: '3 d ago', status: 'finished' },
   },
+];
+
+type LinkSource = 'started' | 'agent' | 'person' | 'branch' | 'closes';
+const LINK_LABEL: Record<LinkSource, string> = {
+  started: 'Started for it', agent: 'Linked by an agent', person: 'Linked by you', branch: 'Same branch', closes: 'Closed by a linked pull request',
+};
+
+interface SubjectLink {
+  subject: string;
+  workspace: string;
+  source: LinkSource;
+  detail: string;
+  activity: string;
+}
+
+const LINKS: readonly SubjectLink[] = [
+  { subject: 'PR #1140 · Bounded history for sessions', workspace: 'session-recovery', source: 'branch', detail: 'head branch session-recovery', activity: 'Review comment from @dana · 3 min ago' },
+  { subject: 'Issue #386 · Bounded history loses ordinals', workspace: 'session-recovery', source: 'closes', detail: 'PR #1140 says "Fixes #386"', activity: 'Opened · 2 d ago' },
+  { subject: 'Issue #391 · Coach subscriptions renew twice', workspace: 'plan-issue-391', source: 'started', detail: 'Start work from labels · gitspace:plan', activity: 'Labeled · 9 min ago' },
+  { subject: 'Issue #392 · Renewal emails go to the old address', workspace: 'plan-issue-391', source: 'agent', detail: 'the project agent, after a mention', activity: `Mentioned ${BOT} · 41 min ago` },
+  { subject: 'PR #1131 · Storybook JIT server memory', workspace: 'storybook-jit', source: 'person', detail: 'Bradley Leatherwood', activity: 'Checks passed · 1 h ago' },
+];
+
+type Delivery = 'wake' | 'notice' | 'ignore';
+const DELIVERY_LABEL: Record<Delivery, string> = { wake: 'Wakes the agent', notice: 'Notice only', ignore: 'Not sent' };
+const DELIVERIES: readonly Delivery[] = ['wake', 'notice', 'ignore'];
+const FOLLOW_THROUGH: readonly { event: ReactNode; delivery: Delivery }[] = [
+  { event: 'Review comments and reviews from people', delivery: 'wake' },
+  { event: <>Comments mentioning {code(BOT)}</>, delivery: 'wake' },
+  { event: 'Failed checks', delivery: 'wake' },
+  { event: 'Comments from bots', delivery: 'notice' },
+  { event: 'Approvals', delivery: 'notice' },
+  { event: 'Merged, closed or reopened', delivery: 'notice' },
+  { event: 'Passing checks', delivery: 'notice' },
 ];
 
 interface Run {
   id: string;
   status: RunStatus;
-  automation: string;
+  /** The automation, or "Linked" when the event reached a linked workspace without one. */
+  by: string;
   event: string;
   subject: string;
   workspace: string | null;
@@ -78,51 +119,65 @@ interface Run {
   at: string;
   checks: readonly { label: string; passed: boolean | null }[];
   timeline: readonly { at: string; label: string }[];
+  untrusted?: string;
 }
+
+const REVIEW_CHECKS = (draft: boolean | null, author: boolean | null) => [
+  { label: 'base branch is main', passed: true }, { label: 'not a draft', passed: draft }, { label: 'author is not dependabot[bot]', passed: author },
+];
 
 const RUNS: readonly Run[] = [
   {
-    id: 'r7', status: 'queued', automation: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1143 · Drop .omp agent support',
-    workspace: null, outcome: 'Waiting for a slot: 2 of 2 runs are working', at: '1 min ago',
-    checks: [{ label: 'base branch is main', passed: true }, { label: 'not a draft', passed: true }, { label: 'author is not dependabot[bot]', passed: true }],
-    timeline: [{ at: '14:02:11', label: 'Delivery received' }, { at: '14:02:11', label: 'Filter passed' }, { at: '14:02:11', label: 'Queued: 2 of 2 runs working' }],
+    id: 'r9', status: 'queued', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1143 · Drop .omp agent support',
+    workspace: null, outcome: 'Waiting for a slot: 2 of 2 runs are working', at: '1 min ago', checks: REVIEW_CHECKS(true, true),
+    timeline: [{ at: '14:02:11', label: 'Delivery received' }, { at: '14:02:11', label: 'Author has write access' }, { at: '14:02:11', label: 'Conditions passed' }, { at: '14:02:11', label: 'Queued: 2 of 2 runs working' }],
   },
   {
-    id: 'r6', status: 'running', automation: 'Review pull requests', event: 'pull_request.synchronize', subject: 'PR #1142 · Narrow combined programs',
-    workspace: 'review-pr-1142', outcome: 'Reviewer agent working', at: '4 min ago',
-    checks: [{ label: 'base branch is main', passed: true }, { label: 'not a draft', passed: true }, { label: 'author is not dependabot[bot]', passed: true }],
-    timeline: [{ at: '13:58:40', label: 'Delivery received' }, { at: '13:58:40', label: 'Filter passed' }, { at: '13:58:41', label: 'Started workspace review-pr-1142 in Review' }, { at: '13:58:52', label: 'Agent working' }],
+    id: 'r8', status: 'running', by: 'Linked', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
+    workspace: 'session-recovery', outcome: 'Review comment from @dana: woke its agent', at: '3 min ago', checks: [],
+    timeline: [{ at: '13:59:02', label: 'Delivery received' }, { at: '13:59:02', label: 'Linked to session-recovery (same branch)' }, { at: '13:59:02', label: 'Review comment from a person: wakes the agent' }, { at: '13:59:03', label: 'Round 2 of 5 today on this pull request' }, { at: '13:59:03', label: 'Sent; agent working' }],
   },
   {
-    id: 'r5', status: 'running', automation: 'Triage new issues', event: 'issues.opened', subject: 'Issue #388 · LFS download stalls on attach',
-    workspace: 'triage-issue-388', outcome: 'Agent working', at: '12 min ago',
-    checks: [{ label: "no label 'wontfix'", passed: true }],
-    timeline: [{ at: '13:50:03', label: 'Delivery received' }, { at: '13:50:03', label: 'Filter passed' }, { at: '13:50:04', label: 'Started workspace triage-issue-388 in Plan' }],
+    id: 'r7', status: 'running', by: 'Start work from labels', event: 'issues.labeled · gitspace:plan', subject: 'Issue #391 · Coach subscriptions renew twice',
+    workspace: 'plan-issue-391', outcome: 'Started in Plan and linked to the issue', at: '9 min ago', checks: [],
+    timeline: [{ at: '13:53:40', label: 'Delivery received' }, { at: '13:53:40', label: 'Label gitspace:plan added by @bradleat (write access)' }, { at: '13:53:41', label: 'Started workspace plan-issue-391 in Plan' }, { at: '13:53:41', label: 'Linked to Issue #391' }],
   },
   {
-    id: 'r4', status: 'skipped', automation: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1141 · WIP: automations run model',
-    workspace: null, outcome: 'Filter: the pull request is a draft', at: '38 min ago',
-    checks: [{ label: 'base branch is main', passed: true }, { label: 'not a draft', passed: false }, { label: 'author is not dependabot[bot]', passed: null }],
+    id: 'r6', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1144 · Faster tone detection',
+    workspace: null, outcome: 'Author not trusted: @outside-dev', at: '20 min ago', checks: REVIEW_CHECKS(true, true), untrusted: '@outside-dev',
+    timeline: [{ at: '13:42:15', label: 'Delivery received' }, { at: '13:42:15', label: 'Skipped: @outside-dev has no write access and is not on the trust list' }],
+  },
+  {
+    id: 'r5', status: 'finished', by: 'Mention', event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
+    workspace: 'plan-issue-391', outcome: 'No linked workspace: the project agent linked it to plan-issue-391', at: '41 min ago', checks: [],
+    timeline: [{ at: '13:21:08', label: 'Delivery received' }, { at: '13:21:08', label: `Comment by @bradleat mentions ${BOT}` }, { at: '13:21:08', label: 'Issue #392 has no linked workspace: sent to the project agent' }, { at: '13:21:40', label: 'Project agent linked Issue #392 to plan-issue-391 and sent it the comment' }],
+  },
+  {
+    id: 'r4', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1141 · WIP: automations run model',
+    workspace: null, outcome: 'Conditions: the pull request is a draft', at: '38 min ago', checks: REVIEW_CHECKS(false, null),
     timeline: [{ at: '13:24:19', label: 'Delivery received' }, { at: '13:24:19', label: 'Skipped: the pull request is a draft' }],
   },
   {
-    id: 'r3', status: 'finished', automation: 'Review pull requests', event: 'pull_request.synchronize', subject: 'PR #1139 · Machine shutdown escalation',
-    workspace: 'review-pr-1139', outcome: 'Sent to existing workspace; agent finished its turn', at: '1 h ago',
-    checks: [{ label: 'base branch is main', passed: true }, { label: 'not a draft', passed: true }, { label: 'author is not dependabot[bot]', passed: true }],
-    timeline: [{ at: '12:57:30', label: 'Delivery received' }, { at: '12:57:30', label: 'Filter passed' }, { at: '12:57:30', label: 'Sent to existing workspace review-pr-1139' }, { at: '13:04:12', label: 'Agent finished its turn' }],
+    id: 'r3', status: 'finished', by: 'Linked', event: 'check_suite.completed · success', subject: 'PR #1131 · Storybook JIT server memory',
+    workspace: 'storybook-jit', outcome: 'Checks passed: notice only', at: '1 h ago', checks: [],
+    timeline: [{ at: '12:58:51', label: 'Delivery received' }, { at: '12:58:51', label: 'Linked to storybook-jit (linked by you)' }, { at: '12:58:51', label: 'Passing checks: notice only, the agent stays asleep' }],
   },
   {
-    id: 'r2', status: 'finished', automation: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
-    workspace: 'triage-issue-387', outcome: 'Agent waiting for plan approval', at: '2 h ago',
-    checks: [{ label: "no label 'wontfix'", passed: true }],
-    timeline: [{ at: '11:40:55', label: 'Delivery received' }, { at: '11:40:55', label: 'Filter passed' }, { at: '11:40:56', label: 'Started workspace triage-issue-387 in Plan' }, { at: '11:46:20', label: 'Agent waiting for plan approval' }],
+    id: 'r2', status: 'finished', by: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
+    workspace: 'inkibra core', outcome: 'The project agent started triage-issue-387 in Plan', at: '2 h ago', checks: [{ label: "no label 'wontfix'", passed: true }],
+    timeline: [{ at: '11:40:55', label: 'Delivery received' }, { at: '11:40:55', label: 'Conditions passed' }, { at: '11:40:56', label: 'Asked the project agent' }, { at: '11:41:30', label: 'Project agent started triage-issue-387 in Plan and linked it' }],
   },
   {
-    id: 'r1', status: 'failed', automation: 'Nightly dependency audit', event: 'schedule 06:00 UTC', subject: '—',
-    workspace: 'inkibra core', outcome: 'Darktop was offline; the message was not delivered', at: '7 h ago',
-    checks: [],
-    timeline: [{ at: '06:00:00', label: 'Tick' }, { at: '06:00:01', label: 'Failed: Darktop was offline' }],
+    id: 'r1', status: 'failed', by: 'Nightly dependency audit', event: 'schedule 06:00 UTC', subject: '—',
+    workspace: 'inkibra core', outcome: 'anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00', at: '7 h ago', checks: [],
+    timeline: [{ at: '06:00:00', label: 'Tick' }, { at: '06:00:01', label: 'Sent to the project agent' }, { at: '06:00:04', label: 'Failed: anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00' }],
   },
+];
+
+const PAST_EVENTS = [
+  'PR #1143 · pull_request.opened · 1 min ago',
+  'PR #1144 · pull_request.opened · @outside-dev · 20 min ago',
+  'PR #1141 · pull_request.opened · draft · 38 min ago',
 ];
 
 function Stat({ value, label }: { value: ReactNode; label: string }): ReactElement {
@@ -135,7 +190,7 @@ function Stat({ value, label }: { value: ReactNode; label: string }): ReactEleme
 function Row({ label, children }: { label: string; children: ReactNode }): ReactElement {
   return <>
     <dt className="pt-0.5 text-caption font-medium text-muted-foreground">{label}</dt>
-    <dd className="text-body text-foreground">{children}</dd>
+    <dd className="min-w-0 text-body text-foreground">{children}</dd>
   </>;
 }
 
@@ -143,55 +198,158 @@ function Field({ label, children }: { label: ReactNode; children: ReactNode }): 
   return <label className="flex min-w-0 flex-col gap-1"><span className="text-caption font-medium text-muted-foreground">{label}</span>{children}</label>;
 }
 
+function TextInput({ label, value, onChange, mono = false }: { label: string; value: string; onChange(value: string): void; mono?: boolean }): ReactElement {
+  const shape = useShape();
+  return <input aria-label={label} placeholder={label} value={value} onChange={e => onChange(e.currentTarget.value)}
+    className={`${shape.input} w-full min-w-0 border border-border bg-background px-2 py-1.5 text-body text-foreground outline-none ${mono ? 'font-mono' : ''}`} />;
+}
+
 function options(values: readonly string[]): ReactElement {
   return <SelectContent>{values.map((value, index) => <SelectItem value={value} index={index} key={value}>{value}</SelectItem>)}</SelectContent>;
 }
 
+function Section({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }): ReactElement {
+  return <section aria-label={title} className="mb-8 flex flex-col gap-3">
+    <div className="flex flex-wrap items-end justify-between gap-2"><h2 className="text-subtitle font-semibold">{title}</h2>{aside}</div>
+    {children}
+  </section>;
+}
+
+function CheckList({ checks }: { checks: Run['checks'] }): ReactElement {
+  return <ul className="flex flex-col gap-1.5">{checks.map(check => <li key={check.label} className="flex items-center gap-2 text-body">
+    {check.passed === true ? <CheckCircle className="text-success" width={16} height={16} strokeWidth={1.5} />
+      : check.passed === false ? <XCircle className="text-destructive" width={16} height={16} strokeWidth={1.5} />
+        : <MinusCircle className="text-muted-foreground" width={16} height={16} strokeWidth={1.5} />}
+    <span className={check.passed === null ? 'text-muted-foreground' : 'text-foreground'}>{check.label}{check.passed === null ? ' (not checked)' : ''}</span>
+  </li>)}</ul>;
+}
+
 function AutomationCard({ automation, index, onEdit }: { automation: Automation; index: number; onEdit(): void }): ReactElement {
   const [enabled, setEnabled] = useState(automation.enabled);
-  const repository = automation.source.kind === 'repository' ? automation.source : null;
   return <Card index={index}>
     <CardHeader>
-      <CardTitle><span className="flex items-center gap-2">{automation.name}
-        {automation.mode ? <Badge size="compact" color={MODE_COLOR[automation.mode]}>{automation.mode}</Badge> : null}
+      <CardTitle><span className="flex flex-wrap items-center gap-2">{automation.name}
+        {automation.modes.map(mode => <Badge key={mode} size="compact" color={MODE_COLOR[mode]}>{mode}</Badge>)}
       </span></CardTitle>
-      <CardDescription><span className="flex flex-wrap items-center gap-1.5">{repository
-        ? <><File02 width={14} height={14} strokeWidth={1.5} />{code(repository.path)} on {code(repository.branch)}</>
-        : 'Defined in GitSpace'}
-        <span>· last run {automation.last.at}</span><Badge variant="dot" size="compact" color={STATUS_COLOR[automation.last.status]}>{automation.last.status}</Badge>
+      <CardDescription><span className="flex flex-wrap items-center gap-1.5">
+        <span>Last run {automation.last.at}</span><Badge variant="dot" size="compact" color={STATUS_COLOR[automation.last.status]}>{automation.last.status}</Badge>
       </span></CardDescription>
       <CardAction>
         <div className="flex items-center gap-2">
           <Switch label={enabled ? 'On' : 'Off'} checked={enabled} onToggle={() => setEnabled(value => !value)} />
           <DropdownMenu>
             <DropdownTrigger render={<Button variant="ghost" size="icon" type="button" aria-label={`Actions for ${automation.name}`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></Button>} />
-            <DropdownContent align="end" className="min-w-[200px] w-[200px]">
+            <DropdownContent align="end" className="min-w-[220px] w-[220px]">
               <MenuItem index={0} icon={glyph(Play)} label="Run now" onSelect={() => undefined} />
-              {repository
-                ? <MenuItem index={1} icon={glyph(File02)} label="Open file" onSelect={() => undefined} />
-                : <MenuItem index={1} icon={glyph(Edit03)} label="Edit" onSelect={onEdit} />}
-              {repository ? null : <MenuItem index={2} icon={glyph(Trash01)} label="Delete" onSelect={() => undefined} />}
+              <MenuItem index={1} icon={glyph(RefreshCcw01)} label="Test with a past event" onSelect={onEdit} />
+              <MenuItem index={2} icon={glyph(Edit03)} label="Edit" onSelect={onEdit} />
+              <MenuItem index={3} icon={glyph(Trash01)} label="Delete" onSelect={() => undefined} />
             </DropdownContent>
           </DropdownMenu>
         </div>
       </CardAction>
     </CardHeader>
     <CardContent>
-      <dl className="grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2">
+      <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
         <Row label="When">{automation.when}</Row>
         <Row label="Only if">{automation.onlyIf.length === 0 ? <span className="text-muted-foreground">Always</span>
           : <span className="flex flex-wrap gap-x-1.5">{automation.onlyIf.map((condition, at) => <span key={at}>{at > 0 ? '· ' : ''}{condition}</span>)}</span>}</Row>
-        <Row label="Then">{automation.then}{automation.mode ? <> · starts in <strong className="font-semibold">{automation.mode}</strong></> : null}</Row>
-        <Row label="Same subject again">{automation.again}</Row>
+        <Row label="Then">{automation.then}</Row>
       </dl>
     </CardContent>
     {enabled ? null : <CardFooter><span className="text-caption text-muted-foreground">Off: events are not recorded as runs</span></CardFooter>}
   </Card>;
 }
 
+function LinksTable({ onLink }: { onLink(): void }): ReactElement {
+  return <>
+  <ul className="flex flex-col divide-y divide-border border-y border-border sm:hidden">
+    {LINKS.map(link => <li key={link.subject} className="flex items-start gap-2 py-3">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="text-body">{link.subject}</span>
+        <span className="font-mono text-caption underline decoration-dotted underline-offset-2">{link.workspace}</span>
+        <span className="text-caption text-muted-foreground">{LINK_LABEL[link.source]} · {link.detail}</span>
+        <span className="text-caption text-muted-foreground">{link.activity}</span>
+      </div>
+      <Button variant="ghost" size="icon" type="button" aria-label={`Actions for ${link.subject}`} onClick={onLink}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></Button>
+    </li>)}
+  </ul>
+  <div className="hidden sm:block"><Table size="compact">
+    <TableHeader><TableRow><TableHead className="w-[32%]">Pull request or issue</TableHead><TableHead className="w-[17%]">Workspace</TableHead><TableHead className="w-[27%]">Linked</TableHead><TableHead className="hidden sm:table-cell">Last activity</TableHead><TableHead className="w-10" /></TableRow></TableHeader>
+    <TableBody>
+      {LINKS.map((link, index) => <TableRow key={link.subject} index={index}>
+        <TableCell className="max-w-0"><span className="block truncate">{link.subject}</span></TableCell>
+        <TableCell><span className="font-mono text-caption underline decoration-dotted underline-offset-2">{link.workspace}</span></TableCell>
+        <TableCell className="max-w-0">
+          <span className="block truncate">{LINK_LABEL[link.source]}</span>
+          <span className="block truncate text-caption text-muted-foreground">{link.detail}</span>
+        </TableCell>
+        <TableCell className="hidden max-w-0 text-caption text-muted-foreground sm:table-cell"><span className="block truncate">{link.activity}</span></TableCell>
+        <TableCell>
+          <DropdownMenu>
+            <DropdownTrigger render={<Button variant="ghost" size="icon" type="button" aria-label={`Actions for ${link.subject}`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></Button>} />
+            <DropdownContent align="end" className="min-w-[220px] w-[220px]">
+              <MenuItem index={0} icon={glyph(Link01)} label="Link to another workspace" onSelect={onLink} />
+              <MenuItem index={1} icon={glyph(LinkBroken01)} label="Unlink" onSelect={() => undefined} />
+            </DropdownContent>
+          </DropdownMenu>
+        </TableCell>
+      </TableRow>)}
+    </TableBody>
+  </Table></div>
+  </>;
+}
+
+function FollowThrough(): ReactElement {
+  const shape = useShape();
+  const [choices, setChoices] = useState<readonly Delivery[]>(FOLLOW_THROUGH.map(row => row.delivery));
+  return <div className={`${shape.container} flex flex-col bg-surface-2 shadow-surface-1`}>
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-3">
+      <strong className="text-body font-semibold">When a linked pull request or issue changes</strong>
+      <Badge size="compact" color="amber">Proposed</Badge>
+    </div>
+    <ul className="flex flex-col divide-y divide-border">
+      {FOLLOW_THROUGH.map((row, index) => <li key={index} className="grid grid-cols-1 items-center gap-2 px-5 py-2 sm:grid-cols-[minmax(0,1fr)_11rem] sm:gap-3">
+        <span className="text-body">{row.event}</span>
+        <Select value={DELIVERY_LABEL[choices[index] ?? row.delivery]} onValueChange={value => {
+          const picked = DELIVERIES.find(key => DELIVERY_LABEL[key] === value) ?? row.delivery;
+          setChoices(current => current.map((choice, at) => at === index ? picked : choice));
+        }}><SelectTrigger aria-label="Delivery" />{options(DELIVERIES.map(key => DELIVERY_LABEL[key]))}</Select>
+      </li>)}
+    </ul>
+    <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">At most 5 rounds on one pull request or issue a day; past that its workspace is told to ask you. Waking an agent counts as a run and holds a slot while it works.</p>
+  </div>;
+}
+
+function TrustList(): ReactElement {
+  const shape = useShape();
+  const [trusted, setTrusted] = useState<readonly string[]>(['@mira-contract', '@renovate[bot]']);
+  const [draft, setDraft] = useState('');
+  return <div className={`${shape.container} flex flex-col gap-3 bg-surface-2 px-5 py-4 shadow-surface-1`}>
+    <p className="text-body text-muted-foreground">An event runs only if its author has write access to <span className="font-mono text-caption text-foreground">inKibra/inkibra-core</span> (6 people, checked through the GitHub App when the event arrives) or is listed here. For a comment, the author is the commenter. Schedules and manual runs are always trusted.</p>
+    <div className="flex flex-wrap gap-2">{trusted.map(login => <span key={login} className={`${shape.input} flex items-center gap-1 border border-border bg-background py-0.5 pl-2 pr-0.5`}>
+      <span className="font-mono text-caption">{login}</span>
+      <Button variant="ghost" size="icon" type="button" aria-label={`Stop trusting ${login}`} onClick={() => setTrusted(current => current.filter(entry => entry !== login))}><XCircle width={14} height={14} strokeWidth={1.5} /></Button>
+    </span>)}</div>
+    <div className="flex max-w-md items-center gap-2">
+      <div className="min-w-0 flex-1"><TextInput label="GitHub login" value={draft} onChange={setDraft} mono /></div>
+      <Button variant="secondary" type="button" leadingIcon={glyph(Plus)} onClick={() => { if (draft.trim()) { setTrusted(current => [...current, draft.trim().startsWith('@') ? draft.trim() : `@${draft.trim()}`]); setDraft(''); } }}>Trust</Button>
+    </div>
+  </div>;
+}
+
 function RunsTable({ onOpen }: { onOpen(run: Run): void }): ReactElement {
-  return <Table size="compact">
-    <TableHeader><TableRow><TableHead className="w-24">Status</TableHead><TableHead className="w-[42%]">Subject</TableHead><TableHead>Automation · event</TableHead><TableHead>Workspace</TableHead><TableHead className="w-24 text-right">When</TableHead></TableRow></TableHeader>
+  return <>
+  <ul className="flex flex-col divide-y divide-border border-y border-border sm:hidden">
+    {RUNS.map(run => <li key={run.id}><button type="button" className="flex w-full flex-col gap-0.5 py-3 text-left" onClick={() => onOpen(run)}>
+      <span className="flex items-center justify-between gap-2"><Badge variant="dot" size="compact" color={STATUS_COLOR[run.status]}>{run.status}</Badge><span className="text-caption tabular-nums text-muted-foreground">{run.at}</span></span>
+      <span className="text-body">{run.subject}</span>
+      <span className="text-caption text-muted-foreground">{run.outcome}</span>
+      <span className="text-caption text-muted-foreground">{run.by} · <span className="font-mono">{run.event}</span></span>
+    </button></li>)}
+  </ul>
+  <div className="hidden sm:block"><Table size="compact">
+    <TableHeader><TableRow><TableHead className="w-24">Status</TableHead><TableHead className="w-[40%]">Subject</TableHead><TableHead>From · event</TableHead><TableHead className="hidden sm:table-cell">Workspace</TableHead><TableHead className="w-24 text-right">When</TableHead></TableRow></TableHeader>
     <TableBody>
       {RUNS.map((run, index) => <TableRow key={run.id} index={index} className="cursor-pointer" onClick={() => onOpen(run)}>
         <TableCell><Badge variant="dot" size="compact" color={STATUS_COLOR[run.status]}>{run.status}</Badge></TableCell>
@@ -200,31 +358,27 @@ function RunsTable({ onOpen }: { onOpen(run: Run): void }): ReactElement {
           <span className="block truncate text-caption text-muted-foreground">{run.outcome}</span>
         </TableCell>
         <TableCell className="max-w-0">
-          <span className="block truncate">{run.automation}</span>
+          <span className="block truncate">{run.by}</span>
           <span className="block truncate font-mono text-caption text-muted-foreground">{run.event}</span>
         </TableCell>
-        <TableCell>{run.workspace ? <span className="font-mono text-caption underline decoration-dotted underline-offset-2">{run.workspace}</span> : <span className="text-muted-foreground">—</span>}</TableCell>
+        <TableCell className="hidden sm:table-cell">{run.workspace ? <span className="font-mono text-caption underline decoration-dotted underline-offset-2">{run.workspace}</span> : <span className="text-muted-foreground">—</span>}</TableCell>
         <TableCell className="text-right tabular-nums text-muted-foreground">{run.at}</TableCell>
       </TableRow>)}
     </TableBody>
-  </Table>;
+  </Table></div>
+  </>;
 }
 
 function RunDetail({ run }: { run: Run }): ReactElement {
   return <>
     <DialogHeader>
       <DialogTitle><span className="flex items-center gap-2">{run.subject}<Badge variant="dot" size="compact" color={STATUS_COLOR[run.status]}>{run.status}</Badge></span></DialogTitle>
-      <DialogDescription>{run.automation} · <span className="font-mono">{run.event}</span> · {run.at}</DialogDescription>
+      <DialogDescription>{run.by} · <span className="font-mono">{run.event}</span> · {run.at}</DialogDescription>
     </DialogHeader>
     <div className="flex flex-col gap-5">
       {run.checks.length ? <section className="flex flex-col gap-2">
         <strong className="text-caption font-medium text-muted-foreground">Only if</strong>
-        <ul className="flex flex-col gap-1.5">{run.checks.map(check => <li key={check.label} className="flex items-center gap-2 text-body">
-          {check.passed === true ? <CheckCircle className="text-success" width={16} height={16} strokeWidth={1.5} />
-            : check.passed === false ? <XCircle className="text-destructive" width={16} height={16} strokeWidth={1.5} />
-              : <MinusCircle className="text-muted-foreground" width={16} height={16} strokeWidth={1.5} />}
-          <span className={check.passed === null ? 'text-muted-foreground' : 'text-foreground'}>{check.label}{check.passed === null ? ' (not checked)' : ''}</span>
-        </li>)}</ul>
+        <CheckList checks={run.checks} />
       </section> : null}
       <section className="flex flex-col gap-2">
         <strong className="text-caption font-medium text-muted-foreground">Timeline</strong>
@@ -232,46 +386,78 @@ function RunDetail({ run }: { run: Run }): ReactElement {
           <span className="w-16 shrink-0 font-mono text-caption tabular-nums text-muted-foreground">{step.at}</span><span>{step.label}</span>
         </li>)}</ol>
       </section>
+      {run.untrusted ? <p className="text-caption text-muted-foreground">Approving runs this event once. Trusting {run.untrusted} lets their later events run too.</p> : null}
     </div>
     <DialogFooter>
       <Button variant="secondary" type="button">View event payload</Button>
-      {run.workspace ? <Button variant="primary" type="button">Open {run.workspace}</Button> : null}
+      {run.untrusted ? <>
+        <Button variant="secondary" type="button">Trust author</Button>
+        <Button variant="primary" type="button">Approve this run</Button>
+      </> : run.workspace ? <Button variant="primary" type="button">Open {run.workspace}</Button> : null}
     </DialogFooter>
   </>;
 }
 
 const PR_ACTIONS = ['opened', 'ready_for_review', 'synchronize', 'reopened', 'closed', 'labeled'];
 
+function TestWithPastEvent(): ReactElement {
+  const shape = useShape();
+  const [event, setEvent] = useState(PAST_EVENTS[0] ?? '');
+  const [tested, setTested] = useState<string | null>(null);
+  const untrusted = tested?.includes('@outside-dev') ?? false;
+  const draft = tested?.includes('draft') ?? false;
+  return <section className={`${shape.container} flex flex-col gap-3 border border-border p-4`}>
+    <strong className="text-body font-semibold">Test with a past event</strong>
+    <p className="text-caption text-muted-foreground">Runs the trigger and conditions against a delivery GitSpace recorded and shows what would happen. Nothing is started until you choose Run it.</p>
+    <div className="flex items-end gap-2">
+      <Field label="Recorded event"><Select value={event} onValueChange={value => { setEvent(value); setTested(null); }}><SelectTrigger aria-label="Recorded event" />{options(PAST_EVENTS)}</Select></Field>
+      <Button variant="secondary" type="button" leadingIcon={glyph(RefreshCcw01)} onClick={() => setTested(event)}>Test</Button>
+    </div>
+    {tested ? <div className="flex flex-col gap-3 border-t border-border pt-3">
+      <CheckList checks={[{ label: untrusted ? 'author @outside-dev is not trusted' : 'author has write access', passed: !untrusted }, ...REVIEW_CHECKS(untrusted ? null : !draft, untrusted || draft ? null : true)]} />
+      {untrusted || draft
+        ? <p className="text-body">Would skip: {untrusted ? 'the author is not trusted' : 'the pull request is a draft'}.</p>
+        : <>
+          <p className="text-body">Would start workspace <span className="font-mono text-caption">review-pr-1143</span> in <strong className="font-semibold">Review</strong> with agent <span className="font-mono text-caption">reviewer</span>, linked to PR #1143. Its first message:</p>
+          <blockquote className={`${shape.input} border border-border bg-surface-2 p-2 text-body`}>Review https://github.com/inKibra/inkibra-core/pull/1143 against main. Leave one review with inline comments; request changes only for correctness or security problems.</blockquote>
+        </>}
+      <div><Button variant="primary" size="compact" type="button" leadingIcon={glyph(Play)} disabled={untrusted || draft}>Run it</Button></div>
+    </div> : null}
+  </section>;
+}
+
 function Editor({ onClose }: { onClose(): void }): ReactElement {
   const shape = useShape();
   const [name, setName] = useState('Review pull requests');
   const [trigger, setTrigger] = useState('GitHub event');
   const [event, setEvent] = useState('Pull request');
-  const [actions, setActions] = useState<ReadonlySet<string>>(new Set(['opened', 'ready_for_review', 'synchronize']));
+  const [actions, setActions] = useState<ReadonlySet<string>>(new Set(['opened', 'ready_for_review']));
   const [then, setThen] = useState('Start a workspace for the subject');
   const [mode, setMode] = useState<string>('Review');
   const [agent, setAgent] = useState('reviewer');
-  const [again, setAgain] = useState('Send the event to its workspace');
   const [prompt, setPrompt] = useState('Review {{pull_request.html_url}} against {{pull_request.base.ref}}. Leave one review with inline comments; request changes only for correctness or security problems.');
   const conditions = [['Base branch', 'is', 'main'], ['Draft', 'is', 'false'], ['Author', 'is not', 'dependabot[bot]']];
   return <>
     <DialogHeader>
       <DialogTitle>Edit automation</DialogTitle>
-      <DialogDescription>When something happens in this project, do something. Each firing is recorded as a run.</DialogDescription>
+      <DialogDescription>Automations start new work. Later activity on the pull request or issue reaches the workspace through its link, not through this automation.</DialogDescription>
     </DialogHeader>
     <div className="flex flex-col gap-5">
-      <InputGroup><InputField index={0} label="Name" value={name} onChange={setName} /></InputGroup>
+      <Field label="Name"><TextInput label="Name" value={name} onChange={setName} /></Field>
 
       <section className="flex flex-col gap-3">
         <strong className="text-body font-semibold">When</strong>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Trigger"><Select value={trigger} onValueChange={setTrigger}><SelectTrigger aria-label="Trigger" />{options(['GitHub event', 'Schedule', 'Manual only'])}</Select></Field>
-          <Field label="Event"><Select value={event} onValueChange={setEvent}><SelectTrigger aria-label="Event" />{options(['Pull request', 'Pull request review', 'Issue', 'Issue comment', 'Push', 'Check suite'])}</Select></Field>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Trigger"><Select value={trigger} onValueChange={setTrigger}><SelectTrigger aria-label="Trigger" />{options(['GitHub event', 'Label added', 'Schedule', 'Manual only'])}</Select></Field>
+          {trigger === 'Label added'
+            ? <Field label="Labels"><span className={`${shape.input} border border-border bg-surface-2 px-2 py-1.5 font-mono text-caption`}>gitspace:plan, gitspace:code, gitspace:review</span></Field>
+            : <Field label="Event"><Select value={event} onValueChange={setEvent}><SelectTrigger aria-label="Event" />{options(['Pull request', 'Pull request review', 'Issue', 'Issue comment', 'Push', 'Check suite'])}</Select></Field>}
         </div>
-        <div className="flex flex-wrap gap-1.5">{PR_ACTIONS.map(action => <Button key={action} size="compact" type="button"
+        {trigger === 'GitHub event' ? <div className="flex flex-wrap gap-1.5">{PR_ACTIONS.map(action => <Button key={action} size="compact" type="button"
           variant={actions.has(action) ? 'primary' : 'secondary'}
           onClick={() => setActions(current => { const next = new Set(current); if (next.has(action)) next.delete(action); else next.add(action); return next; })}>
-          <span className="font-mono">{action}</span></Button>)}</div>
+          <span className="font-mono">{action}</span></Button>)}</div> : null}
+        {trigger === 'Label added' ? <p className="text-caption text-muted-foreground">Each label starts its own mode: <span className="font-mono">gitspace:plan</span> in Plan, <span className="font-mono">gitspace:code</span> in Code, <span className="font-mono">gitspace:review</span> in Review.</p> : null}
       </section>
 
       <section className="flex flex-col gap-3">
@@ -283,22 +469,25 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
           <Button variant="ghost" size="icon" type="button" aria-label="Remove condition"><Trash01 width={14} height={14} strokeWidth={1.5} /></Button>
         </div>)}
         <div><Button variant="ghost" size="compact" type="button" leadingIcon={glyph(Plus)}>Add condition</Button></div>
+        <p className="text-caption text-muted-foreground">Authors without write access who are not on the trust list are skipped, with Approve this run.</p>
       </section>
 
       <section className="flex flex-col gap-3">
         <strong className="text-body font-semibold">Then</strong>
-        <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(['Start a workspace for the subject', 'Message a workspace', 'Message the project agent'])}</Select></Field>
-        <div className="grid grid-cols-3 gap-3">
+        <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(['Start a workspace for the subject', 'Message a workspace', 'Message the project agent', 'Ask the project agent'])}</Select></Field>
+        {then === 'Start a workspace for the subject' ? <div className="grid grid-cols-2 gap-3">
           <Field label="Starts in"><Select value={mode} onValueChange={setMode}><SelectTrigger aria-label="Starts in" />{options(['Plan', 'Code', 'Review'])}</Select></Field>
           <Field label="Agent"><Select value={agent} onValueChange={setAgent}><SelectTrigger aria-label="Agent" />{options(['default', 'reviewer', 'scout'])}</Select></Field>
-          <Field label="Same subject again"><Select value={again} onValueChange={setAgain}><SelectTrigger aria-label="Same subject again" />{options(['Send the event to its workspace', 'Ignore'])}</Select></Field>
-        </div>
+        </div> : null}
+        {then === 'Ask the project agent' ? <p className="text-caption text-muted-foreground">The project agent gets the event and decides: start a workspace, link it to one that already covers it, message one, or skip. One agent turn per event.</p> : null}
         <Field label="Instruction">
           <textarea rows={4} value={prompt} onChange={e => setPrompt(e.currentTarget.value)}
             className={`${shape.input} w-full resize-y border border-border bg-surface-2 p-2 text-body text-foreground outline-none`} />
         </Field>
-        <p className="text-caption text-muted-foreground">The event arrives with the instruction as the workspace's first message. Workspaces stay open when the pull request closes; they get a notice.</p>
+        <p className="text-caption text-muted-foreground">The event arrives with the instruction as the workspace's first message, and the workspace is linked to the pull request.</p>
       </section>
+
+      <TestWithPastEvent />
     </div>
     <DialogFooter>
       <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
@@ -307,43 +496,76 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
   </>;
 }
 
+function LinkDialog({ onClose }: { onClose(): void }): ReactElement {
+  const [workspace, setWorkspace] = useState('session-recovery');
+  const [subject, setSubject] = useState('#1140');
+  return <>
+    <DialogHeader>
+      <DialogTitle>Link a pull request or issue</DialogTitle>
+      <DialogDescription>Its activity goes to this workspace, and mentions of {BOT} on it reach the workspace's agent.</DialogDescription>
+    </DialogHeader>
+    <div className="flex flex-col gap-4">
+      <Field label="Workspace"><Select value={workspace} onValueChange={setWorkspace}><SelectTrigger aria-label="Workspace" />{options(['session-recovery', 'plan-issue-391', 'storybook-jit', 'review-pr-1142'])}</Select></Field>
+      <Field label="Pull request, issue or branch"><TextInput label="Pull request, issue or branch" value={subject} onChange={setSubject} mono /></Field>
+      <p className="text-caption text-muted-foreground">A link you or an agent make replaces one found by branch. A pull request or issue has one workspace in this project; linking it here moves it from its current workspace.</p>
+    </div>
+    <DialogFooter>
+      <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+      <Button variant="primary" type="button" leadingIcon={glyph(Link01)} onClick={onClose}>Link</Button>
+    </DialogFooter>
+  </>;
+}
+
 function AutomationsMock(): ReactElement {
   const shape = useShape();
   const [editing, setEditing] = useState(false);
+  const [linking, setLinking] = useState(false);
   const [run, setRun] = useState<Run | null>(null);
   return <div className="flex h-dvh flex-col bg-background">
     <PageCanvas>
       <PageHeader kicker="inkibra core" title="Automations"
-        description="When something happens in this project, do something. Each firing is a run."
+        description="When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace."
         actions={<Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>} />
 
       <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
-        <div className="grid grid-cols-4 divide-x divide-border">
-          <Stat value="3 of 4" label="On" />
+        <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">
+          <Stat value="4 of 5" label="On" />
           <Stat value="2 / 2" label="Working now" />
           <Stat value={1} label="Queued" />
-          <Stat value={1} label="Failed today" />
+          <Stat value={1} label="Waiting for approval" />
         </div>
         <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">At most 2 runs work at once. A run holds a slot only while its agent works; a workspace waiting for you does not.</p>
       </section>
 
-      <section aria-label="Automations" className="mb-8 flex flex-col gap-3">
-        <h2 className="text-subtitle font-semibold">Automations</h2>
+      <Section title="Automations">
         <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
           {AUTOMATIONS.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
         </CardGroup>
-      </section>
+      </Section>
 
-      <section aria-label="Recent runs" className="flex flex-col gap-3">
-        <div className="flex items-end justify-between"><h2 className="text-subtitle font-semibold">Recent runs</h2><span className="text-caption text-muted-foreground">Every event an automation saw, including skipped ones</span></div>
+      <Section title="Linked pull requests and issues"
+        aside={<Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Link01)} onClick={() => setLinking(true)}>Link a pull request or issue</Button>}>
+        <p className="text-caption text-muted-foreground">Each has one workspace in this project, linked when GitSpace starts the workspace for it, when an agent or you link it, or by branch. Mention {code(BOT)} in a comment to reach its workspace; with no link, the mention goes to the project agent.</p>
+        <LinksTable onLink={() => setLinking(true)} />
+        <FollowThrough />
+      </Section>
+
+      <Section title="Trusted authors">
+        <TrustList />
+      </Section>
+
+      <Section title="Recent runs" aside={<span className="text-caption text-muted-foreground">Every event seen, skipped ones included</span>}>
         <RunsTable onOpen={setRun} />
-      </section>
+      </Section>
 
       <Dialog open={editing} onOpenChange={open => { if (!open) setEditing(false); }}>
         <DialogContent size="lg"><Editor onClose={() => setEditing(false)} /></DialogContent>
       </Dialog>
+      <Dialog open={linking} onOpenChange={open => { if (!open) setLinking(false); }}>
+        <DialogContent><LinkDialog onClose={() => setLinking(false)} /></DialogContent>
+      </Dialog>
       <Dialog open={run !== null} onOpenChange={open => { if (!open) setRun(null); }}>
-        <DialogContent>{run ? <RunDetail run={run} /> : null}</DialogContent>
+        <DialogContent size="lg">{run ? <RunDetail run={run} /> : null}</DialogContent>
       </Dialog>
     </PageCanvas>
   </div>;
