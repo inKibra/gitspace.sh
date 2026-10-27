@@ -56,6 +56,9 @@ export const browserOverlayFunction = `function(command) {
     host.setAttribute('aria-hidden', 'true');
     host.style.cssText = 'all:initial;position:fixed;inset:0;display:block;pointer-events:none;z-index:2147483646;contain:layout style';
     const root = host.attachShadow({ mode: 'closed' });
+    // A world whose toolbar left the page (a later debugger session's overlay took its place, as after an extension
+    // update) lets go of the page at its next event, so its listeners never take your keys and clicks from the live one.
+    const gone = () => { if (host.isConnected) return false; overlay?.dispose(); return true; };
     const font = 'font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:0;-webkit-font-smoothing:antialiased;';
     const frame = make('div', 'position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .4s ease', root);
     // The toolbar: mark or REC, who and what, then its buttons.
@@ -198,13 +201,14 @@ export const browserOverlayFunction = `function(command) {
     // Your own pointer over the toolbar makes it clickable; the agent's pointer (each point it is about to use) never
     // does, and is not reported.
     const hover = event => {
+      if (gone()) return;
       const box = bar.getBoundingClientRect();
       const inside = event.clientX >= box.left - 4 && event.clientX <= box.right + 4 && event.clientY >= box.top - 4 && event.clientY <= box.bottom + 4;
       const agent = state.target && Math.abs(event.clientX - state.target[0]) < 1 && Math.abs(event.clientY - state.target[1]) < 1;
       bar.style.pointerEvents = inside && !agent ? 'auto' : 'none';
       if (!agent) report({ x: Math.min(1, Math.max(0, event.clientX / innerWidth)), y: Math.min(1, Math.max(0, event.clientY / innerHeight)) });
     };
-    const leave = event => { if (event.type === 'visibilitychange' ? document.visibilityState === 'hidden' : !event.relatedTarget) report(null); };
+    const leave = event => { if (gone()) return; if (event.type === 'visibilitychange' ? document.visibilityState === 'hidden' : !event.relatedTarget) report(null); };
     document.addEventListener('mousemove', hover, { capture: true, passive: true });
     document.addEventListener('mouseout', leave, { capture: true, passive: true });
     document.addEventListener('visibilitychange', leave);
@@ -216,7 +220,7 @@ export const browserOverlayFunction = `function(command) {
     resume.addEventListener('click', () => { if (press('resume')) what.textContent = 'Resuming…'; });
     // Your pointer or key press on the page while the agent acts there takes the tab; one on the toolbar does not, and
     // a page's own events (not trusted) never do.
-    const take = event => { if (event.isTrusted && (state.mode === 'run' || state.mode === 'step') && !comments.on() && !event.composedPath().includes(host)) press('take'); };
+    const take = event => { if (gone()) return; if (event.isTrusted && (state.mode === 'run' || state.mode === 'step') && !comments.on() && !event.composedPath().includes(host)) press('take'); };
     addEventListener('pointerdown', take, { capture: true, passive: true });
     addEventListener('keydown', take, { capture: true, passive: true });
     capture.addEventListener('click', () => { if (press(state.capture === 'recording' ? 'captureStop' : 'capture')) captureLabel.data = state.capture === 'recording' ? 'Saving…' : 'Starting…'; });
@@ -337,7 +341,7 @@ export const browserOverlayFunction = `function(command) {
       // While an agent acts here the layer stands aside: your own presses on the page come here first, and the agent's
       // (at the point its cursor is about to use) go on to the page.
       const intercept = event => {
-        if (!view || layerOn() || !event.isTrusted || event.composedPath().includes(host)) return;
+        if (gone() || !view || layerOn() || !event.isTrusted || event.composedPath().includes(host)) return;
         if (state.target && Math.abs(event.clientX - state.target[0]) < 1 && Math.abs(event.clientY - state.target[1]) < 1) return;
         event.preventDefault(); event.stopImmediatePropagation();
         if (event.type.startsWith('pointer')) pointer(event);
@@ -345,7 +349,7 @@ export const browserOverlayFunction = `function(command) {
       const INTERCEPTED = ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'auxclick'];
       for (const type of INTERCEPTED) addEventListener(type, intercept, { capture: true });
       const escape = event => {
-        if (!view || event.key !== 'Escape' || !event.isTrusted) return;
+        if (gone() || !view || event.key !== 'Escape' || !event.isTrusted) return;
         event.preventDefault(); event.stopImmediatePropagation();
         if (!open) { call('off'); return; }
         if (open.kind === 'draft') call('cancel', { seq: open.seq });
