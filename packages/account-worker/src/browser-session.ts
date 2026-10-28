@@ -13,7 +13,7 @@ import { localhostPort, localhostRefusal, type WorkspaceServiceUrl } from './wor
 import { SERVICE_COOKIE, type ServiceWorkspace } from './service-sessions.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 import { CloudCaptures } from './browser-capture.js';
-import { CloudDownloads } from './browser-downloads.js';
+import { CloudDownloads, StepDownloads, type ScriptDownload, type ScriptDownloads } from './browser-downloads.js';
 import { ScriptRunFiles, type ScriptUploadFiles } from './browser-script-files.js';
 import { workspaceDrive } from './workspace-drive.js';
 import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, CloudWatch } from './browser-watch.js';
@@ -36,6 +36,9 @@ const Targets = z.object({ targetInfos: z.array(z.object({ targetId: z.string(),
 const LayoutMetrics = z.object({ cssVisualViewport: z.object({ pageX: z.number(), pageY: z.number(), clientWidth: z.number().positive(), clientHeight: z.number().positive() }) });
 /** Previews are at most this wide, small enough to refresh often. */
 const PREVIEW_WIDTH = 480;
+/** The owner of this workspace's single-step downloads in `StepDownloads`: this object serves one workspace's cloud
+ * browser. */
+const CLOUD_STEPS = 'cloud';
 
 /** The pages open in a browser, as the Inspector's Browser tab lists them. */
 export async function browserPages(shim: CdpBrowserShim): Promise<{ targetId: string; url: string; title: string }[]> {
@@ -119,6 +122,8 @@ export class BrowserSessionDO extends BudgetedDurableObject {
   private readonly captures = new CloudCaptures();
   /** Each running script's files (its captures, uploads and the downloads while it runs), by run. */
   private readonly runFiles = new Map<string, ScriptRunFiles>();
+  /** Downloads single steps started on the cloud browser (no running script claimed them), until a step lists them. */
+  private readonly stepDownloads = new StepDownloads(this.ctx.storage, 'browser.step-download:');
   /** When this object last told the account its cloud browser is open (`tellAccount`); 0 once it said it closed. */
   private toldOpen = 0;
   /** The tabs you hold now, by target (docs/APERTURE-DESIGN.md §7.2): none of the agent's commands reach them, a
@@ -157,9 +162,16 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       // A dropped connection ends this browser; the next use opens another.
       upstream.subscribe(event => { if (event.method === 'disconnected' && this.browser === opening) this.release('the cloud browser’s connection ended, so the tab is gone; open a new one if you still need it.'); });
       const shim = await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) });
-      // Downloads go to the workspace drive; each running cloud script lists those started while it ran.
+      // Downloads go to the workspace drive; each running cloud script follows those started while it runs, and the
+      // workspace's single steps list the others.
       await CloudDownloads.open(shim, workspaceDrive(this.env, workspace), download => {
-        for (const files of this.runFiles.values()) if (files.browser.source === 'headless') files.downloaded(download);
+        const running = [...this.runFiles.values()].filter(files => files.browser.source === 'headless' && files.running);
+        for (const files of running) files.downloaded(download);
+        if (running.length) return;
+        const { outcome, ...started } = download;
+        this.ctx.waitUntil(this.stepDownloads.begin(CLOUD_STEPS, started)
+          .then(async () => this.stepDownloads.settle(CLOUD_STEPS, download.id, await outcome))
+          .catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_step_download_failed', error: String(error) }))));
       });
       this.tellAccount(true);
       return shim;
@@ -327,6 +339,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       cloud: async () => shimChannel(await this.shim(), 'Agent', { holds: targetId => this.held.has(targetId), refuse: () => BROWSER_TAB_HELD }),
       // Debug files of the cloud browser's tabs (`browser-powers.ts`).
       drive: identity => workspaceDrive(this.env, identity),
+      downloads: () => this.stepDownloads.report(CLOUD_STEPS),
       services: {
         urlPattern: hostedServiceUrlPattern(this.env),
         hostname: hostname => isHostedServiceHostname(this.env, hostname),
@@ -353,11 +366,11 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     if (!relay) await this.shim();
     const stateKey = placement.kind === 'account-relay' ? `browser.run.state:relay:${placement.pairingId}` : 'browser.run.state:cloud';
     const run = crypto.randomUUID(), groupId = command.grant.body.groupId;
-    const files = new ScriptRunFiles(workspaceDrive(this.env, scope), relay && placement.kind === 'account-relay'
+    const files = new ScriptRunFiles(workspaceDrive(this.env, scope), relay && relayToken && placement.kind === 'account-relay'
       ? { source: 'relay', groupId, chrome: async () => {
         const pairing = (await relay.browserRelayStatus()).pairings.find(item => item.pairingId === placement.pairingId);
         return { name: pairing?.name ?? 'Your Chrome', protocol: pairing?.extension?.protocol ?? 0 };
-      } }
+      }, downloads: version => relay.browserRelayScriptDownloads(relayToken, version) }
       : { source: 'headless', groupId });
     this.runFiles.set(run, files);
     const sandbox = this.env.CODEMODE_LOADER.load({
@@ -378,8 +391,9 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       stopped.reject(new Error(limit));
     }, BROWSER_RUN_LIMIT_MS);
     let text: string;
-    // Downloads your Chrome's extension saved for this run, which it finishes uploading before the run ends.
-    let chromeDownloads: { path: string; size: number; mediaType: string }[] = [];
+    // Your Chrome's downloads for this run, as the relay followed them; its extension finishes uploading them before
+    // the run ends.
+    let chromeDownloads: ScriptDownload[] = [];
     // Why your Chrome stopped the script (you took one of its tabs over), which its result says instead of the error
     // its Playwright saw as its connection closed.
     let takenOver: string | null = null;
@@ -389,6 +403,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
       try { text = await Promise.race([sandbox.getEntrypoint<Runner>().run({ label: scope.conversationKind === 'main' ? 'Agent' : 'Subagent', state: await this.ctx.storage.get(stateKey) ?? {} }), stopped.promise]); }
       finally {
         clearTimeout(timer);
+        files.end();
         this.runFiles.delete(run);
         this.stopped.delete(run);
         // Cuts the script off your Chrome; a lost end still lapses at the run's deadline.
@@ -420,6 +435,21 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     const files = this.runFiles.get(run);
     if (!files) throw new Error('The script run ended');
     return files.uploadFiles(urls);
+  }
+
+  /** A running script's downloads once they differ from `version`, from its sandbox through `BrowserSessionFiles`; a
+   * run that ended answers at once, `ended` true. */
+  async scriptDownloads(run: string, version: unknown): Promise<ScriptDownloads> {
+    const files = this.runFiles.get(run);
+    if (!files) return { version: 0, ended: true, downloads: [] };
+    return files.downloads(version);
+  }
+
+  /** A running script's `download.saveAs()`, from its sandbox through `BrowserSessionFiles`. */
+  async scriptSaveDownload(run: string, id: unknown, url: unknown): Promise<{ file: string }> {
+    const files = this.runFiles.get(run);
+    if (!files) throw new Error('The script run ended');
+    return files.saveDownload(id, url);
   }
 
   /** A cloud script's CDP connection, from the sandbox through `BrowserSessionCdp`: `/script/<run>/<cursor label>`; or
@@ -480,8 +510,8 @@ async function filesReply<Value>(operation: Promise<Value>): Promise<FilesReply<
   catch (error) { return { ok: false, error: (error instanceof Error ? error.message : String(error)).slice(0, 4096) }; }
 }
 
-/** The sandbox's only way to the workspace drive: a script's `capture()` and `upload()`, for its own run only (`props`,
- * set by the session). The session holds what the run may do, and refuses once it ended. */
+/** The sandbox's only way to the workspace drive: a script's `capture()`, `upload()` and downloads, for its own run only
+ * (`props`, set by the session). The session holds what the run may do, and refuses once it ended. */
 export class BrowserSessionFiles extends WorkerEntrypoint<Env, { session: string; run: string }> {
   capture(shot: unknown): Promise<FilesReply<{ captureId: string; url: string }>> {
     return filesReply(this.env.BROWSER_SESSION.getByName(this.ctx.props.session).scriptCapture(this.ctx.props.run, shot));
@@ -489,5 +519,16 @@ export class BrowserSessionFiles extends WorkerEntrypoint<Env, { session: string
 
   uploadFiles(urls: unknown): Promise<FilesReply<ScriptUploadFiles>> {
     return filesReply<ScriptUploadFiles>(this.env.BROWSER_SESSION.getByName(this.ctx.props.session).scriptUploadFiles(this.ctx.props.run, urls));
+  }
+
+  /** The run's downloads, all of them in the order they started, once the list differs from `version` (a count of
+   * changes: a start or a settle each add one; 0 before any); after the run ended, at once with `ended` true. */
+  downloads(version: unknown): Promise<FilesReply<ScriptDownloads>> {
+    return filesReply<ScriptDownloads>(this.env.BROWSER_SESSION.getByName(this.ctx.props.session).scriptDownloads(this.ctx.props.run, version));
+  }
+
+  /** Copies the run's saved download `id` to `url` (`drive://workspace/<path>`), answering the copy's address. */
+  saveDownload(id: unknown, url: unknown): Promise<FilesReply<{ file: string }>> {
+    return filesReply(this.env.BROWSER_SESSION.getByName(this.ctx.props.session).scriptSaveDownload(this.ctx.props.run, id, url));
   }
 }

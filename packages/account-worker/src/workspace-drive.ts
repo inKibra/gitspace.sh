@@ -40,6 +40,9 @@ export interface WorkspaceDrive {
   machineTarget(path: string): Promise<{ scopeId: string; path: string }>;
   /** Names a file a machine stored (`drive_transfer` `fromMachine`'s result) at `path`. */
   record(path: string, mediaType: string | null, stored: { blobHash: string; size: number }): Promise<WorkspaceDriveWritten>;
+  /** Names the file at `from` at `to` too, replacing a file there: the same stored object under its type, so no bytes
+   * move whatever its size. */
+  copy(from: string, to: string): Promise<WorkspaceDriveWritten>;
 }
 
 export function workspaceDrive(env: Env, workspace: { projectId: string; workspaceId: string }): WorkspaceDrive {
@@ -105,6 +108,12 @@ export function workspaceDrive(env: Env, workspace: { projectId: string; workspa
     async record(path, mediaType, stored) {
       const drive = await artifacts();
       return written(await drive.write(drive.writableUrl(path), { stored: { blobHash: stored.blobHash, size: stored.size }, mediaType }));
+    },
+    async copy(from, to) {
+      const drive = await artifacts();
+      const entry = (await drive.writableEntries()).entries.find(candidate => candidate.path === from);
+      if (!entry) throw new Error(`${from} does not exist`);
+      return written(await drive.write(drive.writableUrl(to), { stored: { blobHash: entry.blobHash, size: entry.size, ...(entry.object ? { object: entry.object } : {}) }, mediaType: entry.mediaType }));
     },
   };
 }

@@ -74,7 +74,7 @@ describe('a download an agent tab starts', () => {
     expect(released).toBe(false);
     complete();
     await release;
-    expect(chrome.uploaded(begin => begin.kind === 'download')).toEqual([{ begin: { kind: 'download', groupId, attemptId, name: 'report.csv', mediaType: 'text/csv' }, bytes: Buffer.from('a,b\n1,2\n') }]);
+    expect(chrome.uploaded(begin => begin.kind === 'download')).toEqual([{ begin: { kind: 'download', groupId, attemptId, name: 'report.csv', mediaType: 'text/csv', targetId: 'target-1', url: 'https://app.example/report.csv' }, bytes: Buffer.from('a,b\n1,2\n') }]);
     for (const request of chrome.requests) expect(await chrome.authorizedAsRequired(request)).toBe(true);
     await chrome.advance(10_000);
     expect(chrome.downloadCalls).toEqual(['cancel:5', 'erase:5']);
@@ -90,6 +90,19 @@ describe('a download an agent tab starts', () => {
     await chrome.execute({ operation: 'release', attemptId });
     expect(chrome.downloadCalls).toEqual(['cancel:6', 'removeFile:6', 'erase:6']);
     expect(chrome.uploaded(begin => begin.kind === 'download').map(({ begin, bytes }) => [begin.name, begin.mediaType, bytes.toString()])).toEqual([['export.json', 'application/json', '{}']]);
+  });
+
+  it('names its tab, and its address unless that is the whole file (a long data: URL)', async () => {
+    const chrome = await installed({ protocol: 5 });
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    const url = `data:text/plain;base64,${btoa('x'.repeat(9000))}`;
+    await chrome.pageEvent('target-1', 'Page.downloadWillBegin', { frameId: 'main', guid: 'g-3', url, suggestedFilename: 'notes.txt' });
+    await chrome.download({ id: 7, url, finalUrl: url, mime: 'text/plain', filename: '', state: 'in_progress' });
+    await chrome.execute({ operation: 'release', attemptId });
+    const [saved] = chrome.uploaded(begin => begin.kind === 'download');
+    expect(saved?.begin).toEqual({ kind: 'download', groupId: chrome.grant.body.groupId, attemptId, name: 'notes.txt', mediaType: 'text/plain', targetId: 'target-1' });
+    expect(saved?.bytes.toString()).toBe('x'.repeat(9000));
   });
 });
 

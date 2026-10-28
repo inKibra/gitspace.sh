@@ -16,7 +16,7 @@ import { TabScreencast } from './screencast.ts';
 // Browser powers and Everything (`powers.ts`).
 import { ChromeEverything, EVERYTHING_ORIGINS, powerStepCommand, stepReach } from './powers.ts';
 import { CaptureTracksInChrome } from './capture-tracks.ts';
-import { relaySignature, Upload } from './upload.ts';
+import { DOWNLOAD_URL_MAX, relaySignature, Upload } from './upload.ts';
 import { workspaceRequest } from './workspaces.ts';
 
 const endpoint = new URL('/api/browser-relay/extension', GITSPACE_ACCOUNT_URL).href.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
@@ -862,6 +862,11 @@ async function runCommand(message) {
     // The cursor reaches each point before the event does; a script's own screenshot never shows the overlay.
     if (method === 'Input.dispatchMouseEvent') await overlay(targetId, { cursor: { x: verdict.send.x, y: verdict.send.y, type: verdict.send.type } });
     if (method === 'Page.captureScreenshot') await overlay(targetId, { conceal: true });
+    // Chrome reports a session's execution contexts when its Runtime domain turns on, never when it is on already, and
+    // the tab's one debugger session outlives a script while a watch, a capture, the comment tool or another script
+    // keeps it: the next script would hear of no context and wait forever on the page's own world. Runtime goes off
+    // first, so each script hears every context of the page.
+    if (method === 'Runtime.enable') await chrome.debugger.sendCommand(lease.source, 'Runtime.disable');
     effect = method === 'Target.attachToTarget' ? { sessionId: lease.sessionId } : method === 'Target.getTargetInfo' ? describeTarget(targetId) : method === 'GitSpace.setInputFilesFromUrls' ? setInputFiles(lease, verdict.send) : method.startsWith('Input.') ? agentInput(targetId, chrome.debugger.sendCommand(lease.source, method, verdict.send)) : chrome.debugger.sendCommand(lease.source, method, verdict.send);
   } finally {
     admitted.resolve();
@@ -1194,7 +1199,7 @@ async function saveDownload(item, download) {
   await chrome.downloads.erase({ id: item.id }).catch(() => {});
   const source = await openDownload(download, item.mime || 'application/octet-stream');
   const name = (download.name || (item.filename || '').split(/[\\/]/).pop() || 'download').replace(/[\u0000-\u001f\\/:*?"<>|]/g, '_').trim().slice(0, 200) || 'download';
-  const upload = new Upload(GITSPACE_ACCOUNT_URL, signUpload, { kind: 'download', groupId: download.groupId, attemptId: download.attemptId, name, mediaType: source.mediaType });
+  const upload = new Upload(GITSPACE_ACCOUNT_URL, signUpload, { kind: 'download', groupId: download.groupId, attemptId: download.attemptId, name, mediaType: source.mediaType, targetId: download.lease.targetId, ...(download.url.length <= DOWNLOAD_URL_MAX ? { url: download.url } : {}) });
   try {
     for (let piece = await source.read(); piece; piece = await source.read()) await upload.write(piece);
     await upload.complete();

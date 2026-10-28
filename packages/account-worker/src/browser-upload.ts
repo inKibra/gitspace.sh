@@ -3,6 +3,7 @@ import { DRIVE_FILE_MAX_BYTES, TENANT_OBJECT_PART_BYTES } from '@gitspace/protoc
 import { BROWSER_DRIVE_PREFIX, browserUnbase64 } from '@gitspace/protocol-runtime';
 import { CAPTURE_FILES, captureFolder } from './browser-capture.js';
 import { DriveUploadSchema } from './drive-files.js';
+import type { DownloadOutcome } from './browser-downloads.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
 
 /**
@@ -21,10 +22,10 @@ export const BROWSER_UPLOAD_IDLE_MS = 45 * 60_000;
 const SIGNATURE_WINDOW_MS = 60_000;
 /** Uploads one Chrome may have open at once. */
 const UPLOADS_PER_CHROME = 16;
-/** A finished download waits this long for its run to collect it. */
-const DOWNLOAD_KEEP_MS = 60 * 60_000;
 const NONCES = 'browser.relay.upload-nonces';
 const UPLOAD = 'browser.relay.upload:';
+/** Where the relay keeps downloads single steps started on your Chrome until a step's result lists them
+ * (`StepDownloads`). */
 export const BROWSER_DOWNLOAD = 'browser.relay.download:';
 
 /** What a pairing-key signature on a request to the account is for: `upload` begins an upload, `share` makes, ends or
@@ -46,18 +47,25 @@ const SIGNED: Record<BrowserSignedLabel, { code: string; noun: string; Noun: str
 };
 const Signature = z.object({ pairingId: z.string().uuid(), generation: z.number().int().nonnegative(), issuedAt: z.number().int(), nonce: z.string().regex(/^[a-f0-9]{64}$/u), signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/u).max(128) });
 const Begin = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('download'), groupId: z.string().uuid(), attemptId: z.string().min(1).max(256), name: z.string().min(1).max(512), mediaType: z.string().min(1).max(128) }),
+  // `targetId` (the tab that started it) and `url` (its address, left out when longer) come from extensions that send them.
+  z.strictObject({ kind: z.literal('download'), groupId: z.string().uuid(), attemptId: z.string().min(1).max(256), name: z.string().min(1).max(512), mediaType: z.string().min(1).max(128), targetId: z.string().min(1).max(256).optional(), url: z.string().max(8192).optional() }),
   z.strictObject({ kind: z.literal('capture'), groupId: z.string().uuid(), captureId: z.string().uuid(), file: z.enum(['video.webm', 'frames.bin', 'frames.json', 'thumbnail.jpg', 'steps.json', 'layout.jsonl']), mediaType: z.string().min(1).max(128) }),
 ]);
 const Complete = z.strictObject({ parts: z.number().int().positive(), size: z.number().int().positive().max(DRIVE_FILE_MAX_BYTES) });
 const Upload = z.object({
   uploadId: z.string().uuid(), pairingId: z.string().uuid(), projectId: z.string(), workspaceId: z.string(), groupId: z.string().uuid(),
-  target: z.discriminatedUnion('kind', [z.object({ kind: z.literal('download'), attemptId: z.string() }), z.object({ kind: z.literal('capture'), captureId: z.string().uuid(), file: Begin.options[1].shape.file })]),
+  // A download's file name, tab and address; sessions begun before they were kept have the defaults.
+  target: z.discriminatedUnion('kind', [z.object({ kind: z.literal('download'), attemptId: z.string(), name: z.string().default('download'), targetId: z.string().nullable().default(null), url: z.string().default('') }), z.object({ kind: z.literal('capture'), captureId: z.string().uuid(), file: Begin.options[1].shape.file })]),
   path: z.string(), mediaType: z.string(), parts: z.number().int().nonnegative(), size: z.number().int().nonnegative(), drive: DriveUploadSchema, expiresAt: z.number().int(),
 });
 export type BrowserUpload = z.infer<typeof Upload>;
-/** A finished download, kept for the run that started it (workspace-relative drive path). */
-export const BrowserDownloadSchema = z.object({ path: z.string(), size: z.number().int().nonnegative(), mediaType: z.string(), expiresAt: z.number().int() });
+/** The upload of a download: its run or step's attempt, file name, tab and address. */
+export type BrowserDownloadUpload = BrowserUpload & { target: Extract<BrowserUpload['target'], { kind: 'download' }> };
+
+/** A workspace-relative drive path as its `drive://workspace/` address, each segment encoded. */
+export function browserDriveFile(path: string): string {
+  return `drive://workspace/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
 
 /** A request signed with a pairing key, as the route saw it. */
 export type BrowserSignedRequest = { method: string; pathname: string; header: string | null; bodySha256: string };
@@ -89,10 +97,14 @@ export type BrowserUploadAuthority = {
   capture(pairingId: string, groupId: string, captureId: string): Promise<boolean>;
   /** A capture file finished. */
   captured(captureId: string, file: keyof typeof CAPTURE_FILES, size: number): Promise<void>;
+  /** A download's upload began (`outcome` null), finished (its drive address, size and type) or failed (why). */
+  download(upload: BrowserDownloadUpload, outcome: DownloadOutcome | null): Promise<void>;
 };
 
 const fail = (status: number, code: string, message: string): BrowserRequestFailure => ({ ok: false, status, code, message });
 const SESSION_GONE = fail(404, 'UPLOAD_UNKNOWN', 'Unknown upload');
+/** Why a download whose upload session lapsed was not saved. */
+const LAPSED = `No part of it arrived for ${BROWSER_UPLOAD_IDLE_MS / 60_000} minutes`;
 
 /** The confirmed pairing whose key signed this request for `label` (`pairing` gives its key), once per nonce: the nonces
  * of every label are kept together in `storage` while their signatures could still be accepted. */
@@ -169,7 +181,7 @@ export class BrowserUploads {
     }
     const upload = await this.session(step.pairingId, step.uploadId);
     if (!upload.ok) return upload;
-    if (step.op === 'abort') { await this.forget(upload.value); return { ok: true, value: {} }; }
+    if (step.op === 'abort') { await this.forget(upload.value, 'Your Chrome stopped saving it'); return { ok: true, value: {} }; }
     if (step.op === 'complete') return this.complete(upload.value, step.body);
     const row = upload.value;
     if (step.index !== row.parts) return fail(409, 'UPLOAD_PART_OUT_OF_ORDER', `Expected part ${row.parts + 1}`);
@@ -183,13 +195,15 @@ export class BrowserUploads {
     if (!stored) return SESSION_GONE;
     const row = Upload.parse(stored);
     if (row.pairingId !== pairingId) return SESSION_GONE;
-    if (row.expiresAt <= Date.now()) { await this.forget(row); return fail(410, 'UPLOAD_EXPIRED', 'This upload expired; start it again'); }
+    if (row.expiresAt <= Date.now()) { await this.forget(row, LAPSED); return fail(410, 'UPLOAD_EXPIRED', 'This upload expired; start it again'); }
     return { ok: true, value: row };
   }
 
-  private async forget(row: BrowserUpload): Promise<void> {
+  /** Ends an unfinished upload, `reason` saying why for a download's run or step. */
+  private async forget(row: BrowserUpload, reason: string): Promise<void> {
     await this.storage.delete(`${UPLOAD}${row.uploadId}`);
     await this.drive(row).discard(row.drive).catch((error: unknown) => console.warn(JSON.stringify({ event: 'browser_upload_discard_failed', uploadId: row.uploadId, error: String(error) })));
+    if (row.target.kind === 'download') await this.authority.download({ ...row, target: row.target }, { error: reason });
   }
 
   private async begin(pairingId: string, body: unknown): Promise<BrowserUploadReply> {
@@ -204,18 +218,19 @@ export class BrowserUploads {
     const open: BrowserUpload[] = [];
     for (const stored of (await this.storage.list({ prefix: UPLOAD })).values()) {
       const row = Upload.parse(stored);
-      if (row.expiresAt <= now) await this.forget(row); else open.push(row);
+      if (row.expiresAt <= now) await this.forget(row, LAPSED); else open.push(row);
     }
-    for (const [key, stored] of await this.storage.list({ prefix: BROWSER_DOWNLOAD })) if (BrowserDownloadSchema.parse(stored).expiresAt <= now) await this.storage.delete(key);
     if (open.filter(row => row.pairingId === pairingId).length >= UPLOADS_PER_CHROME) return fail(429, 'UPLOAD_CAPACITY', 'Too many uploads from this Chrome at once');
     const drive = this.drive(group);
     const sameWorkspace = open.filter(row => row.projectId === group.projectId && row.workspaceId === group.workspaceId).map(row => row.path);
     const path = input.kind === 'capture' ? `${captureFolder(input.captureId)}${input.file}` : await browserDownloadPath(drive, input.name, now, sameWorkspace);
     if (input.kind === 'capture' && sameWorkspace.includes(path)) return fail(409, 'UPLOAD_IN_PROGRESS', `${input.file} of this capture is already being uploaded`);
     const uploadId = crypto.randomUUID(), expiresAt = now + BROWSER_UPLOAD_IDLE_MS;
-    const row: BrowserUpload = { uploadId, pairingId, ...group, groupId: input.groupId, target: input.kind === 'download' ? { kind: 'download', attemptId: input.attemptId } : { kind: 'capture', captureId: input.captureId, file: input.file }, path, mediaType: input.mediaType, parts: 0, size: 0, drive: await drive.upload(), expiresAt };
+    const target: BrowserUpload['target'] = input.kind === 'download' ? { kind: 'download', attemptId: input.attemptId, name: input.name, targetId: input.targetId ?? null, url: input.url ?? '' } : { kind: 'capture', captureId: input.captureId, file: input.file };
+    const row: BrowserUpload = { uploadId, pairingId, ...group, groupId: input.groupId, target, path, mediaType: input.mediaType, parts: 0, size: 0, drive: await drive.upload(), expiresAt };
     await this.storage.put(`${UPLOAD}${uploadId}`, row);
-    return { ok: true, value: { uploadId, pairingId, expiresAt: new Date(expiresAt).toISOString(), path: `drive://workspace/${path.split('/').map(encodeURIComponent).join('/')}` } satisfies z.infer<typeof BrowserUploadBegunSchema> };
+    if (target.kind === 'download') await this.authority.download({ ...row, target }, null);
+    return { ok: true, value: { uploadId, pairingId, expiresAt: new Date(expiresAt).toISOString(), path: browserDriveFile(path) } satisfies z.infer<typeof BrowserUploadBegunSchema> };
   }
 
   /** The link's route stored part `index` in the drive; the session moves on to the next. */
@@ -224,7 +239,7 @@ export class BrowserUploads {
     if (!stored) return SESSION_GONE;
     const row = Upload.parse(stored);
     if (row.parts !== step.index) return fail(409, 'UPLOAD_PART_OUT_OF_ORDER', `Expected part ${row.parts + 1}`);
-    if (row.size + step.size > DRIVE_FILE_MAX_BYTES) { await this.forget(row); return fail(413, 'UPLOAD_TOO_LARGE', `Drive files are limited to ${DRIVE_FILE_MAX_BYTES / 1024 / 1024 / 1024} GiB`); }
+    if (row.size + step.size > DRIVE_FILE_MAX_BYTES) { const message = `Drive files are limited to ${DRIVE_FILE_MAX_BYTES / 1024 / 1024 / 1024} GiB`; await this.forget(row, message); return fail(413, 'UPLOAD_TOO_LARGE', message); }
     const next = { ...row, parts: row.parts + 1, size: row.size + step.size, drive: step.drive, expiresAt: Date.now() + BROWSER_UPLOAD_IDLE_MS };
     await this.storage.put(`${UPLOAD}${row.uploadId}`, next);
     return { ok: true, value: { received: next.size } };
@@ -236,9 +251,10 @@ export class BrowserUploads {
     if (parsed.data.parts !== row.parts || parsed.data.size !== row.size) return fail(409, 'UPLOAD_INCOMPLETE', `Received ${row.parts} parts, ${row.size} bytes`);
     const file = await this.drive(row).finish(row.drive, row.path, row.mediaType);
     await this.storage.delete(`${UPLOAD}${row.uploadId}`);
-    if (row.target.kind === 'download') await this.storage.put(`${BROWSER_DOWNLOAD}${row.target.attemptId}:${row.uploadId}`, { path: row.path, size: file.size, mediaType: row.mediaType, expiresAt: Date.now() + DOWNLOAD_KEEP_MS } satisfies z.infer<typeof BrowserDownloadSchema>);
+    const saved = { file: browserDriveFile(row.path), size: file.size, mediaType: row.mediaType };
+    if (row.target.kind === 'download') await this.authority.download({ ...row, target: row.target }, saved);
     else await this.authority.captured(row.target.captureId, row.target.file, file.size);
-    return { ok: true, value: { path: `drive://workspace/${row.path.split('/').map(encodeURIComponent).join('/')}`, size: file.size, mediaType: row.mediaType } };
+    return { ok: true, value: { path: saved.file, size: saved.size, mediaType: saved.mediaType } };
   }
 }
 

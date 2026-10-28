@@ -2,23 +2,21 @@ import { z } from 'zod';
 import { parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import { browserUnbase64, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { captureFolder, captureName, writeCapture } from './browser-capture.js';
-import type { BrowserDownload, SavedDownload } from './browser-downloads.js';
+import { DOWNLOAD_WAIT_MS, DownloadList, listedDownload, type BrowserDownload, type ListedDownload, type ScriptDownload, type ScriptDownloads } from './browser-downloads.js';
+import { browserDriveFile } from './browser-upload.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
 
 /** The browser a run drives, as its files need it: the cloud browser, or your Chrome with its name and extension
- * protocol (read once, when a capture or an upload first needs them). */
+ * protocol (read once, when a capture or an upload first needs them) and the run's downloads as the relay follows them
+ * (`downloads`, answering as `ScriptRunFiles.downloads` does). */
 export type ScriptRunBrowser =
   | { source: 'headless'; groupId: string }
-  | { source: 'relay'; groupId: string; chrome: () => Promise<{ name: string }> };
+  | { source: 'relay'; groupId: string; chrome: () => Promise<{ name: string }>; downloads: (version: number) => Promise<ScriptDownloads> };
 /** The drive files an upload sets: bytes for Playwright on the cloud browser; on your Chrome sealed `/files/` links,
  * which the extension fetches itself (`GitSpace.setInputFilesFromUrls`), so the bytes never cross the relay. */
 export type ScriptUploadFiles =
   | { kind: 'bytes'; files: { name: string; mediaType: string; bytes: Uint8Array }[] }
   | { kind: 'links'; files: { url: string; name: string; mediaType: string; size: number }[] };
-/** A download in a run's result: saved at its drive address, still being saved, or not saved and why. */
-export type ScriptRunDownload = { file: string; size: number; mediaType: string } | { name: string; saving: true } | { name: string; error: string };
-/** A download as a run follows it: unsettled (`outcome` null) until it is saved or fails. */
-type FollowedDownload = { name: string; outcome: { saved: SavedDownload } | { error: string } | null };
 
 /** Captures one run may save. */
 export const SCRIPT_CAPTURES = 5;
@@ -27,8 +25,7 @@ export const SCRIPT_CAPTURES = 5;
 const UPLOAD_FILES = 8, UPLOAD_BYTES = 20 * 1024 * 1024;
 /** The largest image side models take (docs/SIMPLIFICATION.md entry 66); a script's capture aims at 1600. */
 const IMAGE_PIXELS = 2000;
-/** After its script ends, a run's result waits this long for downloads still being saved. */
-const DOWNLOAD_WAIT_MS = 30_000;
+const RUN_ENDED = 'The script run ended';
 const Shot = z.object({
   name: z.string().max(1000).nullable(), targetId: z.string().min(1).max(256),
   page: z.object({ url: z.string(), title: z.string() }),
@@ -55,18 +52,28 @@ function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
 
 /**
  * The files of one script run (docs/APERTURE-DESIGN.md §6.1), in the workspace drive: its captures (`capture()`, at
- * most five), the drive files it sets into pages (`upload()`), and the downloads of the cloud browser while it ran.
- * The sandbox reaches it only through the session's `BrowserSessionFiles` binding for this run, so its input is
- * untrusted and checked here.
+ * most five), the drive files it sets into pages (`upload()`), and its downloads, which the script follows while it
+ * runs (`downloads`) and copies elsewhere in the drive (`saveDownload`): the cloud browser's started while it ran, kept
+ * here; your Chrome's, kept by the relay. The sandbox reaches it only through the session's `BrowserSessionFiles`
+ * binding for this run, so its input is untrusted and checked here.
  */
 export class ScriptRunFiles {
   private readonly captures: { url: string; image: string }[] = [];
   private capturing = 0;
-  private readonly downloads: FollowedDownload[] = [];
+  /** The cloud browser's downloads while the run was live. */
+  private readonly cloud = new DownloadList();
   private readonly saving: Promise<unknown>[] = [];
+  /** Resolved when the run ends (`end`). */
+  private readonly ending = Promise.withResolvers<void>();
+  private ended = false;
+  /** The relay's last answer about your Chrome's downloads, which every call after the end repeats. */
+  private relayed: ScriptDownloads = { version: 0, ended: false, downloads: [] };
   private chrome: Promise<{ name: string }> | undefined;
 
-  constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url'>, readonly browser: ScriptRunBrowser) {}
+  constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url' | 'copy'>, readonly browser: ScriptRunBrowser) {}
+
+  /** Whether the run is still live: the cloud browser's downloads go to live runs only. */
+  get running(): boolean { return !this.ended; }
 
   private chromeInfo(browser: Extract<ScriptRunBrowser, { source: 'relay' }>): Promise<{ name: string }> {
     this.chrome ??= browser.chrome();
@@ -125,25 +132,67 @@ export class ScriptRunFiles {
 
   /** A download the cloud browser started while this run was live. */
   downloaded(download: BrowserDownload): void {
-    const listed: FollowedDownload = { name: download.name, outcome: null };
-    this.downloads.push(listed);
-    this.saving.push(download.saved.then(
-      saved => { listed.outcome = { saved }; },
-      (error: unknown) => { listed.outcome = { error: error instanceof Error ? error.message.slice(0, 1024) : String(error) }; },
-    ));
+    const { outcome, ...started } = download;
+    this.cloud.start(started);
+    this.saving.push(outcome.then(settled => this.cloud.settle(download.id, settled)));
   }
 
-  /** The run's files for its result, once its script ended: the downloads saved while it ran (`chrome`: those your
-   * Chrome's extension saved; the cloud browser's are waited for up to 30 s), and each capture's address and image. */
-  async report(chrome: SavedDownload[]): Promise<{ downloads: ScriptRunDownload[]; content: RuntimeToolResult['content'] }> {
+  /** The run's downloads once they differ from `version` (`DownloadList.state`): the cloud browser's kept here, your
+   * Chrome's asked of the relay. Once the run ended every call answers at once, `ended` true. */
+  async downloads(input: unknown): Promise<ScriptDownloads> {
+    const version = z.number().int().nonnegative().parse(input);
+    return this.follow(version);
+  }
+
+  private async follow(version: number): Promise<ScriptDownloads> {
+    if (this.browser.source === 'headless') return this.cloud.state(version);
+    if (this.ended) return { ...this.relayed, ended: true };
+    const answered = await Promise.race([this.browser.downloads(version), this.ending.promise.then(() => null)]);
+    if (!answered) return { ...this.relayed, ended: true };
+    this.relayed = answered;
+    return answered;
+  }
+
+  /** Copies the run's saved download `id` to `drive://workspace/<path>`, replacing a file there, without moving its
+   * bytes; answers the copy's address. A download still being saved is waited for while the run lasts. */
+  async saveDownload(idInput: unknown, urlInput: unknown): Promise<{ file: string }> {
+    const id = z.string().max(256).parse(idInput), url = z.string().max(8192).parse(urlInput);
+    if (this.ended) throw new Error(RUN_ENDED);
+    const target = parseResourceUri(url);
+    if (target?.kind !== 'drive' || target.mount !== 'workspace' || target.suffix) throw new Error(`${url} is not a file of this workspace's drive: saveAs() takes drive://workspace/<path>`);
+    // -1 is never a version, so the first look answers at once; each later one waits for the next change.
+    let version = -1;
+    for (;;) {
+      const state = await this.follow(version);
+      const download = state.downloads.find(item => item.id === id);
+      if (!download) throw new Error(`This run has no download ${id}`);
+      const { outcome } = download;
+      if (outcome && 'error' in outcome) throw new Error(`${download.name} was not saved: ${outcome.error}`);
+      if (outcome) {
+        const source = parseResourceUri(outcome.file);
+        if (source?.kind !== 'drive') throw new Error(`${outcome.file} is not a drive file`);
+        return { file: browserDriveFile((await this.drive.copy(source.path, target.path)).path) };
+      }
+      if (state.ended) throw new Error(`${download.name} was still being saved when the run ended`);
+      version = state.version;
+    }
+  }
+
+  /** The run ended: waiters on its downloads answer, `ended` true, and nothing more is saved for it. */
+  end(): void {
+    this.ended = true;
+    this.cloud.end();
+    this.ending.resolve();
+  }
+
+  /** The run's files for its result, once its script ended: its downloads, each once (`chrome`: your Chrome's, as the
+   * relay followed them; the cloud browser's still being saved are waited for up to 30 s), and each capture's address
+   * and image. */
+  async report(chrome: ScriptDownload[]): Promise<{ downloads: ListedDownload[]; content: RuntimeToolResult['content'] }> {
     const waited = Promise.withResolvers<void>();
     const timer = setTimeout(waited.resolve, DOWNLOAD_WAIT_MS);
-    try { await Promise.race([Promise.allSettled(this.saving), waited.promise]); } finally { clearTimeout(timer); }
-    const downloads = [...this.downloads, ...chrome.map(saved => ({ name: saved.path, outcome: { saved } }))].map(({ name, outcome }): ScriptRunDownload => {
-      if (!outcome) return { name, saving: true };
-      if ('error' in outcome) return { name, error: outcome.error };
-      return { file: `drive://workspace/${outcome.saved.path.split('/').map(encodeURIComponent).join('/')}`, size: outcome.saved.size, mediaType: outcome.saved.mediaType };
-    });
+    try { await Promise.race([Promise.all(this.saving), waited.promise]); } finally { clearTimeout(timer); }
+    const downloads = [...this.cloud.downloads, ...chrome].map(listedDownload);
     return { downloads, content: this.captures.flatMap(({ url, image }) => [{ type: 'text' as const, text: `Capture saved to ${url}` }, { type: 'image' as const, data: image, mimeType: 'image/jpeg' }]) };
   }
 }

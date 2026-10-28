@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { command, installed } from './installed.js';
+import { command, installed, settle } from './installed.js';
 
 describe('a script on your Chrome', () => {
   it('cannot open, list or drive a tab on a site that allows single steps only', async () => {
@@ -54,6 +54,34 @@ describe('a script on your Chrome', () => {
     await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '1', contextId: 1 }))).rejects.toThrow('names an execution context this script was not given');
     await chrome.pageEvent('target-1', 'Runtime.executionContextsCleared', {});
     await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.callFunctionOn', { functionDeclaration: 'function() {}', executionContextId: 7 }))).rejects.toThrow('names an execution context this script was not given');
+  });
+
+  it('hears the page’s execution contexts though Chrome’s debugger stayed on the tab after an earlier script', async () => {
+    const chrome = await installed();
+    // As Chrome does: a session hears the page's contexts when its Runtime domain turns on, never while it is on.
+    const runtimeOn = new Set<string>();
+    chrome.answer(({ targetId, method }) => {
+      if (method === 'Runtime.disable') runtimeOn.delete(targetId);
+      if (method === 'Runtime.enable' && !runtimeOn.has(targetId)) {
+        runtimeOn.add(targetId);
+        void chrome.pageEvent(targetId, 'Runtime.executionContextCreated', { context: { id: 1, uniqueId: 'page-1', origin: 'https://app.example', name: '', auxData: { isDefault: true, type: 'default', frameId: 'main' } } });
+      }
+      return method === 'Page.getLayoutMetrics' ? { cssLayoutViewport: { pageX: 0, pageY: 0, clientWidth: 1000, clientHeight: 500 } } : undefined;
+    });
+    // Someone watches the tab, so Chrome's debugger stays on it from one script to the next.
+    await chrome.execute({ operation: 'shareWatch', shareId: crypto.randomUUID(), targetId: 'target-1', maxWidth: 800, maxHeight: 600 });
+    for (const script of ['first', 'second']) {
+      const attemptId = await chrome.begin();
+      await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+      chrome.sent.length = 0;
+      await chrome.execute(command(attemptId, 'target-1', 'Runtime.enable'));
+      await settle();
+      expect({ script, contexts: chrome.sent.filter(entry => entry.method === 'Runtime.executionContextCreated').length }).toEqual({ script, contexts: 1 });
+      // The page's own world is one it was given.
+      await chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: 'document.title', contextId: 1 }));
+      await chrome.execute({ operation: 'release', attemptId });
+    }
+    expect(chrome.detached).toEqual([]);
   });
 
   it('sees and reaches only the sites it names', async () => {

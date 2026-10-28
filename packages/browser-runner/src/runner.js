@@ -1,9 +1,13 @@
 // Runs one agent-written Playwright script inside a Worker Loader sandbox (docs/APERTURE-DESIGN.md §6.1). The sandbox
 // has no network of its own: `env.CDP` is its only way out, a WebSocket to the browser through GitSpace's CDP layer,
-// and `env.FILES` its only way to the workspace drive (`capture`, `upload`), scoped to this run by the session.
-// `./script.js` is the agent's script, an async function of `{ page, context, browser, state, view, act, capture, upload }`.
+// and `env.FILES` its only way to the workspace drive (`capture`, `upload`, file calls, downloads), scoped to this run
+// by the session. `./script.js` is the agent's script, an async function of `{ page, context, browser, state, view,
+// act, capture, upload }`.
 import { connect } from '@cloudflare/playwright';
 import { WorkerEntrypoint } from 'cloudflare:workers';
+// Playwright's own classes, as the package builds its pages and elements from them (its exports name none).
+import { ElementHandle } from '../node_modules/@cloudflare/playwright/lib/playwright-core/src/client/elementHandle.js';
+import { Frame } from '../node_modules/@cloudflare/playwright/lib/playwright-core/src/client/frame.js';
 import { scriptTools } from './tools.ts';
 import script from './script.js';
 
@@ -40,7 +44,18 @@ export default class Runner extends WorkerEntrypoint {
       const page = context.pages().at(-1) ?? await context.newPage();
       // `view()` shows a page as observe does, with refs that `act()` takes in this run or a later one; `capture()`
       // saves a screenshot to the drive and `upload()` sets a file input's files from it.
-      const { view, act, capture, upload } = scriptTools(context, this.env.FILES);
+      const { view, act, capture, upload, setInputFiles, followDownloads } = scriptTools(context, this.env.FILES);
+      // Playwright's file calls take drive files and files from memory (a locator's, a page's or a frame's
+      // `setInputFiles` go through its frame; an element handle's, a file chooser's `setFiles` too), and each page
+      // hears `download` for the downloads it saves to the drive.
+      const frameFiles = Frame.prototype.setInputFiles, elementFiles = ElementHandle.prototype.setInputFiles;
+      Frame.prototype.setInputFiles = function (selector, files, options = {}) {
+        return setInputFiles({ description: selector, page: async () => this.page(), attribute: name => this.getAttribute(selector, name, { strict: options.strict, timeout: options.timeout }), set: payloads => frameFiles.call(this, selector, payloads, options) }, files);
+      };
+      ElementHandle.prototype.setInputFiles = function (files, options = {}) {
+        return setInputFiles({ description: 'The element', page: async () => (await this.ownerFrame())?.page() ?? null, attribute: name => this.getAttribute(name), set: payloads => elementFiles.call(this, payloads, options) }, files);
+      };
+      followDownloads();
       const value = await script({ page, context, browser, state, view, act, capture, upload });
       // A script that returns nothing ends with the view of its latest page, which the next run's `page` is.
       if (value === undefined) {

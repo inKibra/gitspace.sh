@@ -12,7 +12,8 @@ import { RelayBrowser } from './relay-browser.js';
 import { extensionFiles, SCRIPT_TAKEN_REFUSAL } from '@gitspace/browser-extension';
 import { zipSync, strToU8 } from 'fflate';
 import { captureName, readCapture, writeCapture, type CaptureDrive } from './browser-capture.js';
-import { BROWSER_DOWNLOAD, BrowserDownloadSchema, BrowserUploads, browserRequestSigner, type BrowserRequestFailure, type BrowserSignedRequest, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
+import { BROWSER_DOWNLOAD, BrowserUploads, browserRequestSigner, type BrowserDownloadUpload, type BrowserRequestFailure, type BrowserSignedRequest, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
+import { DownloadList, StepDownloads, type DownloadOutcome, type ScriptDownload, type ScriptDownloads } from './browser-downloads.js';
 import { BrowserShareEventSchema, BrowserShareFrameSchema, BrowserShares, closeOpenSocket, equalSecret, type BrowserShareAccount } from './browser-share.js';
 import { BrowserWatches } from './browser-watch.js';
 import { BrowserCaptureShares } from './browser-capture-share.js';
@@ -226,8 +227,13 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
    * disconnects. */
   private readonly scripts = new Map<string, ScriptRun>();
   /** Scripts the extension stopped because you took one of their tabs over (docs/APERTURE-DESIGN.md §7.2), by token,
-   * until the browser session ends them (`scriptEnd`), which reports why: their attempt for their downloads. */
-  private readonly takenScripts = new Map<string, { attemptId: string }>();
+   * until the browser session ends them (`scriptEnd`), which reports why. */
+  private readonly takenScripts = new Set<string>();
+  /** Each script run's downloads, by token, from its begin until the browser session ends it (`scriptEnd`); a run
+   * whose end never came goes at the next begin after its deadline and release. */
+  private readonly runDownloads = new Map<string, { attemptId: string; deadline: number; list: DownloadList }>();
+  /** Downloads single steps started on a Chrome, until a step of their workspace on that Chrome lists them. */
+  private readonly stepDownloads: StepDownloads;
   /** Single steps on a Chrome by attempt, while their authority lasts: a download one starts uploads under it. */
   private readonly steps = new Map<string, { pairingId: string; groupId: string; deadline: number }>();
   /** When this object last heard from each Chrome, so its messages renew `seenAt` only now and then (`seen`). */
@@ -243,8 +249,9 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
    * names the account to share links' viewers; `schedule` re-arms the host's alarm when a share deadline changes;
    * `deviceActive` says whether a watching device still verifies. */
   constructor(private readonly ctx: DurableObjectState, private readonly env: { ACCOUNT_ID: string; SPACE_AUTHORITY: BrowserWorkspaces; USER_PROJECTS: BrowserProjects }, private readonly drive: (identity: { projectId: string; workspaceId: string }) => BrowserRelayDrive, private readonly account: BrowserShareAccount, schedule: () => Promise<void>, deviceActive: (deviceId: string) => Promise<boolean>) {
-    // `drive`: debug files of your Chrome's tabs (`browser-powers.ts`).
-    this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this, drive });
+    // `drive`: debug files of your Chrome's tabs (`browser-powers.ts`); `downloads`: what a single step's result lists.
+    this.stepDownloads = new StepDownloads(ctx.storage, BROWSER_DOWNLOAD);
+    this.runtime = new AccountBrowserRuntime({ storage: ctx.storage, relay: this, drive, downloads: async scope => scope.placement.kind === 'account-relay' ? this.stepDownloads.report(`${scope.projectId}:${scope.workspaceId}:${scope.placement.pairingId}`) : [] });
     this.uploads = new BrowserUploads(ctx.storage, {
       pairing: pairingId => this.signingKey(pairingId),
       group: async (pairingId, groupId) => {
@@ -267,6 +274,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         const stored = await ctx.storage.get(`${CAPTURE}${captureId}`);
         if (stored) { const row = CaptureRow.parse(stored); await ctx.storage.put(`${CAPTURE}${captureId}`, { ...row, files: { ...row.files, [file]: size } } satisfies CaptureRow); }
       },
+      download: (upload, outcome) => this.downloadChanged(upload, outcome),
     }, drive);
     this.shareLinks = new BrowserShares(ctx, {
       pairing: async pairingId => {
@@ -1309,6 +1317,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
   async scriptBegin(authorization: RuntimeAccountBrowserAuthorization): Promise<{ token: string }> {
     const now = Date.now();
     for (const [token, run] of this.scripts) if (run.deadline <= now) await this.endScript(token, run, 'Script run expired');
+    for (const [token, followed] of this.runDownloads) if (followed.deadline + RELEASE_MS <= now) { followed.list.end(); this.runDownloads.delete(token); }
     const { scope, command } = authorization.body, placement = scope.placement;
     if (placement.kind !== 'account-relay') throw new Error('Account relay placement required');
     if (command.type !== 'execute' || command.args.action !== 'run') throw new Error('Browser script authorization required');
@@ -1329,26 +1338,46 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     await this.informGroup(placement.pairingId, connection, command.grant.body.groupId);
     await this.request(placement.pairingId, { operation: 'authorize', authorization });
     const token = [...crypto.getRandomValues(new Uint8Array(32))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-    this.scripts.set(token, { authorization, grant: command.grant, pairingId: placement.pairingId, attemptId: scope.attemptId, deadline: Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt)), connection });
+    const deadline = Math.min(Date.parse(body.expiresAt), Date.parse(body.dispatch.deadlineAt));
+    this.scripts.set(token, { authorization, grant: command.grant, pairingId: placement.pairingId, attemptId: scope.attemptId, deadline, connection });
+    this.runDownloads.set(token, { attemptId: scope.attemptId, deadline, list: new DownloadList() });
     return { token };
   }
   /** Ends a script: its CDP connection closes and the extension refuses its attempt from now on, having finished
-   * uploading the run's downloads, which are returned (workspace-relative drive paths), with what the script was
-   * waiting on in your Chrome as it ended (`RelayBrowser.waiting`). */
-  async scriptEnd(token: string): Promise<{ downloads: { path: string; size: number; mediaType: string }[]; stopped: string | null; waiting: string | null }> {
-    const run = this.scripts.get(token), taken = this.takenScripts.get(token);
-    this.takenScripts.delete(token);
+   * uploading the run's downloads, which are returned as the run followed them, with what the script was waiting on in
+   * your Chrome as it ended (`RelayBrowser.waiting`). */
+  async scriptEnd(token: string): Promise<{ downloads: ScriptDownload[]; stopped: string | null; waiting: string | null }> {
+    const run = this.scripts.get(token), taken = this.takenScripts.delete(token);
     const waiting = run?.browser?.waiting() ?? null;
     if (run) await this.endScript(token, run, 'Script ended');
-    const attemptId = run?.attemptId ?? taken?.attemptId;
-    if (!attemptId) return { downloads: [], stopped: null, waiting };
-    const downloads: { path: string; size: number; mediaType: string }[] = [];
-    for (const [key, stored] of await this.ctx.storage.list({ prefix: `${BROWSER_DOWNLOAD}${attemptId}:` })) {
-      const { path, size, mediaType } = BrowserDownloadSchema.parse(stored);
-      downloads.push({ path, size, mediaType });
-      await this.ctx.storage.delete(key);
+    const followed = this.runDownloads.get(token);
+    this.runDownloads.delete(token);
+    followed?.list.end();
+    return { downloads: followed?.list.downloads ?? [], stopped: taken ? SCRIPT_TAKEN_REFUSAL : null, waiting };
+  }
+  /** A script run's downloads on your Chrome once they differ from `version` (`DownloadList.state`), for its browser
+   * session: at once when they do, else at the next start or settle, the run's end or its deadline. A run that ended
+   * answers at once, `ended` true. */
+  async scriptDownloads(token: string, version: number): Promise<ScriptDownloads> {
+    const followed = this.runDownloads.get(token);
+    if (!followed) return { version, ended: true, downloads: [] };
+    const lapsed = Promise.withResolvers<void>();
+    const timer = setTimeout(lapsed.resolve, Math.max(0, followed.deadline - Date.now()));
+    try { return await followed.list.state(version, lapsed.promise); } finally { clearTimeout(timer); }
+  }
+  /** A download upload began, finished or failed on your Chrome: a script run's goes to its run's list, a single step's
+   * to the steps of its workspace on that Chrome. */
+  private async downloadChanged(upload: BrowserDownloadUpload, outcome: DownloadOutcome | null): Promise<void> {
+    const { attemptId, name, targetId, url } = upload.target;
+    const run = [...this.runDownloads.values()].find(followed => followed.attemptId === attemptId);
+    if (run) {
+      if (outcome) run.list.settle(upload.uploadId, outcome);
+      else run.list.start({ id: upload.uploadId, targetId, url, name });
+      return;
     }
-    return { downloads, stopped: taken ? SCRIPT_TAKEN_REFUSAL : null, waiting };
+    const owner = `${upload.projectId}:${upload.workspaceId}:${upload.pairingId}`;
+    if (outcome) await this.stepDownloads.settle(owner, upload.uploadId, outcome);
+    else await this.stepDownloads.begin(owner, { id: upload.uploadId, targetId, url, name });
   }
   /** A script's CDP connection, from its sandbox through `BrowserSessionCdp`: `BROWSER_SCRIPT_PATH<token>/<cursor
    * label>`. Public requests never reach this path (index.ts forwards only `/ws` and `/tunnel/` to the relay object);
@@ -1369,7 +1398,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
           // You took one of its tabs over: the script ends now, its connection closing with why, rather than its
           // Playwright retrying the refused command until it times out.
           if (error instanceof Error && error.message === SCRIPT_TAKEN_REFUSAL && this.scripts.get(token) === run) {
-            this.takenScripts.set(token, { attemptId: run.attemptId });
+            this.takenScripts.add(token);
             await this.endScript(token, run, SCRIPT_TAKEN_REFUSAL);
           }
           throw error;

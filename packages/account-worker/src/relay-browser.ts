@@ -13,6 +13,9 @@ const ONE_CONTEXT = 'Your Chrome has one context, the workspace group';
 const WITHOUT_EFFECT: Readonly<Record<string, true>> = { 'Browser.setDownloadBehavior': true, 'Browser.setWindowBounds': true, 'Target.setDiscoverTargets': true, 'Target.setAutoAttach': true };
 const Tab = z.object({ targetId: z.string(), title: z.string(), url: z.string() });
 const Opened = z.object({ targetId: z.string(), sessionId: z.string() });
+/** The extension closes its connection to the account on a frame longer than this (`RELAY_INBOUND_LIMIT` in its
+ * background.js); the relay adds a request id of at most this many characters to a command's message. */
+const EXTENSION_FRAME_CHARS = 4_000_000, REQUEST_ID_CHARS = 32;
 
 /** How one script run reaches your Chrome: the extension's run operations, and its events by tab. */
 export type RelayRunLink = {
@@ -117,9 +120,13 @@ export class RelayBrowser implements BrowserChannel {
   }
 
   private async command(targetId: string, sessionId: string, method: string, params: Params): Promise<unknown> {
+    const message = { operation: 'command', targetId, sessionId, method, params, attemptId: this.link.attemptId };
+    const size = JSON.stringify(message).length + REQUEST_ID_CHARS;
+    // Sent anyway, the frame would cut your Chrome off the account, ending every script and step on it.
+    if (size > EXTENSION_FRAME_CHARS) throw new Error(`${method} is ${(size / 1e6).toFixed(1)} MB, more than your Chrome's connection to GitSpace carries at once (${EXTENSION_FRAME_CHARS / 1e6} MB): send less in one call (put a large file in the drive, with space_artifacts fromMachine, and pass drive://workspace/<path>)`);
     const id = ++this.sent;
     this.unanswered.set(id, { method, sentAt: Date.now() });
-    try { return await this.link.request({ operation: 'command', targetId, sessionId, method, params, attemptId: this.link.attemptId }); }
+    try { return await this.link.request(message); }
     finally { this.unanswered.delete(id); }
   }
 

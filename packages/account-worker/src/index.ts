@@ -454,9 +454,11 @@ export class UserRelayDO extends BudgetedDurableObject {
     await this.browserRelay.retireWorkspace(projectId, workspaceId);
     await this.serviceRevokeCloud({ projectId, workspaceId });
   }
-  /** A script on a Chrome (`browser.run`) begins with its signed run authority and ends from the browser session. */
+  /** A script on a Chrome (`browser.run`) begins with its signed run authority and ends from the browser session,
+   * which follows the run's downloads on that Chrome while it runs. */
   browserRelayScriptBegin(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.scriptBegin(authorization); }
   browserRelayScriptEnd(token: string) { return this.browserRelay.scriptEnd(token); }
+  browserRelayScriptDownloads(token: string, version: number) { return this.browserRelay.scriptDownloads(token, version); }
   /** One step of a file upload from a Chrome extension (`serveBrowserUpload`). */
   browserRelayUpload(step: BrowserUploadStep) { return this.browserRelay.upload(step); }
   /** Share links (`browser-share.ts`): a request your Chrome signed, a link's greeting, and a viewer joining. */

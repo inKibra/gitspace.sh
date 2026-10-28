@@ -15,9 +15,12 @@ const BEGIN_PATH = '/api/browser-relay/uploads';
  * last is whatever remains. An upload idle for 45 minutes is forgotten, longer than a capture records. */
 const PART_BYTES = 32 * 1024 * 1024;
 
-/** What one upload stores: a download of a live script or step on the group, or one file of a capture. */
+/** A download's address goes with its upload when it is at most this long (a `data:` URL can be the whole file). */
+export const DOWNLOAD_URL_MAX = 8192;
+/** What one upload stores: a download of a live script or step on the group (with the tab that started it and its
+ * address, when that is at most `DOWNLOAD_URL_MAX` characters), or one file of a capture. */
 export type UploadTarget =
-  | { kind: 'download'; groupId: string; attemptId: string; name: string; mediaType: string }
+  | { kind: 'download'; groupId: string; attemptId: string; name: string; mediaType: string; targetId: string; url?: string }
   | { kind: 'capture'; groupId: string; captureId: string; file: 'video.webm' | 'frames.bin' | 'frames.json' | 'thumbnail.jpg' | 'steps.json' | 'layout.jsonl'; mediaType: string };
 /** Signs one request: the header value for `method` on `pathname` with a body of this SHA-256 (lowercase hex). An
  * upload signs only its begin request, `POST /api/browser-relay/uploads`. */

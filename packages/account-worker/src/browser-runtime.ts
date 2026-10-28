@@ -1,11 +1,12 @@
 import { z } from 'zod';
-import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, RuntimeBrowserShareExpirySchema, canonicalBrowserAuthorization, type BROWSER_SHARE_EXPIRIES_MINUTES, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAccountBrowserGrantSchema, RuntimeAccountBrowserGroupRowSchema, RuntimeBrowserShareExpirySchema, canonicalBrowserAuthorization, type BROWSER_SHARE_EXPIRIES_MINUTES, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorizationBody, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { performBrowserAction, type BrowserSemanticTab } from '@gitspace/runtime-machine/browser-semantic';
 import { BrowserOutputStore } from '@gitspace/runtime-machine/browser-output';
 import { BrowserServicePolicy, BrowserServicePaused, type BrowserWorkspaceServiceHostname } from '@gitspace/runtime-machine/browser-service-policy';
 import type { BrowserChannel } from './browser-cdp.js';
 import { browserOriginMatches } from '@gitspace/protocol-environment';
 import { performBrowserPower } from './browser-powers.js';
+import type { ListedDownload } from './browser-downloads.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
 
 /** Management actions from the Browser tab on your Chrome's workspace group: Stop, Close tab, Focus in Chrome, Take over,
@@ -41,17 +42,27 @@ export class AccountBrowserRuntime {
   private outputs = new BrowserOutputStore();
   private cloud = new Map<string, Promise<BrowserChannel>>();
   /** `cloud` opens this workspace's view of its cloud browser (a client of the browser session object);
-   * `drive`: the workspace's drive, where debug files go (`browser-powers.ts`). */
-  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices; drive?: (workspace: { projectId: string; workspaceId: string }) => Pick<WorkspaceDrive, 'write'> }) {}
+   * `drive`: the workspace's drive, where debug files go (`browser-powers.ts`); `downloads`: what a single step's result
+   * lists of the downloads single steps started on its browser (`StepDownloads.report`). */
+  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices; drive?: (workspace: { projectId: string; workspaceId: string }) => Pick<WorkspaceDrive, 'write'>; downloads?: (scope: RuntimeAccountBrowserAuthorizationBody['scope']) => Promise<ListedDownload[]> }) {}
   async execute(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization;
     // Stop never waits behind the step it stops, nor Close tab and Focus in Chrome behind the workspace's step.
     if (body.command.type === 'manage' && CONTROLS[body.command.action]) return this.perform(authorization, signal);
     const scope = JSON.stringify([body.scope.projectId, body.scope.workspaceId]);
     const predecessor = this.queues.get(scope) ?? Promise.resolve();
-    const operation = predecessor.catch(() => {}).then(() => this.perform(authorization, signal));
+    const operation = predecessor.catch(() => {}).then(() => this.step(authorization, signal));
     const settled = operation.then(() => {}, () => {}); this.queues.set(scope, settled);
     try { return await operation; } finally { if (this.queues.get(scope) === settled) this.queues.delete(scope); }
+  }
+  /** One operation; a single step's result ends with the downloads single steps started on its browser, when there
+   * are any (`{"downloads":[…]}`, after waiting for those begun and never listed to settle). */
+  private async step(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
+    const result = await this.perform(authorization, signal);
+    const { command, scope } = authorization.body;
+    if (command.type !== 'execute' || !this.options.downloads) return result;
+    const downloads = await this.options.downloads(scope);
+    return downloads.length ? { ...result, content: [...result.content, { type: 'text', text: JSON.stringify({ downloads }) }] } : result;
   }
   /** Keeps a group's grant and its workspace index, so the browser's reports reach the workspace and status finds it.
    * A single step records it here; a script on your Chrome records it when the relay begins the run. A renewal may move
