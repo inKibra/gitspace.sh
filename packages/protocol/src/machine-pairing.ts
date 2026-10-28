@@ -15,19 +15,19 @@ export const machinePairingTokenSchema = z.strictObject({
 });
 export type MachinePairingToken = z.infer<typeof machinePairingTokenSchema>;
 
-export function encodeMachinePairingToken(input: MachinePairingToken, now = Date.now()): string {
+/** Expiry is the server's: it set `expiresAt` from its clock and refuses a claim after it. Browser and machine clocks
+ * differ from it, so neither side checks the time here (a machine 30 s slow refused every fresh token). */
+export function encodeMachinePairingToken(input: MachinePairingToken): string {
   const value = machinePairingTokenSchema.parse(input);
-  if (value.expiresAt <= now || value.expiresAt > now + MACHINE_PAIRING_TTL_MS) throw new Error('Pairing token is expired or exceeds its maximum lifetime');
   return `gsp_${btoa(JSON.stringify(value)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
 }
 
-export function decodeMachinePairingToken(input: string, now = Date.now()): MachinePairingToken | null {
+export function decodeMachinePairingToken(input: string): MachinePairingToken | null {
   if (!/^gsp_[A-Za-z0-9_-]{1,4096}$/u.test(input)) return null;
   try {
     const raw = input.slice(4).replaceAll('-', '+').replaceAll('_', '/');
     const parsed = machinePairingTokenSchema.safeParse(JSON.parse(atob(raw.padEnd(Math.ceil(raw.length / 4) * 4, '='))));
-    if (!parsed.success || parsed.data.expiresAt <= now || parsed.data.expiresAt > now + MACHINE_PAIRING_TTL_MS) return null;
-    return parsed.data;
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }

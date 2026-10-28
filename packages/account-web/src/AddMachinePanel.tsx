@@ -91,7 +91,7 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
   };
   const now = Date.now();
   const command = pairing && !expired && pairing.expiresAt > now && (!status || status.state === 'created')
-    ? `"$HOME/.local/bin/gitspace" machine setup --pair ${encodeMachinePairingToken({ version: 1, ...pairing }, now)}` : null;
+    ? `"$HOME/.local/bin/gitspace" machine setup --pair ${encodeMachinePairingToken({ version: 1, ...pairing })}` : null;
   return <Card>
     <CardHeader>
       <CardTitle>Add your computer</CardTitle>

@@ -4,7 +4,7 @@ import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { createRelayAuthorization, createServerClock, decodeMachinePairingToken, releaseTargetSchema, sendSigned, signRpcRequest } from '@gitspace/protocol';
+import { MACHINE_PAIRING_TTL_MS, createRelayAuthorization, createServerClock, decodeMachinePairingToken, releaseTargetSchema, sendSigned, signRpcRequest } from '@gitspace/protocol';
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
@@ -236,7 +236,7 @@ machine.command('setup').description('Link using the pairing command from your a
     requireSystemTools();
     if (await loadConfig()) throw new Error('This computer is already linked. Use gitspace machine start, or remove its enrollment before linking another account.');
     const token = decodeMachinePairingToken(options.pair);
-    if (!token) throw new Error('Invalid or expired pairing token. Create a new pairing command in your account.');
+    if (!token) throw new Error('This is not a complete pairing token: copy the whole command from Settings > Machines > Add a computer again.');
     let pending: PendingPairing;
     try {
       pending = JSON.parse(await readFile(PAIRING_PATH, 'utf8')) as PendingPairing;
@@ -257,7 +257,9 @@ machine.command('setup').description('Link using the pairing command from your a
     };
     await pairingRequest('claim', { userId: token.userId, pairingId: token.pairingId, token: token.token, machineId: pending.machineId, label: pending.label, signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey)), exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(credentialProtocolBase64.decode(pending.exchangePrivateKey))) });
     console.log(`Approve ${pending.label} in the browser. Signing key: ${credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey))}`);
-    while (Date.now() < token.expiresAt) {
+    // The server ends the pairing at its expiry (the poll then fails with its message); this machine's clock may differ.
+    const giveUpAt = Date.now() + MACHINE_PAIRING_TTL_MS + 60_000;
+    while (Date.now() < giveUpAt) {
       const result = await pairingRequest<EnrolledPairing | { state: 'pending' }>('poll', { userId: token.userId, pairingId: token.pairingId });
       if (result.state === 'enrolled') {
         if (result.machineId !== pending.machineId || result.userId !== token.userId || result.grant.grant.signingPublicKey !== credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey))) throw new Error('Pairing response does not match this machine');

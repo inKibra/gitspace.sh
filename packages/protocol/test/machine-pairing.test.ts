@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, setSystemTime } from 'bun:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   createDeviceBinding, signDeviceInvite, credentialProtocolBase64, credentialAuthorityGrantPayload,
@@ -67,15 +67,19 @@ describe('delegated machine credential authority', () => {
 });
 
 describe('machine pairing command tokens', () => {
-  it('bounds lifetime and rejects redirects to insecure or credential-bearing origins', () => {
+  it('reads a token whatever the local clock says, and rejects redirects to insecure or credential-bearing origins', () => {
     const input = { version: 1 as const, userId, pairingId: deviceId, token: 'a'.repeat(43), apiUrl: 'https://account.gitspace.sh', expiresAt: now + 600_000 };
-    const encoded = encodeMachinePairingToken(input, now);
-    expect(decodeMachinePairingToken(encoded, now)).toEqual(input);
-    expect(decodeMachinePairingToken(encoded, now + 600_000)).toBeNull();
-    expect(() => encodeMachinePairingToken({ ...input, expiresAt: now + 600_001 }, now)).toThrow();
-    for (const apiUrl of ['http://account.gitspace.sh', 'https://user:password@account.gitspace.sh', 'https://account.gitspace.sh/path', 'https://account.gitspace.sh?redirect=other']) {
-      expect(() => encodeMachinePairingToken({ ...input, apiUrl }, now)).toThrow();
+    const encoded = encodeMachinePairingToken(input);
+    // The server owns expiry: a machine whose clock is behind or ahead of it still reads a fresh token.
+    for (const offset of [-120_000, 0, 120_000]) {
+      setSystemTime(new Date(now + offset));
+      expect(decodeMachinePairingToken(encoded)).toEqual(input);
     }
-    expect(decodeMachinePairingToken(encodeMachinePairingToken({ ...input, apiUrl: 'http://127.0.0.1:8787' }, now), now)?.apiUrl).toBe('http://127.0.0.1:8787');
+    setSystemTime();
+    expect(decodeMachinePairingToken(`${encoded.slice(0, -10)}`)).toBeNull();
+    for (const apiUrl of ['http://account.gitspace.sh', 'https://user:password@account.gitspace.sh', 'https://account.gitspace.sh/path', 'https://account.gitspace.sh?redirect=other']) {
+      expect(() => encodeMachinePairingToken({ ...input, apiUrl })).toThrow();
+    }
+    expect(decodeMachinePairingToken(encodeMachinePairingToken({ ...input, apiUrl: 'http://127.0.0.1:8787' }))?.apiUrl).toBe('http://127.0.0.1:8787');
   });
 });
