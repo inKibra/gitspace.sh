@@ -53,19 +53,13 @@ Choose **Add a computer** in the web app. Follow the walkthrough on the computer
 
 The client supports published macOS and Linux platform builds. On Windows, use a supported Linux distribution in WSL. Install Git and the OpenSSH client first. GitSpace supplies the verified machine runtime and its Bun executable; no GitSpace source checkout or local build is required.
 
-Run the installer:
+In the browser, choose **Generate pairing command**. Copy that command to the computer's terminal. It installs the client of your account's release from your account's address, then pairs the computer:
 
 ```bash
-curl -fsSL https://gitspace.sh/install | sh
+curl -fsSL https://<handle>.gitspace.sh/install | sh -s -- --pair <short-lived-pairing-token>
 ```
 
-The pairing command uses the full path to `~/.local/bin/gitspace`, so you do not need to change your PATH. You can add that directory to your PATH later to run `gitspace` by name.
-
-In the browser, choose **Generate pairing command**. Copy that command to the computer's terminal. It has this form:
-
-```bash
-"$HOME/.local/bin/gitspace" machine setup --pair <short-lived-pairing-token>
-```
+Add `--label <name>` after the token to name the computer; it defaults to the host name. The client is installed at `~/.local/bin/gitspace`; add that directory to your PATH to run `gitspace` by name. Without an account, `curl -fsSL https://gitspace.sh/install | sh` installs the platform's current client.
 
 The computer generates its own keys. Compare its name and signing key in the browser with the terminal, then choose **Approve this computer**. The command downloads the verified runtime and starts it. Keep the terminal open until setup reports readiness, then check that the browser shows **Connected**.
 

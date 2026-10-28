@@ -134,7 +134,8 @@ import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
-import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
+import { tenantPlatformFetch, tenantPlatformJson, tenantProvider } from './tenant-platform.js';
+import { accountDistributionResponse } from './distribution.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, accountStatus, activeAccount, authorizeControl } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DeviceVerifier, invalidateDeviceAuthority, withDeviceAuthority, type DeviceRegistrySnapshot, type MachineCredential } from './device-authority.js';
@@ -2837,11 +2838,7 @@ async function releaseDataObjectResponse(request: Request, env: Env, signed: Sig
   const object = operation === 'data.head' ? await env.DATA.head(objectKey) : await env.DATA.get(objectKey);
   if (!object) {
     if (keyFromPath.startsWith('distribution/v1/releases/') || /^objects\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
-      const target = new URL(`/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}/machine-release/blob`, env.PLATFORM_URL);
-      target.searchParams.set('key', keyFromPath);
-      const response = await (env.PLATFORM_SERVICE ?? { fetch }).fetch(new Request(target, {
-        headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}` }, redirect: 'manual', signal: request.signal,
-      }));
+      const response = await tenantPlatformFetch(env, `/machine-release/blob?${new URLSearchParams({ key: keyFromPath })}`, { signal: request.signal });
       const expectedHash = signed.payload.hash;
       if (response.ok && expectedHash !== undefined && expectedHash !== response.headers.get('x-gitspace-sha256')) {
         await response.body?.cancel();
@@ -3241,6 +3238,8 @@ const worker = {
       return (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(env.ACCOUNT_ID).fetch(request);
     }
     if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
+    const distribution = await accountDistributionResponse(request, env, url.pathname);
+    if (distribution) return distribution;
     if (url.pathname.startsWith('/files/')) return serveArtifactFile(request, env);
     if (url.pathname.startsWith('/v1/shared-guides/')) {
       const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));

@@ -90,8 +90,9 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
     finally { setBusy(false); }
   };
   const now = Date.now();
+  // This account's address installs the client of the account's own release.
   const command = pairing && !expired && pairing.expiresAt > now && (!status || status.state === 'created')
-    ? `"$HOME/.local/bin/gitspace" machine setup --pair ${encodeMachinePairingToken({ version: 1, ...pairing })}` : null;
+    ? `curl -fsSL ${window.location.origin}/install | sh -s -- --pair ${encodeMachinePairingToken({ version: 1, ...pairing })}` : null;
   return <Card>
     <CardHeader>
       <CardTitle>Add your computer</CardTitle>
@@ -99,15 +100,10 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
     </CardHeader>
     <CardContent className="flex flex-col gap-6">
       <section className="flex flex-col gap-2">
-        <h3 className="text-body font-semibold">1. Install on the computer you want to connect</h3>
+        <h3 className="text-body font-semibold">1. Install and pair the computer you want to connect</h3>
         <p className="text-body text-muted-foreground">Install Git and the OpenSSH client first. On Windows, use a supported Linux distribution in WSL. The installer detects the platform and checks the download.</p>
-        <InputCopy value="curl -fsSL https://gitspace.sh/install | sh" />
-        <p className="text-caption text-muted-foreground">The pairing command uses the default install location, so you do not need to change your PATH.</p>
-      </section>
-      <section className="flex flex-col gap-2">
-        <h3 className="text-body font-semibold">2. Pair this computer</h3>
         {!pairing || expired || status?.state === 'cancelled' ? <>
-          <p className="text-body text-muted-foreground">Generate a command for this account, run it on that computer, then approve the matching signing key below. The command expires after ten minutes.</p>
+          <p className="text-body text-muted-foreground">Generate a command for this account, run it in that computer’s terminal, then approve the matching signing key below. The command expires after ten minutes.</p>
           {expired ? <p role="status" className="text-caption text-muted-foreground">The pairing command expired. Cancel any old attempt in the terminal before starting a new one.</p> : null}
           <div><Button variant="primary" disabled={busy} onClick={() => { void create(); }}>{busy ? 'Creating command...' : 'Generate pairing command'}</Button></div>
         </> : null}
@@ -123,7 +119,7 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
         </div> : null}
       </section>
       {status?.state === 'approved' || status?.state === 'enrolled' ? <section className="flex flex-col gap-2" aria-live="polite">
-        <h3 className="text-body font-semibold">3. Wait for the runtime to connect</h3>
+        <h3 className="text-body font-semibold">2. Wait for the runtime to connect</h3>
         <div><Badge color={machine?.state === 'online' ? 'green' : 'blue'}>{machine?.state === 'online' ? 'Connected' : 'Installing or connecting'}</Badge></div>
         <p className="text-body text-muted-foreground">{machine?.state === 'online' ? 'This computer is ready for workspace placement. Its software releases are managed from your account.' : 'The terminal downloads the verified runtime and starts it. This can take a few minutes. Keep the terminal open until it reports readiness.'}</p>
         {machine?.error ? <p role="alert" className="text-body text-destructive">{machine.error}</p> : null}

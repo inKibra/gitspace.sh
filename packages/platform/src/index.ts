@@ -12,6 +12,7 @@ import { CreditLedgerDO, isCreditLedgerRecord, type CreditLedgerRecord } from '.
 import { deployChannelTenant, deployTenantWorker, revertTenantWorker, type DeployResult } from './deployer.js';
 import { TenantControlDO } from './tenant-control.js';
 import { defaultFrontendResponse } from './default-release.js';
+import { machineClientResponse } from './default-client.js';
 import { defaultMachineResponse } from './default-native.js';
 import { invokeCompute } from './compute-provider.js';
 import { fetchUsageReport, usageReportKey, usageReportSchema, usageReportScripts, usageSpikes, utcDate, utcDayWindow, HOURLY_SPIKE_FLOORS, SPIKE_FLOORS, SPIKE_RATIO, type UsageReport } from './usage-report.js';
@@ -368,6 +369,7 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   const config = await deployments.tenantConfig();
   if (!config) return platformError(409, 'TENANT_UNPROVISIONED', 'Tenant resource namespace is missing');
   if (path === '/machine-release' || path === '/machine-release/blob') return defaultMachineResponse(request, env, tenant);
+  if (path.startsWith('/machine-release/client/')) return machineClientResponse(request, env, tenant, path);
   if (path === '/state' && request.method === 'GET') {
     const [control, deployment] = await Promise.all([env.TENANT_CONTROL.getByName(tenant).get(), deployments.getState()]);
     return Response.json({ control, deployment: { active: deployment.active?.sha ?? null } }, { headers: { 'cache-control': 'private, no-store' } });

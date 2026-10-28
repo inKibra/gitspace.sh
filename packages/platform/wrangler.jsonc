@@ -44,6 +44,11 @@
     {
       "binding": "RELEASES",
       "bucket_name": "gitspace-releases-rebuild-20260913"
+    },
+    {
+      // The installer's stable channel and its releases, served globally by gitspace-auth.
+      "binding": "DISTRIBUTION",
+      "bucket_name": "gitspace-data"
     }
   ],
   "services": [

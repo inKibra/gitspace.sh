@@ -1,5 +1,6 @@
 interface Env {
   RELEASES: R2Bucket;
+  DISTRIBUTION: R2Bucket;
   DISPATCHER: DispatchNamespace;
   COMPUTE: Fetcher;
   COMPUTE_TEMPLATE_SCRIPT: string;

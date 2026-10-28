@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { machineNativePlatformSchema } from '@gitspace/protocol/deployment';
-import { defaultMachineRelease, defaultMachineObject, defaultNativeSelectionSchema, resolveDefaultRelease, verifyDefaultObject } from '@gitspace/protocol/default-release';
+import { defaultMachineRelease, defaultMachineObject, defaultNativeSelectionSchema, resolveDefaultRelease, verifyDefaultObject, type DefaultRelease } from '@gitspace/protocol/default-release';
 import { defaultReleaseReader } from './default-release.js';
 
 type NativeSelection = z.infer<typeof defaultNativeSelectionSchema>;
@@ -53,14 +53,18 @@ async function historicalPlatform(bucket: R2Bucket, generation: string): Promise
   } while (cursor);
   return undefined;
 }
+/** The default release a tenant's machines follow: its pinned default, or the current platform default when unpinned. */
+export async function tenantDefaultRelease(env: Env, tenant: string): Promise<DefaultRelease> {
+  const active = (await env.DEPLOYMENTS.getByName(tenant).getState()).active;
+  const pin = active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
+  if (pin && (pin.source !== 'literal' || pin.value === undefined)) throw new Error('Invalid tenant default release pin');
+  return (await resolveDefaultRelease(defaultReleaseReader(env.RELEASES), pin?.source === 'literal' ? pin.value : undefined)).release;
+}
 /** Caller authenticates the tenant's platform token before entering this helper. */
 export async function defaultMachineResponse(request: Request, env: Env, tenant: string): Promise<Response> {
   try {
-    const active = (await env.DEPLOYMENTS.getByName(tenant).getState()).active;
-    const pin = active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-    if (pin && (pin.source !== 'literal' || pin.value === undefined)) throw new Error('Invalid tenant default release pin');
+    const release = await tenantDefaultRelease(env, tenant);
     const reader = defaultReleaseReader(env.RELEASES);
-    const { release } = await resolveDefaultRelease(reader, pin?.source === 'literal' ? pin.value : undefined);
     const url = new URL(request.url);
     if (url.pathname.endsWith('/blob')) {
       if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method not allowed', { status: 405 });

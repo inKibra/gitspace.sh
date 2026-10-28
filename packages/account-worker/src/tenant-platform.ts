@@ -1,11 +1,15 @@
-export async function tenantPlatformJson<T>(env: Env, path: string, init?: RequestInit): Promise<T> {
+export async function tenantPlatformFetch(env: Env, path: string, init?: RequestInit): Promise<Response> {
   const target = new URL(`/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}${path}`, env.PLATFORM_URL);
   const request = new Request(target, {
     ...init,
     headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}`, ...(init?.body ? { 'content-type': 'application/json' } : {}) },
     redirect: 'manual',
   });
-  const response = env.PLATFORM_SERVICE ? await env.PLATFORM_SERVICE.fetch(request) : await fetch(request);
+  return env.PLATFORM_SERVICE ? env.PLATFORM_SERVICE.fetch(request) : fetch(request);
+}
+
+export async function tenantPlatformJson<T>(env: Env, path: string, init?: RequestInit): Promise<T> {
+  const response = await tenantPlatformFetch(env, path, init);
   if (!response.ok) throw new Error(`Platform request failed (${response.status}): ${(await response.text()).slice(0, 512)}`);
   return await response.json() as T;
 }

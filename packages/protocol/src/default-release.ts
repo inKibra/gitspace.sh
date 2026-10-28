@@ -100,6 +100,12 @@ export async function verifyDefaultNativeArtifact(reader: DefaultReleaseReader, 
   }
 }
 
+/** The installer client for one platform of an account: release id and the SHA-256 its published manifest records. */
+export const machineClientSchema = z.object({
+  release: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u), platform: machineNativePlatformSchema,
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u), size: z.number().int().positive(),
+}).strict();
+export type MachineClient = z.infer<typeof machineClientSchema>;
 export const defaultNativeSelectionSchema = z.object({ platform: machineNativePlatformSchema.optional(), generation: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional() }).strict();
 type NativeSelection = z.infer<typeof defaultNativeSelectionSchema>;
 export async function resolveDefaultRelease(reader: DefaultReleaseReader, pin?: string | null): Promise<{ release: DefaultRelease; pin: string }> {

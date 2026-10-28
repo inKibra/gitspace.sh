@@ -2,6 +2,7 @@ import { credentialProtocolBase64, SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/p
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE } from '@gitspace/protocol/server-clock';
 import { tenantIdSchema } from '@gitspace/protocol/deployment';
+import { installScript } from '@gitspace/protocol/install-script';
 import { AccountRegistryDO, type OperatorAccountRecord } from './account-registry.js';
 import { InviteRegistryDO } from './invite-registry.js';
 import { operatorIdentity } from './access-auth.js';
@@ -65,6 +66,11 @@ const operatorWorker = {
  async fetch(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === '/health' || url.pathname === '/healthz') return Response.json({ status: 'ok' });
+  if (url.pathname === '/install' && (request.method === 'GET' || request.method === 'HEAD')) {
+    return new Response(request.method === 'HEAD' ? null : installScript('https://api.gitspace.sh/distribution/v1'), {
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
+    });
+  }
   if (url.pathname.startsWith('/distribution/')) {
       if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } });
       const stable = /^\/distribution\/v1\/stable\/(?:darwin|linux)-(?:arm64|x64)\.(?:json|txt)$/u.test(url.pathname);

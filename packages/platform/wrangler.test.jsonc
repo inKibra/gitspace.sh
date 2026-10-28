@@ -46,6 +46,10 @@
     {
       "binding": "RELEASES",
       "bucket_name": "gitspace-platform-releases-test"
+    },
+    {
+      "binding": "DISTRIBUTION",
+      "bucket_name": "gitspace-platform-distribution-test"
     }
   ],
   "vars": {

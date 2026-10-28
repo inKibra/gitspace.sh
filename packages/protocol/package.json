@@ -38,7 +38,8 @@
     "./socket-auth": "./src/socket-auth.ts",
     "./github": "./src/github.ts",
     "./storage-breaker": "./src/storage-breaker.ts",
-    "./storage-migration": "./src/storage-migration.ts"
+    "./storage-migration": "./src/storage-migration.ts",
+    "./install-script": "./src/install-script.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

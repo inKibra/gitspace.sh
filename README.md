@@ -23,19 +23,13 @@ Attach a computer or create a cloud machine (below) when an agent needs to run c
 
 ## Connect your own computer
 
-Install Git and the OpenSSH client on the computer first. Then follow the account's **Add a computer** walkthrough:
+Install Git and the OpenSSH client on the computer first. Then follow the account's **Add a computer** walkthrough: generate a short-lived pairing command in the browser and run it on that computer:
 
 ```sh
-curl -fsSL https://gitspace.sh/install | sh
+curl -fsSL https://<handle>.gitspace.sh/install | sh -s -- --pair <token>
 ```
 
-The installer selects a published platform build and verifies its checksum. GitSpace supplies its own runtime; no source checkout, separately installed Bun, or local build is needed.
-
-Generate a short-lived pairing command in the browser and run it on that computer:
-
-```sh
-gitspace machine setup --pair <token>
-```
+The account's installer installs the client published with the account's default release for that platform (its pinned default, or the current platform default when unpinned; the platform's stable client where that release has none) and verifies its checksum, then runs `gitspace machine setup --pair <token>` (add `--label <name>` to name the computer). GitSpace supplies its own runtime; no source checkout, separately installed Bun, or local build is needed. Without an account, `curl -fsSL https://gitspace.sh/install | sh` installs the platform's stable client.
 
 Compare the signing key shown in the terminal and browser before approving the computer. Setup downloads the verified runtime and starts it. The computer receives its own machine identity, not your account root private key.
 
