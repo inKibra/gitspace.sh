@@ -80,10 +80,10 @@ export async function verifyDefaultWorker(reader: DefaultReleaseReader, worker: 
   return [...modules, worker.manifest];
 }
 
-/** `manifests` checks each manifest; `all` also checks every worker module and native chunk they pin. */
+/** `manifests` checks the worker, image provenance and native manifests; `all` also checks every worker module, frontend file and native chunk. */
 export async function verifyDefaultReleaseContents(reader: DefaultReleaseReader, manifest: DefaultRelease, content: 'all' | 'manifests' = 'all'): Promise<void> {
   await verifyDefaultWorker(reader, manifest.worker, content);
-  for (const object of manifest.frontend.files) await verifyDefaultObject(reader, object);
+  if (content === 'all') for (const object of manifest.frontend.files) await verifyDefaultObject(reader, object);
   const provenance = defaultImageProvenanceSchema.parse(JSON.parse(new TextDecoder().decode(await verifyDefaultObject(reader, manifest.image.provenance))));
   if (provenance.commit !== manifest.commit || provenance.image !== manifest.image.image) throw new Error('Default image provenance commit or image mismatch');
   for (const native of manifest.machines) {

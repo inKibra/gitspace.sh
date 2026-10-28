@@ -77,6 +77,14 @@ describe('coherent default account releases', () => {
     f.objects.delete(`defaults/releases/${sha}/worker.manifest.json`);
     await expect(loadDefaultRelease(f.api)).rejects.toThrow('missing');
   });
+  test('resolving the current default reads its manifests, not its frontend files', async () => {
+    const f = storage();
+    await publishDefaultRelease(await build(), f.api);
+    const read: string[] = [];
+    await loadDefaultRelease({ async get(key) { read.push(key); return f.api.get(key); } });
+    expect(read).toContain(`defaults/releases/${sha}/worker.manifest.json`);
+    expect(read.filter(key => key.includes('/frontend/'))).toEqual([]);
+  });
   test('concurrent promotions cannot overwrite a pointer changed since publication began', async () => {
     const f = storage();
     await publishDefaultRelease(await build(), f.api);
