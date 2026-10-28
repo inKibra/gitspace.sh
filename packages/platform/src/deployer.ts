@@ -6,6 +6,7 @@ import {
   workerModuleKey,
   workerReleaseMetadataSchema,
   type LegacyPlatformDeployRequest,
+  type PlatformRevertRequest,
   type PlatformDeployRequest,
   type PlatformDeployResponse,
   type WorkerManifest,
@@ -360,6 +361,8 @@ interface Candidate {
   /** RELEASES key: a worker manifest, or a LEGACY single bundle. */
   workerKey: string;
   metadata: WorkerReleaseMetadata;
+  /** Inference capability a default release advertises; tenant-built releases record theirs in the account. */
+  inferenceVersion?: 1;
 }
 
 type Deployments = DurableObjectStub<TenantDeploymentsDO>;
@@ -378,7 +381,7 @@ async function loadChannel(env: Env): Promise<Candidate | null> {
       ...manifest.worker.metadata,
       resources: [...manifest.worker.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'), { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: pin }],
     });
-    return { sha: manifest.worker.version, workerKey: 'manifest' in manifest.worker ? manifest.worker.manifest.key : manifest.worker.bundle.key, metadata };
+    return { sha: manifest.worker.version, workerKey: 'manifest' in manifest.worker ? manifest.worker.manifest.key : manifest.worker.bundle.key, metadata, ...(manifest.inferenceVersion ? { inferenceVersion: manifest.inferenceVersion } : {}) };
   } catch { return null; }
 }
 
@@ -538,14 +541,14 @@ export async function deployTenantWorker(env: Env, tenant: string, request: Plat
   return swap(env, tenant, deployments, lease.value, { sha: request.sha, workerKey: staged.value, metadata: request.metadata }, true);
 }
 
-export async function revertTenantWorker(env: Env, tenant: string, to: 'previous' | 'channel'): Promise<DeployResult> {
+export async function revertTenantWorker(env: Env, tenant: string, request: PlatformRevertRequest): Promise<DeployResult> {
   const deployments = env.DEPLOYMENTS.getByName(tenant);
   const lease = await deployments.acquireLease();
   if (lease.status === 'error') return { status: 'error', error: { status: 409, ...lease.error } };
   const state = lease.value;
 
   let candidate: Candidate | null = null;
-  if (to === 'previous') {
+  if (request.to === 'previous') {
     const previous = state.previous;
     if (previous && await env.RELEASES.head(previous.workerKey)) candidate = { sha: previous.sha, workerKey: previous.workerKey, metadata: previous.metadata };
   } else {
@@ -557,10 +560,14 @@ export async function revertTenantWorker(env: Env, tenant: string, to: 'previous
       status: 'error',
       error: {
         status: 409,
-        code: to === 'previous' ? 'NO_PREVIOUS_RELEASE' : 'CHANNEL_UNAVAILABLE',
-        message: to === 'previous' ? 'No earlier healthy release to restore' : 'Channel release is not published to RELEASES',
+        code: request.to === 'previous' ? 'NO_PREVIOUS_RELEASE' : 'CHANNEL_UNAVAILABLE',
+        message: request.to === 'previous' ? 'No earlier healthy release to restore' : 'Channel release is not published to RELEASES',
       },
     };
+  }
+  if (request.inferenceVersion !== undefined && candidate.inferenceVersion !== request.inferenceVersion) {
+    await deployments.releaseLease();
+    return { status: 'error', error: { status: 409, code: 'RELEASE_INCOMPATIBLE', message: `Release ${candidate.sha} does not advertise inferenceVersion ${request.inferenceVersion}` } };
   }
   return swap(env, tenant, deployments, state, candidate, false);
 }

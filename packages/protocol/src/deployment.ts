@@ -334,7 +334,11 @@ export const platformDeployResponseSchema = z.object({
 });
 export type PlatformDeployResponse = z.infer<typeof platformDeployResponseSchema>;
 
-export const platformRevertRequestSchema = z.object({ to: z.enum(['previous', 'channel']) });
+export const platformRevertRequestSchema = z.object({
+  to: z.enum(['previous', 'channel']),
+  /** The restored release must advertise this inference capability; the platform refuses one that does not. */
+  inferenceVersion: z.literal(1).optional(),
+});
 export type PlatformRevertRequest = z.infer<typeof platformRevertRequestSchema>;
 
 /** Tenant → platform: the worker's own version stamp, served at `/healthz` and compared after upload. */

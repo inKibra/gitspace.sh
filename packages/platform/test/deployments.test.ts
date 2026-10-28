@@ -123,7 +123,7 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
 }
 
 /** Publishes a default release; `legacy` publishes its worker the way defaults were published before module releases. */
-async function publishDefault(commit: string, tags: string[], legacy = false) {
+async function publishDefault(commit: string, tags: string[], { legacy = false, inferenceVersion }: { legacy?: boolean; inferenceVersion?: 1 } = {}) {
   const prefix = `defaults/releases/${commit}/`;
   async function object(name: string, content: string | Uint8Array<ArrayBuffer>) {
     const key = prefix + name;
@@ -137,7 +137,7 @@ async function publishDefault(commit: string, tags: string[], legacy = false) {
   const frontend = await object('frontend/index.html', `<html>${commit}</html>`);
   const provenance = await object('image-provenance.json', JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` }));
   const manifest = await object('manifest.json', JSON.stringify({
-    schemaVersion: 1, commit,
+    schemaVersion: 1, commit, ...(inferenceVersion ? { inferenceVersion } : {}),
     worker: { commit, version: commit, ...worker, metadata: metadata(tags) },
     frontend: { commit, files: [{ ...frontend, path: 'index.html', contentType: 'text/html' }] },
     image: { commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance },
@@ -550,7 +550,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
 
   it.each([['module', false], ['legacy bundle', true]])('falls back to a channel published as a %s when a first deploy is unhealthy', async (_format, legacy) => {
     const commit = 'a'.repeat(40);
-    await publishDefault(commit, ['v1'], legacy);
+    await publishDefault(commit, ['v1'], { legacy });
     const tenant = `golf-${legacy ? 'legacy' : 'modules'}`;
     const token = await mintToken(tenant);
     const result = await deploy(tenant, token, 'unhealthy', ['v1'], 'nope');
@@ -596,6 +596,23 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     expect(await defaultImage.json()).toMatchObject({ value: { image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` } });
     const pin = (await env.DEPLOYMENTS.getByName('hotel').getState()).active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
     expect(pin).toMatchObject({ source: 'literal', value: expectedPin });
+  });
+
+  it('restores the channel under an inference requirement only when the default advertises it', async () => {
+    const commit = '7'.repeat(40);
+    await publishDefault(commit, ['v1']);
+    const token = await mintToken('kilo');
+    await deploy('kilo', token, 'k1', ['v1']);
+
+    const refused = await tenantPost('kilo', 'revert', token, { to: 'channel', inferenceVersion: 1 });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: { code: 'RELEASE_INCOMPATIBLE' } });
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-kilo`)).toBe(bundleSource('k1'));
+
+    await publishDefault(commit, ['v1'], { inferenceVersion: 1 });
+    const restored = await tenantPost('kilo', 'revert', token, { to: 'channel', inferenceVersion: 1 });
+    expect(restored.status).toBe(200);
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-kilo`)).toBe(bundleSource(commit));
   });
 
   it('refuses a channel revert when the channel bundle is not published', async () => {

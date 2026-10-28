@@ -38,7 +38,7 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   objects.set(workerManifestKey, workerManifest);
   objects.set(`${prefix}image-provenance.json`, image.provenance);
   const manifest = defaultReleaseSchema.parse({
-    schemaVersion: 1, commit, machines,
+    schemaVersion: 1, commit, inferenceVersion: 1, machines,
     worker: { commit: worker.commit, version: worker.version, manifest: defaultObject(workerManifestKey, workerManifest), metadata: worker.metadata },
     frontend: { commit: frontend.commit, files: frontend.files.map(file => {
       const key = `${prefix}frontend/${file.path}`;

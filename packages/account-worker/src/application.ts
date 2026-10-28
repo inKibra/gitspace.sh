@@ -96,6 +96,7 @@ import {
   GITSPACE_CANONICAL_BRANCH,
   type DeploymentStatus,
   type PlatformDeployRequest,
+  type PlatformRevertRequest,
   type ReleaseStatus,
 } from '@gitspace/protocol/deployment';
 import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } from './providers.js';
@@ -2323,10 +2324,12 @@ export async function readTenantDeployment(env: Env, userId: string): Promise<De
 /** Returns every target to the channel build: the Worker through the platform, machines and the frontend by selection. */
 export async function revertTenantRelease(env: Env, userId: string): Promise<DeploymentStatus> {
   const releases = tenantReleases(env, userId);
-  await releases.assertChannelCompatible();
+  const cutover = await releases.inferenceCutover();
   if ((await tenantWorkerVersion(env, userId)).sha !== null) {
-    const outcome = await platformCall(env, userId, 'revert', { to: 'channel' });
+    const outcome = await platformCall(env, userId, 'revert', { to: 'channel', ...(cutover ? { inferenceVersion: 1 } : {}) });
     if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Platform revert failed');
+  } else if (cutover) {
+    throw new Error('Without a platform worker the channel\'s inference-profile support cannot be verified. Select a source release advertising inferenceVersion 1 instead.');
   }
   await releases.revert();
   return readTenantDeployment(env, userId);
@@ -2344,7 +2347,7 @@ export async function checkCanonicalHead(env: Env, userId: string): Promise<Depl
   await tenantReleases(env, userId).recordCanonicalHead({ repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit, checkedAt: new Date().toISOString() });
   return readTenantDeployment(env, userId);
 }
-async function platformCall(env: Env, userId: string, action: 'deploy' | 'revert', body: PlatformDeployRequest | { to: 'previous' | 'channel' }): Promise<{ status: ReleaseStatus; error: string | null }> {
+async function platformCall(env: Env, userId: string, action: 'deploy' | 'revert', body: PlatformDeployRequest | PlatformRevertRequest): Promise<{ status: ReleaseStatus; error: string | null }> {
   try {
     const response = await (env.PLATFORM_SERVICE ?? { fetch }).fetch(`${env.PLATFORM_URL}/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}/${action}`, {
       method: 'POST',

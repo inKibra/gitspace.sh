@@ -351,6 +351,37 @@ describe('tenant releases', () => {
     expect(unversionedChannel.current.platformWorker).toEqual({ sha: null, version: 'channel' });
   });
 
+  it('requires inference-profile support from the channel once the account has cut over', async () => {
+    const { userId, control } = await tenant();
+    const platform: Partial<Env> = { PLATFORM_URL: 'https://platform.test', PLATFORM_TOKEN: 'tenant-token' };
+    const reverts: unknown[] = [];
+    let channelSupportsProfiles = false;
+    network.use(
+      http.get(`https://platform.test/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, credits: null, deployment: { active: 'tenant-release' } })),
+      http.post(`https://platform.test/__platform/tenants/${env.TENANT_ID}/revert`, async ({ request }) => {
+        reverts.push(await request.json());
+        return channelSupportsProfiles
+          ? HttpResponse.json({ sha: 'channel:1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' })
+          : HttpResponse.json({ error: { code: 'RELEASE_INCOMPATIBLE', message: 'Release channel:0 does not advertise inferenceVersion 1' } }, { status: 409 });
+      }),
+    );
+    await control('deploy.stage', stageInput('tenant-release'));
+    await control('deploy.launch', { sha: 'tenant-release', targets: ['machine', 'frontend'] });
+    await env.CREDENTIALS.getByName(userId).ensureInference();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+
+    await expect(revertTenantRelease({ ...env, ...platform }, userId)).rejects.toThrow('RELEASE_INCOMPATIBLE');
+    expect((await releases.status(userId, { sha: null, version: null })).desired).toMatchObject({ machine: 'tenant-release', frontend: 'tenant-release' });
+
+    channelSupportsProfiles = true;
+    const reverted = deploymentStatusSchema.parse(await revertTenantRelease({ ...env, ...platform }, userId));
+    expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
+    expect(reverts).toEqual([
+      { accountId: userId, to: 'channel', inferenceVersion: 1 },
+      { accountId: userId, to: 'channel', inferenceVersion: 1 },
+    ]);
+  });
+
   it('deploys only the bound tenant despite caller-supplied routing', async () => {
     const { userId, control } = await tenant();
     const foreignId = `foreign-${crypto.randomUUID()}`;

@@ -379,20 +379,12 @@ export class TenantReleasesDO extends BudgetedDurableObject {
   }
 
   async revert(): Promise<TenantDesired> {
-    await this.assertChannelCompatible();
     const desired: TenantDesired = { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() };
     this.saveDesired(desired);
     return desired;
   }
 
-  /** Call before any external platform rollback, not only before saving selection. */
-  async assertChannelCompatible(): Promise<void> {
-    if (await this.inferenceCutover()) {
-      throw new Error('Channel inference-profile compatibility cannot be verified after account cutover. Select a source release advertising inferenceVersion 1 instead.');
-    }
-  }
-
-  private inferenceCutover(): Promise<boolean> {
+  inferenceCutover(): Promise<boolean> {
     return (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID).inferenceCutover();
   }
 

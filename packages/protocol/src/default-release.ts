@@ -22,6 +22,8 @@ export const defaultNativeProvenanceSchema = z.object({ sourceRevision: defaultC
 export const defaultMachineReleaseSchema = z.object({ sha: z.string().min(1), commit: defaultCommitSchema, platform: machineNativePlatformSchema, artifact: releaseArtifactSchema }).strict();
 export const defaultReleaseSchema = z.object({
   schemaVersion: z.literal(1), commit: defaultCommitSchema,
+  /** Capability of every included target; absent on defaults published before it was recorded, which cannot be verified. */
+  inferenceVersion: z.literal(1).optional(),
   worker: z.union([
     z.object({ commit: defaultCommitSchema, version: defaultCommitSchema, manifest: defaultObjectSchema, metadata: workerReleaseMetadataSchema }).strict(),
     /** LEGACY(single-bundle releases): a default published before module releases; delete once no pointer or tenant pin names one. */

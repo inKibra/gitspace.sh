@@ -293,7 +293,7 @@ async function handleTenantDeployment(request: Request, env: Env, tenant: string
   } else {
     const parsed = platformRevertRequestSchema.safeParse(body);
     if (!parsed.success) return platformError(400, 'INVALID_DEPLOY_REQUEST', parsed.error.message);
-    result = await revertTenantWorker(env, tenant, parsed.data.to);
+    result = await revertTenantWorker(env, tenant, parsed.data);
   }
   if (result.status === 'error') return platformError(result.error.status, result.error.code, result.error.message);
   await meterDeploy(env, tenant, result.value.sha);
