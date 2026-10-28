@@ -1,12 +1,12 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { createCloudCodemode } from '../src/runtime-codemode.js';
-import type { WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { createToolResultStore, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earendil-works/pi-durable';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createRuntimeTools, WorkspaceDoc, type ToolServices } from '@gitspace/runtime-core';
-import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { parseToolResultReference, RuntimeFullOutputDetailsSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 
 const noModel = async (): Promise<never> => { throw new Error('No inference in local isolate proof'); };
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
@@ -149,7 +149,7 @@ test('real durable authority completes a caught denied read after an effect with
         if (input.tool === 'write') effects++;
         return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [] };
       },
-      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', preflight: async () => {},
+      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', preflight: async () => {}, results: createToolResultStore(ctx.storage.sql, 'workspace', WORKSPACE_TOOL_RESULTS_MAX_BYTES),
     };
     const jobs: Parameters<typeof createRuntimeTools>[1] = { execute: noModel, reconcile: noModel, cancel: noModel, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: noModel, wakeAt: noModel, deliverConversationEvent: noModel, observeProcess: noModel, stopProcess: noModel };
     const tools = createRuntimeTools(services, jobs, (id, context) => harness.abortTask(id, context), async call => {
@@ -174,6 +174,55 @@ test('real durable authority completes a caught denied read after an effect with
       expect(results[0]).toMatchObject({ status: 'completed', content: [{ type: 'text', text: '"caught"' }] });
       expect(results[1]).toEqual(results[0]);
       expect(effects).toBe(1);
+    } finally { await harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('an MCP result past what the transcript keeps reaches mcp.call whole, the script returns only what it filtered, and grep finds its nested fields by line', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-mcp-whole:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const sandbox = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel });
+    // Every comment of a Figma file in one call: hundreds of KB of one line of JSON, several times what a tool result keeps.
+    const comments = Array.from({ length: 3000 }, (_, index) => ({ id: `comment-${index}`, author: index % 1000 === 7 ? { name: 'Ana', handle: 'ana' } : { name: `Person ${index % 13}`, handle: `person-${index % 13}` }, message: `Comment ${index}: ${'detail '.repeat(10)}` }));
+    const results: RuntimeToolResult[] = [];
+    const kept = createToolResultStore(ctx.storage.sql, 'workspace', WORKSPACE_TOOL_RESULTS_MAX_BYTES);
+    const completedWith = (input: { requestId: string; attemptId: string }, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
+    const services: ToolServices = {
+      async invoke(input) {
+        if (input.tool === 'codemode') { const result = await sandbox.execute(input); results.push(result); return result; }
+        if (input.tool === 'mcp_discover') return completedWith(input, [{ name: 'list_comments', description: 'Every comment of a file' }]);
+        if (input.tool === 'mcp_invoke') return completedWith(input, comments);
+        throw new Error(`Unexpected tool ${input.tool}`);
+      },
+      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', preflight: async () => {}, results: kept,
+    };
+    const jobs: Parameters<typeof createRuntimeTools>[1] = { execute: noModel, reconcile: noModel, cancel: noModel, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: noModel, wakeAt: noModel, deliverConversationEvent: noModel, observeProcess: noModel, stopProcess: noModel };
+    const tools = createRuntimeTools(services, jobs, (id, context) => harness.abortTask(id, context), async () => {});
+    const registry = createRegistry();
+    registry.install(defineExtension({ name: 'codemode-mcp-proof', tools }));
+    const model: Model<Api> = { id: 'proof', name: 'Proof', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
+    let generated = false;
+    const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+      const first = !generated; generated = true;
+      const message: AssistantMessage = { role: 'assistant', content: first ? [{ type: 'toolCall', id: 'parent', name: 'codemode', arguments: { code: 'const comments = await mcp.call({ connectionId: "figma", name: "list_comments" }); return comments.filter(comment => comment.author.handle === "ana").map(comment => comment.id);', timeoutMs: 10000 } }] : [{ type: 'text', text: 'Done' }], api: model.api, provider: model.provider, model: model.id, stopReason: first ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: first ? 'toolUse' : 'stop', message }); stream.end(message); return stream;
+    } };
+    const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
+    try {
+      const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
+      await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
+      await root.submit({ type: 'input', content: 'Find Ana\'s comments.' }, BACKGROUND_CONTEXT);
+      await root.waitForIdle(BACKGROUND_CONTEXT);
+      expect(JSON.stringify(comments).length).toBeGreaterThan(5 * 50 * 1024);
+      expect(results).toEqual([expect.objectContaining({ status: 'completed', content: [{ type: 'text', text: JSON.stringify(['comment-7', 'comment-1007', 'comment-2007']) }] })]);
+      const parent = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'parent');
+      expect(parent?.role === 'toolResult' ? parent.content : null).toEqual([{ type: 'text', text: JSON.stringify(['comment-7', 'comment-1007', 'comment-2007']) }]);
+      // The child's output was kept indented: a grep of its reference finds Ana's nested handle on lines of its own.
+      const child = (await root.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []).find(message => message.role === 'toolResult' && message.toolName === 'mcp_invoke');
+      const reference = RuntimeFullOutputDetailsSchema.parse(child?.role === 'toolResult' ? child.details : null).fullOutput.reference;
+      const location = parseToolResultReference(reference);
+      if (!location) throw new Error(`Not a result reference: ${reference}`);
+      const found = await kept.answer(location, RuntimeToolResultRequestSchema.parse({ tool: 'grep', args: { pattern: '"handle": "ana"', path: reference } }));
+      expect(found.split('\n')).toEqual([expect.stringMatching(/^\d+: {6}"handle": "ana"$/u), expect.stringMatching(/^\d+: {6}"handle": "ana"$/u), expect.stringMatching(/^\d+: {6}"handle": "ana"$/u)]);
     } finally { await harness.close(BACKGROUND_CONTEXT); }
   });
 });

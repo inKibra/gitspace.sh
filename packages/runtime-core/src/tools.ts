@@ -1,10 +1,10 @@
-import { AssistantEntry, ToolResultEntry, ToolTask, defineTool, type Harness, type ToolExecutionApi, type ToolRegistration } from '@earendil-works/pi-durable';
+import { AssistantEntry, ToolResultEntry, ToolTask, defineTool, type Harness, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from '@earendil-works/pi-durable';
 import { Type } from 'typebox';
 import { z } from 'zod';
 import type { JsonValue, Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
-import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
@@ -13,6 +13,7 @@ import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { admitToolImages, imageLimits } from './inference/image-limits.js';
 import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
 import { isTakeoverEvent } from './takeover.js';
+import { keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
 export type CodemodeToolOutcome =
   | { status: 'completed'; value: JsonValue }
@@ -29,6 +30,8 @@ export type ToolServices = {
   /** The tab an ask_takeover call names, on your Chrome or the cloud browser, as its card shows it; throws why it
    * cannot be taken over (a machine's headless browser, an extension too old, no such tab in the workspace's group). */
   takeoverTab(input: { conversationId: string; args: RuntimeAskTakeoverArguments }): Promise<RuntimeTakeoverTab>;
+  /** Tool output longer than the transcript keeps, kept whole (docs/SIMPLIFICATION.md, Oversized tool results). */
+  results: ToolResultStore;
 };
 const workspaceId = z.string().min(1).optional();
 const get = z.object({ method: z.literal('get'), workspaceId });
@@ -80,15 +83,15 @@ export function parseToolArguments<S extends z.ZodType>(tool: string, schema: S,
 // Wording adapted from installed OMP 18.2.11; unsupported OMP selectors and operations are not advertised.
 const contract = <S extends z.ZodType>(schema: S, description: string) => ({ schema, description });
 const contracts = {
-  read: contract(Arguments.RuntimeReadArgumentsSchema, 'Read a file from the cloud-owned shared working copy, or a supported local/artifact/skill/rule resource. Use one-based offset and limit for text lines. Supported images return image content. An absolute /tmp/... path reads /tmp on the attached machine, scratch space bash shares that is never synced. Parallelize independent reads. No inline path selectors or URL fetching are supported.'),
+  read: contract(Arguments.RuntimeReadArgumentsSchema, 'Read a file from the cloud-owned shared working copy, or a supported local/artifact/skill/rule resource. Use one-based offset and limit for text lines. Supported images return image content. An absolute /tmp/... path reads /tmp on the attached machine, scratch space bash shares that is never synced. A result://<workspace>/<conversation>/<call> path reads, by the same offset and limit, the whole output of a tool call whose result was too long to show and ended with a line naming that reference; results of any workspace in this project can be read. Parallelize independent reads. No inline path selectors or URL fetching are supported.'),
   write: contract(Arguments.RuntimeWriteArgumentsSchema, 'Create or overwrite a file in the cloud-owned shared working copy. Prefer edit for surgical changes; write for new files or complete replacements. A drive://workspace/<path> path (workspace session) or drive://base/<path> path (project session) writes that artifact instead; an absolute /tmp/... path writes /tmp on the attached machine, scratch space bash shares that is never synced. message: one line describing why, recorded in the workspace edit history.'),
   edit: contract(Arguments.RuntimeEditArgumentsSchema, 'Replace exact text in the shared working copy, in a drive:// artifact this session may write, or in a file under /tmp on the attached machine (absolute /tmp/... path). Each oldText must occur exactly once in the original file; edits must not overlap. Read the relevant text first. All edits are validated before writing. message: one line describing why, recorded in the workspace edit history.'),
   apply_patch: contract(Arguments.ApplyPatchArgumentsSchema, 'Apply a V4A patch to the shared working copy. Use *** Begin Patch / *** End Patch with Add File, Delete File, or Update File headers; optional Move to follows Update File. Update hunks start @@ and use space context, - removals, + additions. Context must match exactly and unambiguously; all operations validate before effects. Do not use hashline syntax. message: one line describing why, recorded in the workspace edit history.'),
   bash: contract(Arguments.RuntimeBashArgumentsSchema, 'Run a finite bash command. timeoutMs (up to 30 minutes) stops it after that long and returns its output with exit code 124. Set background:true for a durable immediate job handle and automatic completion delivery: a finished job you have not waited for arrives as a <gitspace-event> message (from GitSpace, not the user); waiting for or checking a finished job consumes it. Use op list/status/wait/logs/cancel with the returned job handle to control background commands; logs accepts lines/head/cursor. on selects a machine; at pins immutable source. cwd defaults to repository root; it may be a repository path or an absolute path in /tmp on the machine. Use proc for services and interactive programs.'),
-  grep: contract(Arguments.RuntimeGrepArgumentsSchema, 'Exact, exhaustive search of the latest canonical snapshot with pinned ripgrep on an attached machine, using Rust regex. path/glob filter files; hidden and gitignore control visibility. caseSensitive defaults true; multiline enables cross-line matches. offset and limit page matching lines (default 1000, maximum 10000). Unsupported lookaround/backreferences fail; no PCRE fallback. on selects the machine. Without an attached machine it fails: use code_search. Returns path:line:content. Use instead of shell grep.'),
+  grep: contract(Arguments.RuntimeGrepArgumentsSchema, 'Exact, exhaustive search of the latest canonical snapshot with pinned ripgrep on an attached machine, using Rust regex. path/glob filter files; hidden and gitignore control visibility. caseSensitive defaults true; multiline enables cross-line matches. offset and limit page matching lines (default 1000, maximum 10000). Unsupported lookaround/backreferences fail; no PCRE fallback. on selects the machine. Without an attached machine it fails: use code_search. Returns path:line:content. Use instead of shell grep. A result://<workspace>/<conversation>/<call> path (a tool output too long to show whole) is searched in the cloud with no machine, by the same pattern, case, multiline and paging, and returns line:content.'),
   code_search: contract(Arguments.RuntimeCodeSearchArgumentsSchema, 'Search the cloud working copy through its trigram index; needs no machine. Takes grep\'s arguments and Rust regex semantics, without on. Returns JSON: matches (path:line:content, path order), truncated (more matches; page with offset), partial (the verification budget stopped the search before every candidate was checked: narrow path/glob/pattern, or use grep), indexedCommit and behind (snapshots the index trails the working copy while recent edits are indexed), skippedFiles (over 8 MiB or a line over 1 MiB) and notes. A pattern without a 3-character literal is checked file by file under the budget. Use code_search without a machine; use grep when results must be exhaustive and current.'),
   find: contract(Arguments.RuntimeFindArgumentsSchema, 'Find file paths matching the pattern glob beneath path (workspace root by default), including hidden files. This is filename matching, not semantic search; glob is only used by grep and code_search.'),
-  codemode: contract(Arguments.RuntimeCodemodeArgumentsSchema, 'Execute JavaScript in a fresh cloud Worker isolate with no network, filesystem, environment or credentials. Globals: tools, mcp, completion, judge, display. tools.<name>(args) executes this agent\'s tools, GitSpace space_* tools included (for example await tools.space_workspace({ method: \'create\', ... })), through their ordinary permissions, approvals and routing; there is no space object. completion/judge and mcp.list/search/describe/call use cloud-authorized capabilities. Main agent only. Await effects before returning; execution is bounded to 30 seconds and 64 KiB output. Interrupted scripts are never replayed.'),
+  codemode: contract(Arguments.RuntimeCodemodeArgumentsSchema, 'Execute JavaScript in a fresh cloud Worker isolate with no network, filesystem, environment or credentials. Globals: tools, mcp, completion, judge, display. tools.<name>(args) executes this agent\'s tools, GitSpace space_* tools included (for example await tools.space_workspace({ method: \'create\', ... })), through their ordinary permissions, approvals and routing; there is no space object. completion/judge and mcp.list/search/describe/call use cloud-authorized capabilities. A tool\'s whole output reaches the script, up to 25 MB, even when a model call would see only its start: filter a large result (mcp.call returns its parsed JSON) and return what matters. Main agent only. Await effects before returning; execution is bounded to 30 seconds and 64 KiB output. Interrupted scripts are never replayed.'),
   agents: contract(Arguments.RuntimeAgentsArgumentsSchema, `Spawn an agent with a complete task (replies you did not wait for arrive as <gitspace-event> messages from GitSpace, not the user): agent names a definition (omit it for a worker), role chooses its model role by id (default, deep, fast, taste or one the profile adds; a worker defaults to fast). name is only an address. Send to an address, wait for events, stop a child, or list/status. background lets a child outlive the foreground turn. At most ${MAX_RUNNING_SUBAGENTS} subagents run at once: a spawn, or a message to an idle child, beyond that is queued (the result and list say so) and starts when a running one finishes; stopping a queued child drops it.`),
   proc: contract(Arguments.RuntimeProcArgumentsSchema, 'Supervise workspace processes across generations, terminals and services. start spec needs name/application; args/env default empty, cwd repository root, pty true. on selects machine. list/status/describe/logs/wait are readonly. Readiness timeout leaves the process live; inspect timedOut and matched. logs accepts lines/head/cursor/grep. send accepts text with enter default true, keys, signal or resize. stop/restart mutate. A ready port gets a machine URL; pin {name, source process|declared, as?, port?} points the workspace URL as (default name) at that running service on the on machine. Private or out-of-workspace processes are inaccessible. Agent-started process exits are delivered automatically.'),
   machines: contract(Arguments.RuntimeMachinesArgumentsSchema, 'List the machines attached to this workspace that are online, detach one exact attachmentId and generation, or attach a machine. attach takes an optional machine id or label and optional needs; omitted, it picks the account default machine, else any online machine offering needs. It returns at once with state attaching while the machine sets up; a notice arrives when it is ready. A machine agents may not attach asks the user instead.'),
@@ -235,12 +238,13 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     prepareArguments: input => parseToolArguments(name, contract.schema, input),
     // A round that changes files runs its calls in the order the model wrote them, so a later read sees the write.
     executionMode: ['write', 'edit', 'apply_patch'].includes(name) ? 'sequential' : 'parallel', replay: ['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'bash'].includes(name) ? 'safe' : 'unsafe',
+    outputLimits: TOOL_OUTPUT_LIMITS,
     async execute(input, api, context) {
       const args = RuntimeJsonSchema.parse(parseToolArguments(name, contract.schema, input));
       const safe = Arguments.runtimeOperationIsReadOnly(name, args);
       const child = (await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child;
       if (child && !isSubagentToolCallAllowed(name, args, child.tools)) throw new Error(`Subagent ${child.name} cannot use ${name} this way`);
-      const run = async () => {
+      const run = async (): Promise<ToolExecutionResult> => {
         context.abortSignal?.throwIfAborted();
         const attemptId = await api.memo('gitspace.attempt', `tool:${api.taskId}`, context);
         const invocation = { tool: name, args, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: api.callId, attemptId, replay: safe ? 'safe' as const : 'unsafe' as const, signal: context.abortSignal };
@@ -289,7 +293,14 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
           const error = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
           if (status.success && status.data.executorStatus === 'interrupted') return { status: 'interrupted', error };
           if (result.isError) return { status: 'failed', error };
-          return { status: 'completed', value: RuntimeJsonSchema.parse(result.content) };
+          const kept = RuntimeFullOutputDetailsSchema.safeParse(result.details);
+          if (!kept.success) return { status: 'completed', value: RuntimeJsonSchema.parse(result.content) };
+          // The transcript holds the part of a longer output the model saw; the script gets all of it.
+          const { fullOutput } = kept.data;
+          if (fullOutput.keptBytes < fullOutput.bytes) return { status: 'failed', error: `${input.tool} ran, but its output (${(fullOutput.bytes / 1024 / 1024).toFixed(1)} MB) is over the ${TOOL_RESULT_MAX_BYTES / 1024 / 1024} MB a tool result keeps, so codemode cannot receive it whole; ${fullOutput.reference} holds part of it.` };
+          const text = await services.results.text({ conversationId: String(api.conversationId), callId: input.callId });
+          const at = result.content.findIndex(item => item.type === 'text');
+          return { status: 'completed', value: RuntimeJsonSchema.parse(result.content.filter((item, index) => item.type !== 'text' || index === at).map(item => item.type === 'text' ? { type: 'text', text } : item)) };
           } catch (error) {
             return { status: admitted ? 'interrupted' : 'failed', error: error instanceof Error ? error.message : String(error) };
           }
@@ -302,7 +313,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         const output = ref === undefined ? content : admitToolImages(content, imageLimits(api.models.getModel(ref.provider, ref.modelId)));
         return { output, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
-      return safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run);
+      const result = await (safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run));
+      return keepWholeOutput(result, services.results, { conversationId: String(api.conversationId), callId: api.callId }, TOOL_OUTPUT_LIMITS);
     },
   }));
   tools.push(defineTool({ name: 'todo', description: 'Replace the durable work checklist.', parameters: Type.Object({ items: Type.Array(Type.Object({ id: Type.String(), text: Type.String(), status: Type.Union([Type.Literal('pending'), Type.Literal('active'), Type.Literal('completed')]) })) }), replay: 'safe', async execute(input, api, context) { return serialized(String(api.conversationId), async () => { await api.commit(async tx => { const doc = await tx.doc(TodosDoc, api.conversationId); doc.items = input.items; }, context); return { output: [{ type: 'text', text: 'Checklist updated.' }] }; }); } }));

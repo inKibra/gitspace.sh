@@ -3,9 +3,9 @@ import { expect, test, vi } from 'vitest';
 import { createModels, createAssistantMessageEventStream, type ToolCall, type AssistantMessage } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { Result } from 'better-result';
-import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
-import { ArtifactsCodeStore, createWorkspaceRuntime, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, createToolResultStore, createWorkspaceRuntime, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
@@ -185,6 +185,62 @@ test('grep runs only on an attached machine and points at code_search without on
       expect(machine.mock.calls.at(-1)?.[0]).toMatchObject({ tool: 'grep', machineId: cache.machineId, snapshot: checkpoint });
     } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
+});
+
+test('a long tool output is kept in the workspace; read and grep page and search it with no machine', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`kept-output:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, services, root, invoke, text, calls, reports, identity } = await ownerFixture(ctx);
+    try {
+      await runtime.harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
+      const rows = Array.from({ length: 6000 }, (_, index) => `row ${index + 1}${index + 1 === 5555 ? ' needle' : ''}`).join('\n');
+      expect((await invoke('write', { path: 'rows.txt', content: rows })).status).toBe('completed');
+      calls.push({ type: 'toolCall', id: 'every-row', name: 'read', arguments: { path: 'rows.txt', limit: 6000 } });
+      await root.submit({ type: 'input', requestId: 'every-row', content: 'Read every row.' }, BACKGROUND_CONTEXT);
+      await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10000), BACKGROUND_CONTEXT));
+      if (reports.length) throw new AggregateError(reports, 'Runtime fixture reported errors');
+      const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'every-row');
+      const shown = result?.role === 'toolResult' ? result.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('\n') : '';
+      const reference = `result://${identity.workspaceId}/${String(root.id)}/every-row`;
+      expect(shown).toContain(reference);
+      expect(shown).not.toContain('needle');
+      expect(text(await invoke('read', { path: reference, offset: 5554, limit: 2 })).split('\n').slice(0, 2)).toEqual(['row 5554', 'row 5555 needle']);
+      // No machine is attached: grep of a kept output runs in the cloud, and asks for none before an approval.
+      await services.tools.preflight({ tool: 'grep', args: { pattern: 'needle', path: reference }, conversationId: String(root.id), taskId: 'proof', requestId: 'preflight', attemptId: 'preflight', replay: 'safe' });
+      expect(text(await invoke('grep', { pattern: 'needle', path: reference }))).toBe('5555:row 5555 needle');
+    } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('the project agent and a workspace read another workspace\'s kept output of the project through its object; others are refused', async () => {
+  const project = async (projectId: string, workspaceIds: string[]) => {
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+    const created = await authority.bootstrap({ id: projectId, name: projectId, repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    await authority.setProjectLifecycle(created.revision, 'active');
+    for (const id of workspaceIds) await authority.putWorkspace({ id, projectId, kind: 'worktree', name: id, branch: id, phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  };
+  /** A long output of call `callId` in conversation 1, kept by the workspace's own object. */
+  const keep = (workspaceId: string, callId: string, text: string) => runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`), async (_instance, ctx) => createToolResultStore(ctx.storage.sql, workspaceId, WORKSPACE_TOOL_RESULTS_MAX_BYTES).put({ conversationId: '1', callId, text }));
+  const projectId = `kept-project-${crypto.randomUUID()}`, otherProjectId = `kept-other-${crypto.randomUUID()}`;
+  await project(projectId, [`${projectId}-worker`, `${projectId}-sibling`]);
+  await project(otherProjectId, [`${otherProjectId}-worker`]);
+  const reference = await keep(`${projectId}-worker`, 'toolu_figma', Array.from({ length: 3000 }, (_, index) => `comment ${index + 1}${index + 1 === 2999 ? ' needle' : ''}`).join('\n'));
+  const elsewhere = await keep(`${otherProjectId}-worker`, 'toolu_secret', 'another project\'s output');
+  for (const workspaceId of [projectId, `${projectId}-sibling`]) {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`kept-reader:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+      try {
+        const read = await invoke('read', { path: reference, offset: 2998, limit: 2 });
+        expect(read.status, text(read)).toBe('completed');
+        expect(text(read).split('\n').slice(0, 2)).toEqual(['comment 2998', 'comment 2999 needle']);
+        expect(text(await invoke('grep', { pattern: 'needle', path: reference }))).toBe('2999:comment 2999 needle');
+        for (const outside of [elsewhere, `result://${projectId}-deleted/1/toolu_figma`]) {
+          const refused = await invoke('read', { path: outside });
+          expect(refused.status).toBe('failed');
+          expect(text(refused)).toMatch(/^Workspace .* is outside this project$/u);
+        }
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  }
 });
 
 test('code_search answers from the cloud index with no machine and says how far the index trails', async () => {

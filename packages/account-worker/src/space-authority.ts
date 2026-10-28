@@ -4,7 +4,7 @@ import { workspaceLiveKey, type LiveNotice } from '@gitspace/protocol/live-notic
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCommentAuthorSchema, RuntimeBrowserCommentFilterSchema, RuntimeBrowserCommentWriteSchema, RuntimeBrowserHolderSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentFilter, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite, type RuntimeBrowserHolder, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
 import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { announceComment, workspaceCommentThreads, writeWorkspaceComment, type CommentScope } from './browser-comments.js';
@@ -13,7 +13,7 @@ import { captureReplayAskedText, withCaptureSummaries } from './browser-capture-
 import { readCapture } from './browser-capture.js';
 import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { createRuntimeQaServices } from './runtime-services.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
@@ -1090,6 +1090,15 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeTranscript(raw: unknown, format: 'json' | 'ndjson' = 'json', range: unknown = {}): Promise<Response> {
     const input = RuntimeIdentitySchema.extend({ conversationId: z.string().optional() }).parse(raw);
     return (await this.getRuntime(input)).transcript(input.conversationId, format, RuntimeTranscriptRangeSchema.parse(range));
+  }
+
+  /** A `read` or `grep` of a tool output this workspace kept, for a conversation of another workspace in the project
+   * (the caller applied history_read's rule). It reads the stored pages without opening the runtime. */
+  async runtimeToolResult(raw: unknown, key: unknown, request: unknown): Promise<string> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
+    const results = createToolResultStore(this.ctx.storage.sql, identity.workspaceId, WORKSPACE_TOOL_RESULTS_MAX_BYTES);
+    return results.answer(z.object({ conversationId: z.string().min(1), callId: z.string().min(1) }).parse(key), RuntimeToolResultRequestSchema.parse(request));
   }
 
 

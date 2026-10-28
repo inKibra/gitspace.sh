@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalJson, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
 import type { DocumentMarkdown } from './document-markdown.js';
@@ -279,6 +279,25 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   function requireGrepMachine(attemptId: string): void {
     if (savedDispatch(attemptId) || selections.load(attemptId)) return;
     if (!options.runtime().attachments.list().some(item => isAttachmentReady(item))) throw new Error(GREP_REQUIRES_MACHINE);
+  }
+  /** The rule for reading another workspace's history and kept tool outputs: this workspace, the project's own (base)
+   * workspace or any workspace of the project, and nothing outside it. */
+  async function requireProjectWorkspace(workspaceId: string): Promise<void> {
+    if (workspaceId !== identity.workspaceId && workspaceId !== identity.projectId && !await authority().getWorkspace(workspaceId)) throw new Error(`Workspace ${workspaceId} is outside this project`);
+  }
+  /** A `read` or `grep` of a `result://` path: this workspace's kept output, or another's through its own object. */
+  async function keptToolResult(input: Invocation, path: string): Promise<RuntimeToolResult> {
+    const location = parseToolResultReference(path);
+    if (!location) throw new Error(`${path} is not a tool result reference: result://<workspace>/<conversation>/<call>`);
+    const request = RuntimeToolResultRequestSchema.parse({ tool: input.tool, args: input.args });
+    const key = { conversationId: location.conversationId, callId: location.callId };
+    let text: string;
+    if (location.workspaceId === identity.workspaceId) text = await options.runtime().toolResults.answer(key, request);
+    else {
+      await requireProjectWorkspace(location.workspaceId);
+      text = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${location.workspaceId}`).runtimeToolResult({ projectId: identity.projectId, workspaceId: location.workspaceId }, key, request);
+    }
+    return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text }] };
   }
   /** The named machine; else the account default machine when online and permitted; else any online permitted machine
    * offering `needs`. Its attachment is requested without waiting for setup, and the conversation hears when it is
@@ -575,6 +594,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const conversation = await options.runtime().browserConversation(input.conversationId);
       if (!conversation.root && !isSubagentToolCallAllowed(input.tool, input.args, conversation.tools ?? [])) throw new Error(`This subagent cannot use ${input.tool} this way`);
       input.signal?.throwIfAborted();
+      if ((input.tool === 'read' || input.tool === 'grep') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && isToolResultReference(input.args.path)) return await keptToolResult(input, input.args.path);
       if (input.tool === 'grep') {
         requireGrepMachine(input.attemptId);
         return executeMachine(input);
@@ -756,7 +776,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (input.tool === 'history_read') {
           const request = RuntimeHistoryReadArgumentsSchema.parse(args);
           const workspaceId = request.workspaceId ?? identity.workspaceId;
-          if (workspaceId !== identity.workspaceId && workspaceId !== identity.projectId && !await authority().getWorkspace(workspaceId)) throw new Error('History workspace is outside this project');
+          await requireProjectWorkspace(workspaceId);
           // Ordinals are entryId*1024+n: the runtime reads only the requested entries.
           const range = request.mode === 'content' ? { from: request.ordinal, before: request.ordinal + 1 } : { from: request.offset };
           return completed(input, await readRuntimeHistory(await transcript(workspaceId, request.conversationId, range), request, workspaceId));
@@ -850,7 +870,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.
         if (savedDispatch(input.attemptId) || selections.load(input.attemptId)?.result) return;
-        if ((machineTools[input.tool] && input.tool !== 'browser') || input.tool === 'grep') {
+        if ((machineTools[input.tool] && input.tool !== 'browser') || (input.tool === 'grep' && !(typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && isToolResultReference(input.args.path)))) {
           await requireMachine(input, input.args);
         } else if (input.tool === 'environment') {
           const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);

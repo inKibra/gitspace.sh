@@ -20,6 +20,7 @@ export * from './browser-capture-agent.js';
 export * from './browser-powers.js';
 export * from './browser-workspaces.js';
 export * from './tool-arguments.js';
+export * from './tool-results.js';
 export * from './apply-patch.js';
 export * from './subagent-policy.js';
 export * from './workspace-status.js';

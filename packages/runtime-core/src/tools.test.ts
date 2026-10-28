@@ -4,11 +4,12 @@ import { z } from 'zod';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { Type } from 'typebox';
-import { createModels, createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type Models, type Model, type Api, type ToolCall } from '@earendil-works/pi-ai';
-import { RuntimeBrowserApprovalCardSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema } from '@gitspace/protocol-runtime';
+import { createModels, createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type Message, type Models, type Model, type Api, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
+import { RuntimeBrowserApprovalCardSchema, RuntimeFullOutputDetailsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, TOOL_RESULT_MAX_BYTES, toolResultReference } from '@gitspace/protocol-runtime';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, parseToolArguments, runtimeToolParameters, type ToolServices } from './tools.js';
+import type { ToolResultKey } from './tool-results.js';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { DurableJobsDoc, createJobTask, createJobTool, type JobServices } from './jobs.js';
 import { RuntimeBashArgumentsSchema } from '@gitspace/protocol-runtime/tool-arguments';
@@ -17,11 +18,18 @@ const model: Model<Api> = { id: 'tool-contract', name: 'Tool contract', provider
 const unused = async (): Promise<never> => { throw new Error('Unexpected operation'); };
 const operations: JobServices = { execute: unused, reconcile: unused, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, wakeAt: unused, deliverConversationEvent: unused, observeProcess: unused, stopProcess: unused };
 const completed: ToolServices['invoke'] = async input => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: `Executed ${input.tool}` }] });
+/** Outputs the workspace kept, by reference. */
+const kept = new Map<string, string>();
+const keptReference = (key: ToolResultKey) => toolResultReference({ workspaceId: 'workspace', ...key });
 const services: ToolServices = {
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
   question: async () => 'answered', instructions: async () => '', preflight: async () => {},
   async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
+  results: {
+    async put(input) { kept.set(keptReference(input), input.text); return keptReference(input); },
+    async text(key) { const text = kept.get(keptReference(key)); if (text === undefined) throw new Error(`${keptReference(key)} names no kept tool output`); return text; },
+  },
 };
 const samples: Record<string, ToolCall['arguments']> = {
   read: { path: 'src/main.ts', offset: 1, limit: 10 }, write: { path: 'src/main.ts', content: 'new content' },
@@ -458,3 +466,108 @@ test('a rejected tool call names only the problems of the method it asked for, o
   expect(reject({ name: 'x' })).toMatch(/method: required, one of .*start, create, open, restore, setRelations$/);
   expect(parseToolArguments('space_workspace', RuntimeWorkspaceArgumentsSchema, { method: 'status' })).toEqual({ method: 'status' });
 });
+
+/** `count` numbered lines of 30 bytes each. */
+const numbered = (count: number) => Array.from({ length: count }, (_, index) => `line ${String(index + 1).padStart(6, '0')}: ${'x'.repeat(15)}\n`).join('');
+/** The result the model saw for call `id`. */
+function resultOf(messages: readonly Message[], id: string): ToolResultMessage {
+  const result = messages.find(message => message.role === 'toolResult' && message.toolCallId === id);
+  if (result?.role !== 'toolResult') throw new Error(`No result for ${id}`);
+  return result;
+}
+
+test('an output longer than the transcript keeps is kept whole; the model sees its head, ending in where the rest is', async () => {
+  const output = numbered(5000);
+  const image = { type: 'image' as const, mimeType: 'image/png', data: 'iVBORw0KGgo=' };
+  const { harness, root } = await registered([[call('bash', { command: 'seq 5000' }, 'long-output')]], async input => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: output }, image] }), operations, [], { ...model, input: ['text', 'image'] });
+  try {
+    await root.submit({ type: 'input', content: 'Print every line.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const result = resultOf((await root.context(BACKGROUND_CONTEXT)).messages, 'long-output');
+    const reference = keptReference({ conversationId: String(root.id), callId: 'long-output' });
+    expect(kept.get(reference)).toBe(output);
+    expect(RuntimeFullOutputDetailsSchema.parse(result.details).fullOutput).toEqual({ reference, bytes: output.length, lines: 5000, keptBytes: output.length });
+    expect(result.content.filter(item => item.type === 'image')).toEqual([image]);
+    const shown = result.content.flatMap(item => item.type === 'text' ? [item.text] : []);
+    expect(shown).toHaveLength(1);
+    const lines = shown[0]!.split('\n');
+    const note = lines.pop() ?? '';
+    // Whole lines from the first, then the note: the harness kept all of it, the reference included.
+    expect(lines).toEqual(output.split('\n').slice(0, lines.length));
+    expect(lines.length).toBeGreaterThan(1000);
+    expect(note).toContain(reference);
+    expect(note).toContain(`offset ${lines.length + 1} reads on`);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('a codemode child gets the whole output the transcript cut, and one past 25 MB fails naming the part kept', async () => {
+  const whole = numbered(5000);
+  const huge = numbered(Math.ceil((TOOL_RESULT_MAX_BYTES + 1024 * 1024) / 30));
+  const outcomes: unknown[] = [];
+  const { harness, root } = await registered([[call('codemode', { code: 'filter' })]], async input => {
+    if (input.tool === 'read') return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: input.requestId === 'whole' ? whole : huge }] };
+    if (!input.codemodeTools) throw new Error('Missing codemode authority');
+    for (const callId of ['whole', 'huge']) outcomes.push(await input.codemodeTools({ tool: 'read', args: { path: `${callId}.txt` }, callId, signal: AbortSignal.timeout(5000) }));
+    return completed(input);
+  });
+  try {
+    await root.submit({ type: 'input', content: 'Filter the output.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
+    const hugeReference = keptReference({ conversationId: String(root.id), callId: 'huge' });
+    expect(outcomes).toEqual([{ status: 'completed', value: [{ type: 'text', text: whole }] }, { status: 'failed', error: expect.stringContaining(hugeReference) }]);
+    // Past the cap the first 25 MB is kept, in whole lines.
+    const keptHuge = kept.get(hugeReference) ?? '';
+    expect(keptHuge.length).toBeLessThanOrEqual(TOOL_RESULT_MAX_BYTES);
+    expect(keptHuge.length).toBeGreaterThan(TOOL_RESULT_MAX_BYTES - 30);
+    expect(huge.startsWith(keptHuge)).toBe(true);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 15_000);
+
+test('a background command\'s long logs are kept whole like any other output', async () => {
+  const logs = call('bash', {}, 'long-logs');
+  const output = numbered(4000);
+  const seed = defineTool({
+    name: 'accept-command', description: 'Admit a command fixture.', parameters: Type.Object({}), replay: 'safe',
+    async execute(_input, api, context) {
+      const acceptance = RuntimeJobAcceptanceSchema.parse({ status: 'accepted', acceptedAt: new Date().toISOString(), job: { projectId: 'project', workspaceId: 'workspace', jobId: 'log-command', taskId: String(api.taskId), conversationId: String(api.conversationId), requestId: 'log-command' } });
+      await api.commit(async tx => {
+        (await tx.doc(DurableJobsDoc, api.conversationId)).records.command = { acceptance, observation: acceptance, args: { command: 'true', background: true }, fingerprint: 'accepted', spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 10000).toISOString(), attemptId: 'log-command', cancelRequested: false, delivered: false };
+      }, context);
+      logs.arguments = { op: 'logs', job: acceptance.job };
+      return { output: [{ type: 'text', text: 'Accepted.' }] };
+    },
+  });
+  const { harness, root } = await registered([[call('accept-command', {})], [logs]], completed, {
+    ...operations,
+    async controlJob(input) { return { status: 'completed', requestId: 'long-logs', attemptId: input.attemptId, content: [{ type: 'text', text: output }] }; },
+  }, [seed]);
+  try {
+    await root.submit({ type: 'input', content: 'Read the command output.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const reference = keptReference({ conversationId: String(root.id), callId: 'long-logs' });
+    expect(kept.get(reference)).toContain(JSON.stringify(output));
+    expect(JSON.stringify(resultOf((await root.context(BACKGROUND_CONTEXT)).messages, 'long-logs').content)).toContain(reference);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 4000);
+
+test('one line of JSON past the cap is kept and shown indented, so lines page it, and codemode parses the same value', async () => {
+  const value = { file: 'figma', comments: Array.from({ length: 2000 }, (_, index) => ({ id: `comment-${index}`, author: { name: `Person ${index}`, handle: `person-${index}` }, message: 'detail '.repeat(5) })) };
+  const line = JSON.stringify(value);
+  const outcomes: unknown[] = [];
+  const { harness, root } = await registered([[call('mcp_invoke', { connectionId: 'figma', name: 'list_comments', arguments: {} }, 'comments')], [call('codemode', { code: 'parse' })]], async input => {
+    if (input.tool === 'mcp_invoke') return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: line }] };
+    if (!input.codemodeTools) throw new Error('Missing codemode authority');
+    outcomes.push(await input.codemodeTools({ tool: 'mcp_invoke', args: { connectionId: 'figma', name: 'list_comments', arguments: {} }, callId: 'child-comments', signal: AbortSignal.timeout(5000) }));
+    return completed(input);
+  });
+  try {
+    await root.submit({ type: 'input', content: 'List the comments.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(5000), BACKGROUND_CONTEXT));
+    expect(line.length).toBeGreaterThan(2 * 50 * 1024);
+    expect(kept.get(keptReference({ conversationId: String(root.id), callId: 'comments' }))).toBe(JSON.stringify(value, null, 2));
+    const shown = resultOf((await root.context(BACKGROUND_CONTEXT)).messages, 'comments').content.flatMap(item => item.type === 'text' ? [item.text] : [])[0] ?? '';
+    expect(shown.split('\n').slice(0, 9)).toEqual(['{', '  "file": "figma",', '  "comments": [', '    {', '      "id": "comment-0",', '      "author": {', '        "name": "Person 0",', '        "handle": "person-0"', '      },']);
+    const [outcome] = z.tuple([z.object({ status: z.literal('completed'), value: z.tuple([z.object({ type: z.literal('text'), text: z.string() })]) })]).parse(outcomes);
+    expect(JSON.parse(outcome.value[0].text)).toEqual(value);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);

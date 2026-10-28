@@ -3,6 +3,7 @@ export * from './harness.js';
 export * from './tasks.js';
 export { ProcessExitsDoc, recordMachineReconnection, recordProcessExit } from './jobs.js';
 export * from './tools.js';
+export * from './tool-results.js';
 export * from './conversation-tools.js';
 export * from './automation-requests.js';
 export * from './subagent-state.js';

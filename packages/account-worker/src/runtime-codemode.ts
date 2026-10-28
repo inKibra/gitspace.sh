@@ -8,6 +8,9 @@ import type { RuntimeModelHelper } from './runtime-inference.js';
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
 type Options = { loader: WorkerLoader; storage: DurableObjectStorage; model: RuntimeModelHelper };
 const MAX_BYTES = 65_536;
+/** A value crosses into the isolate as UTF-8 JSON in one Workers RPC message, at most 32 MiB: room for a tool's whole
+ * output, which is kept up to `TOOL_RESULT_MAX_BYTES` of text. */
+const MAX_VALUE_BYTES = 32 * 1024 * 1024 - 64 * 1024;
 const MAX_CALLS = 128;
 const callSchema = z.object({ tool: z.string().min(1), args: RuntimeJsonSchema });
 const methods = z.enum(['list', 'search', 'describe', 'call']);
@@ -51,10 +54,11 @@ export function createCloudCodemode(options: Options) {
       let revoked = false;
       let uncertain = false;
       const check = () => { controller.signal.throwIfAborted(); if (revoked) throw new Error('Codemode capability revoked'); if (++capabilityCalls > MAX_CALLS) throw new Error('Codemode call limit exceeded'); };
-      const track = <T>(operation: () => Promise<T>): Promise<T> => {
+      const track = (operation: () => Promise<z.infer<typeof RuntimeJsonSchema>>): Promise<Uint8Array> => {
         const promise = operation().then(value => {
-          if (new TextEncoder().encode(JSON.stringify(value)).length > MAX_BYTES) throw new Error('Codemode tool result exceeds 64 KiB; narrow the query');
-          return value;
+          const bytes = new TextEncoder().encode(JSON.stringify(value));
+          if (bytes.byteLength > MAX_VALUE_BYTES) throw new Error('Codemode tool result exceeds the 32 MiB a script can receive; narrow the query');
+          return bytes;
         });
         pending.add(promise);
         void promise.then(() => pending.delete(promise), () => pending.delete(promise));
@@ -90,10 +94,8 @@ export function createCloudCodemode(options: Options) {
             const content = z.array(RuntimeContentSchema).parse(await invoke(tool, args));
             const text = content.find(item => item.type === 'text');
             if (!text || text.type !== 'text') throw new Error('MCP tool omitted its result');
-            let parsed: unknown;
-            // Tool results are cut at 50 KB; a cut result is unreadable JSON, not missing access.
-            try { parsed = JSON.parse(text.text); } catch { throw new Error(`MCP ${tool} returned more than the 50 KB tool result limit and arrived cut off; request less (one tool, fewer fields, a page)`); }
-            return RuntimeJsonSchema.parse(parsed);
+            // A tool's whole output reaches codemode, however much of it the transcript keeps.
+            return RuntimeJsonSchema.parse(JSON.parse(text.text));
           }));
         }
       }
@@ -106,7 +108,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 export default class Sandbox extends WorkerEntrypoint { async execute(capability) {
   const output = []; let bytes = 0;
   const display = value => { const text = JSON.stringify(value) ?? 'null'; bytes += new TextEncoder().encode(text).length; if (bytes > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); output.push(text); };
-  const unwrap = async pending => { const result = await pending; if (!result.ok) throw new Error(result.error); return result.value; };
+  const unwrap = async pending => { const result = await pending; if (!result.ok) throw new Error(result.error); return JSON.parse(new TextDecoder().decode(result.value)); };
   const tools = new Proxy(Object.create(null), { get: (_, name) => typeof name === 'string' ? args => unwrap(capability.tool(name, args ?? {})) : undefined });
   const mcp = Object.freeze(Object.fromEntries(['list','search','describe','call'].map(method => [method, args => unwrap(capability.mcp(method, args ?? {}))])));
   const cancelled = capability.cancelled().then(reason => { throw new Error(reason); });

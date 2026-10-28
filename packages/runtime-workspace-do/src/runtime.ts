@@ -6,7 +6,7 @@ import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
 import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, PlanDoc, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, recordMachineReconnection, recordProcessExit, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
-import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
@@ -28,7 +28,8 @@ import { transcriptResponse, type RuntimeTranscriptFormat, type WithdrawnNotices
 import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished'> & { lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void };
+import { createToolResultStore, type WorkspaceToolResults } from './tool-results.js';
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void };
 /** The main conversation's turn for an input submitted with a request id. */
 export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
 /** One message of a turn, its text cut short. */
@@ -45,6 +46,8 @@ export type WorkspaceRuntime = {
   cloudFiles: CloudFileStore;
   /** Indexed search of the canonical snapshot; needs no machine. */
   codeSearch: CodeSearchIndex;
+  /** Tool outputs longer than the transcript keeps, read as `result://` paths. */
+  toolResults: WorkspaceToolResults;
   snapshot(): Promise<RuntimeSnapshot>;
   /** `tools` is a subagent's own tool list; null for the main conversation. */
   browserConversation(conversationId: string): Promise<{ id: ConversationId; root: boolean; tools: readonly string[] | null }>;
@@ -173,7 +176,8 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
 async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: RunningMarks, heartbeat: () => void, opening: RunningStep): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
   opening.update('opening the harness');
-  const runtime = await createRuntimeHarness({ ...options, storage, models: marks.models(options.models), unfinished: marks.unfinished });
+  const toolResults = createToolResultStore(options.storage.sql, options.identity.workspaceId, WORKSPACE_TOOL_RESULTS_MAX_BYTES);
+  const runtime = await createRuntimeHarness({ ...options, tools: { ...options.tools, results: toolResults }, storage, models: marks.models(options.models), unfinished: marks.unfinished });
   const { harness } = runtime;
   const withdrawn = createWithdrawnNotices(options.storage.sql);
   opening.update('withdrawing sync failure notices');
@@ -547,7 +551,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     return value;
   }
   return {
-    harness, attachments, cloudFiles, codeSearch,
+    harness, attachments, cloudFiles, codeSearch, toolResults,
     invokeConversationTool,
     async browserConversation(conversationId) {
       const target = await conversation(conversationId);

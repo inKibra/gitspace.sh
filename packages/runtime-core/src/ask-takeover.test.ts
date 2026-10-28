@@ -47,7 +47,7 @@ async function open(storage: Storage, args: object = asked) {
   } };
   const runtime = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage, models, model: { provider: 'test', modelId: model.id },
-    tools: { invoke: unused, prepareBrowser: unused, instructions: async () => '', preflight: async () => {}, async takeoverTab(input) { lookups.push(input.args); return tab; } },
+    tools: { invoke: unused, prepareBrowser: unused, instructions: async () => '', preflight: async () => {}, async takeoverTab(input) { lookups.push(input.args); return tab; }, results: { put: unused, text: unused } },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, async wakeAt(at) { wakes.push(at); const done = woken; woken = Promise.withResolvers(); done.resolve(); } },
     retainedRules: { loadRules: async () => [], judge: unused, matchAst: unused }, editTool: () => 'edit',
     onReport: error => { reports.push(error); }, admitInference: async () => ({ provider: 'test', modelId: model.id }), bindInferenceConversation: async () => {},
