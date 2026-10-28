@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { Duplex } from 'node:stream';
 import { mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import type { FileHandle } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { z } from 'zod';
 import { DaemonSpecSchema, StoredDaemonSchema, SupervisorRequestError, type DaemonRequest, type DaemonResponse } from './protocol.js';
@@ -9,7 +10,10 @@ import { bootIdentity, descendants, processIdentity, sameProcess, signalIdentity
 import { TerminalProjection } from './terminal-output.js';
 
 type Stored = z.infer<typeof StoredDaemonSchema>;
-type Running = { stored: Stored; bindings?: Record<string, string>; pipe?: ChildProcess; pty?: Bun.Subprocess; terminal?: Bun.Terminal; text: string; projection: TerminalProjection; listeners: Set<() => void>; writes: Promise<void>; launching?: Promise<void>; readinessTask?: Promise<void>; exitTask?: Promise<void>; stoppingTask?: Promise<void>; backgroundFailure?: Error; writing?: boolean; dirty?: boolean; stopping: boolean; recovered: boolean; restart?: NodeJS.Timeout; outputOffset?: number; outputTask?: Promise<void>; outputTimer?: NodeJS.Timeout; released?: boolean };
+/** A launch's `keepOutput` file: `total` bytes of output arrived, the first `queued` of them were accepted (everything
+ * after the first dropped byte is dropped too), and `written` reached the file. */
+type KeptOutput = { file: FileHandle; maxBytes: number; total: number; queued: number; written: number; writes: Promise<void>; failure?: string };
+type Running = { stored: Stored; bindings?: Record<string, string>; pipe?: ChildProcess; pty?: Bun.Subprocess; terminal?: Bun.Terminal; text: string; projection: TerminalProjection; kept?: KeptOutput; listeners: Set<() => void>; writes: Promise<void>; launching?: Promise<void>; readinessTask?: Promise<void>; exitTask?: Promise<void>; stoppingTask?: Promise<void>; backgroundFailure?: Error; writing?: boolean; dirty?: boolean; stopping: boolean; recovered: boolean; restart?: NodeJS.Timeout; outputOffset?: number; outputTask?: Promise<void>; outputTimer?: NodeJS.Timeout; released?: boolean };
 const MAX_LOG = 1024 * 1024;
 const StoredOutputSchema = StoredDaemonSchema.extend({ output: z.string().max(MAX_LOG), outputOffset: z.number().int().nonnegative().optional() });
 // Read legacy values only to retain their required names, never as launch bindings.
@@ -143,8 +147,36 @@ export class ProcessSupervisor {
     run.stored.cursor += text.length;
     if (run.text.length > MAX_LOG) { const removed = run.text.length - MAX_LOG; run.text = run.text.slice(removed); run.stored.base += removed; }
     run.projection.push(text);
+    if (run.kept) this.keep(run.kept, text);
     void this.persist(run).catch(error => { run.stored.daemon.failure = `Log persistence failed: ${String(error)}`; this.changed(run); });
     this.notify(run);
+  }
+  /** Queues what fits of `text` for the kept-output file. A cut falls before the character it would split. */
+  private keep(kept: KeptOutput, text: string): void {
+    const dropping = kept.queued < kept.total;
+    const length = Buffer.byteLength(text);
+    kept.total += length;
+    if (dropping) return;
+    const bytes = Buffer.from(text);
+    let end = Math.min(length, kept.maxBytes - kept.queued);
+    if (end < length) while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+    if (end === 0) return;
+    kept.queued += end;
+    const part = bytes.subarray(0, end);
+    kept.writes = kept.writes.then(async () => {
+      if (kept.failure) return;
+      try { await kept.file.writeFile(part); kept.written += part.length; } catch (error) { kept.failure = `Kept output write failed: ${String(error)}`; }
+    });
+  }
+  /** Flushes and closes the kept-output file, and records in the snapshot what it holds. */
+  private async closeKept(run: Running): Promise<void> {
+    const kept = run.kept;
+    if (!kept) return;
+    run.kept = undefined;
+    await kept.writes;
+    await kept.file.close().catch((error: unknown) => { kept.failure ??= `Kept output close failed: ${String(error)}`; });
+    if (kept.failure) run.stored.daemon.failure = kept.failure;
+    run.stored.daemon.keptOutput = { bytes: kept.written, droppedBytes: kept.total - kept.written };
   }
   private async readDetachedOutput(run: Running): Promise<void> {
     const file = await open(join(this.root, 'daemons', run.stored.daemon.name, 'output.log'), 'a+', 0o600);
@@ -183,7 +215,7 @@ export class ProcessSupervisor {
       throw new Error('Process environment bindings are unavailable; supply a fresh start after confirmed cleanup');
     }
     run.stopping = false; run.recovered = false; run.stoppingTask = undefined;
-    daemon.state = 'starting'; daemon.exitCode = null; delete daemon.failure; delete daemon.readiness; delete daemon.nextRestartCount;
+    daemon.state = 'starting'; daemon.exitCode = null; delete daemon.failure; delete daemon.readiness; delete daemon.nextRestartCount; delete daemon.keptOutput;
     const readinessCursor = run.stored.cursor;
     // Commit an unresolved claim before spawn. Recovery never replays this claim.
     run.stored.claimBoot = await bootIdentity();
@@ -194,6 +226,10 @@ export class ProcessSupervisor {
     const inherited = spec.inheritEnv === false ? {} : Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GITSPACE_')));
     const env = { ...inherited, ...run.bindings };
     try {
+      if (spec.keepOutput) {
+        await mkdir(dirname(spec.keepOutput.path), { recursive: true, mode: 0o700 });
+        run.kept = { file: await open(spec.keepOutput.path, 'w', 0o600), maxBytes: spec.keepOutput.maxBytes, total: 0, queued: 0, written: 0, writes: Promise.resolve() };
+      }
       if (spec.pty) {
         const child = Bun.spawn([spec.application, ...spec.args], {
           cwd: spec.cwd, env,
@@ -231,6 +267,7 @@ export class ProcessSupervisor {
         run.readinessTask = this.readiness(run, readinessCursor).catch(error => { run.backgroundFailure = error instanceof Error ? error : new Error(String(error)); });
       }
     } catch {
+      await this.closeKept(run);
       daemon.state = 'failed'; daemon.failure = 'Process launch failed'; daemon.pid = null;
       await this.persist(run); this.changed(run);
       // Spawn errors may contain resolved environment values; never persist or return them.
@@ -245,6 +282,7 @@ export class ProcessSupervisor {
     if (run.released) return;
     if (run.stored.spec.detached) await this.readDetachedOutput(run);
     run.terminal?.close(); run.terminal = undefined;
+    await this.closeKept(run);
     run.stored.daemon.exitCode = code;
     run.stored.daemon.pid = null;
     run.stored.identity = null;
@@ -377,6 +415,7 @@ export class ProcessSupervisor {
       if (request.spec.detached && !request.spec.persist) throw new SupervisorRequestError('DETACHED_REQUIRES_PERSISTENCE', 'Detached processes require persist:true; transient execution cannot retain detached output or recovery records');
       if (request.spec.ready?.log) new RegExp(request.spec.ready.log, 'u');
       if (request.spec.detached && request.spec.pty) throw new Error('A detached process cannot allocate a PTY');
+      if (request.spec.detached && request.spec.keepOutput) throw new Error('A detached process writes its own output file; it cannot keep output');
       const existing = this.runs.get(request.spec.name);
       if (existing && !finished(existing)) throw new Error(`Process ${request.spec.name} is already active or unresolved`);
       if (existing) {

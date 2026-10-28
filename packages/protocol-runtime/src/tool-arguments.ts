@@ -38,7 +38,7 @@ const processName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,159}$/u);
 const processTimeout = z.number().int().positive().max(300_000);
 const processSelection = RuntimeDispatchSelectionSchema.shape;
 export const RuntimeProcArgumentsSchema = z.discriminatedUnion('op', [
-  z.strictObject({ op: z.literal('start'), ...processSelection, spec: DaemonStartSpecSchema.omit({ visibility: true, inheritEnv: true }).extend({ cwd: path.optional(), args: z.array(z.string()).default([]), env: z.record(z.string(), z.string()).default({}), pty: z.boolean().default(true), restart: z.enum(['no', 'on-failure', 'always']).default('no'), persist: z.boolean().default(true), detached: z.boolean().default(false) }).strict() }),
+  z.strictObject({ op: z.literal('start'), ...processSelection, spec: DaemonStartSpecSchema.omit({ visibility: true, inheritEnv: true, keepOutput: true }).extend({ cwd: path.optional(), args: z.array(z.string()).default([]), env: z.record(z.string(), z.string()).default({}), pty: z.boolean().default(true), restart: z.enum(['no', 'on-failure', 'always']).default('no'), persist: z.boolean().default(true), detached: z.boolean().default(false) }).strict() }),
   z.strictObject({ op: z.literal('list'), ...processSelection }),
   z.strictObject({ op: z.literal('status'), name: processName, instanceId: z.string().uuid().optional(), restartCount: z.number().int().nonnegative().optional(), ...processSelection }),
   z.strictObject({ op: z.literal('describe'), name: processName, instanceId: z.string().uuid().optional(), restartCount: z.number().int().nonnegative().optional(), ...processSelection }),

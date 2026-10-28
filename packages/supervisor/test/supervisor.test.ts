@@ -393,3 +393,13 @@ test('completed process identity survives replacement and supervisor recovery', 
     expect(previous.daemon.exitCode).toBe(7);
   } finally { await recovered.request({ op: 'shutdown' }); }
 }, 5000);
+
+test('kept output stops at its byte limit before a character it would split, and nothing after the cut is appended', async () => {
+  const supervisor = await fixture();
+  const path = join(supervisor.root, 'kept', 'output.log');
+  await supervisor.request({ op: 'start', spec: { ...spec('kept', "printf 'ééééé'; sleep 0.2; printf 'a'"), keepOutput: { path, maxBytes: 9 } } });
+  const exited = await supervisor.request({ op: 'wait', name: 'kept', for: 'exit', timeoutMs: 5000 });
+  if (exited.op !== 'wait') throw new Error('Unexpected response');
+  expect(await readFile(path, 'utf8')).toBe('éééé');
+  expect(exited.daemon.keptOutput).toEqual({ bytes: 8, droppedBytes: 3 });
+});

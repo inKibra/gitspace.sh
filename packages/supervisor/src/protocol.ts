@@ -19,6 +19,9 @@ export const DaemonSpecSchema = z.object({
   visibility: z.enum(['public', 'private']).optional(),
   pty: z.boolean(), restart: z.enum(['no', 'on-failure', 'always']), persist: z.boolean(), detached: z.boolean(),
   ready: z.object({ log: z.string().optional(), port: z.number().int().min(1).max(65535).optional(), host: z.string().optional(), timeoutMs: timeout.optional() }).optional(),
+  /** The process's whole output, to `maxBytes` UTF-8 bytes, is written to `path` as it arrives (each launch starts it
+   * empty); output past that is dropped. The caller owns the file. Not for detached processes. */
+  keepOutput: z.object({ path: z.string().min(1), maxBytes: z.number().int().positive() }).optional(),
 });
 export type DaemonSpec = z.infer<typeof DaemonSpecSchema>;
 /** Environment values exist only in a caller's transient start request. */
@@ -32,6 +35,8 @@ export const DaemonSnapshotSchema = z.object({
   failure: z.string().optional(), restartCount: z.number().int().nonnegative(),
   nextRestartCount: z.number().int().nonnegative().optional(),
   readiness: z.object({ timedOut: z.boolean(), matched: z.string().optional() }).optional(),
+  /** For a process started with `keepOutput`, set when it exits: the bytes its file holds and the bytes it dropped. */
+  keptOutput: z.object({ bytes: z.number().int().nonnegative(), droppedBytes: z.number().int().nonnegative() }).optional(),
 });
 export type DaemonSnapshot = z.infer<typeof DaemonSnapshotSchema>;
 export const DaemonRequestSchema = z.discriminatedUnion('op', [
