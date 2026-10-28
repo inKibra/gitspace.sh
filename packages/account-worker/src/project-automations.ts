@@ -3,6 +3,7 @@ import {
   AUTOMATION_EVENT_ACTIONS,
   AUTOMATION_EVENT_LABEL,
   AUTOMATION_MAX_QUEUE_MS,
+  AUTOMATION_MODES,
   AUTOMATION_START_LABELS,
   AutomationActionSchema,
   AutomationConditionSchema,
@@ -36,8 +37,10 @@ import {
   type AutomationView,
 } from '@gitspace/protocol/automations-contract';
 import { githubRepositoryOf } from '@gitspace/protocol/github';
+import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS } from '@gitspace/protocol/inference';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { cloudResourceId, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
+import { profileModelRoles } from '@gitspace/runtime-core/inference';
 import { z } from 'zod';
 import { AutomationEventSchema, automationEventName, describeAutomationEvent, globMatches, triggerMatches, type AutomationEvent } from './automation-events.js';
 import { createCloudWorkspace, restoreCloudWorkspace, retryCloudWorkspaceCreation } from './cloud-workspace-lifecycle.js';
@@ -122,10 +125,13 @@ const SettingsSchema = z.object({
   trusted: z.array(z.string().trim().transform(login => login.replace(/^@/u, '')).pipe(z.string().regex(GITHUB_LOGIN, 'A trusted author is a GitHub login'))).max(MAX_TRUSTED),
 });
 
-/** What a workspace started for a subject is: its name and branch, mode, source and the subject it is linked to. */
+/** What a workspace started for a subject is: its name and branch, mode, model role, source and the subject it is
+ * linked to. */
 const StartSchema = z.object({
   name: z.string(),
-  mode: z.enum(['plan', 'code', 'review']),
+  mode: z.enum(AUTOMATION_MODES),
+  /** The model role its first run uses; null (and runs recorded before roles) the profile's default role. */
+  role: z.string().nullable().default(null),
   sourceKind: z.enum(['base', 'branch', 'pull-request']),
   sourceRef: z.string(),
   subject: AutomationSubjectSchema,
@@ -151,7 +157,7 @@ const TURN_END: Record<'finished' | 'failed' | 'asked', { state: 'finished' | 'f
   asked: { state: 'finished', label: 'Stopped to ask a person', outcome: text => `Waiting for you: ${text ?? 'a question'}` },
 };
 
-const MODE_LABEL: Record<AutomationMode, string> = { plan: 'Plan', code: 'Code', review: 'Review' };
+const MODE_LABEL: Record<AutomationMode, string> = { plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship' };
 const LINK_LABEL: Record<AutomationLinkSource, string> = { person: 'linked by a person', agent: 'linked by an agent', started: 'started for it', branch: 'same branch', closes: 'closed by its pull request' };
 /** A stronger link replaces a weaker one (docs/AUTOMATIONS-DESIGN.md §4). */
 const LINK_STRENGTH: Record<AutomationLinkSource, number> = { person: 3, agent: 3, started: 2, branch: 1, closes: 1 };
@@ -516,13 +522,15 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     }
   }
 
-  /** The project's automations, the limits and trust list they run under, and its subject links. */
-  list(projectIdInput: string): { automations: AutomationView[]; settings: AutomationSettings; links: AutomationLinkView[] } {
+  /** The project's automations, the limits and trust list they run under, its subject links, and the model roles a
+   * started workspace may run as. */
+  async list(projectIdInput: string): Promise<{ automations: AutomationView[]; settings: AutomationSettings; links: AutomationLinkView[]; modelRoles: string[] }> {
     const projectId = this.ensureProject(projectIdInput);
     return {
       automations: this.rows<AutomationRow>('SELECT * FROM automations ORDER BY name, id').map(row => this.automationView(projectId, row)),
       settings: this.settings(),
       links: this.rows<LinkRow>('SELECT * FROM automation_links ORDER BY COALESCE(activity_at, linked_at) DESC, subject_key').map(linkView),
+      modelRoles: await this.modelRoles(projectId),
     };
   }
 
@@ -835,7 +843,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
         // Cancelled meanwhile: nothing is delivered.
         if (this.run(run.id)?.state !== 'running') return;
         const space = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`);
-        const delivery = { projectId, workspaceId, requestId: `${AUTOMATION_REQUEST_PREFIX}${run.id}`, text: run.message };
+        const role = run.kind === 'start' ? StartSchema.parse(JSON.parse(run.start_json ?? 'null')).role : null;
+        const delivery = { projectId, workspaceId, requestId: `${AUTOMATION_REQUEST_PREFIX}${run.id}`, text: run.message, ...(role === null ? {} : { role }) };
         if (run.kind === 'notice') {
           await space.runtimeAutomationNotice(delivery);
           const current = this.run(run.id);
@@ -858,11 +867,20 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 
   /** A `start` run's workspace, created once under the id chosen when the run was recorded (a retried creation
-   * resumes it), then linked to the run's subject. */
+   * resumes it), then linked to the run's subject. A model role the project's profile no longer offers fails the run
+   * before the workspace exists. */
   private async startWorkspace(projectId: string, run: RunRow): Promise<void> {
     const start = StartSchema.parse(JSON.parse(run.start_json ?? 'null'));
     if (start.created || run.workspace_id === null) return;
     const workspaceId = run.workspace_id;
+    if (start.role !== null) {
+      const roles = await this.modelRoles(projectId);
+      if (!roles.includes(start.role)) {
+        const current = this.run(run.id);
+        if (current?.state === 'running') this.finish(current, 'failed', `Failed: model role ${start.role} is no longer in the project's inference profile; it offers ${roles.join(', ')}`, Date.now());
+        return;
+      }
+    }
     const existing = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getWorkspace(workspaceId);
     if (!existing) await createCloudWorkspace(this.env, this.env.ACCOUNT_ID, { id: workspaceId, projectId, name: start.name, branch: start.name, phase: start.mode, sourceKind: start.sourceKind, sourceRef: start.sourceRef });
     else if (existing.lifecycle === 'provisioning' || existing.lifecycle === 'failed') await retryCloudWorkspaceCreation(this.env, this.env.ACCOUNT_ID, workspaceId);
@@ -872,7 +890,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     if (current?.state !== 'running') return;
     // A link a person or agent made meanwhile stays; one found by branch gives way to the started workspace.
     const linked = this.putLink(start.subject, workspaceId, 'started', start.detail, now);
-    const timeline = [...TimelineSchema.parse(JSON.parse(current.timeline_json)), { at: now, label: `Started workspace ${start.name} in ${MODE_LABEL[start.mode]}` },
+    const timeline = [...TimelineSchema.parse(JSON.parse(current.timeline_json)), { at: now, label: `Started workspace ${start.name} in ${MODE_LABEL[start.mode]} with model role ${MODEL_ROLE_LABELS[start.role ?? 'default'] ?? start.role}` },
       { at: now, label: linked ? `Linked to ${automationSubjectName(start.subject)}` : `${automationSubjectName(start.subject)} stays linked to another workspace` }];
     this.ctx.storage.sql.exec('UPDATE automation_runs SET start_json=?, timeline_json=? WHERE id=?', JSON.stringify({ ...start, created: true }), JSON.stringify(timeline), run.id);
   }
@@ -1021,12 +1039,12 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
         const number = subject.number ?? 0;
         const name = `${mode}-${subject.kind === 'pullRequest' ? `pr-${number}` : subject.kind === 'issue' ? `issue-${number}` : (subject.branch ?? 'branch').toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 40)}`;
         const start: Start = {
-          name, mode, subject, created: false,
+          name, mode, role: action.role ?? null, subject, created: false,
           sourceKind: subject.kind === 'pullRequest' ? 'pull-request' : subject.kind === 'issue' ? 'base' : 'branch',
           sourceRef: subject.kind === 'pullRequest' ? String(number) : subject.kind === 'issue' ? '' : subject.branch ?? '',
           detail: event.label === null ? automation.name : `${automation.name} · ${event.label}`,
         };
-        return { ...plan, kind: 'start', start, workspaceId: cloudResourceId(name), targetName: name, would: `Would start workspace ${name} in ${MODE_LABEL[mode]}, linked to ${automationSubjectName(subject)}` };
+        return { ...plan, kind: 'start', start, workspaceId: cloudResourceId(name), targetName: name, would: `Would start workspace ${name} in ${MODE_LABEL[mode]} with model role ${MODEL_ROLE_LABELS[start.role ?? 'default'] ?? start.role}, linked to ${automationSubjectName(subject)}` };
       }
       case 'sendToLinked': {
         const linked = await context.linked();
@@ -1161,11 +1179,18 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     });
   }
 
-  /** The name runs show for an action's target; a named workspace must be an active workspace of the project. */
+  /** The name runs show for an action's target; a named workspace must be an active workspace of the project, and a
+   * started workspace's model role one its inference profile offers. */
   private async targetName(projectId: string, action: AutomationAction): Promise<string> {
     switch (action.kind) {
       case 'messageProjectAgent': return 'the project agent';
-      case 'startWorkspace': return 'a new workspace';
+      case 'startWorkspace': {
+        if (action.role !== undefined) {
+          const roles = await this.modelRoles(projectId);
+          if (!roles.includes(action.role)) refuse('action.role', `${action.role} is not a model role of this project's inference profile; it offers ${roles.join(', ')}`);
+        }
+        return 'a new workspace';
+      }
       case 'sendToLinked': return 'the linked workspace';
       case 'messageWorkspace': {
         const workspace = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getWorkspace(action.workspaceId);
@@ -1174,6 +1199,12 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
         return workspace.name;
       }
     }
+  }
+
+  /** The model roles the project's inference profile offers: those every profile has, and its own. */
+  private async modelRoles(projectId: string): Promise<string[]> {
+    const catalog = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).cloudInferenceCatalog(projectId);
+    return [...new Set([...BUILT_IN_MODEL_ROLES, ...(catalog ? profileModelRoles(catalog.profile.settings) : [])])];
   }
 
   /** The project's GitHub repository (`owner/name`), or null when its remote is not on GitHub. */

@@ -1482,11 +1482,11 @@ const automationProject = { projectId: wire.string };
 const automationTarget = { projectId: wire.string, automationId: wire.string };
 
 /** A project's automations, the limits and trust list they run under, its linked pull requests, issues and branches,
- * and its GitHub repository and bot. */
+ * its GitHub repository and bot, and the model roles its inference profile offers a started workspace. */
 export const listAutomationsContract = gitspaceRpc
   .procedure()
   .input(wire.object(automationProject))
-  .output(wire.object({ automations: wire.array(AutomationViewCodec), settings: AutomationSettingsCodec, links: wire.array(AutomationLinkViewCodec), github: AutomationGitHubCodec }))
+  .output(wire.object({ automations: wire.array(AutomationViewCodec), settings: AutomationSettingsCodec, links: wire.array(AutomationLinkViewCodec), modelRoles: wire.array(wire.string), github: AutomationGitHubCodec }))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 

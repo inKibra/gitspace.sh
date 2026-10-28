@@ -158,10 +158,10 @@ export const AUTOMATION_EVENT_ACTIONS: Record<AutomationGitHubEvent, readonly st
   check_suite: ['completed', 'requested', 'rerequested'],
 };
 
-export const AUTOMATION_MODES = ['plan', 'code', 'review'] as const;
+export const AUTOMATION_MODES = ['plan', 'code', 'review', 'ship'] as const;
 export type AutomationMode = (typeof AUTOMATION_MODES)[number];
 /** A label trigger starts on these labels, each naming the mode a started workspace begins in. */
-export const AUTOMATION_START_LABELS: Readonly<Record<string, AutomationMode>> = { 'gitspace:plan': 'plan', 'gitspace:code': 'code', 'gitspace:review': 'review' };
+export const AUTOMATION_START_LABELS: Readonly<Record<string, AutomationMode>> = { 'gitspace:plan': 'plan', 'gitspace:code': 'code', 'gitspace:review': 'review', 'gitspace:ship': 'ship' };
 
 // Triggers, conditions, actions and instructions. Each is one zod schema: the wire codec, the automations object's
 // stored JSON and the project agent's tool all read it.
@@ -175,7 +175,7 @@ export const AutomationTriggerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('manual') }).strict(),
   /** One or more GitHub events, each with the actions it starts on. */
   z.object({ kind: z.literal('github'), events: z.array(AutomationEventTriggerSchema).min(1).max(AUTOMATION_GITHUB_EVENTS.length) }).strict(),
-  /** A `gitspace:plan`, `gitspace:code` or `gitspace:review` label added to an issue or pull request. */
+  /** A `gitspace:plan`, `gitspace:code`, `gitspace:review` or `gitspace:ship` label added to an issue or pull request. */
   z.object({ kind: z.literal('label') }).strict(),
 ]);
 export type AutomationTrigger = z.infer<typeof AutomationTriggerSchema>;
@@ -232,8 +232,10 @@ export const AutomationActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('messageProjectAgent'), instruction: z.string().max(16_000) }).strict(),
   z.object({ kind: z.literal('messageWorkspace'), workspaceId: z.string().min(1).max(200), instruction: z.string().max(16_000) }).strict(),
   /** A new workspace for the event's pull request, issue or branch, linked to it; the rendered instruction and the event
-   * are its first message. `mode` null (a label trigger only) starts in the label's mode. */
-  z.object({ kind: z.literal('startWorkspace'), mode: z.enum(AUTOMATION_MODES).nullable(), instruction: z.string().max(16_000) }).strict(),
+   * are its first message. `mode` null (a label trigger only) starts in the label's mode. `role` is the model role of
+   * the project's inference profile its first run uses, set on its session as a person switching role sets it; absent,
+   * the profile's default role. */
+  z.object({ kind: z.literal('startWorkspace'), mode: z.enum(AUTOMATION_MODES).nullable(), role: z.string().min(1).max(100).optional(), instruction: z.string().max(16_000) }).strict(),
   /** The workspace linked to the event's subject: `wake` starts its agent, otherwise a notice leaves it asleep. With no
    * linked workspace the run is skipped, or with `orProjectAgent` goes to the project agent. */
   z.object({ kind: z.literal('sendToLinked'), wake: z.boolean(), orProjectAgent: z.boolean(), instruction: z.string().max(16_000) }).strict(),

@@ -1,6 +1,6 @@
 import type { WorkspaceReport } from '@gitspace/protocol-workspace';
 import type { RuntimeTurn, WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import type { RuntimeRequestStatus } from '@gitspace/runtime-core';
+import type { RuntimeAutomationInput, RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { RuntimeIdentity } from './runtime-services.js';
 import { AUTOMATION_REQUEST_PREFIX, type AutomationTurnReport } from './project-automations.js';
 
@@ -9,7 +9,7 @@ import { AUTOMATION_REQUEST_PREFIX, type AutomationTurnReport } from './project-
  * watch is armed before the submission exists, so the turn that submission starts is the one that reports. A retried
  * submission names the same request and delivers nothing new.
  */
-export async function submitAutomationTurn(storage: DurableObjectStorage, runtime: WorkspaceRuntime, input: { requestId: string; text: string }): Promise<{ conversationId: string }> {
+export async function submitAutomationTurn(storage: DurableObjectStorage, runtime: WorkspaceRuntime, input: RuntimeAutomationInput): Promise<{ conversationId: string }> {
   if (await runtime.turn(input.requestId) !== null) return runtime.automationSubmit(input);
   storage.sql.exec('INSERT OR IGNORE INTO workspace_automation_turns(request_id) VALUES(?)', input.requestId);
   try { return await runtime.automationSubmit(input); } catch (error) {

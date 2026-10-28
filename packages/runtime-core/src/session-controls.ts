@@ -34,6 +34,13 @@ export async function applyInferenceThinking(target: Conversation, admission: In
   }, BACKGROUND_CONTEXT);
   await target.configure({ thinkingLevel: thinking ?? null }, BACKGROUND_CONTEXT);
 }
+/** The conversation's role, as cycling roles or an automation starting its workspace chooses it: the profile's role
+ * gives the model and effort of every admission after it. */
+export function selectRole(controls: z.infer<typeof ControlsSchema>, role: string): void {
+  controls.role = role;
+  controls.selection = role === 'default' ? { kind: 'default' } : { kind: 'role', role };
+  controls.thinkingSelection = { source: 'profile' };
+}
 export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>({ kind: 'gitspace.session-selection', version: 1, scope: 'session', initial: () => ({ conversationId: null }) });
 const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }) });
 const DefinitionMetadataSchema = z.object({ name: z.string().min(1).optional(), description: z.string().default(''), model: z.union([z.string(), z.array(z.string())]).optional(), thinking: ThinkingSchema.nullable().optional(), tools: z.union([z.string(), z.array(z.string())]).optional(), spawns: z.union([z.string(), z.array(z.string())]).optional() });
@@ -289,7 +296,7 @@ export function createSessionControls(services: SessionControlServices) {
       }
       case 'setModel': { const catalog = await services.catalog(); if (!catalog.models.some(model => model.provider === command.provider && model.id === command.model)) throw new Error('Model is not admitted by the inference profile'); await services.configureModel(target.id, { provider: command.provider, modelId: command.model }); await mutate(draft => { draft.role = null; draft.selection = { kind: 'explicit', provider: command.provider, modelId: command.model }; }); break; }
       case 'setThinking': { const thinking = modelRoleThinkingSchema.parse(command.thinking); await target.configure({ thinkingLevel: thinking }, ctx); await mutate(draft => { draft.thinkingSelection = { source: 'conversation', thinking }; }); break; }
-      case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => { draft.role = role.id; draft.selection = role.id === 'default' ? { kind: 'default' } : { kind: 'role', role: role.id }; draft.thinkingSelection = { source: 'profile' }; }); break; }
+      case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => selectRole(draft, role.id)); break; }
       case 'setFast': await mutate(draft => { draft.fastMode = command.enabled; }); break;
       case 'setWorkspacePhase':
         await services.setWorkspacePhase?.(command.phase);

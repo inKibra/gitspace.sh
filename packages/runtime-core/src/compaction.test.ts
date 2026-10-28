@@ -8,11 +8,12 @@ import { createRuntimeHarness, type RuntimeHarnessOptions } from './harness.js';
 const model: Model<Api> = { id: 'summarizer', name: 'Summarizer', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
-const OUTPUT = 'y'.repeat(150_000), LOG = `case 7 failed\n${OUTPUT}`;
+const OUTPUT = 'y'.repeat(150_000), LOG = `case 7 failed\n${OUTPUT}`, SCREENSHOT = 'iVBORw0KGgo'.repeat(2_000);
 const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage => ({ role: 'assistant', content: [{ type: 'text', text }], api: model.api, provider: model.provider, model: model.id, stopReason, ...(stopReason === 'error' ? { errorMessage: 'prompt is too long' } : {}), timestamp: Date.now(), usage });
 
-/** A conversation holding one large tool exchange, the provider's requests, and the record of unfinished requests. */
-async function fixture(options: { fullFails?: boolean; unfinished?: Record<string, number> } = {}) {
+/** A conversation holding one large tool exchange (after `older` earlier ones and a screenshot when asked), the
+ * provider's requests, and the record of unfinished requests. */
+async function fixture(options: { fullFails?: boolean; unfinished?: Record<string, number>; older?: number } = {}) {
   const requests: Context[] = [];
   const unfinished = new Map(Object.entries(options.unfinished ?? {}));
   /** Requests refused by signal never reach the provider; their reasons are what the user is shown. */
@@ -49,7 +50,11 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
   };
   const { harness, root } = await createRuntimeHarness(options_);
   await root.commit(async tx => {
-    await tx.appendEntry(UserEntry, root.id, { model: [{ role: 'user', content: 'Write big.ts and run the tests', timestamp: 1 }] });
+    await tx.appendEntry(UserEntry, root.id, { model: [{ role: 'user', content: [{ type: 'text', text: 'Write big.ts and run the tests' }, ...(options.older ? [{ type: 'image' as const, data: SCREENSHOT, mimeType: 'image/png' }] : [])], timestamp: 1 }] });
+    for (let index = 0; index < (options.older ?? 0); index++) {
+      await tx.appendEntry(AssistantEntry, root.id, { model: [{ role: 'assistant', content: [{ type: 'toolCall', id: `read-${index}`, name: 'read', arguments: { path: `old-${index}.log` } }], api: model.api, provider: model.provider, model: model.id, stopReason: 'toolUse', timestamp: 1, usage }] });
+      await tx.appendEntry(ToolResultEntry, root.id, { model: [{ role: 'toolResult', toolCallId: `read-${index}`, toolName: 'read', content: [{ type: 'text', text: `old-${index} start\n${OUTPUT}` }], isError: false, timestamp: 1 }], data: { diagnostics: [] } });
+    }
     await tx.appendEntry(AssistantEntry, root.id, { model: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'write-1', name: 'write', arguments: { path: 'big.ts', content: 'x'.repeat(150_000) } }], api: model.api, provider: model.provider, model: model.id, stopReason: 'toolUse', timestamp: 2, usage }] });
     await tx.appendEntry(ToolResultEntry, root.id, { model: [{ role: 'toolResult', toolCallId: 'write-1', toolName: 'write', content: [{ type: 'text', text: LOG }], isError: false, timestamp: 3 }], data: { diagnostics: [] } });
     for (let turn = 0; turn < 8; turn++) await tx.appendEntry(UserEntry, root.id, { model: [{ role: 'user', content: `Recent request ${turn}: ${'z'.repeat(12_000)}`, timestamp: 4 + turn }] });
@@ -57,6 +62,27 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
   return { harness, root, requests, unfinished, refusals };
 }
 const sent = (request: Context) => JSON.stringify(request.messages);
+const DROPPED_NOTE = 'Older tool output and images were left out of the request this summary was made from';
+
+test('compaction of a prefix over the limit sends one request without old tool output or images, and the summary says so', async () => {
+  const { harness, root, requests, unfinished } = await fixture({ older: 12 });
+  try {
+    await root.compact(undefined, context);
+    await root.waitForIdle(context);
+    expect(requests).toHaveLength(1);
+    const request = sent(requests[0]!);
+    expect(request).not.toContain(OUTPUT);
+    expect(request).not.toContain(SCREENSHOT);
+    expect(request).toContain('[1 image(s) left out of this summary request]');
+    // The ten most recent tool results keep their start; the three oldest say only which tool ran.
+    expect(request).not.toContain('old-2 start');
+    expect(request).toContain('old-3 start');
+    expect(request).toContain('case 7 failed');
+    expect(request.split('[read output left out of this summary request]')).toHaveLength(4);
+    expect(JSON.stringify((await root.entries({}, 200, undefined, context)).items)).toContain(DROPPED_NOTE);
+    expect(unfinished.size).toBe(0);
+  } finally { await harness.close(context); }
+}, 10_000);
 
 test('compaction sends the full prefix first and, when that fails, the prefix without heavy tool output', async () => {
   const { harness, root, requests, unfinished } = await fixture({ fullFails: true });
@@ -68,13 +94,15 @@ test('compaction sends the full prefix first and, when that fails, the prefix wi
     expect(sent(requests[1]!)).toContain('case 7 failed');
     expect(sent(requests[1]!)).toContain('more characters left out of this summary request');
     expect(sent(requests[1]!).length).toBeLessThan(30_000);
-    expect(JSON.stringify((await root.entries({}, 100, undefined, context)).items)).toContain('Handoff: wrote big.ts');
+    const entries = JSON.stringify((await root.entries({}, 100, undefined, context)).items);
+    expect(entries).toContain('Handoff: wrote big.ts');
+    expect(entries).toContain(DROPPED_NOTE);
     expect(unfinished.size).toBe(0);
   } finally { await harness.close(context); }
 }, 10_000);
 
-test('a compaction resets cut off is retried whole once, then without heavy tool output, then refused in words', async () => {
-  for (const [earlier, expected] of [[1, 'full'], [2, 'lean'], [3, 'refused']] as const) {
+test('a compaction a reset cut off is retried once without old tool output, then refused in words', async () => {
+  for (const [earlier, expected] of [[1, 'dropped'], [2, 'refused']] as const) {
     const { harness, root, requests, unfinished, refusals } = await fixture({ unfinished: { 'compaction:1': earlier } });
     try {
       await root.compact(undefined, context).catch(() => undefined);
@@ -82,12 +110,13 @@ test('a compaction resets cut off is retried whole once, then without heavy tool
       if (expected === 'refused') {
         // Neither this hook nor pi's own summarizer sends the prefix again.
         expect(requests).toHaveLength(0);
-        expect(refusals.at(-1)).toContain('Compaction was cut off by a workspace reset 3 times');
+        expect(refusals.at(-1)).toContain('Compaction was cut off by a workspace reset 2 times');
         expect(unfinished.has('compaction:1')).toBe(false);
         continue;
       }
       expect(requests).toHaveLength(1);
-      expect(sent(requests[0]!).includes(OUTPUT)).toBe(expected === 'full');
+      expect(sent(requests[0]!)).not.toContain(OUTPUT);
+      expect(sent(requests[0]!)).toContain('case 7 failed');
     } finally { await harness.close(context); }
   }
 }, 20_000);

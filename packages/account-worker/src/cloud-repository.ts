@@ -288,8 +288,9 @@ async function readCloudContent(
   // The payload, not its pointer, counts against the budget.
   budget.remaining += bytes.byteLength;
   reserve(budget, pointer.size, tooLarge);
+  if (checkout.source.project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
   // The store verifies oid and size while streaming.
-  const payload = await (await createAccountGitLfsStore(env, userId, checkout.source.project.id, `inspector:${checkout.source.workspace.id}`)).get(pointer);
+  const payload = await createAccountGitLfsStore(env, userId, checkout.source.project.id, `inspector:${checkout.source.workspace.id}`).get(pointer);
   if (!payload) throw new Error(`LFS file ${path} (${pointer.size} bytes) needs a machine to download its content from origin.`);
   return { bytes: await collectBytes(payload, pointer.size), lfs: true };
 }

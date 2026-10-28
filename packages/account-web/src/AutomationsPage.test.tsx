@@ -65,8 +65,8 @@ afterEach(async () => {
   else Reflect.deleteProperty(Element.prototype, 'getAnimations');
 });
 
-async function renderProject(automations: readonly AutomationView[], { links = [], settings = AUTOMATION_DEFAULT_SETTINGS }: { links?: readonly AutomationLinkView[]; settings?: AutomationSettings } = {}): Promise<void> {
-  queries.set('list', { automations, settings, links, github });
+async function renderProject(automations: readonly AutomationView[], { links = [], settings = AUTOMATION_DEFAULT_SETTINGS, modelRoles = ['default', 'deep', 'fast', 'taste'] }: { links?: readonly AutomationLinkView[]; settings?: AutomationSettings; modelRoles?: readonly string[] } = {}): Promise<void> {
+  queries.set('list', { automations, settings, links, modelRoles, github });
   await act(() => root.render(<AutomationsPage projects={[{ id: 'project', name: 'GitSpace', workspaces }]} projectId="project" onSelectProject={() => undefined} onOpenWorkspace={() => undefined} />));
 }
 
@@ -205,6 +205,23 @@ it('saves the chosen events, actions and filters, without a filter the events no
   } });
 });
 
+it('starts a workspace in the chosen mode and model role, offering the roles of the project\'s inference profile', async () => {
+  rpc.create.mockResolvedValue({ status: 'ok', value: review });
+  await renderProject([], { modelRoles: ['default', 'deep', 'fast', 'taste', 'reviewer'] });
+  await act(() => button('New automation').click());
+  await type(field('input[aria-label="Name"]'), 'Review pull requests');
+  await type(field<HTMLTextAreaElement>('textarea[aria-label="Instruction"]'), 'Review {{pull_request.html_url}}.');
+  await choose('Mode', 'Code');
+  await act(() => field('[aria-label="Model role"]').click());
+  const listboxes = [...document.body.querySelectorAll('[role="listbox"]')];
+  expect([...listboxes.at(-1)?.querySelectorAll('[role="option"]') ?? []].map(option => option.textContent)).toEqual(['Default', 'Deep', 'Fast', 'Taste', 'reviewer']);
+  await act(() => field('[aria-label="Model role"]').click());
+  await choose('Model role', 'reviewer');
+  await act(async () => button('Create automation').click());
+  const action = { kind: 'startWorkspace', mode: 'code', role: 'reviewer', instruction: 'Review {{pull_request.html_url}}.' };
+  expect(rpc.create).toHaveBeenCalledExactlyOnceWith({ projectId: 'project', draft: expect.objectContaining({ action }) });
+});
+
 it('tests against the chosen recorded event and runs it only for the saved automation unchanged', async () => {
   const events: AutomationRecordedEvent[] = [
     { deliveryId: 'delivery-1143', event: 'pull_request', label: 'PR #1143 · pull_request.opened', receivedAt: new Date('2026-10-27T11:59:00Z') },
@@ -212,7 +229,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
   ];
   queries.set('events', events);
   rpc.test.mockResolvedValue({ status: 'ok', value: {
-    results: [{ label: 'PR #1144 · pull_request.opened', result: 'Would start workspace review-pr-1144 in Review, linked to PR #1144', runs: true }],
+    results: [{ label: 'PR #1144 · pull_request.opened', result: 'Would start workspace review-pr-1144 in Review with model role Default, linked to PR #1144', runs: true }],
     instruction: 'Review https://github.com/inKibra/inkibra-core/pull/1144.',
     checks: [{ label: 'base branch is main', passed: true }, { label: 'not a draft', passed: null }],
   } });
@@ -238,7 +255,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
   expect(rpc.test).toHaveBeenLastCalledWith({ projectId: 'project', draft, deliveryId: 'delivery-1144' });
   const checks = [...field('[aria-label="Checks"]').querySelectorAll('li')].map(check => check.textContent);
   expect(checks).toEqual(['base branch is main', 'not a draft (not checked)']);
-  expect(field('[aria-label="Test result"]').textContent).toBe('Would start workspace review-pr-1144 in Review, linked to PR #1144');
+  expect(field('[aria-label="Test result"]').textContent).toBe('Would start workspace review-pr-1144 in Review with model role Default, linked to PR #1144');
   expect(field('[aria-label="Rendered instruction"]').textContent).toBe('Review https://github.com/inKibra/inkibra-core/pull/1144.');
   expect(rpc.runOnEvent).not.toHaveBeenCalled();
 

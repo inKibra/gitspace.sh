@@ -1,11 +1,12 @@
 import { InboxDoc, type Harness, type Storage, type Cursor, type Conversation, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { AutomationRequestsDoc } from './documents.js';
-import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
+import { applyInferenceThinking, selectRole, SessionControlsDoc } from './session-controls.js';
 import type { RuntimeHarnessOptions } from './harness.js';
 
-/** An automation run's instruction to the main conversation; its request id makes a retried submission deliver it once. */
-export type RuntimeAutomationInput = { requestId: string; text: string };
+/** An automation run's instruction to the main conversation; its request id makes a retried submission deliver it once.
+ * `role` (a workspace an automation started) becomes the conversation's model role with this first run. */
+export type RuntimeAutomationInput = { requestId: string; text: string; role?: string };
 export type RuntimeRequestStatus = { state: 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'withdrawn'; conversationId: string | null; message: string | null };
 
 /** Request tracking for automation runs: idempotent submission by request id, status, withdraw and cancel. */
@@ -43,8 +44,11 @@ export function createAutomationRequests(options: Pick<RuntimeHarnessOptions, 'a
       if (saved?.requests[input.requestId]?.withdrawn || saved?.withdrawnRequests?.includes(input.requestId)) return { conversationId: id };
       const existing = await target.commit(tx => tx.submissionByRequest(target.id, input.requestId), context);
       if (!existing) {
-        const selection = (await options.harness.snapshot(SessionControlsDoc, target.id, context))?.selection ?? { kind: 'default' as const };
+        const { role } = input;
+        // The role is admitted before it is selected: one the profile no longer has refuses the run and changes nothing.
+        const selection = role === undefined ? (await options.harness.snapshot(SessionControlsDoc, target.id, context))?.selection ?? { kind: 'default' as const } : { kind: 'role' as const, role };
         const model = await options.admitInference({ conversationId: id, requestId: input.requestId, selection });
+        if (role !== undefined) await target.commit(async tx => { const controls = await tx.doc(SessionControlsDoc, target.id); selectRole(controls, role); controls.revision++; }, context);
         await options.configureModel(target.id, model);
         await applyInferenceThinking(target, model);
         await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, context);

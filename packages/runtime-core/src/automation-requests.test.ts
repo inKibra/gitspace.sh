@@ -2,8 +2,10 @@ import { expect, test } from 'vitest';
 import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
+import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 import { createAutomationRequests } from './automation-requests.js';
 import { createConversationLifecycle } from './conversation-lifecycle.js';
+import { SessionControlsDoc } from './session-controls.js';
 
 const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'controlled', name: 'Controlled', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
@@ -75,6 +77,49 @@ test('a retried submission delivers its instruction once, and a request id canno
     expect(prompts.filter(prompt => prompt.includes('Nightly audit'))).toHaveLength(1);
     expect(prompts).toHaveLength(2);
   } finally { release.resolve(); await harness.close(context); }
+});
+
+test('an automation\'s model role is admitted for its first run and becomes the conversation\'s role; a role the profile lacks is refused and changes nothing', async () => {
+  const storage = new MemoryStorage();
+  const prompts: string[] = [];
+  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+    prompts.push(JSON.stringify(input));
+    const stream = createAssistantMessageEventStream();
+    const message = reply();
+    stream.push({ type: 'done', reason: 'stop', message });
+    stream.end(message);
+    return stream;
+  } };
+  const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
+  try {
+    const root = await harness.root(context, { agent: { model: reference } });
+    const admitted: ModelSelectionIntent[] = [];
+    const automation = createAutomationRequests({
+      harness, storage,
+      // As the cloud admits: a role the profile does not define is refused.
+      async admitInference({ selection = { kind: 'default' } }) {
+        if (selection.kind === 'role' && selection.role === 'gone') throw new Error('Inference role gone is not defined in this profile; its roles are default, deep, fast, taste, reviewer');
+        admitted.push(selection);
+        return { ...reference, ...(selection.kind === 'role' ? { role: selection.role } : {}) };
+      },
+      async configureModel(id, value) { const target = await harness.conversation(id, context); if (!target) throw new Error('Missing target'); await target.configure({ model: value }, context); },
+      async wake() { harness.resume(); },
+    });
+    const controls = async () => harness.snapshot(SessionControlsDoc, root.id, context);
+
+    await expect(automation.submit({ requestId: 'automation:gone', text: 'Review as gone', role: 'gone' })).rejects.toThrow('Inference role gone is not defined');
+    expect((await controls())?.role ?? null).toBeNull();
+
+    await automation.submit({ requestId: 'automation:start', text: 'Review the pull request', role: 'reviewer' });
+    await root.waitForIdle(context);
+    expect(admitted).toEqual([{ kind: 'role', role: 'reviewer' }]);
+    expect(await controls()).toMatchObject({ role: 'reviewer', selection: { kind: 'role', role: 'reviewer' } });
+    // A later run with no role keeps the conversation's.
+    await automation.submit({ requestId: 'automation:feedback', text: 'Address the review feedback' });
+    await root.waitForIdle(context);
+    expect(admitted).toEqual([{ kind: 'role', role: 'reviewer' }, { kind: 'role', role: 'reviewer' }]);
+    expect(prompts.some(prompt => prompt.includes('Review as gone'))).toBe(false);
+  } finally { await harness.close(context); }
 });
 
 test('withdrawing a queued instruction leaves the active user turn and other queued messages untouched', async () => {

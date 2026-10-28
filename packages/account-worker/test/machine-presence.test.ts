@@ -16,7 +16,7 @@ import {
 import { RuntimeAttachInputSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import worker, { SpaceAuthorityDO, UserRelayDO } from '../src/index.js';
-import { createRuntimeQaServices } from '../src/runtime-services.js';
+import { createRuntimeQaServices } from '../src/runtime-qa.js';
 
 const rootKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
@@ -228,7 +228,7 @@ describe('relay presence', () => {
       // The eighth failure gives up: no wake is left, and the workspace's QA inbox says so.
       expect(await retries()).toEqual([]);
       expect(await relayAlarm()).toBeNull();
-      expect((await createRuntimeQaServices(env, RuntimeIdentitySchema.parse(workspace)).list()).map(item => item.description)).toEqual([`GitSpace could not record that machine ${machineId} is online in this workspace after 8 tries over about 10 minutes (A workspace did not record the machine presence). It shows the old state until the machine next connects or disconnects.`]);
+      expect(await runInDurableObject(space(workspace.workspaceId), (_instance, state) => createRuntimeQaServices(state.storage, env, RuntimeIdentitySchema.parse(workspace)).list().map(item => item.description))).toEqual([`GitSpace could not record that machine ${machineId} is online in this workspace after 8 tries over about 10 minutes (A workspace did not record the machine presence). It shows the old state until the machine next connects or disconnects.`]);
     } finally { clock.mockRestore(); }
     refused.mockRestore();
     await connect({ notices: RELAY_NOTICE_MODE });

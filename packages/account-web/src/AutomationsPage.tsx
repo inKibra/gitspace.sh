@@ -73,6 +73,7 @@ import {
   type AutomationTriggerKind,
   type AutomationView,
 } from '@gitspace/protocol/automations-contract';
+import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS } from '@gitspace/protocol/inference';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
@@ -113,8 +114,8 @@ const NO_GITHUB: AutomationGitHub = { repository: null, bot: null };
 
 type BadgeColor = 'blue' | 'amber' | 'green' | 'gray' | 'red';
 const RUN_STATE_COLOR: Record<AutomationRunState, BadgeColor> = { running: 'blue', queued: 'amber', finished: 'green', skipped: 'gray', failed: 'red' };
-const MODE_LABEL: Record<AutomationMode, string> = { plan: 'Plan', code: 'Code', review: 'Review' };
-const MODE_COLOR: Record<AutomationMode, 'indigo' | 'emerald' | 'violet'> = { plan: 'indigo', code: 'emerald', review: 'violet' };
+const MODE_LABEL: Record<AutomationMode, string> = { plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship' };
+const MODE_COLOR: Record<AutomationMode, 'indigo' | 'emerald' | 'violet' | 'amber'> = { plan: 'indigo', code: 'emerald', review: 'violet', ship: 'amber' };
 const TRIGGER_KINDS: readonly AutomationTriggerKind[] = ['github', 'label', 'schedule', 'manual'];
 const TRIGGER_OPTION_LABEL: Record<AutomationTriggerKind, string> = { github: 'GitHub event', label: 'Label added', schedule: 'Schedule', manual: 'Manual only' };
 /** What an instruction's placeholders are checked against, in the editor's refusal. */
@@ -126,8 +127,10 @@ const MESSAGE_ACTION_KINDS: readonly ActionKind[] = ['messageWorkspace', 'messag
 /** Starting a workspace and sending to the linked one need the pull request, issue or branch an event is about. */
 const TRIGGER_ACTIONS: Record<AutomationTriggerKind, readonly ActionKind[]> = { github: EVENT_ACTION_KINDS, label: EVENT_ACTION_KINDS, schedule: MESSAGE_ACTION_KINDS, manual: MESSAGE_ACTION_KINDS };
 const ACTION_LABEL: Record<ActionKind, string> = { startWorkspace: 'Start a workspace for the subject', sendToLinked: 'Send to the linked workspace', messageWorkspace: 'Message a workspace', messageProjectAgent: 'Message the project agent' };
-/** The Starts in choice that leaves the mode to the label; only a label trigger offers it. */
+/** The Mode choice that leaves the mode to the label; only a label trigger offers it. */
 const LABEL_MODE = 'label';
+/** The role a started workspace runs as when the action names none. */
+const DEFAULT_ROLE = 'default';
 const DELIVERY_OPTIONS: readonly { value: string; label: string }[] = [{ value: 'wake', label: 'Wakes the agent' }, { value: 'notice', label: 'A notice; the agent stays asleep' }];
 /** The Recorded event choice that tests the recent deliveries the trigger starts on. */
 const RECENT_EVENTS = 'recent';
@@ -408,7 +411,7 @@ function actionReadback(automation: AutomationView, project: AutomationsProject 
   switch (action.kind) {
     case 'messageProjectAgent': return 'Message the project agent';
     case 'messageWorkspace': return <>Message workspace <span className="font-mono text-caption">{workspaceLabel(project, automation.projectId, action.workspaceId)}</span></>;
-    case 'startWorkspace': return <>Start a workspace for {subjectNoun(automation.trigger)} · starts in <strong className="font-semibold">{action.mode ? MODE_LABEL[action.mode] : 'the label\'s mode'}</strong></>;
+    case 'startWorkspace': return <>Start a workspace for {subjectNoun(automation.trigger)} · starts in <strong className="font-semibold">{action.mode ? MODE_LABEL[action.mode] : 'the label\'s mode'}</strong>{action.role ? <> with model role <strong className="font-semibold">{MODEL_ROLE_LABELS[action.role] ?? action.role}</strong></> : null}</>;
     case 'sendToLinked': return <>Send to its linked workspace{action.orProjectAgent ? ', or to the project agent when it has none' : ''}{action.wake ? <> · <strong className="font-semibold">wakes the agent</strong></> : ' as a notice · the agent stays asleep'}</>;
   }
 }
@@ -711,10 +714,10 @@ function ConditionRow({ condition, bot, missing, onChange, onRemove }: { conditi
   </li>;
 }
 
-type EditorField = 'name' | 'cron' | 'events' | 'conditions' | 'action' | 'mode' | 'workspace' | 'instruction';
+type EditorField = 'name' | 'cron' | 'events' | 'conditions' | 'action' | 'mode' | 'role' | 'workspace' | 'instruction';
 /** The `field` an `automationInvalid` error names, mapped to the editor control that shows it. */
 const INVALID_FIELD: Record<string, EditorField> = {
-  name: 'name', 'trigger.cron': 'cron', 'trigger.events': 'events', conditions: 'conditions', 'action.kind': 'action', 'action.mode': 'mode', 'action.workspaceId': 'workspace', 'action.instruction': 'instruction',
+  name: 'name', 'trigger.cron': 'cron', 'trigger.events': 'events', conditions: 'conditions', 'action.kind': 'action', 'action.mode': 'mode', 'action.role': 'role', 'action.workspaceId': 'workspace', 'action.instruction': 'instruction',
 };
 
 function editorFailure(cause: unknown, key: string, operation: string): { key: string; field: EditorField | null; message: string } {
@@ -722,8 +725,8 @@ function editorFailure(cause: unknown, key: string, operation: string): { key: s
   return { key, field: null, message: rpcErrorMessage(cause, operation) };
 }
 
-function AutomationEditor({ projectId, workspaces, github, source, testFirst, now, onCancel, onSaved, onRan }: {
-  projectId: string; workspaces: readonly AutomationWorkspace[]; github: AutomationGitHub; source: AutomationView | null; testFirst: boolean; now: number;
+function AutomationEditor({ projectId, workspaces, github, modelRoles, source, testFirst, now, onCancel, onSaved, onRan }: {
+  projectId: string; workspaces: readonly AutomationWorkspace[]; github: AutomationGitHub; modelRoles: readonly string[]; source: AutomationView | null; testFirst: boolean; now: number;
   onCancel(): void; onSaved(): Promise<void>; onRan(run: AutomationRunView): Promise<void>;
 }): ReactElement {
   const shape = useShape();
@@ -737,6 +740,7 @@ function AutomationEditor({ projectId, workspaces, github, source, testFirst, no
   const [conditions, setConditions] = useState<readonly AutomationCondition[]>(source?.conditions ?? []);
   const [actionKind, setActionKind] = useState<ActionKind>(source?.action.kind ?? (TRIGGER_ACTIONS[initialTrigger].includes('startWorkspace') ? 'startWorkspace' : 'messageProjectAgent'));
   const [mode, setMode] = useState<AutomationMode | null>(source?.action.kind === 'startWorkspace' ? source.action.mode : initialTrigger === 'label' ? null : 'review');
+  const [role, setRole] = useState(source?.action.kind === 'startWorkspace' ? source.action.role ?? DEFAULT_ROLE : DEFAULT_ROLE);
   const [wake, setWake] = useState(source?.action.kind === 'sendToLinked' ? source.action.wake : true);
   const [orProjectAgent, setOrProjectAgent] = useState(source?.action.kind === 'sendToLinked' ? source.action.orProjectAgent : false);
   const [workspaceId, setWorkspaceId] = useState(source?.action.kind === 'messageWorkspace' ? source.action.workspaceId : '');
@@ -779,7 +783,7 @@ function AutomationEditor({ projectId, workspaces, github, source, testFirst, no
   // Conditions the chosen events do not offer stay out of the draft.
   const shownConditions = conditions.filter(condition => offered.includes(condition.kind));
   const action: AutomationAction = actionKind === 'messageWorkspace' ? { kind: 'messageWorkspace', workspaceId, instruction }
-    : actionKind === 'startWorkspace' ? { kind: 'startWorkspace', mode, instruction }
+    : actionKind === 'startWorkspace' ? { kind: 'startWorkspace', mode, ...(role === DEFAULT_ROLE ? {} : { role }), instruction }
       : actionKind === 'sendToLinked' ? { kind: 'sendToLinked', wake, orProjectAgent, instruction }
         : { kind: 'messageProjectAgent', instruction };
   // A person's automation runs at once; a proposal edited here is switched on when saved.
@@ -807,6 +811,8 @@ function AutomationEditor({ projectId, workspaces, github, source, testFirst, no
   const [onlyEvent] = events;
   const conditionsReadback = `Runs for ${events.length === 1 && onlyEvent ? EVENT_NOUN[onlyEvent.event] : 'events'}${completeConditions.length ? ` ${completeConditions.map(condition => conditionPhrase(condition, bot)).join(', ')}` : ' of every kind'}.`;
   const modeChoices = [...(triggerKind === 'label' ? [{ value: LABEL_MODE, label: 'The label\'s mode' }] : []), ...AUTOMATION_MODES.map(entry => ({ value: entry, label: MODE_LABEL[entry] }))];
+  // A saved role the profile no longer offers stays chosen until changed; saving it is refused.
+  const roleChoices = [...modelRoles, ...(modelRoles.includes(role) ? [] : [role])].map(entry => ({ value: entry, label: MODEL_ROLE_LABELS[entry] ?? entry }));
 
   const chosenDelivery = deliveryChoice ?? recorded[0]?.deliveryId ?? RECENT_EVENTS;
   const delivery = eventTrigger && chosenDelivery !== RECENT_EVENTS ? chosenDelivery : null;
@@ -940,7 +946,7 @@ function AutomationEditor({ projectId, workspaces, github, source, testFirst, no
           {errors.events ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{errors.events}</p> : null}
           {events.length < AUTOMATION_GITHUB_EVENTS.length ? <div><Button variant="ghost" size="compact" type="button" leadingIcon={PlusGlyph} onClick={addEvent}>Add an event</Button></div> : null}
         </> : null}
-        {triggerKind === 'label' ? <p className="text-caption text-muted-foreground">Each label starts its own mode: <span className="font-mono">gitspace:plan</span> in Plan, <span className="font-mono">gitspace:code</span> in Code, <span className="font-mono">gitspace:review</span> in Review.</p> : null}
+        {triggerKind === 'label' ? <p className="text-caption text-muted-foreground">Each label starts its own mode: <span className="font-mono">gitspace:plan</span> in Plan, <span className="font-mono">gitspace:code</span> in Code, <span className="font-mono">gitspace:review</span> in Review, <span className="font-mono">gitspace:ship</span> in Ship.</p> : null}
         {triggerKind === 'schedule' ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {schedule.preset === 'hourly' ? <Field label="At minute"><Select value={String(schedule.minute)} onValueChange={value => setSchedule(current => ({ ...current, minute: Number(value) }))}>
             <SelectTrigger aria-label="At minute" />{options(MINUTES.map(minute => ({ value: String(minute), label: `:${twoDigits(minute)}` })))}
@@ -982,8 +988,11 @@ function AutomationEditor({ projectId, workspaces, github, source, testFirst, no
           <Field label="Action" error={errors.action}><Select value={actionKind} onValueChange={value => { const kind = TRIGGER_ACTIONS[triggerKind].find(entry => entry === value); if (kind) setActionKind(kind); }}>
             <SelectTrigger aria-label="Action" />{options(TRIGGER_ACTIONS[triggerKind].map(kind => ({ value: kind, label: ACTION_LABEL[kind] })))}
           </Select></Field>
-          {actionKind === 'startWorkspace' ? <Field label="Starts in" error={errors.mode}><Select value={mode ?? LABEL_MODE} onValueChange={value => setMode(AUTOMATION_MODES.find(entry => entry === value) ?? null)}>
-            <SelectTrigger aria-label="Starts in" />{options(modeChoices)}
+          {actionKind === 'startWorkspace' ? <Field label="Mode" error={errors.mode}><Select value={mode ?? LABEL_MODE} onValueChange={value => setMode(AUTOMATION_MODES.find(entry => entry === value) ?? null)}>
+            <SelectTrigger aria-label="Mode" />{options(modeChoices)}
+          </Select></Field> : null}
+          {actionKind === 'startWorkspace' ? <Field label="Model role" error={errors.role}><Select value={role} onValueChange={setRole}>
+            <SelectTrigger aria-label="Model role" />{options(roleChoices)}
           </Select></Field> : null}
           {actionKind === 'sendToLinked' ? <Field label="Delivery"><Select value={wake ? 'wake' : 'notice'} onValueChange={value => setWake(value === 'wake')}>
             <SelectTrigger aria-label="Delivery" />{options(DELIVERY_OPTIONS)}
@@ -1009,7 +1018,7 @@ function AutomationEditor({ projectId, workspaces, github, source, testFirst, no
           </DropdownMenu>
           <span className="min-w-0 text-caption text-muted-foreground">A field in <span className="font-mono">{'{{…}}'}</span> is {eventTrigger ? 'replaced by the event\'s value; Test with a past event shows the result.' : 'filled in when it runs; Test shows the result.'}</span>
         </div>
-        {actionKind === 'startWorkspace' ? <p className="text-caption text-muted-foreground">The event arrives with the instruction as the workspace's first message, and the workspace is linked to {subjectNoun(trigger)}.</p> : null}
+        {actionKind === 'startWorkspace' ? <p className="text-caption text-muted-foreground">The event arrives with the instruction as the workspace's first message, run with the chosen model role of the project's inference profile, and the workspace is linked to {subjectNoun(trigger)}.</p> : null}
       </section>
 
       {eventTrigger ? <section ref={testSection} aria-label="Test with a past event" className={`${shape.container} flex min-w-0 flex-col gap-3 border border-border p-4`}>
@@ -1208,6 +1217,7 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
   const settings = listRead.value?.settings ?? AUTOMATION_DEFAULT_SETTINGS;
   const links = listRead.value?.links ?? [];
   const github = listRead.value?.github ?? NO_GITHUB;
+  const modelRoles = listRead.value?.modelRoles ?? BUILT_IN_MODEL_ROLES;
   const bot = github.bot ?? 'the GitSpace bot';
   const ordered = [...automations.filter(automation => automation.proposal !== null), ...automations.filter(automation => automation.proposal === null)];
   const groups = [
@@ -1317,7 +1327,7 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
         </> : null}
 
     <Dialog open={editor !== null} onOpenChange={open => { if (!open) setEditor(null); }}>
-      <DialogContent size="lg">{shownEditor && projectId !== null ? <AutomationEditor key={shownEditor.id} projectId={projectId} workspaces={project?.workspaces ?? []} github={github} source={shownEditor.source} testFirst={shownEditor.test} now={now}
+      <DialogContent size="lg">{shownEditor && projectId !== null ? <AutomationEditor key={shownEditor.id} projectId={projectId} workspaces={project?.workspaces ?? []} github={github} modelRoles={modelRoles} source={shownEditor.source} testFirst={shownEditor.test} now={now}
         onCancel={() => setEditor(null)} onSaved={async () => { setEditor(null); await refresh(); }}
         onRan={async run => { setEditor(null); await refresh(); setOpenRun(run); }} /> : null}</DialogContent>
     </Dialog>

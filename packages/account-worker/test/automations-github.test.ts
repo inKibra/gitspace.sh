@@ -192,8 +192,40 @@ describe('automations on GitHub events', () => {
     expect(triage).toMatchObject({ automationName: 'Triage labeled issues', state: 'skipped', outcome: 'Skipped: Issue #7 already has workspace plan-issue-7 starting' });
     await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: run?.workspaceId, text: expect.stringContaining('Work on https://github.com/inKibra/pantry/issues/7, labeled gitspace:plan.') })));
     expect(await authority.getWorkspace(run?.workspaceId ?? '')).toMatchObject({ name: 'plan-issue-7', phase: 'plan', sourceKind: 'base', sourceCommit: commit('1') });
-    expect((await runs())[1]?.timeline.map(entry => entry.label)).toEqual(expect.arrayContaining(['Started workspace plan-issue-7 in Plan', 'Linked to Issue #7']));
+    expect((await runs())[1]?.timeline.map(entry => entry.label)).toEqual(expect.arrayContaining(['Started workspace plan-issue-7 in Plan with model role Default', 'Linked to Issue #7']));
     expect((await automations.list(projectId)).links).toMatchObject([{ subject: { kind: 'issue', number: 7, title: 'Pantry search is slow' }, workspaceId: run?.workspaceId, source: 'started', detail: 'Start work from labels · gitspace:plan' }]);
+  });
+
+  it('starts a workspace whose first run uses the automation\'s model role, refuses a role the profile does not offer, and fails a run whose role the profile dropped since', async () => {
+    const { projectId, authority, automations, send, work, runs, submitted } = await installed(['bradleat']);
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    const { profiles, assignments } = await vault.ensureInference();
+    const profileId = assignments.find(assignment => assignment.projectId === projectId)?.profileId ?? '';
+    const original = profiles.find(profile => profile.id === profileId);
+    if (!original) throw new Error('The project has no inference profile');
+    const withReviewer = await vault.updateInferenceProfile({ profileId, name: original.name, settings: { ...original.settings, 'modelRoles.reviewer': 'openai/gpt-5' }, expectedRevision: original.revision });
+    if (withReviewer.status !== 'ok') throw new Error('The profile did not take the reviewer role');
+    const review = (role: string): AutomationDraft => ({ ...reviewPullRequests, action: { kind: 'startWorkspace', mode: 'review', role, instruction: 'Review {{pull_request.html_url}}.' } });
+
+    expect(await automations.create({ projectId, draft: review('critic') })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.role', message: 'critic is not a model role of this project\'s inference profile; it offers default, deep, fast, taste, reviewer' } });
+    automationValue(await automations.create({ projectId, draft: review('reviewer') }));
+    expect((await automations.list(projectId)).modelRoles).toEqual(['default', 'deep', 'fast', 'taste', 'reviewer']);
+
+    await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(12, { author: 'bradleat', head: 'fix-pantry' }) });
+    await work();
+    const [started] = await runs();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith({ projectId, workspaceId: started?.workspaceId, requestId: `automation:${started?.id}`, text: expect.stringContaining('Review https://github.com/inKibra/pantry/pull/12.'), role: 'reviewer' }));
+    expect((await runs())[0]?.timeline.map(entry => entry.label)).toContain('Started workspace review-pr-12 in Review with model role reviewer');
+
+    const { 'modelRoles.reviewer': _reviewer, ...withoutReviewer } = withReviewer.value.profiles.find(profile => profile.id === profileId)?.settings ?? {};
+    const revision = withReviewer.value.profiles.find(profile => profile.id === profileId)?.revision ?? 0;
+    expect(await vault.updateInferenceProfile({ profileId, name: original.name, settings: withoutReviewer, expectedRevision: revision })).toMatchObject({ status: 'ok' });
+    await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(13, { author: 'bradleat', head: 'fix-shelves' }) });
+    await work();
+    const [dropped] = await runs();
+    expect(dropped).toMatchObject({ subject: { number: 13 }, state: 'failed', outcome: 'Failed: model role reviewer is no longer in the project\'s inference profile; it offers default, deep, fast, taste' });
+    expect(await authority.getWorkspace(dropped?.workspaceId ?? '')).toBeNull();
+    expect(submitted).toHaveBeenCalledTimes(1);
   });
 
   it('runs an outsider\'s events once they are on the trust list, sends a mention without a linked workspace to the project agent, and closes with a notice that wakes no agent', async () => {
@@ -246,7 +278,7 @@ describe('automations on GitHub events', () => {
     const test = (deliveryId: string) => automations.testDraft({ projectId, draft: reviewPullRequests, requestedBy: 'Brad', deliveryId });
     expect(automationValue(await test(outsider))).toMatchObject({ results: [{ result: 'Skipped: author not trusted (@outside-dev)', runs: false }], checks: [{ passed: false }, { passed: null }, { passed: null }] });
     expect(automationValue(await test(draft))).toMatchObject({ results: [{ result: 'Skipped: the pull request is a draft', runs: false }], checks: [{ passed: true }, { passed: true }, { label: 'not a draft', passed: false }] });
-    expect(automationValue(await test(ready))).toMatchObject({ results: [{ result: 'Would start workspace review-pr-15 in Review, linked to PR #15', runs: true }], instruction: 'Review https://github.com/inKibra/pantry/pull/15 against main.' });
+    expect(automationValue(await test(ready))).toMatchObject({ results: [{ result: 'Would start workspace review-pr-15 in Review with model role Default, linked to PR #15', runs: true }], instruction: 'Review https://github.com/inKibra/pantry/pull/15 against main.' });
     expect(await runs()).toEqual([]);
 
     const saved = automationValue(await automations.create({ projectId, draft: reviewPullRequests }));

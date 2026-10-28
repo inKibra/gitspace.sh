@@ -41,6 +41,7 @@ import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } 
 import { AutomationRunRecordSchema, automationRunView, utcDay, type AutomationRunRecord } from './project-automations.js';
 import type { AutomationProjectSummary, AutomationRunView } from '@gitspace/protocol/automations-contract';
 import { z } from 'zod';
+import { RuntimeQaItemSchema, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 import type { WorkspaceServiceUrl } from './workspace-service-urls.js';
 
@@ -1018,7 +1019,9 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
           this.ctx.storage.sql.exec('CREATE TABLE qa_retry_reports_purged(done INTEGER)');
         });
       }
-      if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      const purging = !this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length;
+      const keepingQa = this.ctx.storage.sql.exec("SELECT 1 FROM project_events WHERE entity='qa' LIMIT 1").toArray().length > 0;
+      if ((purging || keepingQa) && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
     });
   }
 
@@ -1065,6 +1068,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   }
 
   async alarm(): Promise<void> {
+    // First: the purge below deletes the events of every entity this object no longer keeps, QA among them.
+    await this.moveQaToWorkspaces();
     // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
     // log; the cloud runtime reads none of it. Delete it in batches of 1,000 every 10 seconds: each event is about two
     // written rows (with its index), so the purge stays near 720k rows an hour, under the storage breaker (2M per 10
@@ -1074,6 +1079,36 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       if (deleted === 0) this.ctx.storage.sql.exec('CREATE TABLE legacy_events_purged(done INTEGER)');
       else await this.ctx.storage.setAlarm(Date.now() + 10_000);
     }
+  }
+
+  /** Workspaces keep their own QA items. The items this object kept for them move once to each workspace that still
+   * exists, each in its latest state and in the order they were recorded, and their events are deleted after every
+   * workspace took its own. A workspace that cannot take them fails the alarm, which the platform retries with backoff;
+   * the next start of this object tries again. */
+  private async moveQaToWorkspaces(): Promise<void> {
+    const rows = this.ctx.storage.sql.exec<{ offset: number; payload_json: string }>("SELECT offset,payload_json FROM project_events WHERE entity='qa' ORDER BY offset").toArray();
+    const last = rows.at(-1)?.offset;
+    if (last === undefined) return;
+    const project = this.getProject();
+    const byWorkspace = new Map<string, Map<string, RuntimeQaItem>>();
+    for (const row of rows) {
+      const payload = QaEventPayloadSchema.safeParse(JSON.parse(row.payload_json));
+      // Items of a deleted workspace, or recorded with no workspace, have no one to show them.
+      if (!payload.success || !project || (payload.data.workspaceId !== project.id && !this.getWorkspace(payload.data.workspaceId))) continue;
+      const items = byWorkspace.get(payload.data.workspaceId) ?? new Map<string, RuntimeQaItem>();
+      items.set(payload.data.item.id, payload.data.item);
+      byWorkspace.set(payload.data.workspaceId, items);
+    }
+    const failed: string[] = [];
+    for (const [workspaceId, items] of byWorkspace) {
+      try { await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).runtimeQaImport({ projectId: project?.id, workspaceId }, [...items.values()]); }
+      catch (error) {
+        failed.push(workspaceId);
+        console.error(JSON.stringify({ event: 'qa_move_failed', projectId: project?.id, workspaceId, items: items.size, message: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    if (failed.length) throw new Error(`QA items did not move to ${failed.length} workspaces`);
+    this.ctx.storage.sql.exec("DELETE FROM project_events WHERE entity='qa' AND offset<=?", last);
   }
 
   private committing = false;
@@ -2007,11 +2042,6 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return Response.json(this.readEventRecords(afterOffset, PROJECT_EVENT_PAGE));
   }
 
-  /** One page of an entity's events after `afterOffset`, served by `project_events_entity`: never scans the whole project log. */
-  listEntityEvents(entity: string, afterOffset = 0, limit = PROJECT_EVENT_PAGE): ProjectEvent[] {
-    return this.ctx.storage.sql.exec<ProjectEventRow>('SELECT * FROM project_events WHERE entity=? AND offset>? ORDER BY offset LIMIT ?', entity, afterOffset, Math.min(Math.max(1, Math.trunc(limit)), PROJECT_EVENT_PAGE)).toArray().map(projectEventRecord);
-  }
-
   private readEventRecords(afterOffset: number, limit: number): ProjectEvent[] {
     return this.ctx.storage.sql.exec<ProjectEventRow>(
       'SELECT * FROM project_events WHERE offset>? ORDER BY offset LIMIT ?',
@@ -2028,8 +2058,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
 
 /** Most project events one list call reads; QA readers page with the runtime's applied offset. */
 const PROJECT_EVENT_PAGE = 500;
+/** QA events this object kept for a workspace before workspaces kept their own items. */
+const QaEventPayloadSchema = z.object({ workspaceId: z.string(), item: RuntimeQaItemSchema });
 /** Entities the cloud app writes to `project_events`; every other entity is legacy machine history. */
-const CURRENT_EVENT_ENTITIES = ['qa', 'goal', 'workflow', 'rubric', 'journal', 'change-guide', 'review-thread', 'agent-incident', 'artifact', 'mcp-grant'];
+const CURRENT_EVENT_ENTITIES = ['goal', 'workflow', 'rubric', 'journal', 'change-guide', 'review-thread', 'agent-incident', 'artifact', 'mcp-grant'];
 
 function projectEventRecord(row: ProjectEventRow): ProjectEvent {
   return {

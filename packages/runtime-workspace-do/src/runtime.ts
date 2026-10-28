@@ -29,7 +29,9 @@ import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, ty
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
 import { createToolResultStore, type WorkspaceToolResults } from './tool-results.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { /** The workspace's QA items, read from its own storage. */ list(): z.infer<typeof RuntimeQaDocumentSchema>['items']; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** The open finished `stage`; stages run in this order. */ openStage?(stage: RuntimeOpenStage): void };
+/** The stages of opening a workspace runtime: its storage, the harness, the one-time notice withdrawal, the first snapshot. */
+export type RuntimeOpenStage = 'storage' | 'harness' | 'notices' | 'snapshot';
 /** The main conversation's turn for an input submitted with a request id. */
 export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
 /** One message of a turn, its text cut short. */
@@ -175,13 +177,16 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
 }
 async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: RunningMarks, heartbeat: () => void, opening: RunningStep): Promise<WorkspaceRuntime> {
   const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
+  options.openStage?.('storage');
   opening.update('opening the harness');
   const toolResults = createToolResultStore(options.storage.sql, options.identity.workspaceId, WORKSPACE_TOOL_RESULTS_MAX_BYTES);
   const runtime = await createRuntimeHarness({ ...options, tools: { ...options.tools, results: toolResults }, storage, models: marks.models(options.models), unfinished: marks.unfinished });
+  options.openStage?.('harness');
   const { harness } = runtime;
   const withdrawn = createWithdrawnNotices(options.storage.sql);
   opening.update('withdrawing sync failure notices');
   await withdrawSyncFailureNotices(storage, harness, runtime.root, withdrawn, options.storage.sql);
+  options.openStage?.('notices');
   const attachments = new AttachmentStore(options.storage, { ...options.attachments, dispatch: input => { heartbeat(); return options.attachments.dispatch(input); } });
   // Sync merges and cloud writes build snapshots in memory: each is marked while it runs.
   const code: Pick<WorkspaceRuntimeOptions['code'], 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> = {
@@ -195,7 +200,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     changedSnapshotPaths: (repository, before, after) => marks.run('path diff', `tree ${before.slice(0, 12)} to ${after.slice(0, 12)}`, () => options.code.changedSnapshotPaths(repository, before, after)),
   };
   // A failed LFS retention is tried again from 5 s, doubling to 30 minutes, for at most 10 tries (about 85 minutes); after
-  // that only work that flushes the outbox anyway (a snapshot change, a cloud write, an open) tries again. Its outbox row
+  // that only work that flushes the outbox anyway (a snapshot change, a cloud write, a wake) tries again. Its outbox row
   // stays an LFS root meanwhile, keeping its objects retained.
   const retention = createStoredRetry(options.storage.sql, {
     table: 'runtime_lfs_retention_failures', event: 'lfs_retention_failed', workspaceId: options.identity.workspaceId, firstMs: 5_000, maxMs: 30 * 60_000, attempts: 10, schedule: options.schedule, report: options.onReport,
@@ -245,8 +250,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     return { failed(error: unknown) { if (!failing) { failing = true; options.onReport(error); } }, succeeded() { failing = false; } };
   };
   const publishing = failureRun();
-  /** Opening and waking flush the outbox. A failed retention has scheduled its own retry and reported itself; any other
-   * failure (storage) is reported here. */
+  /** Waking flushes the outbox. A failed retention has scheduled its own retry and reported itself; any other failure
+   * (storage) is reported here. */
   async function flushCloudRetention() {
     try { await cloudFiles.flushRetention(); }
     catch (error) { if (!retention.handled(error)) options.onReport(error); }
@@ -470,7 +475,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     }
     const tasks = [...taskViews].sort(([leftId, left], [rightId, right]) => TASK_ORDER[left.status] - TASK_ORDER[right.status] || leftId - rightId).map(([, task]) => task.view);
     const workspace = await harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT);
-    const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
+    const qa = RuntimeQaDocumentSchema.parse({ items: options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
     const status = workspaceStatus(committedCode ?? null);
     const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': status, 'gitspace.draft': drafts.snapshot(), 'gitspace.browsers': options.browsers ? await options.browsers() : null } });
@@ -539,10 +544,9 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     }
     publish();
   });
-  opening.update('flushing cloud retention');
-  await flushCloudRetention();
   opening.update('rebuilding the snapshot');
   await rebuild();
+  options.openStage?.('snapshot');
   async function conversation(id?: string) {
     if (id === undefined) return runtime.root;
     const canonical = conversationIds.get(id) ?? await history.conversation(id);

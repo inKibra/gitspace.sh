@@ -1,11 +1,13 @@
-import { env, SELF } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant, type ControlOperation } from '@gitspace/protocol';
+import { projectEventSchema, type ProjectEvent } from '@gitspace/protocol/project-authority';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { FiledIssueSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { z } from 'zod';
-import { appendRuntimeQa, createRuntimeQaServices } from '../src/runtime-services.js';
+import { appendRuntimeQa, createRuntimeQaServices, type RuntimeQaServices } from '../src/runtime-qa.js';
+import type { RuntimeIdentity } from '../src/runtime-services.js';
 import { tenantRootPrivateKey as rootPrivateKey } from './setup.js';
 
 const actor = { deviceId: 'browser-1', canApprove: true };
@@ -13,64 +15,85 @@ const commit = 'a'.repeat(40);
 
 async function project() {
   const projectId = `qa-${crypto.randomUUID()}`;
-  await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).bootstrap({ id: projectId, name: 'QA', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
-  return { a: RuntimeIdentitySchema.parse({ projectId, workspaceId: 'workspace-a' }), b: RuntimeIdentitySchema.parse({ projectId, workspaceId: 'workspace-b' }) };
+  await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).bootstrap({ id: projectId, name: projectId, repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  return { a: RuntimeIdentitySchema.parse({ projectId, workspaceId: `${projectId}-a` }), b: RuntimeIdentitySchema.parse({ projectId, workspaceId: `${projectId}-b` }) };
 }
 const filed = async (id: string) => (await env.ACCOUNT_STATE.getByName('account').listFiledIssues({ limit: 100 })).filter(row => row.id === id);
+const space = (identity: RuntimeIdentity) => env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.workspaceId}`);
+/** `work` with the QA inbox of the workspace's own object. */
+const inbox = <T>(identity: RuntimeIdentity, work: (qa: RuntimeQaServices, storage: DurableObjectStorage) => T | Promise<T>) => runInDurableObject(space(identity), (_instance, state) => work(createRuntimeQaServices(state.storage, env, identity), state.storage));
+/** Ends the object's instance; the next call builds it again from what it stored. */
+async function restart(stub: DurableObjectStub) {
+  await runInDurableObject(stub, (_instance, state) => { state.abort('restart'); }).catch(() => {});
+}
 
-test('a workspace inbox lists only its own reports', async () => {
-  const { a, b } = await project();
-  await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Failure in A' });
-  await appendRuntimeQa(env, b, crypto.randomUUID(), { message: 'Failure in B' });
-  expect((await createRuntimeQaServices(env, a).list()).map(item => item.title)).toEqual(['Failure in A']);
+test('copies of an open report are merged into the first, a repeated failure files nothing new, and both hold across a restart', async () => {
+  const { a } = await project();
+  const first = await inbox(a, (_qa, storage) => {
+    const item = appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Process observation unavailable' });
+    for (let copy = 0; copy < 2; copy++) appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Process observation unavailable' });
+    return item;
+  });
+  await restart(space(a));
+  expect(await inbox(a, qa => qa.list().map(item => [item.state, item.duplicateOf]))).toEqual([['open', null], ['merged', first.id], ['merged', first.id]]);
+  await inbox(a, qa => { qa.report('Process observation unavailable'); qa.report('Network connection lost.'); qa.report('Network connection lost.'); });
+  await restart(space(a));
+  expect(await inbox(a, qa => qa.list().filter(item => item.state === 'open').map(item => item.title))).toEqual(['Process observation unavailable', 'Network connection lost.']);
 });
 
-test('copies of an open report are merged into the first, durably, and a repeated failure files nothing new', async () => {
+test('filing an issue twice leaves one account row with the latest reviewed copy, and the workspace records when, across a restart', async () => {
   const { a } = await project();
-  const first = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Process observation unavailable' });
-  for (let copy = 0; copy < 2; copy++) await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Process observation unavailable' });
-  const listed = await createRuntimeQaServices(env, a).list();
-  expect(listed.map(item => [item.state, item.duplicateOf])).toEqual([['open', null], ['merged', first.id], ['merged', first.id]]);
-  // A later runtime reads the merge back instead of merging again.
-  const reopened = createRuntimeQaServices(env, a);
-  expect((await reopened.list()).filter(item => item.state === 'open').map(item => item.id)).toEqual([first.id]);
-  await Promise.all([reopened.report('Process observation unavailable'), reopened.report('Process observation unavailable')]);
-  await reopened.report('Network connection lost.');
-  await reopened.report('Network connection lost.');
-  expect((await createRuntimeQaServices(env, a).list()).filter(item => item.state === 'open').map(item => item.title)).toEqual(['Process observation unavailable', 'Network connection lost.']);
-});
-
-test('filing an issue twice leaves one account row with the latest reviewed copy, and the workspace records when', async () => {
-  const { a } = await project();
-  const item = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Proc watch failed\nsecret token here', tool: 'proc', model: 'opus' });
-  const qa = createRuntimeQaServices(env, a);
-  await qa.act({ ...a, itemId: item.id, action: { kind: 'file', excerpt: 'Proc watch failed' } }, actor);
-  await qa.act({ ...a, itemId: item.id, action: { kind: 'file', excerpt: 'Proc watch failed (trimmed)' } }, actor);
+  const item = await inbox(a, async (qa, storage) => {
+    const reported = appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Proc watch failed\nsecret token here', tool: 'proc', model: 'opus' });
+    await qa.act({ ...a, itemId: reported.id, action: { kind: 'file', excerpt: 'Proc watch failed' } }, actor);
+    await qa.act({ ...a, itemId: reported.id, action: { kind: 'file', excerpt: 'Proc watch failed (trimmed)' } }, actor);
+    return reported;
+  });
   const rows = await filed(item.id);
-  expect(rows).toEqual([expect.objectContaining({ projectId: a.projectId, workspaceId: 'workspace-a', title: 'Proc watch failed', excerpt: 'Proc watch failed (trimmed)', tool: 'proc', model: 'opus', filedBy: 'browser-1', state: 'open', resolution: null })]);
-  // The runtime's own snapshot and a later runtime both show it filed; the item itself stays open.
-  expect((await qa.list()).find(entry => entry.id === item.id)).toMatchObject({ state: 'open', filedAt: rows[0]!.filedAt });
-  expect((await createRuntimeQaServices(env, a).list()).find(entry => entry.id === item.id)).toMatchObject({ state: 'open', filedAt: rows[0]!.filedAt });
+  expect(rows).toEqual([expect.objectContaining({ projectId: a.projectId, workspaceId: a.workspaceId, title: 'Proc watch failed', excerpt: 'Proc watch failed (trimmed)', tool: 'proc', model: 'opus', filedBy: 'browser-1', state: 'open', resolution: null })]);
+  await restart(space(a));
+  // The item itself stays open.
+  expect(await inbox(a, qa => qa.list().find(entry => entry.id === item.id))).toMatchObject({ state: 'open', filedAt: rows[0]!.filedAt });
 });
 
 test('only the workspace\'s own unmerged issue can be filed', async () => {
   const { a, b } = await project();
-  const first = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Repeated failure' });
-  const copy = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Repeated failure' });
-  const qa = createRuntimeQaServices(env, a);
-  expect((await qa.list()).find(entry => entry.id === copy.id)).toMatchObject({ state: 'merged', duplicateOf: first.id });
-  await expect(qa.act({ ...a, itemId: copy.id, action: { kind: 'file', excerpt: 'copy' } }, actor)).rejects.toThrow(/merged/u);
-  await expect(createRuntimeQaServices(env, b).act({ ...b, itemId: first.id, action: { kind: 'file', excerpt: 'not mine' } }, actor)).rejects.toThrow(/does not belong/u);
-  expect([...await filed(copy.id), ...await filed(first.id)]).toEqual([]);
+  const [first, copy] = await inbox(a, (_qa, storage) => [appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Repeated failure' }), appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Repeated failure' })]);
+  expect(copy).toMatchObject({ state: 'merged', duplicateOf: first!.id });
+  await expect(inbox(a, qa => qa.act({ ...a, itemId: copy!.id, action: { kind: 'file', excerpt: 'copy' } }, actor))).rejects.toThrow(/merged/u);
+  await expect(inbox(b, qa => qa.act({ ...b, itemId: first!.id, action: { kind: 'file', excerpt: 'not mine' } }, actor))).rejects.toThrow(/does not belong/u);
+  expect([...await filed(copy!.id), ...await filed(first!.id)]).toEqual([]);
 });
 
-test('marking an issue fixed records the commit, in this runtime and the next', async () => {
+test('marking an issue fixed records the commit, across a restart', async () => {
   const { a } = await project();
-  const item = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Broken diff view' });
-  const qa = createRuntimeQaServices(env, a);
-  await qa.act({ ...a, itemId: item.id, action: { kind: 'fixed', commit } }, actor);
-  expect((await qa.list()).find(entry => entry.id === item.id)).toMatchObject({ state: 'fixed', fixedIn: commit });
-  expect((await createRuntimeQaServices(env, a).list()).find(entry => entry.id === item.id)).toMatchObject({ state: 'fixed', fixedIn: commit });
+  const item = await inbox(a, async (qa, storage) => {
+    const reported = appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Broken diff view' });
+    await qa.act({ ...a, itemId: reported.id, action: { kind: 'fixed', commit } }, actor);
+    return reported;
+  });
+  await restart(space(a));
+  expect(await inbox(a, qa => qa.list().find(entry => entry.id === item.id))).toMatchObject({ state: 'fixed', fixedIn: commit });
+});
+
+test('the project\'s QA items move once to the workspaces they belong to, each in its latest state', async () => {
+  const { a, b } = await project();
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${a.projectId}`);
+  for (const identity of [a, b]) await authority.putWorkspace({ id: identity.workspaceId, projectId: identity.projectId, kind: 'worktree', name: identity.workspaceId, branch: identity.workspaceId, phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  const recorded = (workspaceId: string, title: string, state: 'open' | 'dismissed', id: string = crypto.randomUUID()): Omit<ProjectEvent, 'offset' | 'createdAt' | 'eventId'> => ({ scope: 'workspace', entity: 'qa', entityId: id, revision: 1, operation: 'created', payload: { workspaceId, item: { id, title, description: title, historyRef: `history://${workspaceId}`, tool: null, model: 'opus', runtimeVersion: 'pi-1.0', state, duplicateOf: null, createdAt: new Date().toISOString() } } });
+  // Live projects finished their legacy event purge, which deletes the events of entities no longer kept.
+  await runInDurableObject(authority, (_instance, state) => { state.storage.sql.exec('CREATE TABLE IF NOT EXISTS legacy_events_purged(done INTEGER)'); });
+  const dismissedLater = crypto.randomUUID();
+  await authority.appendEvents([recorded(a.workspaceId, 'Failure in A', 'open', dismissedLater), recorded(b.workspaceId, 'Failure in B', 'open'), recorded('deleted-workspace', 'Failure nobody shows', 'open'), recorded(a.workspaceId, 'Failure in A', 'dismissed', dismissedLater), recorded(a.workspaceId, 'Second failure in A', 'open')]);
+  // A release restarts the object; its start schedules the move.
+  await restart(authority);
+  const restarted = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${a.projectId}`);
+  expect(await runDurableObjectAlarm(restarted)).toBe(true);
+  const titles = (identity: RuntimeIdentity) => inbox(identity, qa => qa.list().map(item => [item.title, item.state]));
+  expect(await titles(a)).toEqual([['Failure in A', 'dismissed'], ['Second failure in A', 'open']]);
+  expect(await titles(b)).toEqual([['Failure in B', 'open']]);
+  const events = z.array(projectEventSchema).parse(await (await restarted.listEvents(0)).json());
+  expect(events.filter(event => event.entity === 'qa')).toEqual([]);
 });
 
 test('the ops client lists stored filed issues newest first and resolves one without touching the workspace', async () => {
@@ -87,8 +110,8 @@ test('the ops client lists stored filed issues newest first and resolves one wit
     return z.object({ value: z.unknown() }).parse(await response.json()).value;
   };
   const { a } = await project();
-  const older = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Older failure' });
-  const newer = await appendRuntimeQa(env, a, crypto.randomUUID(), { message: 'Newer failure' });
+  const [older, newer] = await inbox(a, (_qa, storage) => [appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Older failure' }), appendRuntimeQa(storage, a, crypto.randomUUID(), { message: 'Newer failure' })]);
+  if (!older || !newer) throw new Error('Expected two filed items');
   const state = env.ACCOUNT_STATE.getByName('account');
   for (const [item, filedAt] of [[older, '2026-10-20T10:00:00.000Z'], [newer, '2026-10-21T10:00:00.000Z']] as const) {
     await state.fileIssue({ id: item.id, projectId: a.projectId, workspaceId: a.workspaceId, title: item.title, excerpt: item.description, tool: null, model: item.model, historyRef: item.historyRef, createdAt: item.createdAt, filedAt, filedBy: 'browser-1' });
@@ -100,5 +123,5 @@ test('the ops client lists stored filed issues newest first and resolves one wit
   expect(await list({ state: 'open' })).toEqual([newer.id]);
   expect(await list({ state: 'resolved' })).toEqual([older.id]);
   // Resolving here leaves the workspace's issue as it was.
-  expect((await createRuntimeQaServices(env, a).list()).find(entry => entry.id === older.id)).toMatchObject({ state: 'open', fixedIn: null });
+  expect(await inbox(a, qa => qa.list().find(entry => entry.id === older.id))).toMatchObject({ state: 'open', fixedIn: null });
 });
