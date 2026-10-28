@@ -318,6 +318,21 @@ describe('machine notices', () => {
     ]);
   });
 
+  it('a machine that returns through the relay after its absence was told is reported back, and fleet reads still answer', async () => {
+    const workspace = await attachedWorkspace('notice-relay-return');
+    const first = await connect();
+    await eventually(async () => await attachmentOnline(workspace.workspaceId) === true);
+    first.close(1000, 'host stopped');
+    await eventually(async () => await attachmentOnline(workspace.workspaceId) === false);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+    await runDurableObjectAlarm(space(workspace.workspaceId));
+    clock.mockRestore();
+    await connect();
+    // The workspace names the machine in its notice while the relay's presence pass waits for that workspace.
+    await eventually(async () => (await notices(workspace.workspaceId)).includes('Machine Darktop is back online; commands can run on it again.'));
+    expect(await machineState()).toBe('online');
+  });
+
   it('holds no wake for a blip it will never tell', async () => {
     const workspace = await attachedWorkspace('notice-blip');
     await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);

@@ -482,7 +482,10 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserCaptureShareLive(captureShareId: string) { return this.browserRelay.captureShareLive(captureShareId); }
   browserCaptureShareComment(captureShareId: string, viewer: { name: string; guest: boolean }, request: RuntimeBrowserCaptureShareComment) { return this.browserRelay.captureShareComment(captureShareId, viewer, request); }
 
-  private presenceLine: Promise<void> = Promise.resolve();
+  /** Each machine's presence passes, in order; a machine's entry is removed once its last pass ends. */
+  private presenceLines = new Map<string, Promise<void>>();
+  /** Machines whose presence pass is telling their workspaces now. */
+  private reporting = new Set<string>();
   private alarmLine: Promise<void> = Promise.resolve();
   /** When machine presence is next reconciled against the live sockets, after a restart. */
   private presenceCheckAt: number | null = null;
@@ -519,6 +522,9 @@ export class UserRelayDO extends BudgetedDurableObject {
   async confirmMachinePresence(machineIds: readonly string[]): Promise<void> {
     await Promise.all(machineIds.map(async machineId => {
       for (const socket of this.ctx.getWebSockets(`endpoint:machine:${machineId}`)) this.heartbeatLive(socket);
+      // A pass telling this machine's workspaces wrote the fleet first, and a workspace it is telling may be the reader
+      // asking now: waiting for that pass would wait on itself.
+      if (this.reporting.has(machineId)) return;
       await this.reconcilePresence(machineId);
     }));
   }
@@ -554,53 +560,60 @@ export class UserRelayDO extends BudgetedDurableObject {
     });
   }
 
-  /** Presence is written only when it changes: to the fleet, then to each workspace attaching the machine. Passes are
-  * serialized and each reads the live sockets, so interleaved opens and closes converge on the final state. An accepted
-  * socket always tells the workspaces (they write only on change), so a workspace that missed a report catches up on
-  * the machine's next connection; a workspace that cannot be told keeps the state unreported and is retried with
-  * backoff (`PRESENCE_RETRIES`). */
+  /** Presence is written only when it changes: to the fleet, then to each workspace attaching the machine. A machine's
+  * passes are serialized and each reads the live sockets, so interleaved opens and closes converge on the final state;
+  * passes of different machines run independently. An accepted socket always tells the workspaces (they write only on
+  * change), so a workspace that missed a report catches up on the machine's next connection; a workspace that cannot be
+  * told keeps the state unreported and is retried with backoff (`PRESENCE_RETRIES`). */
   private reconcilePresence(machineId: string, accepted = false): Promise<void> {
-    const run = this.presenceLine.then(async () => {
-      const connected = this.machineConnected(machineId);
-      const reported = this.ctx.storage.sql.exec('SELECT 1 FROM machine_presence WHERE machine_id=?', machineId).toArray().length > 0;
-      if (reported === connected && !(accepted && connected)) {
-        this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
+    const run = (this.presenceLines.get(machineId) ?? Promise.resolve()).then(async () => {
+      this.reporting.add(machineId);
+      try { await this.reportPresence(machineId, accepted); } finally { this.reporting.delete(machineId); }
+    });
+    const line = run.catch(() => {});
+    this.presenceLines.set(machineId, line);
+    void line.then(() => { if (this.presenceLines.get(machineId) === line) this.presenceLines.delete(machineId); });
+    return run;
+  }
+
+  private async reportPresence(machineId: string, accepted: boolean): Promise<void> {
+    const connected = this.machineConnected(machineId);
+    const reported = this.ctx.storage.sql.exec('SELECT 1 FROM machine_presence WHERE machine_id=?', machineId).toArray().length > 0;
+    if (reported === connected && !(accepted && connected)) {
+      this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
+      return;
+    }
+    let unreached: { projectId: string; workspaceId: string }[] = [];
+    try {
+      const workspaces = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).machinePresence(machineId, connected);
+      const failed = await Promise.all(workspaces.map(workspace => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeMachinePresence(machineId, connected).then(() => false, (error: unknown) => {
+        console.error(JSON.stringify({ event: 'relay_presence_workspace_failed', machineId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
+        return true;
+      })));
+      unreached = workspaces.filter((_workspace, index) => failed[index]);
+      if (unreached.length) throw new Error('A workspace did not record the machine presence');
+      if (connected) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_presence(machine_id) VALUES(?)', machineId);
+      else this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(JSON.stringify({ event: 'relay_presence_failed', machineId, connected, message }));
+      // Unreported, a connected machine is pushed again by the retry.
+      if (connected) this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
+      const failures = (this.ctx.storage.sql.exec<{ failures: number }>('SELECT failures FROM presence_retries WHERE machine_id=?', machineId).toArray()[0]?.failures ?? 0) + 1;
+      if (failures <= PRESENCE_RETRIES) {
+        this.ctx.storage.sql.exec('INSERT INTO presence_retries(machine_id,failures,due_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET failures=excluded.failures, due_at=excluded.due_at', machineId, failures, Date.now() + PRESENCE_RETRY_MS * 2 ** (failures - 1));
+        await this.scheduleAlarm();
         return;
       }
-      let unreached: { projectId: string; workspaceId: string }[] = [];
-      try {
-        const workspaces = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).machinePresence(machineId, connected);
-        const failed = await Promise.all(workspaces.map(workspace => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeMachinePresence(machineId, connected).then(() => false, (error: unknown) => {
-          console.error(JSON.stringify({ event: 'relay_presence_workspace_failed', machineId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
-          return true;
-        })));
-        unreached = workspaces.filter((_workspace, index) => failed[index]);
-        if (unreached.length) throw new Error('A workspace did not record the machine presence');
-        if (connected) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_presence(machine_id) VALUES(?)', machineId);
-        else this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
-        this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(JSON.stringify({ event: 'relay_presence_failed', machineId, connected, message }));
-        // Unreported, a connected machine is pushed again by the retry.
-        if (connected) this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
-        const failures = (this.ctx.storage.sql.exec<{ failures: number }>('SELECT failures FROM presence_retries WHERE machine_id=?', machineId).toArray()[0]?.failures ?? 0) + 1;
-        if (failures <= PRESENCE_RETRIES) {
-          this.ctx.storage.sql.exec('INSERT INTO presence_retries(machine_id,failures,due_at) VALUES(?,?,?) ON CONFLICT(machine_id) DO UPDATE SET failures=excluded.failures, due_at=excluded.due_at', machineId, failures, Date.now() + PRESENCE_RETRY_MS * 2 ** (failures - 1));
-          await this.scheduleAlarm();
-          return;
-        }
-        this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
-        await this.scheduleAlarm();
-        console.error(JSON.stringify({ event: 'relay_presence_gave_up', machineId, connected, failures, message, workspaces: unreached.map(workspace => workspace.workspaceId) }));
-        const text = `GitSpace could not record that machine ${machineId} is ${connected ? 'online' : 'offline'} in this workspace after ${failures} tries over about 10 minutes (${message}). It shows the old state until the machine next connects or disconnects.`;
-        await Promise.all(unreached.map(workspace => appendRuntimeQa(this.env, RuntimeIdentitySchema.parse(workspace), crypto.randomUUID(), { message: text }).catch((qaError: unknown) => {
-          console.error(JSON.stringify({ event: 'relay_presence_report_failed', machineId, workspaceId: workspace.workspaceId, message: qaError instanceof Error ? qaError.message : String(qaError) }));
-        })));
-      }
-    });
-    this.presenceLine = run.catch(() => {});
-    return run;
+      this.ctx.storage.sql.exec('DELETE FROM presence_retries WHERE machine_id=?', machineId);
+      await this.scheduleAlarm();
+      console.error(JSON.stringify({ event: 'relay_presence_gave_up', machineId, connected, failures, message, workspaces: unreached.map(workspace => workspace.workspaceId) }));
+      const text = `GitSpace could not record that machine ${machineId} is ${connected ? 'online' : 'offline'} in this workspace after ${failures} tries over about 10 minutes (${message}). It shows the old state until the machine next connects or disconnects.`;
+      await Promise.all(unreached.map(workspace => appendRuntimeQa(this.env, RuntimeIdentitySchema.parse(workspace), crypto.randomUUID(), { message: text }).catch((qaError: unknown) => {
+        console.error(JSON.stringify({ event: 'relay_presence_report_failed', machineId, workspaceId: workspace.workspaceId, message: qaError instanceof Error ? qaError.message : String(qaError) }));
+      })));
+    }
   }
 
   /** Reconciles every machine reported connected or holding a socket; a socket holder is re-asserted to its workspaces. */
