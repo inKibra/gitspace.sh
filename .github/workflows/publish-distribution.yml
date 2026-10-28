@@ -54,7 +54,8 @@ jobs:
           - target: linux-arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # A cold native cache compiles the runtime's native sources; macos-15-intel took over 15 minutes (2026-10-28).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
