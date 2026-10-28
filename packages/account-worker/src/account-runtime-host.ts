@@ -1,10 +1,9 @@
 import type { WorkspaceEnvironment } from './space-environment.js';
 import { createDocumentMarkdown } from './document-markdown.js';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type RuntimeOpenStage, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { RuntimeAttachment, RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
-import { createRuntimeServices, type RuntimeIdentity } from './runtime-services.js';
-import { createRuntimeQaServices } from './runtime-qa.js';
+import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
 import { workspaceBrowsersDocument } from './runtime-browser.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
 import { z } from 'zod';
@@ -60,13 +59,7 @@ export function runtimeWorkspaceCodeRef(env: Env, identity: RuntimeIdentity, bra
   };
 }
 
-/** An open that takes this long is logged with how long each of its stages took. */
-const SLOW_OPEN_MS = 5_000;
-
-/** The SpaceAuthority actor supplies storage, its seeded workspace metadata and its coalesced outbox/runtime alarm. The
- * open reads the account's settings, and the vault for conversations it resumes, but nothing of the project (its QA
- * items are in its own storage): a machine that reconnects opens every workspace attached to it at once, and they would
- * all wait on one project object. */
+/** The SpaceAuthority actor supplies storage, its seeded workspace metadata and its coalesced outbox/runtime alarm. */
 export async function createAccountWorkspaceRuntime(
   ctx: DurableObjectState,
   env: Env,
@@ -75,14 +68,6 @@ export async function createAccountWorkspaceRuntime(
   requestAttachment: (machineId: string) => Promise<{ attachment: RuntimeAttachment }>,
   environment: WorkspaceEnvironment,
 ): Promise<WorkspaceRuntime> {
-  const openedAt = Date.now();
-  const stages: Partial<Record<RuntimeOpenStage | 'inference' | 'settings', number>> = {};
-  let stageStartedAt = openedAt;
-  const stage = (name: RuntimeOpenStage | 'inference' | 'settings') => {
-    const now = Date.now();
-    stages[name] = now - stageStartedAt;
-    stageStartedAt = now;
-  };
   // The workspace's own metadata, read per use: a base branch change moves the branch this runtime reads code from.
   const metadata = () => {
     const current = readWorkspaceMetadata(ctx.storage);
@@ -106,9 +91,7 @@ export async function createAccountWorkspaceRuntime(
   const tasksTable = ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").toArray().length > 0;
   const retrying = tasksTable ? ctx.storage.sql.exec<{ conversation_id: number }>("SELECT DISTINCT conversation_id FROM tasks WHERE status != 'terminal' AND background = 0").toArray().map(row => String(row.conversation_id)) : [];
   const inference = await createCloudRuntimeInference(ctx, env, identity, retrying);
-  stage('inference');
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
-  stage('settings');
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
   const judge = async (conversationId: string, state: string, questions: Record<string, string>) => {
     const answers = z.record(z.string(), z.object({ bool: z.number().min(0).max(1) })).parse(await inference.modelHelper({ conversationId, operation: 'judge', args: { state, questions: Object.fromEntries(Object.entries(questions).map(([id, instructions]) => [id, { type: 'bool', instructions }])) } }));
@@ -130,8 +113,8 @@ export async function createAccountWorkspaceRuntime(
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
-  const lfs = createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
-  const qa = createRuntimeQaServices(ctx.storage, env, identity);
+  const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
+  const qa = createRuntimeQaServices(env, identity);
   const watch = projectWatchHooks(ctx.storage, identity, (report, onDone) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: identity.projectId }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, error }))));
   const automationTurns = automationTurnHooks(ctx.storage, identity, report => env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runTurnChanged(report), waitUntil);
   runtime = await createWorkspaceRuntime({
@@ -180,16 +163,13 @@ export async function createAccountWorkspaceRuntime(
     schedule,
     qa,
     browsers: () => workspaceBrowsersDocument(ctx.storage),
-    onReport: error => { qa.report(error instanceof Error ? error.message : String(error)); },
+    onReport: error => { waitUntil('qa report', qa.report(error instanceof Error ? error.message : String(error))); },
     attachments: {
       seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),
       dispatch: input => dispatchRuntimeAttachment(env, input),
     },
-    openStage: stage,
   });
-  const durationMs = Date.now() - openedAt;
-  if (durationMs >= SLOW_OPEN_MS) console.warn(JSON.stringify({ event: 'runtime_cold_open', workspaceId: identity.workspaceId, durationMs, stages }));
   waitUntil('wake', runtime.wake());
   waitUntil('project watch', reconcileProjectWatch(ctx.storage, runtime, watch).catch((error: unknown) => console.error('Project watch was not reconciled', { workspaceId: identity.workspaceId, error })));
   waitUntil('automation turns', reconcileAutomationTurns(ctx.storage, runtime, automationTurns).catch((error: unknown) => console.error('Automation turns were not reconciled', { workspaceId: identity.workspaceId, error })));

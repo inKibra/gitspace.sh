@@ -92,8 +92,8 @@ Every Pi package is pinned to an exact version. GitSpace code imports Pi only th
 
 | Component | Where | Owns |
 |---|---|---|
-| **Workspace DO** (evolves the existing per-space `SpaceAuthorityDO`) | Tenant Worker, one per workspace | The workspace's pi-durable Session: root conversation, subagent conversations, operational tasks, documents. Placement and lifecycle authority it already owns stay in the same actor, so one single writer covers both. It holds its own metadata (identity, kind, lifecycle, branch, phase, and the project lifecycle its write policy needs), seeded at creation or by one project read, and authorizes every runtime request from it without reading the project. Opening its runtime reads nothing of the project either, since a reconnecting machine opens every workspace attached to it at once; its QA items are in its own storage (§8.7). Archive, restore, delete and phase changes start here: the workspace fences or erases its runtime and persists first, then the project authority records the change with a revision check; project archive and restore reach each workspace through the Worker. It stores the status summary its runtime publishes, which project listings read without opening the runtime. Scheduler for dispatching work to machines. |
-| **Project DOs** (existing `ProjectAuthorityDO`, `ProjectSecretsDO`, `ProjectCronsDO`) | Tenant Worker | Project-scoped state: environment ledger and values, secrets and grants, and cron definitions. Workspace definitions here are the project's record of what each workspace applied, for listings and the directory. |
+| **Workspace DO** (evolves the existing per-space `SpaceAuthorityDO`) | Tenant Worker, one per workspace | The workspace's pi-durable Session: root conversation, subagent conversations, operational tasks, documents. Placement and lifecycle authority it already owns stay in the same actor, so one single writer covers both. It holds its own metadata (identity, kind, lifecycle, branch, phase, and the project lifecycle its write policy needs), seeded at creation or by one project read, and authorizes every runtime request from it without reading the project. Archive, restore, delete and phase changes start here: the workspace fences or erases its runtime and persists first, then the project authority records the change with a revision check; project archive and restore reach each workspace through the Worker. It stores the status summary its runtime publishes, which project listings read without opening the runtime. Scheduler for dispatching work to machines. |
+| **Project DOs** (existing `ProjectAuthorityDO`, `ProjectSecretsDO`, `ProjectCronsDO`) | Tenant Worker | Project-scoped state: environment ledger and values, secrets and grants, cron definitions, and the new QA queue. Workspace definitions here are the project's record of what each workspace applied, for listings and the directory. |
 | **Credential vault DO** (existing) | Tenant Worker | Sealed provider credentials, refresh leases, profiles, assignments. |
 | **Artifacts namespace** | Cloudflare Artifacts, one per tenant | One repo per project (imported) and one fork per workspace. |
 | **R2 bucket** (existing, one per tenant: `gsp-relay-<accountId>`) | Cloudflare | Blobs: `drive://` artifacts, uploads, large tool outputs. |
@@ -186,7 +186,7 @@ packages/
 | `gitspace.machines` | session | Attached caches and pinned runners, capabilities, and readiness per profile. |
 | `gitspace.environment` | session | Selected profile, run ledger mirror, bindings, per-copy materialization state (§10). |
 | `gitspace.jobs` | session | Job and process registry for the agent hub (§8.2). |
-| `gitspace.qa` | session | The workspace's QA items, read from its own object's storage (§8.7). |
+| `gitspace.qa` | session | Reports filed in this workspace before they reach the project QA queue. |
 
 ### 6.3 Tasks
 
@@ -310,8 +310,8 @@ OMP's tools are context tools: `checkpoint { goal }` marks the start of an inves
 
 ### 8.7 QA queue
 
-- `report_issue` and a "Report" action on any transcript row or tool call create a **QA item** with tool, model, runtime version, workspace, and a `history://` reference. A workspace keeps its items in its own object's storage; its runtime, its agents and the relay (a machine presence it could not record there) file them, and nothing reads them project-wide. Items the project object kept before moved once to their workspaces.
-- A per-workspace QA inbox (the Inspector's Issues tab): dismiss, merge duplicates (Jev or keyword similarity suggests), **Send to GitSpace** (our product queue, with a redacted excerpt), or **Create issue** in the project's repo.
+- `report_issue` and a "Report" action on any transcript row or tool call create a **project QA item** with tool, model, runtime version, workspace, and a `history://` reference.
+- A per-project QA inbox: dismiss, merge duplicates (Jev or keyword similarity suggests), **Send to GitSpace** (our product queue, with a redacted excerpt), or **Create issue** in the project's repo.
 - Nothing leaves the project without a human action. OMP stores reports locally and pushes to `qa.omp.sh` only with consent (`tools/report-tool-issue.ts`); the 56 reports GitSpace agents filed could not be found on the machine afterwards.
 
 ### 8.8 Edit tools

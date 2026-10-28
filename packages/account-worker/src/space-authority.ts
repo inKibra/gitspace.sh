@@ -15,7 +15,7 @@ import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
-import { createRuntimeQaServices, importRuntimeQa } from './runtime-qa.js';
+import { createRuntimeQaServices } from './runtime-services.js';
 import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
@@ -23,7 +23,7 @@ import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
 import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime/tool-arguments';
 import { runtimeServiceControl } from './runtime-service-control.js';
 import { importRefThroughBaseMachine } from './runtime-ref-import.js';
-import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { CheckoutSourceFactsSchema, RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
@@ -341,8 +341,15 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     } else await this.ctx.storage.put('runtime.identity', identity);
     this.publishCloudRuntime(identity);
     if (!this.runtime) {
+      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed.
+      const openStartedAt = Date.now();
       const runtime = this.openRuntime(identity);
       this.runtime = runtime;
+      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed. A failed open is reported by the chain below.
+      runtime.then(() => {
+        const durationMs = Date.now() - openStartedAt;
+        if (durationMs >= 5_000) console.warn(JSON.stringify({ event: 'runtime_cold_open', workspaceId: identity.workspaceId, durationMs }));
+      }, () => {});
       // A storage error ends the session for good: forget it so the next call opens a fresh one from what was committed.
       runtime.then(opened => opened.harness.closed.then(end => {
         if (end.reason !== 'failed' || this.runtime !== runtime) return;
@@ -921,25 +928,6 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return (await this.getRuntime(input)).qa(input, actor);
   }
 
-  /** A failure reported from outside the runtime (the relay could not record a machine's presence here): a QA item of
-   * this workspace unless the same failure is open. An open runtime shows it at once. */
-  async runtimeQaReport(raw: unknown, message: string): Promise<void> {
-    const identity = RuntimeIdentitySchema.parse(raw);
-    const stored = await this.ctx.storage.get('runtime.identity');
-    if (stored !== undefined && RuntimeIdentitySchema.parse(stored).workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
-    createRuntimeQaServices(this.ctx.storage, this.env, identity).report(message);
-    void this.runtime?.then(runtime => { runtime.publish(); }, () => {});
-  }
-
-  /** The QA items the project object kept for this workspace before workspaces kept their own, sent once by its move. */
-  async runtimeQaImport(raw: unknown, items: RuntimeQaItem[]): Promise<void> {
-    const identity = RuntimeIdentitySchema.parse(raw);
-    const stored = await this.ctx.storage.get('runtime.identity');
-    if (stored !== undefined && RuntimeIdentitySchema.parse(stored).workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
-    importRuntimeQa(this.ctx.storage, items);
-    void this.runtime?.then(runtime => { runtime.publish(); }, () => {});
-  }
-
   async runtimeSnapshotCommit(raw: unknown) {
     const input = RuntimeSnapshotCommitInputSchema.parse(raw);
     // The failing step is logged with the error: callers see only its message, often the runtime's bare "internal error".
@@ -1176,7 +1164,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
           await this.scheduleAlarm('lfs', Date.now() + Math.min(3_600_000, 1_000 * 2 ** row.attempts));
           return;
         }
-        createRuntimeQaServices(this.ctx.storage, this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId })).report(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`);
+        await createRuntimeQaServices(this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId })).report(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`)
+          .catch((reported: unknown) => console.error(JSON.stringify({ event: 'portable_lfs_report_failed', snapshotId: row.snapshot_id, message: reported instanceof Error ? reported.message : String(reported) })));
       }
     }
     await this.scheduleAlarm('lfs', null);

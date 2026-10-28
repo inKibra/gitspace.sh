@@ -74,10 +74,11 @@ export class AccountGitLfsStore implements GitLfsStore {
   }
 }
 
-/** The account's store of a project's LFS objects. Callers decide access to the project first: a workspace runtime from
- * its own metadata, the inspector from the project it read. */
-export function createAccountGitLfsStore(env: Env, userId: string, projectId: string, publicationId: string): AccountGitLfsStore {
+export async function createAccountGitLfsStore(env: Env, userId: string, projectId: string, publicationId: string): Promise<AccountGitLfsStore> {
   if (userId !== env.ACCOUNT_ID) throw new Error('LFS account identity mismatch');
+  const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
+  const project = await authority.getProject();
+  if (!project || project.id !== projectId || project.lifecycle === 'deleting') throw new Error('LFS project is unavailable');
   return new AccountGitLfsStore(
     tenantStore(env), projectId,
     // A stub per call: the store lives as long as a workspace runtime, and a stub that saw an error stays broken.

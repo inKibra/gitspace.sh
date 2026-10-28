@@ -98,7 +98,7 @@ function openSmokeRuntime(ctx: DurableObjectState, storage: DurableObjectStorage
       for (const id of requests) check(await ctx.storage.get(`admission:${id}`) === conversationId, 'Missing durable admission');
     },
     session: { catalog: async () => ({ inference: { profileId: 'fixture-profile', profileName: 'Fixture', profileRevision: 1, assignmentRevision: 1 }, models: [{ provider: 'fixture', id: 'fixture', name: 'Smoke', contextWindow: 8192 }], roles: [{ id: 'scout', label: 'Scout', provider: 'fixture', model: 'fixture', thinking: null, current: false }] }), reload: unsupported },
-    qa: { list: () => [], act: unsupported },
+    qa: { list: async () => [], act: unsupported },
     attachments: { seal: unsupported, open: unsupported, dispatch: unsupported },
     waitUntil: promise => ctx.waitUntil(promise), schedule: timestamp => ctx.storage.setAlarm(timestamp),
     ...services,
@@ -271,11 +271,11 @@ export class ResetMarksSmoke extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const operations: OperationalServices = { execute: unsupported, reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => this.ctx.storage.setAlarm(timestamp) };
     if (new URL(request.url).searchParams.get('stage') === 'open') {
-      // A conversation holding a 0.3 MB message; the next open's rebuild reads it, then asks for the Chrome groups,
-      // which never come.
+      // A conversation holding a 0.3 MB message; the next open's rebuild reads it, then asks for the QA items, which
+      // never come.
       await (await openSmokeRuntime(this.ctx, this.ctx.storage, operations)).notice('n'.repeat(300_000));
       const listed = Promise.withResolvers<void>();
-      void openSmokeRuntime(this.ctx, this.ctx.storage, operations, { browsers: () => { listed.resolve(); return Promise.withResolvers<never>().promise; } });
+      void openSmokeRuntime(this.ctx, this.ctx.storage, operations, { qa: { list: () => { listed.resolve(); return Promise.withResolvers<never>().promise; }, act: unsupported } });
       await listed.promise;
     } else {
       // A workspace report the conversation has not taken in: admission fails, then never answers while recovery delivers it.

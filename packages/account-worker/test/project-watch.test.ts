@@ -57,7 +57,7 @@ async function watchFixture(ctx: DurableObjectState) {
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
     retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
     admitInference: async () => ({ provider: 'fixture', modelId: 'fixture', thinking: 'high' }), bindInferenceConversation: async () => undefined, refuseRequest: () => {},
-    session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: () => [], act: unsupported },
+    session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },
     onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async () => {},
     published: (_snapshot, report) => { hooks.published(report); automationTurns.published(report); },
