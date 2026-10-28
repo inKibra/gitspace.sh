@@ -1,5 +1,6 @@
 import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { TenantComputeProvider, type ComputeTarget } from './compute-provider.js';
+import { deployResultSchema, runDeployWork, type DeployResult, type DeployWork } from './deployer.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 /** One upload the platform performed for this tenant, in RELEASES bucket terms. */
@@ -26,10 +27,6 @@ export interface TenantDeploymentState {
   previous: TenantDeployRecord | null;
   deploys: TenantDeployRecord[];
 }
-
-export type DeployLease =
-  | { status: 'ok'; value: TenantDeploymentState }
-  | { status: 'error'; error: { code: 'DEPLOY_IN_PROGRESS'; message: string } };
 
 export interface DeployOutcome {
   sha: string;
@@ -60,11 +57,17 @@ interface TenantConfigRow extends Record<string, SqlStorageValue> {
   root_public_key: string;
   blob_bucket: string | null;
 }
+interface OperationRow extends Record<string, SqlStorageValue> {
+  outcome_json: string | null;
+}
 
 
 const TOKEN_BYTES = 32;
+/** Serializes swaps across instances of the object: a swap that died with an earlier instance holds it this long. */
 const LEASE_MS = 5 * 60_000;
 const HISTORY_LIMIT = 50;
+/** Swaps whose outcome is kept under the id their caller named. */
+const OPERATION_LIMIT = 50;
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -86,10 +89,15 @@ function toRecord(row: DeployRow): TenantDeployRecord {
 /**
  * Per-tenant deployment authority: the bearer token the tenant worker uses to
  * ask for a swap, the migration tag Cloudflare currently has for the script,
- * and the upload history the revert paths walk.
+ * and the upload history the revert paths walk. Every swap runs here, under the
+ * tenant lease.
  */
 export class TenantDeploymentsDO extends BudgetedDurableObject {
   private computeProvider: TenantComputeProvider | null = null;
+  /** Swaps running in this instance, by the operation id their caller named. */
+  readonly #running = new Map<string, Promise<DeployResult>>();
+  /** The swap holding the lease in this instance; a later one takes the lease over once it expires. */
+  #leaseHolder: object | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -121,6 +129,11 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
           root_public_key TEXT NOT NULL,
           blob_bucket TEXT,
           created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS operations (
+          id TEXT PRIMARY KEY,
+          started_at TEXT NOT NULL,
+          outcome_json TEXT
         );
         INSERT OR IGNORE INTO tenant_state(id, applied_migration_tag, active_deploy_id, lease_until, updated_at)
         VALUES (1, NULL, NULL, NULL, '1970-01-01T00:00:00.000Z');
@@ -228,22 +241,65 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
     return { appliedMigrationTag: state.applied_migration_tag, active, previous, deploys };
   }
 
-  /** Serializes deploys per tenant: one upload/probe/revert cycle at a time. */
-  acquireLease(): DeployLease {
+  /**
+   * Runs one upload/probe cycle under the tenant lease in this object, so a caller that leaves cannot cancel it, and
+   * releases the lease when the swap ends, however it ends. A lease held by a swap that died with an earlier instance
+   * of this object expires after LEASE_MS. With an `operationId` the outcome is kept under that id, and the same id
+   * never starts a second swap.
+   */
+  async deploy(tenant: string, work: DeployWork, operationId: string | null): Promise<DeployResult> {
+    if (operationId !== null) {
+      const known = this.operation(operationId);
+      if (known) return known;
+    }
     const now = Date.now();
-    const state = this.stateRow();
-    if (state.lease_until !== null && state.lease_until > now) {
-      return { status: 'error', error: { code: 'DEPLOY_IN_PROGRESS', message: 'Another deployment for this tenant is in progress' } };
+    const lease = this.stateRow().lease_until;
+    if (lease !== null && lease > now) {
+      const refused: DeployResult = { status: 'error', error: { status: 409, code: 'DEPLOY_IN_PROGRESS', message: 'Another deployment for this tenant is in progress' } };
+      if (operationId !== null) this.recordOperation(operationId, now, refused);
+      return refused;
     }
     this.ctx.storage.sql.exec('UPDATE tenant_state SET lease_until = ?, updated_at = ? WHERE id = 1', now + LEASE_MS, new Date(now).toISOString());
-    return { status: 'ok', value: this.getState() };
+    if (operationId !== null) this.recordOperation(operationId, now, null);
+    const holder = {};
+    this.#leaseHolder = holder;
+    const state = this.getState();
+    const run = async (): Promise<DeployResult> => {
+      try {
+        const result = await runDeployWork(this.env, tenant, this, state, work).catch((error: unknown): DeployResult => {
+          console.error(JSON.stringify({ event: 'deploy-failed', tenant, kind: work.kind, message: error instanceof Error ? error.message : String(error) }));
+          return { status: 'error', error: { status: 500, code: 'DEPLOY_FAILED', message: error instanceof Error ? error.message : 'Deployment failed' } };
+        });
+        if (operationId !== null) this.ctx.storage.sql.exec('UPDATE operations SET outcome_json = ? WHERE id = ?', JSON.stringify(result), operationId);
+        return result;
+      } finally {
+        if (operationId !== null) this.#running.delete(operationId);
+        if (this.#leaseHolder === holder) {
+          this.#leaseHolder = null;
+          this.ctx.storage.sql.exec('UPDATE tenant_state SET lease_until = NULL, updated_at = ? WHERE id = 1', new Date().toISOString());
+        }
+      }
+    };
+    const swap = run();
+    if (operationId !== null) this.#running.set(operationId, swap);
+    this.ctx.waitUntil(swap);
+    return swap;
   }
 
-  releaseLease(): void {
-    this.ctx.storage.sql.exec('UPDATE tenant_state SET lease_until = NULL, updated_at = ? WHERE id = 1', new Date().toISOString());
+  /** The outcome of the swap started under `operationId`, waiting while it still runs here; null when none was. */
+  operation(operationId: string): Promise<DeployResult> | DeployResult | null {
+    const running = this.#running.get(operationId);
+    if (running) return running;
+    const row = this.ctx.storage.sql.exec<OperationRow>('SELECT outcome_json FROM operations WHERE id = ?', operationId).toArray()[0];
+    if (!row) return null;
+    if (row.outcome_json !== null) return deployResultSchema.parse(JSON.parse(row.outcome_json));
+    // Started by an earlier instance of this object, which ended before the swap did; its lease runs out on its own.
+    const interrupted: DeployResult = { status: 'error', error: { status: 409, code: 'DEPLOY_INTERRUPTED', message: `The platform restarted during this deployment; the tenant can deploy again within ${LEASE_MS / 60_000} minutes` } };
+    this.ctx.storage.sql.exec('UPDATE operations SET outcome_json = ? WHERE id = ?', JSON.stringify(interrupted), operationId);
+    return interrupted;
   }
 
-  /** Records one upload attempt; a healthy upload becomes the active deploy. Always releases the lease. */
+  /** Records one upload attempt; a healthy upload becomes the active deploy. */
   recordDeploy(outcome: DeployOutcome): TenantDeployRecord {
     return this.ctx.storage.transactionSync(() => {
       const uploadedAt = new Date().toISOString();
@@ -265,9 +321,14 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
       if (outcome.healthy) {
         this.ctx.storage.sql.exec('UPDATE tenant_state SET active_deploy_id = ? WHERE id = 1', row.id);
       }
-      this.ctx.storage.sql.exec('UPDATE tenant_state SET lease_until = NULL, updated_at = ? WHERE id = 1', uploadedAt);
+      this.ctx.storage.sql.exec('UPDATE tenant_state SET updated_at = ? WHERE id = 1', uploadedAt);
       return toRecord(row);
     });
+  }
+
+  private recordOperation(operationId: string, startedAt: number, outcome: DeployResult | null): void {
+    this.ctx.storage.sql.exec('INSERT INTO operations(id, started_at, outcome_json) VALUES (?, ?, ?)', operationId, new Date(startedAt).toISOString(), outcome === null ? null : JSON.stringify(outcome));
+    this.ctx.storage.sql.exec('DELETE FROM operations WHERE id NOT IN (SELECT id FROM operations ORDER BY started_at DESC LIMIT ?)', OPERATION_LIMIT);
   }
 
   private stateRow(): StateRow {

@@ -204,6 +204,7 @@ export function LaunchSheet({ launch, open, onOpenChange, onRetry, onDiscard }: 
   </Elevated>;
 }
 
+/** This page's view of the account's Back to stable while it runs, or how it failed. */
 export interface RevertProgress {
   status: 'running' | 'failed';
   error: string | null;
@@ -218,7 +219,7 @@ export function RevertSheet({ progress, open, onOpenChange, onRetry }: { progres
       <span className="min-w-0 flex-1 text-body font-semibold text-foreground">{failed ? 'Back to stable failed' : 'Going back to stable'}</span>
       <Button variant="ghost" size="icon-compact" aria-label="Close revert progress" onClick={() => onOpenChange(false)}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
     </header>
-    {failed ? <p role="alert" className="text-caption text-destructive">{progress.error}</p> : <span className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color="blue" pulse />Waiting for the stable frontend to activate</span>}
+    {failed ? <p role="alert" className="text-caption text-destructive">{progress.error}</p> : <span className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color="blue" pulse />Swapping the worker to the stable build</span>}
     {failed ? <footer className="flex justify-end gap-2">
       <Button variant="ghost" size="compact" onClick={() => onOpenChange(false)}>Close</Button>
       <Button variant="primary" size="compact" onClick={() => void onRetry()}>Retry</Button>

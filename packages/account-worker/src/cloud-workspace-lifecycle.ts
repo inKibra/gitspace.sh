@@ -35,6 +35,8 @@ export class CloudLifecycleTargetMissing extends Error {
 
 export interface CloudWorkspaceRequest {
   projectId: string;
+  /** The new workspace's id, chosen ahead so a creation retried after a lost reply finds it; otherwise from its name. */
+  id?: string;
   name: string;
   branch: string;
   phase?: WorkspacePhase;
@@ -261,7 +263,7 @@ export async function createCloudWorkspace(env: Env, userId: string, input: Clou
   assertWorkspacePhase(phase, phaseCarriers(dependencies));
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   const source = await resolveSource(env, userId, code, project, sourceWorkspace, input);
-  const workspaceId = cloudResourceId(name);
+  const workspaceId = input.id ?? cloudResourceId(name);
   const definition = await authority.putWorkspace({
     id: workspaceId, projectId: project.id, kind: 'worktree', name, branch: input.branch, phase,
     sourceKind: input.sourceKind, sourceRef: source.sourceRef, sourceCommit: source.sourceCommit,

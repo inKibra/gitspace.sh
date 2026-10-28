@@ -6,7 +6,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
@@ -15,7 +15,6 @@ import { createDefaultNativeArtifact } from './default-native.js';
 import { readExecutableFile } from './executable-manifest.js';
 import { defaultNativeArtifactSchema, defaultNativeProvenanceSchema, verifyDefaultNativeArtifact } from '@gitspace/protocol/default-release';
 import {
-  DISTRIBUTION_BUN_VERSION,
   currentDistributionPlatform,
   currentGlibcVersion,
   distributionChannelSchema,
@@ -25,6 +24,7 @@ import {
   type DistributionFile,
   type DistributionPlatform,
 } from './distribution.js';
+import { BUN_VERSION, NATIVE_PINS } from './native-pins.js';
 
 const ROOT = resolve(import.meta.dir, '../../..');
 const COMPILE_TARGETS: Record<DistributionPlatform, Bun.Build.CompileTarget> = {
@@ -33,28 +33,24 @@ const COMPILE_TARGETS: Record<DistributionPlatform, Bun.Build.CompileTarget> = {
   'linux-arm64': 'bun-linux-arm64',
   'linux-x64': 'bun-linux-x64-baseline',
 };
-// Official release asset digests: https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.0
-const BUN_ASSETS: Record<DistributionPlatform, { name: string; sha256: string }> = {
-  'darwin-arm64': { name: 'bun-darwin-aarch64', sha256: 'c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381' },
-  'darwin-x64': { name: 'bun-darwin-x64-baseline', sha256: 'da9b9f1b4ba766c6f299711f38dfaa98623e1ed9c40896aa53db803c52ec1fa0' },
-  'linux-arm64': { name: 'bun-linux-aarch64', sha256: '4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e' },
-  'linux-x64': { name: 'bun-linux-x64-baseline', sha256: '184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f' },
-};
 
 async function packageBun(platform: DistributionPlatform, scratch: string): Promise<string> {
   if (!Bun.which('unzip')) throw new Error('Release builds require unzip to unpack the hash-pinned official Bun asset; consumers do not need unzip.');
-  const asset = BUN_ASSETS[platform];
+  const pin = NATIVE_PINS[platform].bun;
   const archive = join(scratch, 'bun.zip');
-  const response = await fetch(`https://github.com/oven-sh/bun/releases/download/bun-v${DISTRIBUTION_BUN_VERSION}/${asset.name}.zip`);
-  if (!response.ok || !response.body) throw new Error(`Cannot fetch pinned Bun ${asset.name}: HTTP ${response.status}`);
+  const response = await fetch(pin.url);
+  if (!response.ok || !response.body) throw new Error(`Cannot fetch pinned Bun ${basename(pin.url)}: HTTP ${response.status}`);
   await pipeline(Readable.from(response.body), createWriteStream(archive, { flags: 'wx' }));
-  if ((await digest(archive)).sha256 !== asset.sha256) throw new Error('Official Bun release asset SHA256 mismatch');
+  const archived = await digest(archive);
+  if (archived.sha256 !== pin.sha256 || archived.size !== pin.size) throw new Error('Official Bun release asset SHA256 mismatch');
   const binary = join(scratch, 'bun');
-  const unpack = Bun.spawn(['unzip', '-p', archive, `${asset.name}/bun`], { stdout: 'pipe', stderr: 'inherit' });
+  const unpack = Bun.spawn(['unzip', '-p', archive, pin.member], { stdout: 'pipe', stderr: 'inherit' });
   await pipeline(Readable.from(unpack.stdout), createWriteStream(binary, { flags: 'wx', mode: 0o755 }));
   if (await unpack.exited !== 0) throw new Error('Cannot extract the verified Bun release asset');
   await chmod(binary, 0o755);
-  if (await command([binary, '--version'], scratch) !== DISTRIBUTION_BUN_VERSION) throw new Error('Packaged Bun version does not match the release ABI pin');
+  const extracted = await digest(binary);
+  if (extracted.sha256 !== pin.executable.sha256 || extracted.size !== pin.executable.size) throw new Error('Packaged Bun executable does not match its pin');
+  if (await command([binary, '--version'], scratch) !== BUN_VERSION) throw new Error('Packaged Bun version does not match the release ABI pin');
   return binary;
 }
 
@@ -84,7 +80,7 @@ export async function buildClient(output: string): Promise<void> {
 }
 
 function requireBun(): void {
-  if (Bun.version !== DISTRIBUTION_BUN_VERSION) throw new Error(`Release builds require Bun ${DISTRIBUTION_BUN_VERSION}, found ${Bun.version}. Install the pinned Bun on the build runner; consumers do not install Bun.`);
+  if (Bun.version !== BUN_VERSION) throw new Error(`Release builds require Bun ${BUN_VERSION}, found ${Bun.version}. Install the pinned Bun on the build runner; consumers do not install Bun.`);
 }
 
 async function command(argv: string[], cwd: string, environment: Record<string, string> = {}): Promise<string> {
@@ -184,7 +180,7 @@ export async function buildDistribution(options: { release: string; output: stri
     await pipeline(Readable.from(content()), createGzip({ level: 9 }), createWriteStream(payload, { flags: 'wx', mode: 0o644 }));
     const provenance = {
       schemaVersion: 1, release, platform, sourceRevision: revision, bunVersion: Bun.version,
-      bunAsset: BUN_ASSETS[platform],
+      bunAsset: NATIVE_PINS[platform].bun,
       sourceLock: await digest(join(ROOT, 'bun.lock')),
       native: JSON.parse(await readFile(join(runtime, 'machine/machine-native.json'), 'utf8')) as unknown,
       gitLfs: JSON.parse(await readFile(join(runtime, 'machine/native/git-lfs.json'), 'utf8')) as unknown,

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
 import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
 import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
+import { AutomationDraftSchema, AutomationSubjectRefSchema } from './automations-contract.js';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
 
@@ -703,24 +704,22 @@ export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('met
 export const RuntimeWorkspaceStartArgumentsSchema = z.object({ method: z.literal('start'), workspaceId: z.string().min(1), instruction: z.string().trim().min(1).max(32_768), onDone: z.enum(['quiet', 'wake']).default('quiet') }).strict();
 /** The turn the project agent started in a workspace, while it is watched: its state and its newest items. */
 export const RuntimeWorkspaceProgressArgumentsSchema = z.object({ method: z.literal('progress'), workspaceId: z.string().min(1) }).strict();
+/** Subject links (docs/AUTOMATIONS-DESIGN.md §4): a pull request, issue or branch linked to this workspace, or to a named
+ * one, gets the project's events about it through its automations; one subject has one workspace. */
+export const RuntimeWorkspaceLinkArgumentsSchema = z.discriminatedUnion('method', [
+  z.object({ method: z.literal('links') }).strict(),
+  z.object({ method: z.literal('link'), subject: AutomationSubjectRefSchema, workspaceId: z.string().min(1).optional() }).strict(),
+  z.object({ method: z.literal('unlink'), subject: AutomationSubjectRefSchema }).strict(),
+]);
 export const RuntimeWorkspaceArgumentsSchema = z.union([
   z.object({ method: z.enum(['get', 'current', 'list', 'operations', 'status']), workspaceId: z.string().min(1).optional() }).strict(),
   RuntimeWorkspaceProgressArgumentsSchema,
   RuntimeWorkspaceStartArgumentsSchema,
   RuntimeWorkspaceMutationArgumentsSchema,
+  RuntimeWorkspaceLinkArgumentsSchema,
 ]);
 /** An automation as the project agent drafts it (`AutomationDraft` without `enabled`: a person's approval turns it on). */
-export const RuntimeAutomationDraftSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  trigger: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('schedule'), cron: z.string().trim().min(1) }).strict(),
-    z.object({ kind: z.literal('manual') }).strict(),
-  ]),
-  action: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('messageProjectAgent'), instruction: z.string().trim().min(1).max(16_000) }).strict(),
-    z.object({ kind: z.literal('messageWorkspace'), workspaceId: z.string().min(1), instruction: z.string().trim().min(1).max(16_000) }).strict(),
-  ]),
-}).strict();
+export const RuntimeAutomationDraftSchema = AutomationDraftSchema.omit({ enabled: true }).extend({ conditions: AutomationDraftSchema.shape.conditions.default([]) });
 /** The project agent's automations (docs/AUTOMATIONS-DESIGN.md §5a). What it proposes, new or a change, waits for a person
  * to approve it before it runs; switching one off or deleting it takes effect at once. */
 export const RuntimeAutomationsArgumentsSchema = z.union([

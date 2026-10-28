@@ -1,15 +1,36 @@
 #!/usr/bin/env bun
-import { GetObjectCommand, PutObjectCommand, S3ServiceException } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3ServiceException, type S3Client } from '@aws-sdk/client-s3';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
-import { buildWorkerRelease, buildFrontendTree, workerMetadataFromWrangler, workspaceRevision } from './builders.js';
+import { buildPortableRelease, buildWorkerRelease, buildFrontendTree, workerMetadataFromWrangler, workspaceRevision } from './builders.js';
 import { releaseStorageClient } from './release.js';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
 import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
 import { workerManifestSchema } from '@gitspace/protocol/deployment';
+import { mirrorNatives, nativeMirrorKey, portableManifestSchema, type NativeMirror } from '@gitspace/protocol/machine-release';
 import { DISTRIBUTION_PLATFORMS } from './distribution.js';
+
+/** The platform's native mirror in its releases bucket, reached with the publishing key. */
+function bucketNativeMirror(client: S3Client, bucket: string): NativeMirror {
+  return {
+    async has(sha256) {
+      try {
+        await client.send(new HeadObjectCommand({ Bucket: bucket, Key: nativeMirrorKey(sha256) }), { abortSignal: AbortSignal.timeout(60_000) });
+        return true;
+      } catch (error) {
+        if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404) return false;
+        throw error;
+      }
+    },
+    async put(native, body) {
+      // Reading the body fails, before anything is sent, when its bytes differ from the pin.
+      const bytes = await new Response(body).bytes();
+      await client.send(new PutObjectCommand({ Bucket: bucket, Key: nativeMirrorKey(native.sha256), Body: bytes, ContentType: 'application/octet-stream', ContentLength: bytes.byteLength }), { abortSignal: AbortSignal.timeout(5 * 60_000) });
+    },
+  };
+}
 
 export function defaultReleaseStorage(bucket: string): DefaultReleaseStorage & { close(): void } {
   const client = releaseStorageClient();
@@ -101,6 +122,12 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
         return { commit, version: commit, modules, metadata: await workerMetadataFromWrangler(root) };
       },
       async frontend() { const artifact = await buildFrontendTree(root, join(temporary, 'frontend')); return { commit, files: await files(artifact.path) }; },
+      async portable() {
+        const artifact = await buildPortableRelease(root, join(temporary, 'portable'));
+        const manifest = await Bun.file(artifact.path).bytes();
+        const inventory = portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(manifest))).files;
+        return { manifest, files: await Promise.all(inventory.map(async file => ({ path: file.path, bytes: await Bun.file(join(dirname(artifact.path), 'portable', file.path)).bytes() }))) };
+      },
       async image() {
         const metadataPath = join(temporary, 'image.json');
         const tag = `${imageRepository}:${commit}`;
@@ -115,6 +142,14 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
     for (const [key, bytes] of built.objects) { const path = join(out, key); await mkdir(join(path, '..'), { recursive: true }); await Bun.write(path, bytes); }
     if (args.includes('--publish')) {
       if (!bucket) throw new Error('--bucket is required');
+      const portable = built.manifest.portable && built.objects.get(built.manifest.portable.key);
+      if (!portable) throw new Error('The default release has no portable release');
+      // Natives are mirrored before the default naming them is published.
+      const client = releaseStorageClient();
+      try {
+        const copied = await mirrorNatives(portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(portable))).natives, bucketNativeMirror(client, bucket), fetch);
+        console.log(JSON.stringify({ nativesMirrored: copied }));
+      } finally { client.destroy(); }
       const storage = defaultReleaseStorage(bucket);
       try { await publishDefaultRelease(built, storage); } finally { storage.close(); }
     }

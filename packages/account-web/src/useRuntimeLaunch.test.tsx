@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import { deploymentStatusFixture } from './App.js';
 import { LaunchSheet, LaunchedBanner, RevertSheet, LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
-import { REVERT_ACTIVATION_TIMEOUT_MS, useRuntimeLaunch, type RuntimeLaunch } from './useRuntimeLaunch.js';
+import { useRuntimeLaunch, type RuntimeLaunch } from './useRuntimeLaunch.js';
 
 const rpc = vi.hoisted(() => ({ launch: vi.fn(), revert: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: rpc } }));
@@ -24,6 +24,15 @@ function initial(): DeploymentStatusView {
     ...value,
     launch: { ...value.launch!, launchId: 'attempt-1', status: 'running', phase: 'build', message: 'building tenant worker', sha: value.releases[0]!.sha },
   };
+}
+/** `status` with the account's latest Back to stable in the given state. */
+function withRevert(status: DeploymentStatusView, revertStatus: 'running' | 'succeeded' | 'failed', error: string | null = null, revertId = 'revert-1'): DeploymentStatusView {
+  return { ...status, revert: { revertId, status: revertStatus, error, startedAt: '2026-08-30T10:06:00.000Z', updatedAt: '2026-08-30T10:06:30.000Z' } };
+}
+function button(label: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll('button')].find(candidate => candidate.textContent === label);
+  if (!found) throw new Error(`No ${label} button`);
+  return found;
 }
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -91,27 +100,38 @@ it('propagates rejected launch and revert actions without reloading', async () =
   expect(reload).not.toHaveBeenCalled();
 });
 
-it('waits for observed stable worker activation before reloading channel frontend assets', async () => {
+it('follows the account\'s revert in status and reloads into stable only once the account records it succeeded', async () => {
   sessionStorage.setItem(LAUNCHED_STORAGE_KEY, JSON.stringify({ sha: 'launched', label: 'Launched', at: Date.now() }));
-  let status: DeploymentStatusView = { ...initial(), launch: null };
+  const status: DeploymentStatusView = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValue({ status: 'ok', value: status });
+  rpc.revert.mockResolvedValue({ status: 'ok', value: withRevert(status, 'running') });
   await act(async () => { await state.revert(); });
-  expect(reload).not.toHaveBeenCalled();
-  status = { ...status, desired: { ...status.desired, worker: null, frontend: null } };
-  await act(() => root.render(<View status={status} />));
+  expect(state.revertProgress).toEqual({ status: 'running', error: null });
+  expect(container.textContent).toContain('Swapping the worker to the stable build');
+  expect(refresh).toHaveBeenCalledTimes(1);
+  await act(() => root.render(<View status={withRevert(status, 'running')} />));
   await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
   expect(refresh).toHaveBeenCalledTimes(2);
   expect(reload).not.toHaveBeenCalled();
-  status = { ...status, current: { ...status.current, worker: { sha: null, version: null } } };
-  await act(() => root.render(<View status={status} />));
-  expect(reload).not.toHaveBeenCalled();
-  status = { ...status, current: { ...status.current, worker: { sha: null, version: 'channel-1' } } };
-  await act(() => root.render(<View status={status} />));
+  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
   expect(reload).toHaveBeenCalledTimes(1);
   expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBeNull();
+  expect(state.revertProgress).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
   expect(refresh).toHaveBeenCalledTimes(2);
+});
+it('follows a Back to stable already running when the page opens, but not one that already ended', async () => {
+  const status: DeploymentStatusView = { ...initial(), launch: null };
+  await act(() => root.render(<View status={withRevert(status, 'failed', 'Platform reported channel:1 unhealthy', 'revert-0')} />));
+  expect(container.querySelector('[aria-label="Back to stable progress"]')).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(refresh).not.toHaveBeenCalled();
+  await act(() => root.render(<View status={withRevert(status, 'running')} />));
+  expect(container.querySelector('[aria-label="Back to stable progress"]')).not.toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+  expect(refresh).toHaveBeenCalledTimes(1);
+  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 it.each(['Launch denied', 'Launch busy', 'Workspace not found'])('opens a retryable failure sheet for %s before a launch track exists', async message => {
   const status = { ...initial(), launch: null };
@@ -126,18 +146,18 @@ it.each(['Launch denied', 'Launch busy', 'Workspace not found'])('opens a retrya
   expect(rpc.launch).toHaveBeenLastCalledWith({ source: { kind: 'workspace', workspaceId: 'requested-workspace' }, machineId: 'builder', targets: ['frontend'] });
   expect(state.launch?.status).toBe('running');
 });
-it('cancels stable activation polling when another launch supersedes revert', async () => {
+it('stops following Back to stable when a launch takes the page over', async () => {
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: status });
+  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
   await act(async () => { await state.revert(); });
   rpc.launch.mockRejectedValueOnce(new Error('busy'));
   await act(async () => { await expect(state.start({ kind: 'workspace', workspaceId: 'workspace' }, 'builder', ['frontend'])).rejects.toThrow('busy'); });
-  const stable = { ...status, desired: { ...status.desired, worker: null, frontend: null }, current: { ...status.current, worker: { sha: null, version: 'stable' } } };
-  await act(() => root.render(<View status={stable} />));
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
+  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
   expect(refresh).toHaveBeenCalledTimes(1);
   expect(reload).not.toHaveBeenCalled();
+  expect(state.revertProgress).toBeNull();
 });
 it('does not resume polling or reload after unmount while revert is in flight', async () => {
   await act(() => root.render(<View status={{ ...initial(), launch: null }} />));
@@ -146,56 +166,52 @@ it('does not resume polling or reload after unmount while revert is in flight', 
   let pending: Promise<void>;
   await act(() => { pending = state.revert(); });
   await act(() => root.render(null));
-  await act(async () => { reply.resolve({ status: 'ok', value: initial() }); await pending!; await vi.advanceTimersByTimeAsync(3000); });
+  await act(async () => { reply.resolve({ status: 'ok', value: withRevert(initial(), 'running') }); await pending!; await vi.advanceTimersByTimeAsync(3000); });
   expect(refresh).not.toHaveBeenCalled();
   expect(reload).not.toHaveBeenCalled();
 });
-it('cleans up stable activation polling on unmount', async () => {
+it('stops polling on unmount while following a revert', async () => {
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: status });
+  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
   await act(async () => { await state.revert(); await vi.advanceTimersByTimeAsync(1500); });
   const beforeUnmount = refresh.mock.calls.length;
   await act(() => root.render(null));
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
   expect(refresh).toHaveBeenCalledTimes(beforeUnmount);
   expect(reload).not.toHaveBeenCalled();
 });
 
-it('bounds activation polling, preserves the banner, and retries revert through stable success', async () => {
+it('shows the failure the account recorded, keeps the banner, and Retry follows a new revert to success', async () => {
   const mark = JSON.stringify({ sha: 'launched', label: 'Launched', at: Date.now() });
   sessionStorage.setItem(LAUNCHED_STORAGE_KEY, mark);
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValue({ status: 'ok', value: status });
-  await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Back to stable')!.click(); });
-  expect(container.textContent).toContain('Now running');
-  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBe(mark);
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS - 1); });
+  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
+  await act(async () => { button('Back to stable').click(); });
   expect(state.revertProgress?.status).toBe('running');
-  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(state.revertProgress?.status).toBe('failed');
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('60 seconds');
-  const polls = refresh.mock.calls.length;
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
-  expect(refresh).toHaveBeenCalledTimes(polls);
-  const stable = { ...status, desired: { ...status.desired, worker: null, frontend: null }, current: { ...status.current, worker: { sha: null, version: 'stable' } } };
-  await act(() => root.render(<View status={stable} />));
-  expect(reload).not.toHaveBeenCalled();
+  await act(() => root.render(<View status={withRevert(status, 'failed', 'Platform reported channel:1 unhealthy')} />));
+  expect(state.revertProgress).toEqual({ status: 'failed', error: 'Platform reported channel:1 unhealthy' });
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('unhealthy');
   expect(container.textContent).toContain('Now running');
   expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBe(mark);
-  await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click(); });
+  const polls = refresh.mock.calls.length;
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(refresh).toHaveBeenCalledTimes(polls);
+  expect(reload).not.toHaveBeenCalled();
+
+  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running', null, 'revert-2') });
+  await act(async () => { button('Retry').click(); });
   expect(rpc.revert).toHaveBeenCalledTimes(2);
   expect(rpc.launch).not.toHaveBeenCalled();
   expect(state.revertProgress?.status).toBe('running');
-  await act(() => root.render(<View status={{ ...stable }} />));
+  // The earlier revert's record settles nothing about this one.
+  await act(() => root.render(<View status={withRevert(status, 'failed', 'Platform reported channel:1 unhealthy')} />));
+  expect(state.revertProgress?.status).toBe('running');
+  await act(() => root.render(<View status={withRevert(status, 'succeeded', null, 'revert-2')} />));
   expect(reload).toHaveBeenCalledTimes(1);
   expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBeNull();
   expect(container.textContent).not.toContain('Now running');
-  const completedPolls = refresh.mock.calls.length;
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
-  expect(refresh).toHaveBeenCalledTimes(completedPolls);
-  expect(state.revertProgress).toBeNull();
 });
 
 it('keeps the banner on RPC rejection and exposes a functional revert Retry', async () => {
@@ -204,55 +220,20 @@ it('keeps the banner on RPC rejection and exposes a functional revert Retry', as
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
   rpc.revert.mockRejectedValueOnce(new Error('Revert denied'));
-  await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Back to stable')!.click(); });
+  await act(async () => { button('Back to stable').click(); });
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Revert denied');
   expect(container.textContent).toContain('Now running');
   expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBe(mark);
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
   expect(refresh).not.toHaveBeenCalled();
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: status });
-  await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click(); });
+  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
+  await act(async () => { button('Retry').click(); });
   expect(rpc.revert).toHaveBeenCalledTimes(2);
   expect(rpc.launch).not.toHaveBeenCalled();
   expect(state.revertProgress?.status).toBe('running');
 });
 
-it('keeps the activation budget at sixty elapsed seconds through forward and backward wall-clock jumps', async () => {
-  const wall = Date.now();
-  const mark = JSON.stringify({ sha: 'launched', label: 'Launched', at: wall });
-  sessionStorage.setItem(LAUNCHED_STORAGE_KEY, mark);
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValue({ status: 'ok', value: status });
-  await act(async () => { await state.revert(); });
-  const clock = vi.spyOn(Date, 'now').mockReturnValue(wall + 3_600_000);
-  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-  expect(state.revertProgress?.status).toBe('running');
-  clock.mockReturnValue(wall - 3_600_000);
-  await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
-  expect(state.revertProgress?.status).toBe('running');
-  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(state.revertProgress?.status).toBe('failed');
-  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBe(mark);
-  const completedPolls = refresh.mock.calls.length;
-  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-  expect(refresh).toHaveBeenCalledTimes(completedPolls);
-  expect(reload).not.toHaveBeenCalled();
-});
-
-it('accepts stable activation within the elapsed budget after the wall clock jumps forward', async () => {
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValue({ status: 'ok', value: status });
-  await act(async () => { await state.revert(); });
-  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3_600_000);
-  const stable = { ...status, desired: { ...status.desired, worker: null, frontend: null }, current: { ...status.current, worker: { sha: null, version: 'stable' } } };
-  await act(() => root.render(<View status={stable} />));
-  expect(reload).toHaveBeenCalledTimes(1);
-  expect(state.revertProgress).toBeNull();
-});
-
-it('ignores a superseded revert RPC reply and cancels its deadline for a new launch', async () => {
+it('ignores a superseded revert RPC reply when a launch takes the page over', async () => {
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
   const reply = Promise.withResolvers<{ status: 'ok'; value: DeploymentStatusView }>();
@@ -261,25 +242,24 @@ it('ignores a superseded revert RPC reply and cancels its deadline for a new lau
   await act(() => { pending = state.revert(); });
   rpc.launch.mockRejectedValueOnce(new Error('Launch denied'));
   await act(async () => { await expect(state.start({ kind: 'workspace', workspaceId: 'workspace' }, 'builder', ['frontend'])).rejects.toThrow('Launch denied'); });
-  await act(async () => { reply.resolve({ status: 'ok', value: status }); await pending!; await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
+  await act(async () => { reply.resolve({ status: 'ok', value: withRevert(status, 'running') }); await pending!; await vi.advanceTimersByTimeAsync(15_000); });
   expect(state.revertProgress).toBeNull();
   expect(state.launch?.error).toContain('Launch denied');
   expect(refresh).not.toHaveBeenCalled();
   expect(reload).not.toHaveBeenCalled();
 });
 
-it('still expires when status refresh rejects instead of leaving an unhandled polling failure', async () => {
+it('keeps following through status reads that fail, without an unhandled rejection', async () => {
   const status = { ...initial(), launch: null };
   await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: status });
-  refresh.mockRejectedValue(new Error('Disconnected during activation'));
+  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
+  refresh.mockRejectedValue(new Error('Disconnected during the swap'));
   await act(async () => { await state.revert(); });
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
-  expect(state.revertProgress?.status).toBe('failed');
-  const polls = refresh.mock.calls.length;
-  await act(async () => { await vi.advanceTimersByTimeAsync(REVERT_ACTIVATION_TIMEOUT_MS); });
-  expect(refresh).toHaveBeenCalledTimes(polls);
-  expect(reload).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
+  expect(refresh).toHaveBeenCalledTimes(4);
+  expect(state.revertProgress?.status).toBe('running');
+  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 
 it('refuses an empty machine before dispatch and exposes the failure in the launch sheet', async () => {

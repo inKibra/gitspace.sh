@@ -37,9 +37,14 @@ import {
   cancelAutomationRunContract,
   automationRunsContract,
   testAutomationContract,
+  automationEventsContract,
+  runAutomationOnEventContract,
+  linkAutomationSubjectContract,
+  unlinkAutomationSubjectContract,
   updateAutomationSettingsContract,
   automationsOverviewContract,
 } from '@gitspace/protocol/rpc-contract';
+import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import { ProjectAuthorityDO, UserProjectIndexDO, ProjectMcpGrantNotFoundError, ProjectMcpGrantRevisionConflictError } from './project-authority.js';
@@ -334,7 +339,11 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
   const listAutomations = server.implement(listAutomationsContract).handler(async ({ input, errors }) => {
     try {
-      await project(input.projectId); return ok(await automations(input.projectId).list(input.projectId));
+      const authority = await project(input.projectId);
+      const [listed, bot, summary] = await Promise.all([automations(input.projectId).list(input.projectId), env.GITHUB_APP.getByName(userId).botHandle(), authority.getProject()]);
+      const reference = summary?.repositoryReference ?? null;
+      const repository = reference === null ? null : githubRepositoryOf(reference);
+      return ok({ ...listed, github: { repository, bot } });
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'listAutomations', message: failure(error) }));
     }
@@ -433,6 +442,44 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'testAutomation', message: failure(error) }));
     }
   });
+  const automationEvents = server.implement(automationEventsContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId); return ok(await automations(input.projectId).recordedEvents({ projectId: input.projectId, limit: input.limit ?? 30 }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'automationEvents', message: failure(error) }));
+    }
+  });
+  const runAutomationOnEvent = server.implement(runAutomationOnEventContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).runOnEvent({ ...input, requestedBy: await person() });
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      if (refused.kind === 'invalid') return err(errors.AutomationInvalid({ field: refused.field, message: refused.message }));
+      if (refused.kind === 'notFound') return err(errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }));
+      return err(errors.OperationFailed({ operation: 'runAutomationOnEvent', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'runAutomationOnEvent', message: failure(error) }));
+    }
+  });
+  const linkAutomationSubject = server.implement(linkAutomationSubjectContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).link({ ...input, source: 'person', detail: await person() });
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      return err(refused.kind === 'invalid' ? errors.AutomationInvalid({ field: refused.field, message: refused.message }) : errors.OperationFailed({ operation: 'linkAutomationSubject', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'linkAutomationSubject', message: failure(error) }));
+    }
+  });
+  const unlinkAutomationSubject = server.implement(unlinkAutomationSubjectContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId); return ok({ projectId: input.projectId, unlinked: await automations(input.projectId).unlink(input) });
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'unlinkAutomationSubject', message: failure(error) }));
+    }
+  });
   const updateAutomationSettings = server.implement(updateAutomationSettingsContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId); return ok(await automations(input.projectId).updateSettings(input));
@@ -451,7 +498,7 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
-    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, updateSettings: updateAutomationSettings, overview: automationsOverview },
+    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview },
     mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

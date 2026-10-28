@@ -24,10 +24,14 @@ import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, 
 import { DRIVE_FILE_MAX_BYTES } from './artifact-storage.js';
 import {
   AutomationDraftCodec,
+  AutomationGitHubCodec,
+  AutomationLinkViewCodec,
   AutomationProjectSummaryCodec,
+  AutomationRecordedEventCodec,
   AutomationRunViewCodec,
   AutomationSettingsCodec,
-  AutomationTestResultCodec,
+  AutomationSubjectRefCodec,
+  AutomationTestCodec,
   AutomationViewCodec,
   automationErrors,
 } from './automations-contract.js';
@@ -1477,11 +1481,12 @@ export const stopWorkspaceTerminalContract = gitspaceRpc
 const automationProject = { projectId: wire.string };
 const automationTarget = { projectId: wire.string, automationId: wire.string };
 
-/** A project's automations and the limits they run under. */
+/** A project's automations, the limits and trust list they run under, its linked pull requests, issues and branches,
+ * and its GitHub repository and bot. */
 export const listAutomationsContract = gitspaceRpc
   .procedure()
   .input(wire.object(automationProject))
-  .output(wire.object({ automations: wire.array(AutomationViewCodec), settings: AutomationSettingsCodec }))
+  .output(wire.object({ automations: wire.array(AutomationViewCodec), settings: AutomationSettingsCodec, links: wire.array(AutomationLinkViewCodec), github: AutomationGitHubCodec }))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
@@ -1538,13 +1543,45 @@ export const automationRunsContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
-/** What a draft would do, without running it: its coming schedule times and its rendered instruction. */
+/** What a draft would do, without running it: its coming schedule times, or what it would do with recent recorded
+ * events, or with one (`deliveryId`) its checks and its rendered instruction. */
 export const testAutomationContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ ...automationProject, draft: AutomationDraftCodec }))
-  .output(wire.object({ results: wire.array(AutomationTestResultCodec), instruction: wire.string }))
+  .input(wire.object({ ...automationProject, draft: AutomationDraftCodec, deliveryId: wire.optional(wire.string) }))
+  .output(AutomationTestCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
   .query();
+
+/** The project's repository's recent GitHub deliveries, newest first, for Test with a past event. */
+export const automationEventsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, limit: wire.optional(wire.integer({ min: 1, max: 100 })) }))
+  .output(wire.array(AutomationRecordedEventCodec))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Run it: a saved automation acts once on a recorded delivery, with its trust and conditions checked as when it arrived. */
+export const runAutomationOnEventContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationTarget, deliveryId: wire.string }))
+  .output(AutomationRunViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** A person links a pull request, issue or branch to a workspace; it replaces any link the subject had. */
+export const linkAutomationSubjectContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, subject: AutomationSubjectRefCodec, workspaceId: wire.string }))
+  .output(AutomationLinkViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const unlinkAutomationSubjectContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, subject: AutomationSubjectRefCodec }))
+  .output(wire.object({ projectId: wire.string, unlinked: wire.boolean }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 
 export const updateAutomationSettingsContract = gitspaceRpc
   .procedure()
@@ -2057,7 +2094,7 @@ export const ReleaseRecordWireCodec = wire.object({
   builtBy: wire.string,
   createdAt: wire.string,
   inferenceVersion: wire.optional(wire.literal(1)),
-  artifacts: wire.object({ worker: wire.nullable(ReleaseArtifactWireCodec), machine: wire.nullable(ReleaseArtifactWireCodec), omp: wire.optional(wire.nullable(ReleaseArtifactWireCodec)), frontend: wire.nullable(ReleaseArtifactWireCodec) }),
+  artifacts: wire.object({ worker: wire.nullable(ReleaseArtifactWireCodec), machine: wire.nullable(ReleaseArtifactWireCodec), omp: wire.optional(wire.nullable(ReleaseArtifactWireCodec)), frontend: wire.nullable(ReleaseArtifactWireCodec), portable: wire.optional(ReleaseArtifactWireCodec) }),
   omp: wire.optional(wire.nullable(OmpReleaseMetadataWireCodec)),
   status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec), omps: wire.optional(wire.record(ReleaseStatusWireCodec)) }),
   error: wire.nullable(wire.string),
@@ -2076,6 +2113,15 @@ export const LaunchProgressWireCodec = wire.object({
   updatedAt: wire.string,
 });
 export type LaunchProgressView = InputOf<typeof LaunchProgressWireCodec>;
+/** The account's latest Back to stable; the account runs it to its end whether or not a browser follows it. */
+export const RevertProgressWireCodec = wire.object({
+  revertId: wire.string,
+  status: wire.enum(['running', 'succeeded', 'failed']),
+  error: wire.nullable(wire.string),
+  startedAt: wire.string,
+  updatedAt: wire.string,
+});
+export type RevertProgressView = InputOf<typeof RevertProgressWireCodec>;
 export const DeploymentStatusWireCodec = wire.object({
   desired: wire.object({ worker: wire.nullable(wire.string), machine: wire.nullable(wire.string), frontend: wire.nullable(wire.string), updatedAt: wire.string }),
   current: wire.object({
@@ -2091,6 +2137,7 @@ export const DeploymentStatusWireCodec = wire.object({
   }))),
   launch: wire.nullable(LaunchProgressWireCodec),
   canonical: wire.nullable(CanonicalHeadWireCodec),
+  revert: wire.nullable(RevertProgressWireCodec),
 });
 export type DeploymentStatusView = InputOf<typeof DeploymentStatusWireCodec>;
 export const deploymentStatusContract = gitspaceRpc
@@ -2121,6 +2168,9 @@ export const deploymentDiscardLaunchContract = gitspaceRpc
   .output(DeploymentStatusWireCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** Start Back to stable and return at once with `revert` running: the account swaps the Worker to the default release
+ * through the platform and, only when that swap succeeded, returns every selection to the channel. The outcome is
+ * `deployment.status.revert`. */
 export const deploymentRevertContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
@@ -2301,6 +2351,10 @@ export const gitspaceContract = gitspaceRpc.contract({
     cancelRun: cancelAutomationRunContract,
     runs: automationRunsContract,
     test: testAutomationContract,
+    events: automationEventsContract,
+    runOnEvent: runAutomationOnEventContract,
+    link: linkAutomationSubjectContract,
+    unlink: unlinkAutomationSubjectContract,
     updateSettings: updateAutomationSettingsContract,
     overview: automationsOverviewContract,
   },

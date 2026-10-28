@@ -862,6 +862,9 @@ export function SourceSettings({ deployment, onRevertDeployment, onCheckCanonica
       : selected.length === 0 ? 'You run the stable channel.'
       : selected.some((source) => source.kind === 'canonical') ? `You run an older ${head.branch} commit; launch canonical develop from the GitSpace project's menu.`
       : 'You run a workspace build.'}`;
+  // The latest Back to stable while it runs, and its failure until the selections change again.
+  const reverting = deployment.revert?.status === 'running';
+  const revertFailure = deployment.revert?.status === 'failed' && deployment.revert.updatedAt >= deployment.desired.updatedAt ? deployment.revert.error ?? 'Back to stable failed.' : null;
   return <>
     <Group title="Running"><SettingRows>
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
@@ -873,8 +876,10 @@ export function SourceSettings({ deployment, onRevertDeployment, onCheckCanonica
     </SettingRows></Group>)}
     <Group title="Desired"><SettingRows>
       {RELEASE_TARGETS.map((target) => <SettingRow key={target} title={RELEASE_TARGET_LABEL[target]} description={desiredLabel(deployment, target)}><Badge color={deployment.desired[target] === null ? 'gray' : 'blue'}>{deployment.desired[target] === null ? 'Channel' : 'Release'}</Badge></SettingRow>)}
-      <SettingRow title="All targets" description={`Selections updated ${new Date(deployment.desired.updatedAt).toLocaleString()}`}>
-        <Button variant="secondary" size="compact" disabled={channel || saving} onClick={() => { if (window.confirm('Go back to the stable GitSpace build? The worker swaps now; machines and the frontend follow.')) settle(onRevertDeployment()); }}>Back to stable</Button>
+      <SettingRow title="All targets" description={reverting ? 'Going back to stable: the worker swaps first, then machines and the frontend follow.'
+        : revertFailure ? <span role="alert" className="text-destructive">Back to stable failed: {revertFailure}</span>
+        : `Selections updated ${new Date(deployment.desired.updatedAt).toLocaleString()}`}>
+        <Button variant="secondary" size="compact" disabled={channel || saving || reverting} onClick={() => { if (window.confirm('Go back to the stable GitSpace build? The worker swaps now; machines and the frontend follow.')) settle(onRevertDeployment()); }}>Back to stable</Button>
       </SettingRow>
     </SettingRows></Group>
     <Group title="Canonical source"><SettingRows>

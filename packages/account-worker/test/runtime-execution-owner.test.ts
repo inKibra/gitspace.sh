@@ -162,7 +162,7 @@ test('only the project agent manages automations: a workspace agent is refused e
     try {
       const listed = await invoke('space_automations', { method: 'list' });
       expect(listed.status, text(listed)).toBe('completed');
-      expect(JSON.parse(text(listed))).toEqual({ automations: [], settings: { concurrency: 2, dailyRunCap: 50 } });
+      expect(JSON.parse(text(listed))).toEqual({ automations: [], settings: { concurrency: 2, dailyRunCap: 50, trusted: [] }, links: [] });
     } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

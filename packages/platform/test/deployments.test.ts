@@ -1,9 +1,9 @@
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { env } from 'cloudflare:workers';
 import { createRelayAuthorization } from '@gitspace/protocol/relay';
 import { workerModuleKey, type PlatformDeployResponse, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 import worker from '../src/index.js';
 import { migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
@@ -31,6 +31,8 @@ const probeVersions = new Map<string, string[]>();
 // An in-flight dispatch response retains its script version until its body is released.
 const activeProbes = new Map<string, { version: string; bodies: number }>();
 let rejectNextUpload: string | null = null;
+/** The next script upload waits for `release` after signalling `started`, so a test acts while a swap is in flight. */
+let heldUpload: { started: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | null = null;
 const realFetch = globalThis.fetch;
 const WASM = [0, 97, 115, 109, 1, 0, 0, 0];
 
@@ -100,6 +102,8 @@ const dispatcherStub: DispatchNamespace = {
 
 // `wrangler types` freezes vars to their production literals; the test key is a different string.
 const testEnv: Env = { ...env, ADMIN_PUBLIC_KEY: ADMIN_PUBLIC_KEY as Env['ADMIN_PUBLIC_KEY'], DISPATCHER: dispatcherStub };
+// Swaps run in the tenant's deployment object, which reads the bindings of the test worker itself.
+Object.assign(env, { DISPATCHER: dispatcherStub });
 
 function metadata(migrationTags: string[]): WorkerReleaseMetadata {
   return {
@@ -196,6 +200,20 @@ async function tenantPost(tenant: string, action: 'deploy' | 'revert', token: st
   }), testEnv, createExecutionContext());
 }
 
+function holdNextUpload(): { started: Promise<void>; release(): void } {
+  const hold = { started: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+  heldUpload = hold;
+  // A test that fails while the upload is held must not leave its swap waiting.
+  onTestFinished(() => hold.release.resolve());
+  return { started: hold.started.promise, release: () => hold.release.resolve() };
+}
+
+async function operationGet(tenant: string, token: string, operationId: string): Promise<Response> {
+  return worker.fetch(new Request(`https://platform.test/__platform/tenants/${tenant}/operations/${operationId}`, {
+    headers: { authorization: `Bearer ${token}` },
+  }), testEnv, createExecutionContext());
+}
+
 async function accountId(tenant: string): Promise<string> {
   const config = await env.DEPLOYMENTS.getByName(tenant).tenantConfig();
   if (!config) throw new Error('Tenant fixture is not configured');
@@ -246,6 +264,7 @@ beforeEach(() => {
   probeVersions.clear();
   activeProbes.clear();
   rejectNextUpload = null;
+  heldUpload = null;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const bucketLookup = /^\/client\/v4\/accounts\/test-account\/r2\/buckets\/([^/]+)$/u.exec(url.pathname);
@@ -281,6 +300,12 @@ beforeEach(() => {
     const modulePart = form.get(parsed.main_module);
     if (!(modulePart instanceof File)) throw new Error('module part missing');
     expect(modulePart.type).toBe('application/javascript+module');
+    const hold = heldUpload;
+    if (hold) {
+      heldUpload = null;
+      hold.started.resolve();
+      await hold.release.promise;
+    }
     if (rejectNextUpload) {
       const message = rejectNextUpload;
       rejectNextUpload = null;
@@ -499,7 +524,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(await env.RELEASES.head('tenants/transition/modules/worker.manifest.json')).not.toBeNull();
   });
 
-  it('surfaces Cloudflare rejections without recording a deploy', async () => {
+  it('surfaces Cloudflare rejections without recording a deploy and frees the lease for the next one', async () => {
     const token = await mintToken('echo');
     rejectNextUpload = 'old_tag mismatch';
     const staged = await stageRelease('echo', 'e1');
@@ -509,7 +534,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     const state = await env.DEPLOYMENTS.getByName('echo').getState();
     expect(state.deploys).toHaveLength(0);
     expect(state.appliedMigrationTag).toBeNull();
-    expect((await env.DEPLOYMENTS.getByName('echo').acquireLease()).status).toBe('ok');
+    expect(await deploy('echo', token, 'e1', ['v1'])).toMatchObject({ sha: 'e1', healthy: true });
   });
 
   it('keeps a healthy candidate when the dispatcher still serves its predecessor during propagation', async () => {
@@ -634,6 +659,53 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
     expect(uploads[2]!.module).toBe(bundleSource('one'));
     expect(uploads[2]!.metadata.tags).toEqual(['juliet', 'one']);
+  });
+
+  it('finishes a revert whose caller left mid-swap, keeps its outcome under the operation id, and frees the lease when it ends', async () => {
+    const commit = '5'.repeat(40);
+    await publishDefault(commit, ['v1']);
+    const token = await mintToken('lima');
+    await deploy('lima', token, 'l1', ['v1']);
+    const operationId = crypto.randomUUID();
+    const upload = holdNextUpload();
+    // Nobody reads this answer: the caller is gone once the upload is under way.
+    void tenantPost('lima', 'revert', token, { to: 'channel', operationId });
+    await upload.started;
+
+    const concurrent = await tenantPost('lima', 'revert', token, { to: 'previous' });
+    expect(concurrent.status).toBe(409);
+    expect(await concurrent.json()).toMatchObject({ error: { code: 'DEPLOY_IN_PROGRESS' } });
+    const deployments = env.DEPLOYMENTS.getByName('lima');
+    const outcome = deployments.operation(operationId);
+    // Calls on one stub arrive in order: once this answers, the object holds the request above on the running swap.
+    await deployments.getState();
+    upload.release();
+    expect(await outcome).toEqual({ status: 'ok', value: { sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' } });
+    const answered = await operationGet('lima', token, operationId);
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({ sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect((await deployments.getState()).active?.sha).toBe(commit);
+
+    // The same id answers from the record and never swaps twice.
+    const repeated = await tenantPost('lima', 'revert', token, { to: 'channel', operationId });
+    expect(await repeated.json()).toEqual({ sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(uploads).toHaveLength(2);
+    expect((await operationGet('lima', token, crypto.randomUUID())).status).toBe(404);
+
+    const next = await tenantPost('lima', 'revert', token, { to: 'previous' });
+    expect(next.status).toBe(200);
+    expect(await next.json()).toMatchObject({ sha: 'l1', healthy: true });
+  });
+
+  it('reports a swap that ended with an earlier instance of the deployment object as interrupted', async () => {
+    const token = await mintToken('mike');
+    const operationId = crypto.randomUUID();
+    await runInDurableObject(env.DEPLOYMENTS.getByName('mike'), (_instance, state) => {
+      state.storage.sql.exec('INSERT INTO operations(id, started_at, outcome_json) VALUES (?, ?, NULL)', operationId, new Date().toISOString());
+    });
+    const response = await operationGet('mike', token, operationId);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'DEPLOY_INTERRUPTED' } });
   });
 });
 

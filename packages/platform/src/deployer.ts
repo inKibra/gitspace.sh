@@ -1,6 +1,7 @@
 import {
   WORKER_MANIFEST_FILE,
   WORKER_VERSION_HEADER,
+  platformDeployResponseSchema,
   workerBundleSchema,
   workerManifestSchema,
   workerModuleKey,
@@ -13,6 +14,8 @@ import {
   type WorkerReleaseMetadata,
 } from '@gitspace/protocol/deployment';
 import type { WorkerModule } from '@gitspace/protocol/worker-bundle';
+import { z } from 'zod';
+import type { CreditLedgerRecord } from './credit-ledger.js';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
 import { defaultReleaseReader } from './default-release.js';
 import { DEFAULT_ACCOUNT_POINTER, resolveDefaultRelease } from '@gitspace/protocol/default-release';
@@ -65,6 +68,12 @@ export interface DeployFailure {
 type Outcome<T> = { status: 'ok'; value: T } | { status: 'error'; error: DeployFailure };
 
 export type DeployResult = Outcome<PlatformDeployResponse>;
+
+/** A deploy result as the tenant's deployment object stores it under its operation id. */
+export const deployResultSchema: z.ZodType<DeployResult> = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('ok'), value: platformDeployResponseSchema }),
+  z.object({ status: z.literal('error'), error: z.object({ status: z.number().int(), code: z.string(), message: z.string() }) }),
+]);
 
 /**
  * Migrations Cloudflare still has to run for this tenant: every tag after the
@@ -355,7 +364,7 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string): Promi
 }
 
 /** A release to upload; its bytes are read from RELEASES only for the upload itself, so no swap holds two releases. */
-interface Candidate {
+export interface Candidate {
   /** Exact Worker build identity, checked by the post-upload health probe. */
   sha: string;
   /** RELEASES key: a worker manifest, or a LEGACY single bundle. */
@@ -365,7 +374,8 @@ interface Candidate {
   inferenceVersion?: 1;
 }
 
-type Deployments = DurableObjectStub<TenantDeploymentsDO>;
+/** What a swap reads from and records in the tenant's deployment object, which is also the object running it. */
+export type DeploymentRecords = Pick<TenantDeploymentsDO, 'tenantConfig' | 'providerToken' | 'recordDeploy'>;
 
 async function loadFallback(env: Env, state: TenantDeploymentState, exclude: string): Promise<Candidate | null> {
   const active: TenantDeployRecord | null = state.active && state.active.sha !== exclude ? state.active : null;
@@ -385,18 +395,11 @@ async function loadChannel(env: Env): Promise<Candidate | null> {
   } catch { return null; }
 }
 
-/**
- * Upload → probe → (auto-revert). Assumes the caller holds the tenant lease;
- * `recordDeploy` releases it on every exit except an upload rejection, where
- * nothing changed on Cloudflare and the caller releases explicitly.
- */
-async function swap(env: Env, tenant: string, deployments: Deployments, state: TenantDeploymentState, candidate: Candidate, autoRevert: boolean): Promise<DeployResult> {
+/** Upload → probe → (auto-revert). Runs inside the tenant's deployment object, which holds the lease for the whole call. */
+async function swap(env: Env, tenant: string, records: DeploymentRecords, state: TenantDeploymentState, candidate: Candidate, autoRevert: boolean): Promise<DeployResult> {
   const expectedSha = candidate.sha;
-  const tenantConfig = await deployments.tenantConfig();
-  if (!tenantConfig) {
-    await deployments.releaseLease();
-    return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
-  }
+  const tenantConfig = await records.tenantConfig();
+  if (!tenantConfig) return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
   const candidatePin = candidate.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
   const defaultPin = candidatePin ?? state.active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
   try {
@@ -410,20 +413,16 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
       ] } };
     }
   } catch (error) {
-    await deployments.releaseLease();
     return { status: 'error', error: { status: 409, code: 'DEFAULT_RELEASE_UNAVAILABLE', message: error instanceof Error ? error.message : 'Default release unavailable' } };
   }
   const delta = migrationDelta(candidate.metadata.migrations, state.appliedMigrationTag);
   const accountKey = Uint8Array.from(atob(tenantConfig.rootPublicKey), character => character.charCodeAt(0));
   const accountHash = new Uint8Array(await crypto.subtle.digest('SHA-256', accountKey));
   const accountId = `u-${Array.from(accountHash.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')}`;
-  const token = await deployments.providerToken();
+  const token = await records.providerToken();
   if (candidate.metadata.resources.some(resource => resource.source === 'artifacts')) {
     const failure = await ensureArtifactsNamespace(env, `gsp-${accountId}`);
-    if (failure) {
-      await deployments.releaseLease();
-      return { status: 'error', error: failure };
-    }
+    if (failure) return { status: 'error', error: failure };
   }
   const uploadMetadata = scriptUploadMetadata(candidate.metadata, delta, [tenant, candidate.sha], {
     id: tenant,
@@ -436,15 +435,12 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
     publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
   });
   const rejected = await uploadScript(env, tenant, candidate.workerKey, uploadMetadata);
-  if (rejected) {
-    await deployments.releaseLease();
-    return { status: 'error', error: rejected };
-  }
+  if (rejected) return { status: 'error', error: rejected };
   const appliedMigrationTag = delta ? delta.new_tag : state.appliedMigrationTag;
   const probe = await probeHealth(env, tenant, expectedSha);
   const sha = probe.version ?? candidate.sha;
   if (probe.healthy) {
-    await deployments.recordDeploy({ sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: true, revertedTo: null, appliedMigrationTag });
+    await records.recordDeploy({ sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: true, revertedTo: null, appliedMigrationTag });
     return { status: 'ok', value: { sha, healthy: true, revertedTo: null, appliedMigrationTag } };
   }
 
@@ -465,7 +461,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
       const fallbackSha = fallbackProbe.version ?? fallback.sha;
       if (fallbackProbe.healthy) {
         revertedTo = fallbackSha;
-        await deployments.recordDeploy({
+        await records.recordDeploy({
           sha: fallbackSha,
           workerKey: fallback.workerKey,
           metadata: fallback.metadata,
@@ -476,19 +472,59 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
       }
     }
   }
-  await deployments.recordDeploy({ sha: candidate.sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag });
+  await records.recordDeploy({ sha: candidate.sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag });
   return { status: 'ok', value: { sha: candidate.sha, healthy: false, revertedTo, appliedMigrationTag } };
 }
 
-export async function deployChannelTenant(env: Env, tenant: string): Promise<DeployResult> {
-  const candidate = await loadChannel(env);
-  if (!candidate) {
-    return { status: 'error', error: { status: 503, code: 'CHANNEL_UNAVAILABLE', message: 'Relay channel release is not published' } };
+/** One swap the tenant's deployment object runs under its lease: a staged tenant release, a revert, or the channel a
+ * new tenant starts on. */
+export type DeployWork =
+  | { kind: 'release'; candidate: Candidate }
+  | { kind: 'revert'; request: Omit<PlatformRevertRequest, 'operationId'> }
+  | { kind: 'bootstrap' };
+
+/**
+ * Runs `work` for the tenant. Called by its deployment object, which holds the lease for the whole call, so the swap
+ * and its metering finish whether or not the request that asked for it is still connected. A tenant release and a
+ * revert are metered once they swap; bootstrap installs the channel unmetered.
+ */
+export async function runDeployWork(env: Env, tenant: string, records: DeploymentRecords, state: TenantDeploymentState, work: DeployWork): Promise<DeployResult> {
+  if (work.kind === 'bootstrap') {
+    const candidate = await loadChannel(env);
+    if (!candidate) return { status: 'error', error: { status: 503, code: 'CHANNEL_UNAVAILABLE', message: 'Relay channel release is not published' } };
+    return swap(env, tenant, records, state, candidate, false);
   }
-  const deployments = env.DEPLOYMENTS.getByName(tenant);
-  const lease = await deployments.acquireLease();
-  if (lease.status === 'error') return { status: 'error', error: { status: 409, ...lease.error } };
-  return swap(env, tenant, deployments, lease.value, candidate, false);
+  const result = work.kind === 'release'
+    ? await swap(env, tenant, records, state, work.candidate, true)
+    : await revertSwap(env, tenant, records, state, work.request);
+  // Metering never turns a swap that happened into a failure.
+  if (result.status === 'ok') {
+    await meterDeploy(env, tenant, result.value.sha).catch((error: unknown) => console.error(JSON.stringify({ event: 'deploy-metering-failed', tenant, message: error instanceof Error ? error.message : String(error) })));
+  }
+  return result;
+}
+
+/** One `worker-deploy` ledger entry per swap; an unconfigured credit account is logged, never a deploy failure. */
+async function meterDeploy(env: Env, tenant: string, sha: string): Promise<void> {
+  const credits = env.CREDITS.getByName(tenant);
+  const account = await credits.getAccount();
+  if (account.status === 'error') {
+    console.error(JSON.stringify({ event: 'deploy-metering-skipped', tenant, code: account.error.code }));
+    return;
+  }
+  const now = new Date().toISOString();
+  const ledger: CreditLedgerRecord = {
+    id: `deploy:${tenant}:${sha}:${crypto.randomUUID()}`,
+    resource: 'worker-deploy',
+    quantity: '1',
+    rateVersion: 'cloudflare-2026-08-27',
+    debitMicros: Number(env.DEPLOY_SETTLEMENT_MICROS),
+    windowStart: now,
+    windowEnd: now,
+    createdAt: now,
+  };
+  const applied = await credits.applyUsage(ledger);
+  if (applied.status === 'error') console.error(JSON.stringify({ event: 'deploy-metering-failed', tenant, code: applied.error.code }));
 }
 
 /** Copies a tenant's module release into RELEASES, checking the manifest digest and each module against the manifest. */
@@ -535,18 +571,11 @@ export async function deployTenantWorker(env: Env, tenant: string, request: Plat
     : await stageLegacyBundle(env, tenant, read, request.sha, release);
   if (staged.status === 'error') return staged;
 
-  const deployments = env.DEPLOYMENTS.getByName(tenant);
-  const lease = await deployments.acquireLease();
-  if (lease.status === 'error') return { status: 'error', error: { status: 409, ...lease.error } };
-  return swap(env, tenant, deployments, lease.value, { sha: request.sha, workerKey: staged.value, metadata: request.metadata }, true);
+  return env.DEPLOYMENTS.getByName(tenant).deploy(tenant, { kind: 'release', candidate: { sha: request.sha, workerKey: staged.value, metadata: request.metadata } }, null);
 }
 
-export async function revertTenantWorker(env: Env, tenant: string, request: PlatformRevertRequest): Promise<DeployResult> {
-  const deployments = env.DEPLOYMENTS.getByName(tenant);
-  const lease = await deployments.acquireLease();
-  if (lease.status === 'error') return { status: 'error', error: { status: 409, ...lease.error } };
-  const state = lease.value;
-
+/** Restores the previous healthy release or the current default, refusing one without the requested inference support. */
+async function revertSwap(env: Env, tenant: string, records: DeploymentRecords, state: TenantDeploymentState, request: Omit<PlatformRevertRequest, 'operationId'>): Promise<DeployResult> {
   let candidate: Candidate | null = null;
   if (request.to === 'previous') {
     const previous = state.previous;
@@ -555,7 +584,6 @@ export async function revertTenantWorker(env: Env, tenant: string, request: Plat
     candidate = await loadChannel(env);
   }
   if (!candidate) {
-    await deployments.releaseLease();
     return {
       status: 'error',
       error: {
@@ -566,8 +594,7 @@ export async function revertTenantWorker(env: Env, tenant: string, request: Plat
     };
   }
   if (request.inferenceVersion !== undefined && candidate.inferenceVersion !== request.inferenceVersion) {
-    await deployments.releaseLease();
     return { status: 'error', error: { status: 409, code: 'RELEASE_INCOMPATIBLE', message: `Release ${candidate.sha} does not advertise inferenceVersion ${request.inferenceVersion}` } };
   }
-  return swap(env, tenant, deployments, state, candidate, false);
+  return swap(env, tenant, records, state, candidate, false);
 }

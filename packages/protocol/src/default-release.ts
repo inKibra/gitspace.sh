@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { WORKER_MANIFEST_FILE, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, executableArtifactManifestSchema, machineNativePlatformSchema, releaseArtifactSchema } from './deployment.js';
 import { cloudImageReferenceSchema } from './cloud-image.js';
+import { PORTABLE_MANIFEST_FILE, portableFileKey, portableManifestSchema } from './machine-release.js';
 
 export const DEFAULT_ACCOUNT_POINTER = 'defaults/account.json';
 export const defaultCommitSchema = z.string().regex(/^[a-f0-9]{40}$/u);
@@ -32,12 +33,15 @@ export const defaultReleaseSchema = z.object({
   frontend: z.object({ commit: defaultCommitSchema, files: z.array(defaultObjectSchema.extend({ path: pathSchema, contentType: z.string().min(1) })).min(1) }).strict(),
   image: z.object({ commit: defaultCommitSchema, image: cloudImageReferenceSchema, provenance: defaultObjectSchema }).strict(),
   machines: z.array(defaultNativeArtifactSchema).default([]),
+  /** The portable machine release (`machine-release`); absent on defaults published before it. */
+  portable: defaultObjectSchema.optional(),
 }).strict().superRefine((manifest, context) => {
   if ([manifest.worker.commit, manifest.worker.version, manifest.frontend.commit, manifest.image.commit].some(commit => commit !== manifest.commit)) context.addIssue({ code: 'custom', message: 'Default release part commit mismatch' });
   if (manifest.machines.some(machine => machine.commit !== manifest.commit) || new Set(manifest.machines.map(machine => machine.platform)).size !== manifest.machines.length) context.addIssue({ code: 'custom', message: 'Native default commit mismatch or duplicate platform' });
   const keys = new Set<string>();
   const worker = 'manifest' in manifest.worker ? manifest.worker.manifest : manifest.worker.bundle;
   if ('manifest' in manifest.worker && worker.key !== `defaults/releases/${manifest.commit}/${WORKER_MANIFEST_FILE}`) context.addIssue({ code: 'custom', message: 'Default worker manifest namespace mismatch' });
+  if (manifest.portable && manifest.portable.key !== `defaults/releases/${manifest.commit}/${PORTABLE_MANIFEST_FILE}`) context.addIssue({ code: 'custom', message: 'Default portable release namespace mismatch' });
   for (const object of [worker, ...manifest.frontend.files, manifest.image.provenance]) {
     if (!object.key.startsWith(`defaults/releases/${manifest.commit}/`) || keys.has(object.key)) context.addIssue({ code: 'custom', message: 'Default release object namespace mismatch or duplicate' });
     keys.add(object.key);
@@ -80,7 +84,16 @@ export async function verifyDefaultWorker(reader: DefaultReleaseReader, worker: 
   return [...modules, worker.manifest];
 }
 
-/** `manifests` checks the worker, image provenance and native manifests; `all` also checks every worker module, frontend file and native chunk. */
+/** Verifies the portable release's manifest (and with `all` each file it names); returns every object it publishes. */
+export async function verifyDefaultPortable(reader: DefaultReleaseReader, portable: DefaultObject, content: 'all' | 'manifests'): Promise<DefaultObject[]> {
+  const manifest = portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(await verifyDefaultObject(reader, portable))));
+  const files = manifest.files.map(file => ({ key: portableFileKey(portable.key, file.path), sha256: file.sha256, size: file.size }));
+  if (content === 'all') for (const file of files) await verifyDefaultObject(reader, file);
+  return [...files, portable];
+}
+
+/** `manifests` checks the worker, image provenance, native and portable manifests; `all` also checks every worker module,
+ * frontend file, native chunk and portable file. */
 export async function verifyDefaultReleaseContents(reader: DefaultReleaseReader, manifest: DefaultRelease, content: 'all' | 'manifests' = 'all'): Promise<void> {
   await verifyDefaultWorker(reader, manifest.worker, content);
   if (content === 'all') for (const object of manifest.frontend.files) await verifyDefaultObject(reader, object);
@@ -90,6 +103,7 @@ export async function verifyDefaultReleaseContents(reader: DefaultReleaseReader,
     await verifyDefaultNativeArtifact(reader, native);
     if (content === 'all') for (const chunk of native.chunks) await verifyDefaultObject(reader, chunk);
   }
+  if (manifest.portable) await verifyDefaultPortable(reader, manifest.portable, content);
 }
 
 export async function verifyDefaultNativeArtifact(reader: DefaultReleaseReader, native: DefaultNativeArtifact): Promise<void> {

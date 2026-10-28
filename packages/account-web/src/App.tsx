@@ -78,6 +78,7 @@ export const deploymentStatusFixture: DeploymentStatusView = {
     updatedAt: '2026-08-30T10:05:10.000Z',
   },
   canonical: { repository: 'https://github.com/inKibra/gitspace.sh.git', branch: 'develop', commit: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00', checkedAt: '2026-08-30T10:01:00.000Z' },
+  revert: null,
 };
 
 /** The running launch above as this browser followed it: install done, worker built and uploaded, machine building. */

@@ -1087,6 +1087,14 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return cancelAutomationTurn(this.ctx.storage, await this.getRuntime(input), input.requestId);
   }
 
+  /** An automation run's notice: a line in the main conversation that leaves the agent asleep. The run's request id
+   * keys it, so a notice sent again appears once. */
+  async runtimeAutomationNotice(raw: unknown) {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1) }).parse(raw);
+    await this.runtimeAccess(input, true);
+    await (await this.getRuntime(input)).notice(input.text, input.requestId, 'GitHub');
+  }
+
   async runtimeTranscript(raw: unknown, format: 'json' | 'ndjson' = 'json', range: unknown = {}): Promise<Response> {
     const input = RuntimeIdentitySchema.extend({ conversationId: z.string().optional() }).parse(raw);
     return (await this.getRuntime(input)).transcript(input.conversationId, format, RuntimeTranscriptRangeSchema.parse(range));

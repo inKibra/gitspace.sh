@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultReleaseContents, verifyDefaultWorker, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
+import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultPortable, verifyDefaultReleaseContents, verifyDefaultWorker, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
 import { WORKER_MANIFEST_FILE, workerModuleKey, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { PORTABLE_MANIFEST_FILE, portableFileKey } from '@gitspace/protocol/machine-release';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 
 export type DefaultReleaseStorage = DefaultReleaseReader & { put(key: string, bytes: Uint8Array, expectedEtag: string | null): Promise<void> };
@@ -11,6 +12,8 @@ export type DefaultReleaseBuilders = {
   frontend(): Promise<{ commit: string; files: { path: string; bytes: Uint8Array; contentType: string }[] }>;
   image(): Promise<{ commit: string; image: string; provenance: Uint8Array }>;
   machines?(): Promise<DefaultRelease['machines']>;
+  /** The portable machine release: its manifest and the files it names, by path. */
+  portable?(): Promise<{ manifest: Uint8Array; files: { path: string; bytes: Uint8Array }[] }>;
 };
 export function defaultObject(key: string, bytes: Uint8Array): DefaultObject {
   return { key, size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
@@ -30,6 +33,7 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   const frontend = await builders.frontend();
   const image = await builders.image();
   const machines = builders.machines ? await builders.machines() : [];
+  const portable = builders.portable ? await builders.portable() : null;
   if (await builders.verifyCommit() !== commit) throw new Error('Build checkout commit changed during build');
   const prefix = `defaults/releases/${commit}/`;
   const objects = new Map<string, Uint8Array>();
@@ -37,8 +41,14 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   for (const module of worker.modules) objects.set(workerModuleKey(workerManifestKey, module.name), module.content);
   objects.set(workerManifestKey, workerManifest);
   objects.set(`${prefix}image-provenance.json`, image.provenance);
+  const portableKey = `${prefix}${PORTABLE_MANIFEST_FILE}`;
+  if (portable) {
+    for (const file of portable.files) objects.set(portableFileKey(portableKey, file.path), file.bytes);
+    objects.set(portableKey, portable.manifest);
+  }
   const manifest = defaultReleaseSchema.parse({
     schemaVersion: 1, commit, inferenceVersion: 1, machines,
+    ...(portable ? { portable: defaultObject(portableKey, portable.manifest) } : {}),
     worker: { commit: worker.commit, version: worker.version, manifest: defaultObject(workerManifestKey, workerManifest), metadata: worker.metadata },
     frontend: { commit: frontend.commit, files: frontend.files.map(file => {
       const key = `${prefix}frontend/${file.path}`;
@@ -67,7 +77,8 @@ export async function publishDefaultRelease(build: DefaultReleaseBuild, storage:
   const before = await storage.get(DEFAULT_ACCOUNT_POINTER);
   const pointer = before ? defaultPointerSchema.parse(JSON.parse(new TextDecoder().decode(before.bytes))) : null;
   if (pointer) await verifyRelease(storage, pointer.current);
-  for (const object of [...await verifyDefaultWorker(local, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, reference]) {
+  const portableObjects = manifest.portable ? await verifyDefaultPortable(local, manifest.portable, 'manifests') : [];
+  for (const object of [...await verifyDefaultWorker(local, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, ...portableObjects, reference]) {
     const bytes = await verifyDefaultObject(local, object);
     if (!await storage.get(object.key)) {
       try { await storage.put(object.key, bytes, null); }

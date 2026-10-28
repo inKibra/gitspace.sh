@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { WORKER_MANIFEST_FILE } from '@gitspace/protocol';
+import { PORTABLE_MANIFEST_FILE } from '@gitspace/protocol/machine-release';
 
 export const frontendManifestSchema = z.object({
   files: z.array(z.object({
@@ -17,6 +18,8 @@ export interface ReleaseObjectKeys {
   frontendManifest: string;
   /** Prefix of the frontend tree; files live at `<frontend>/<path>`. */
   frontend: string;
+  /** Portable release manifest; its files live beside it at `portableFileKey(portable, path)`. */
+  portable: string;
 }
 
 export function releaseObjectKeys(sha: string): ReleaseObjectKeys {
@@ -25,6 +28,7 @@ export function releaseObjectKeys(sha: string): ReleaseObjectKeys {
     machine: `releases/${sha}/machine.manifest.json`,
     frontendManifest: `releases/${sha}/frontend.manifest.json`,
     frontend: `releases/${sha}/frontend`,
+    portable: `releases/${sha}/${PORTABLE_MANIFEST_FILE}`,
   };
 }
 

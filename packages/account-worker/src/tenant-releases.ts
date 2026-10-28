@@ -11,11 +11,13 @@ import {
   tenantDesiredSchema,
   MACHINE_EXECUTION_PROTOCOL_VERSION,
   machineProtocolInputSchema,
+  revertProgressSchema,
   type LaunchProgress,
   type MachineExecutionAdmission,
   type CanonicalHead,
   type DeploymentStatus,
   type ReleaseRecord,
+  type RevertProgress,
   type ReleaseStatus,
   type ReleaseTarget,
   type StageReleaseInput,
@@ -25,7 +27,7 @@ import { z } from 'zod';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
 import { defaultMachineReleaseSchema } from '@gitspace/protocol/default-release';
-import { tenantPlatformJson } from './tenant-platform.js';
+import { platformSwap, tenantPlatformJson, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
@@ -35,6 +37,12 @@ declare const GITSPACE_WORKER_SHA: string | undefined;
 /** Build stamp injected by `Bun.build({ define })`; channel/dev builds carry none. */
 export const WORKER_VERSION: string | undefined = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : undefined;
 
+/** A running Back to stable wakes its object this often, so one whose instance ended (the Worker swap it asked for
+ * restarts this object) is picked up even when nothing else calls the object. */
+const REVERT_HEARTBEAT_MS = 60_000;
+/** A Back to stable still running this long after it started is reported failed; the platform ends its swap and
+ * releases its lease well within it. */
+const REVERT_DEADLINE_MS = 15 * 60_000;
 
 export const launchReleaseInputSchema = z.object({
   sha: z.string().min(1).max(160),
@@ -115,6 +123,8 @@ function migrateReleaseSources(storage: DurableObjectStorage): void {
 }
 
 export class TenantReleasesDO extends BudgetedDurableObject {
+  /** The revert this instance runs or reads back from the platform. */
+  #followingRevert: string | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Keep legacy OMP columns as history; active selection and acknowledgements never read or write them.
@@ -148,9 +158,17 @@ export class TenantReleasesDO extends BudgetedDurableObject {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         record_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS latest_revert (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        record_json TEXT NOT NULL
+      );
     `);
     migrateReleaseSources(ctx.storage);
     this.certifyOwnLaunch(WORKER_VERSION ?? null);
+    // An earlier instance ended under a running revert (the Worker swap restarts this object): the platform kept the
+    // swap's outcome under the revert's id.
+    const revert = this.latestRevert();
+    if (revert?.status === 'running') this.followRevert(revert.revertId, () => platformSwap(this.env, `/operations/${revert.revertId}`));
   }
 
   /** The canonical branch head this account last read; status serves it and never reaches the canonical repository. */
@@ -254,6 +272,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
         machine: input.artifacts.machine ?? previous?.artifacts.machine ?? null,
         ...(previous?.artifacts.omp === undefined ? {} : { omp: previous.artifacts.omp }),
         frontend: input.artifacts.frontend ?? previous?.artifacts.frontend ?? null,
+        portable: input.artifacts.portable ?? previous?.artifacts.portable,
       },
       worker: input.worker ?? previous?.worker ?? null,
       ...(previous?.omp === undefined ? {} : { omp: previous.omp }),
@@ -378,10 +397,82 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     return { version: protocol.version, required: MACHINE_EXECUTION_PROTOCOL_VERSION, state: error ? 'blocked' : 'updating', releaseSha, error };
   }
 
-  async revert(): Promise<TenantDesired> {
-    const desired: TenantDesired = { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() };
-    this.saveDesired(desired);
-    return desired;
+  /**
+   * Starts Back to stable unless one is running, and returns it. This object runs it to its end whether or not anyone
+   * follows it: the platform swaps the Worker to the default release, and only a swap that succeeded returns every
+   * selection to the channel.
+   */
+  startRevert(userId: string): RevertProgress {
+    const running = this.latestRevert();
+    if (running?.status === 'running') return running;
+    const now = new Date().toISOString();
+    const revert: RevertProgress = { revertId: crypto.randomUUID(), status: 'running', error: null, startedAt: now, updatedAt: now };
+    this.saveRevert(revert);
+    this.followRevert(revert.revertId, () => this.swapToChannel(userId, revert.revertId));
+    return revert;
+  }
+
+  /** The heartbeat of a running revert: an instance not running it (an earlier one ended) reads its outcome back from
+   * the platform, and one past REVERT_DEADLINE_MS is reported failed. An object with no running revert holds no alarm. */
+  async alarm(): Promise<void> {
+    const revert = this.latestRevert();
+    if (revert?.status !== 'running') return;
+    if (Date.parse(revert.startedAt) + REVERT_DEADLINE_MS <= Date.now()) {
+      await this.settleRevert(revert.revertId, { status: 'failed', error: `Back to stable did not finish within ${REVERT_DEADLINE_MS / 60_000} minutes. Check which Worker runs, then retry.` });
+      return;
+    }
+    if (this.#followingRevert === revert.revertId) await this.ctx.storage.setAlarm(Date.now() + REVERT_HEARTBEAT_MS);
+    else this.followRevert(revert.revertId, () => platformSwap(this.env, `/operations/${revert.revertId}`));
+  }
+
+  /** The swap a revert asks of the platform under the revert's id; none when the platform already runs the channel. */
+  private async swapToChannel(userId: string, revertId: string): Promise<WorkerSwap> {
+    const cutover = await this.inferenceCutover();
+    if ((await tenantWorkerVersion(this.env, userId)).sha !== null) {
+      return platformSwap(this.env, '/revert', { to: 'channel', operationId: revertId, accountId: userId, ...(cutover ? { inferenceVersion: 1 } : {}) });
+    }
+    if (cutover) return { status: 'failed', error: 'Without a platform worker the channel\'s inference-profile support cannot be verified. Select a source release advertising inferenceVersion 1 instead.' };
+    return { status: 'applied', error: null };
+  }
+
+  /** Runs `swap` for the running revert in this instance and records how it ended. The alarm beats meanwhile, so the
+   * next instance picks the revert up when this one ends first. */
+  private followRevert(revertId: string, swap: () => Promise<WorkerSwap>): void {
+    if (this.#followingRevert === revertId) return;
+    this.#followingRevert = revertId;
+    this.ctx.waitUntil((async () => {
+      try {
+        await this.ctx.storage.setAlarm(Date.now() + REVERT_HEARTBEAT_MS);
+        const outcome = await swap().catch((error: unknown): WorkerSwap => ({ status: 'failed', error: error instanceof Error ? error.message : 'Back to stable failed' }));
+        await this.settleRevert(revertId, outcome);
+      } catch (error) {
+        // Storage refuses an instance that was replaced; the next instance reads the outcome back from the platform.
+        console.warn(JSON.stringify({ event: 'revert_follow_ended', revertId, message: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        if (this.#followingRevert === revertId) this.#followingRevert = null;
+      }
+    })());
+  }
+
+  /** Records how the running revert `revertId` ended; only an applied swap returns every selection to the channel. */
+  private async settleRevert(revertId: string, outcome: WorkerSwap): Promise<void> {
+    const revert = this.latestRevert();
+    if (revert?.revertId !== revertId || revert.status !== 'running') return;
+    const updatedAt = new Date().toISOString();
+    if (outcome.status === 'applied') this.saveDesired({ worker: null, machine: null, frontend: null, updatedAt });
+    this.saveRevert(outcome.status === 'applied'
+      ? { ...revert, status: 'succeeded', error: null, updatedAt }
+      : { ...revert, status: 'failed', error: outcome.error ?? 'Back to stable failed', updatedAt });
+    await this.ctx.storage.deleteAlarm();
+  }
+
+  private latestRevert(): RevertProgress | null {
+    const row = this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM latest_revert WHERE id = 1').toArray()[0];
+    return row ? revertProgressSchema.parse(JSON.parse(row.record_json)) : null;
+  }
+
+  private saveRevert(revert: RevertProgress): void {
+    this.ctx.storage.sql.exec('INSERT INTO latest_revert(id, record_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET record_json = excluded.record_json', JSON.stringify(revertProgressSchema.parse(revert)));
   }
 
   inferenceCutover(): Promise<boolean> {
@@ -430,7 +521,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const version = WORKER_VERSION ?? null;
     const worker = { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
     return deploymentStatusSchema.parse({
-      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(), canonical: this.canonicalHead(),
+      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(), canonical: this.canonicalHead(), revert: this.latestRevert(),
     });
   }
 

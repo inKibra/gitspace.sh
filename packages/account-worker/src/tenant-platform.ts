@@ -1,3 +1,6 @@
+import { platformDeployResponseSchema, type PlatformDeployRequest, type PlatformRevertRequest, type ReleaseStatus } from '@gitspace/protocol/deployment';
+import type { WorkerVersion } from './tenant-releases.js';
+
 export async function tenantPlatformFetch(env: Env, path: string, init?: RequestInit): Promise<Response> {
   const target = new URL(`/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}${path}`, env.PLATFORM_URL);
   const request = new Request(target, {
@@ -12,6 +15,38 @@ export async function tenantPlatformJson<T>(env: Env, path: string, init?: Reque
   const response = await tenantPlatformFetch(env, path, init);
   if (!response.ok) throw new Error(`Platform request failed (${response.status}): ${(await response.text()).slice(0, 512)}`);
   return await response.json() as T;
+}
+
+/** The Worker the platform records for this tenant; a channel version has no release sha. */
+export async function tenantWorkerVersion(env: Env, userId: string): Promise<WorkerVersion> {
+  if (userId !== env.ACCOUNT_ID) throw new Error('Tenant identity does not match');
+  const state = await tenantPlatformJson<{ deployment: { active: string | null } }>(env, '/state');
+  const version = state.deployment.active;
+  return { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
+}
+
+/** A Worker swap as the account records it: applied, or failed with the platform's reason. */
+export interface WorkerSwap {
+  status: ReleaseStatus;
+  error: string | null;
+}
+
+/**
+ * Sends a Worker swap to the platform (`/deploy`, `/revert`), or with no body reads the outcome of the revert kept at
+ * `/operations/<id>`, which the platform answers once that swap has ended. Only a healthy swap of the requested release
+ * is applied.
+ */
+export async function platformSwap(env: Env, path: string, body?: (PlatformDeployRequest | PlatformRevertRequest) & { accountId: string }): Promise<WorkerSwap> {
+  try {
+    const response = await tenantPlatformFetch(env, path, body ? { method: 'POST', body: JSON.stringify(body) } : undefined);
+    if (!response.ok) return { status: 'failed', error: `Platform ${path} failed with HTTP ${response.status}: ${(await response.text()).slice(0, 512)}` };
+    const result = platformDeployResponseSchema.parse(await response.json());
+    if (result.revertedTo !== null) return { status: 'failed', error: `Platform reverted to ${result.revertedTo}: ${result.sha} did not pass its health probe` };
+    if (!result.healthy) return { status: 'failed', error: `Platform reported ${result.sha} unhealthy` };
+    return { status: 'applied', error: null };
+  } catch (error) {
+    return { status: 'failed', error: error instanceof Error ? error.message : `Platform ${path} failed` };
+  }
 }
 
 /** The platform binds the request to its stored tenant identity, not caller headers. */

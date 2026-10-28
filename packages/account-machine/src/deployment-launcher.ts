@@ -7,6 +7,7 @@ import { executableManifestPath, readExecutableFile, sha256, validateExecutableA
 import { hashArtifactPath, workspaceRevision } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
 import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { portableFileKey, portableManifestSchema } from '@gitspace/protocol/machine-release';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-objects.js';
 import { z } from 'zod';
 
@@ -26,10 +27,13 @@ export async function requireInferenceCapableSource(root: string, targets: reado
   }
 }
 
+/** What a target build reports: the worker's metadata, and the portable release a machine build makes when its source can. */
+type BuiltTarget<T> = T & { worker?: WorkerReleaseMetadata; portable?: BuiltArtifact };
+
 /** Build code belongs to the selected source tree, not the currently running machine generation. */
 export async function buildWorkspaceTarget<T extends BuiltArtifact>(
   root: string, sha: string, target: ReleaseTarget, output: string, environment: Record<string, string> = {},
-): Promise<T & { worker?: WorkerReleaseMetadata }> {
+): Promise<BuiltTarget<T>> {
   releaseTargetSchema.parse(target);
   const resultPath = `${output}.build.json`;
   const builder = pathToFileURL(join(root, 'packages/deployment/src/builders.ts')).href;
@@ -41,7 +45,11 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
     const target = ${JSON.stringify(target)};
     let built;
     if (target === 'worker') built = { ...await builders.buildWorkerRelease(root, ${JSON.stringify(sha)}, output), worker: await builders.workerMetadataFromWrangler(root) };
-    else if (target === 'machine') built = await builders.buildMachineBundle(root, output);
+    else if (target === 'machine') {
+      built = await builders.buildMachineBundle(root, output);
+      // Source trees from before portable releases build only this platform's machine.
+      if (typeof builders.buildPortableRelease === 'function') built.portable = await builders.buildPortableRelease(root, output + '-portable');
+    }
     else built = await builders.buildFrontendTree(root, output);
     await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(built));
   `;
@@ -50,7 +58,7 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
   const child = Bun.spawn([process.execPath, '--eval', script], { cwd: root, env: { ...process.env, ...environment }, stdout: 'inherit', stderr: 'inherit' });
   if (await child.exited !== 0) throw new Error(`Workspace-owned ${target} build failed; inspect the deployment build output`);
   try {
-    return JSON.parse(await readFile(resultPath, 'utf8')) as T & { worker?: WorkerReleaseMetadata };
+    return JSON.parse(await readFile(resultPath, 'utf8')) as BuiltTarget<T>;
   } finally {
     await rm(resultPath, { force: true });
   }
@@ -262,6 +270,10 @@ export class DeploymentLauncher {
         const built = await buildWorkspaceTarget<BuiltExecutableArtifact>(root, sha, 'machine', join(buildRoot, 'machine'), environment);
         progress('upload', `uploading ${keys.machine}`);
         artifacts.machine = await this.putExecutable(keys.machine, built);
+        if (built.portable) {
+          progress('upload', `uploading the portable release ${keys.portable}`);
+          artifacts.portable = await this.putPortable(keys.portable, built.portable);
+        }
       }
       if (targets.includes('frontend')) {
         progress('build', 'building frontend');
@@ -333,6 +345,21 @@ export class DeploymentLauncher {
     const hash = await this.options.blobs.put(key, bytes);
     if (hash !== built.manifestHash) throw new Error('Uploaded executable manifest hash mismatch');
     return { key, hash: built.manifestHash, size: bytes.byteLength };
+  }
+
+  /** Uploads each file the portable manifest names, checked against it, then the manifest, so a stored manifest never names a missing file. */
+  private async putPortable(key: string, built: BuiltArtifact): Promise<ReleaseArtifact> {
+    const bytes = new Uint8Array(await readFile(built.path));
+    if (sha256(bytes) !== built.hash) throw new Error('Portable release manifest changed before upload');
+    const manifest = portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+    await forEachConcurrent(manifest.files, FRONTEND_TRANSFER_CONCURRENCY, async (file) => {
+      const content = new Uint8Array(await readFile(join(dirname(built.path), 'portable', file.path)));
+      const hash = sha256(content);
+      if (content.byteLength !== file.size || hash !== `sha256:${file.sha256}`) throw new Error(`Portable release file changed before upload: ${file.path}`);
+      if (await this.options.blobs.put(portableFileKey(key, file.path), content) !== hash) throw new Error(`Uploaded portable release file hash mismatch: ${file.path}`);
+    });
+    if (await this.options.blobs.put(key, bytes) !== built.hash) throw new Error('Uploaded portable release manifest hash mismatch');
+    return { key, hash: built.hash, size: bytes.byteLength };
   }
 
   /** Uploads each module the manifest pins, checked against it, then the manifest, so a stored manifest never names a missing module. */

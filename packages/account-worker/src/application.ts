@@ -87,7 +87,6 @@ import { migratedRoleSettings } from './inference-role-migration.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
 import {
-  platformDeployResponseSchema,
   stageReleaseInputSchema,
   machineProtocolInputSchema,
   launchProgressSchema,
@@ -95,9 +94,6 @@ import {
   WORKER_VERSION_HEADER,
   GITSPACE_CANONICAL_BRANCH,
   type DeploymentStatus,
-  type PlatformDeployRequest,
-  type PlatformRevertRequest,
-  type ReleaseStatus,
 } from '@gitspace/protocol/deployment';
 import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } from './providers.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
@@ -135,8 +131,9 @@ import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
-import { tenantPlatformFetch, tenantPlatformJson, tenantProvider } from './tenant-platform.js';
+import { platformSwap, tenantPlatformFetch, tenantPlatformJson, tenantProvider, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
 import { accountDistributionResponse } from './distribution.js';
+import { admitPortableRelease } from './portable-release.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, accountStatus, activeAccount, authorizeControl } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DeviceVerifier, invalidateDeviceAuthority, withDeviceAuthority, type DeviceRegistrySnapshot, type MachineCredential } from './device-authority.js';
@@ -155,7 +152,6 @@ import {
   machineChannelAppliedInputSchema,
   ReleaseNotFoundError,
   WORKER_VERSION,
-  type WorkerVersion,
   type LaunchResult,
 } from './tenant-releases.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
@@ -2311,27 +2307,14 @@ function tenantReleases(env: Env, userId: string) {
 /** What this script reports as its own version: the build stamp, or `dev` for unstamped builds. */
 const WORKER_STAMP = { sha: WORKER_VERSION ?? null, version: WORKER_VERSION ?? 'dev' } as const;
 
-async function tenantWorkerVersion(env: Env, userId: string): Promise<WorkerVersion> {
-  if (userId !== env.ACCOUNT_ID) throw new Error('Tenant identity does not match');
-  const state = await tenantPlatformJson<{ deployment: { active: string | null } }>(env, '/state');
-  const version = state.deployment.active;
-  return { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
-}
 /** What the account runs, read from cloud state; no machine is consulted. */
 export async function readTenantDeployment(env: Env, userId: string): Promise<DeploymentStatus> {
   return tenantReleases(env, userId).status(userId, await tenantWorkerVersion(env, userId));
 }
-/** Returns every target to the channel build: the Worker through the platform, machines and the frontend by selection. */
+/** Starts Back to stable, or finds the one already running; the release object runs it to its end whether or not the
+ * caller stays, and status reports it as `revert`. */
 export async function revertTenantRelease(env: Env, userId: string): Promise<DeploymentStatus> {
-  const releases = tenantReleases(env, userId);
-  const cutover = await releases.inferenceCutover();
-  if ((await tenantWorkerVersion(env, userId)).sha !== null) {
-    const outcome = await platformCall(env, userId, 'revert', { to: 'channel', ...(cutover ? { inferenceVersion: 1 } : {}) });
-    if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Platform revert failed');
-  } else if (cutover) {
-    throw new Error('Without a platform worker the channel\'s inference-profile support cannot be verified. Select a source release advertising inferenceVersion 1 instead.');
-  }
-  await releases.revert();
+  await tenantReleases(env, userId).startRevert(userId);
   return readTenantDeployment(env, userId);
 }
 /** Reads the canonical branch head from the public canonical repository (one ref advertisement, no clone) and stores
@@ -2347,22 +2330,7 @@ export async function checkCanonicalHead(env: Env, userId: string): Promise<Depl
   await tenantReleases(env, userId).recordCanonicalHead({ repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit, checkedAt: new Date().toISOString() });
   return readTenantDeployment(env, userId);
 }
-async function platformCall(env: Env, userId: string, action: 'deploy' | 'revert', body: PlatformDeployRequest | PlatformRevertRequest): Promise<{ status: ReleaseStatus; error: string | null }> {
-  try {
-    const response = await (env.PLATFORM_SERVICE ?? { fetch }).fetch(`${env.PLATFORM_URL}/__platform/tenants/${encodeURIComponent(env.TENANT_ID)}/${action}`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ ...body, accountId: userId }),
-    });
-    if (!response.ok) return { status: 'failed', error: `Platform ${action} failed with HTTP ${response.status}: ${(await response.text()).slice(0, 512)}` };
-    const result = platformDeployResponseSchema.parse(await response.json());
-    if (result.revertedTo !== null) return { status: 'failed', error: `Platform reverted to ${result.revertedTo}: ${result.sha} did not pass its health probe` };
-    if (!result.healthy) return { status: 'failed', error: `Platform reported ${result.sha} unhealthy` };
-    return { status: 'applied', error: null };
-  } catch (error) {
-    return { status: 'failed', error: error instanceof Error ? error.message : `Platform ${action} failed` };
-  }
-}
+
 
 /** Every workspace object hears of the new release; one still resident on older code restarts on it when idle. */
 async function restartSpacesForRelease(env: Env, userId: string, sha: string): Promise<void> {
@@ -2386,10 +2354,10 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   if (launched.record.status.worker !== 'pending') { await releases.finishLaunch(launched.record, input.targets); return launched; }
   const worker = launched.record.artifacts.worker;
   const metadata = launched.record.worker;
-  let outcome: { status: ReleaseStatus; error: string | null };
+  let outcome: WorkerSwap;
   try {
     if (!worker || !metadata) throw new Error('Worker artifact and metadata are required');
-    outcome = await platformCall(env, userId, 'deploy', { sha: input.sha, manifestKey: dataObjectKey(userId, worker.key), manifestHash: worker.hash, metadata });
+    outcome = await platformSwap(env, '/deploy', { sha: input.sha, manifestKey: dataObjectKey(userId, worker.key), manifestHash: worker.hash, metadata, accountId: userId });
   } catch (error) {
     outcome = { status: 'failed', error: error instanceof Error ? error.message : 'Worker deployment failed' };
   }
@@ -3758,9 +3726,12 @@ const worker = {
             case 'deploy.machineProtocol':
               value = await releases.machineProtocol(body.machineId, machineProtocolInputSchema.parse(body.payload));
               break;
-            case 'deploy.stage':
-              value = await releases.stage(stageReleaseInputSchema.parse(body.payload), body.machineId);
+            case 'deploy.stage': {
+              const input = stageReleaseInputSchema.parse(body.payload);
+              if (input.artifacts.portable) await admitPortableRelease(env, body.userId, input.sha, input.artifacts.portable);
+              value = await releases.stage(input, body.machineId);
               break;
+            }
             case 'deploy.launch':
               value = await launchRelease(env, body.userId, body.payload);
               break;

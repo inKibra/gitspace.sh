@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { env, SELF, runInDurableObject } from 'cloudflare:test';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
@@ -126,6 +126,16 @@ async function tenant() {
     return body.value;
   };
   return { userId, handle, control, origin: `https://${handle}.gitspace.sh` };
+}
+
+/** The account's status once its latest revert has ended, read from the release object, not through a browser. */
+async function revertEnded(userId: string) {
+  const releases = env.TENANT_RELEASES.getByName(userId);
+  return vi.waitFor(async () => {
+    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
+    if (status.revert?.status !== 'succeeded' && status.revert?.status !== 'failed') throw new Error('Back to stable is still running');
+    return status;
+  });
 }
 
 describe('tenant releases', () => {
@@ -342,10 +352,11 @@ describe('tenant releases', () => {
     expect(status.current.worker).toEqual({ sha: 'test-inference-worker', version: 'test-inference-worker' });
     expect(status.current.platformWorker).toEqual({ sha: 'good111', version: 'good111' });
 
-    const reverted = deploymentStatusSchema.parse(await revertTenantRelease({ ...env, ...platform }, userId));
+    const started = deploymentStatusSchema.parse(await revertTenantRelease(env, userId));
+    const reverted = await revertEnded(userId);
+    expect(reverted.revert).toMatchObject({ revertId: started.revert?.revertId, status: 'succeeded', error: null });
     expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
-    expect(reverted.current.platformWorker).toEqual({ sha: null, version: 'channel:1' });
-    expect(reverts).toEqual([{ accountId: userId, to: 'channel' }]);
+    expect(reverts).toEqual([{ accountId: userId, to: 'channel', operationId: started.revert?.revertId }]);
     serving = 'channel';
     const unversionedChannel = deploymentStatusSchema.parse(await control('deploy.status', {}, platform));
     expect(unversionedChannel.current.platformWorker).toEqual({ sha: null, version: 'channel' });
@@ -353,7 +364,6 @@ describe('tenant releases', () => {
 
   it('requires inference-profile support from the channel once the account has cut over', async () => {
     const { userId, control } = await tenant();
-    const platform: Partial<Env> = { PLATFORM_URL: 'https://platform.test', PLATFORM_TOKEN: 'tenant-token' };
     const reverts: unknown[] = [];
     let channelSupportsProfiles = false;
     network.use(
@@ -368,18 +378,118 @@ describe('tenant releases', () => {
     await control('deploy.stage', stageInput('tenant-release'));
     await control('deploy.launch', { sha: 'tenant-release', targets: ['machine', 'frontend'] });
     await env.CREDENTIALS.getByName(userId).ensureInference();
-    const releases = env.TENANT_RELEASES.getByName(userId);
 
-    await expect(revertTenantRelease({ ...env, ...platform }, userId)).rejects.toThrow('RELEASE_INCOMPATIBLE');
-    expect((await releases.status(userId, { sha: null, version: null })).desired).toMatchObject({ machine: 'tenant-release', frontend: 'tenant-release' });
+    const refused = deploymentStatusSchema.parse(await revertTenantRelease(env, userId)).revert;
+    const failed = await revertEnded(userId);
+    expect(failed.revert).toMatchObject({ revertId: refused?.revertId, status: 'failed', error: expect.stringContaining('RELEASE_INCOMPATIBLE') });
+    expect(failed.desired).toMatchObject({ machine: 'tenant-release', frontend: 'tenant-release' });
 
     channelSupportsProfiles = true;
-    const reverted = deploymentStatusSchema.parse(await revertTenantRelease({ ...env, ...platform }, userId));
+    const retried = deploymentStatusSchema.parse(await revertTenantRelease(env, userId)).revert;
+    expect(retried?.revertId).not.toBe(refused?.revertId);
+    const reverted = await revertEnded(userId);
+    expect(reverted.revert).toMatchObject({ revertId: retried?.revertId, status: 'succeeded' });
     expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
     expect(reverts).toEqual([
-      { accountId: userId, to: 'channel', inferenceVersion: 1 },
-      { accountId: userId, to: 'channel', inferenceVersion: 1 },
+      { accountId: userId, to: 'channel', inferenceVersion: 1, operationId: refused?.revertId },
+      { accountId: userId, to: 'channel', inferenceVersion: 1, operationId: retried?.revertId },
     ]);
+  });
+
+  it('answers Back to stable while the platform still swaps, and resets the selections only after a swap that succeeded', async () => {
+    const { userId, control } = await tenant();
+    // The platform answers each revert with the swap result the test releases.
+    let answer = Promise.withResolvers<{ healthy: boolean }>();
+    onTestFinished(() => answer.resolve({ healthy: false }));
+    const reverts: unknown[] = [];
+    network.use(
+      http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'tenant-release' } })),
+      http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/revert`, async ({ request }) => {
+        reverts.push(await request.json());
+        const { healthy } = await answer.promise;
+        return HttpResponse.json({ sha: 'channel:1', healthy, revertedTo: null, appliedMigrationTag: null });
+      }),
+    );
+    await control('deploy.stage', stageInput('tenant-release'));
+    await control('deploy.launch', { sha: 'tenant-release', targets: ['machine', 'frontend'] });
+
+    const first = deploymentStatusSchema.parse(await revertTenantRelease(env, userId));
+    expect(first.revert).toMatchObject({ status: 'running', error: null });
+    expect(first.desired).toMatchObject({ machine: 'tenant-release', frontend: 'tenant-release' });
+    await vi.waitFor(() => expect(reverts).toHaveLength(1));
+    // Asking again while it runs follows the same revert; the platform is asked once.
+    expect(deploymentStatusSchema.parse(await revertTenantRelease(env, userId)).revert?.revertId).toBe(first.revert?.revertId);
+
+    // Nobody follows it any more; the platform's swap fails its health probe.
+    answer.resolve({ healthy: false });
+    const failed = await revertEnded(userId);
+    expect(failed.revert).toMatchObject({ revertId: first.revert?.revertId, status: 'failed', error: 'Platform reported channel:1 unhealthy' });
+    expect(failed.desired).toMatchObject({ machine: 'tenant-release', frontend: 'tenant-release' });
+    expect(reverts).toHaveLength(1);
+
+    answer = Promise.withResolvers<{ healthy: boolean }>();
+    const second = deploymentStatusSchema.parse(await revertTenantRelease(env, userId));
+    expect(second.revert).toMatchObject({ status: 'running' });
+    answer.resolve({ healthy: true });
+    const reverted = await revertEnded(userId);
+    expect(reverted.revert).toMatchObject({ revertId: second.revert?.revertId, status: 'succeeded', error: null });
+    expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
+  });
+
+  it('finishes a revert whose object restarted during the swap from the outcome the platform kept', async () => {
+    const { userId, control } = await tenant();
+    const reads: string[] = [];
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/operations/:id`, ({ params }) => {
+      reads.push(String(params.id));
+      return HttpResponse.json({ sha: 'channel:1', healthy: true, revertedTo: null, appliedMigrationTag: null });
+    }));
+    await control('deploy.stage', stageInput('tenant-release'));
+    await control('deploy.launch', { sha: 'tenant-release', targets: ['machine', 'frontend'] });
+    const revertId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    await runInDurableObject(env.TENANT_RELEASES.getByName(userId), (_instance, state) => {
+      state.storage.sql.exec('INSERT INTO latest_revert(id, record_json) VALUES (1, ?)', JSON.stringify({ revertId, status: 'running', error: null, startedAt, updatedAt: startedAt }));
+      // The instance that starts after the Worker swap replaced the one running the revert.
+      new TenantReleasesDO(state, env);
+    });
+    const reverted = await revertEnded(userId);
+    expect(reverted.revert).toMatchObject({ revertId, status: 'succeeded' });
+    expect(reverted.desired).toMatchObject({ worker: null, machine: null, frontend: null });
+    expect(reads).toEqual([revertId]);
+  });
+
+  it('the heartbeat picks up a revert no instance runs, and reports one past its deadline failed', async () => {
+    const { userId, control } = await tenant();
+    const reads: string[] = [];
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/operations/:id`, ({ params }) => {
+      reads.push(String(params.id));
+      return HttpResponse.json({ error: { code: 'RELEASE_INCOMPATIBLE', message: 'Release channel:0 does not advertise inferenceVersion 1' } }, { status: 409 });
+    }));
+    await control('deploy.stage', stageInput('tenant-release'));
+    await control('deploy.launch', { sha: 'tenant-release', targets: ['machine', 'frontend'] });
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const running = async (startedAt: string) => {
+      const revertId = crypto.randomUUID();
+      await runInDurableObject(releases, async (_instance, state) => {
+        state.storage.sql.exec('INSERT OR REPLACE INTO latest_revert(id, record_json) VALUES (1, ?)', JSON.stringify({ revertId, status: 'running', error: null, startedAt, updatedAt: startedAt }));
+        await state.storage.setAlarm(Date.now() + 60_000);
+      });
+      return revertId;
+    };
+
+    const orphan = await running(new Date().toISOString());
+    expect(await runDurableObjectAlarm(releases)).toBe(true);
+    const failed = await revertEnded(userId);
+    expect(failed.revert).toMatchObject({ revertId: orphan, status: 'failed', error: expect.stringContaining('RELEASE_INCOMPATIBLE') });
+    expect(reads).toEqual([orphan]);
+
+    const stale = await running(new Date(Date.now() - 16 * 60_000).toISOString());
+    expect(await runDurableObjectAlarm(releases)).toBe(true);
+    const expired = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
+    expect(expired.revert).toMatchObject({ revertId: stale, status: 'failed', error: expect.stringContaining('15 minutes') });
+    expect(expired.desired).toMatchObject({ machine: 'tenant-release', frontend: 'tenant-release' });
+    expect(reads).toEqual([orphan]);
+    expect(await runInDurableObject(releases, (_instance, state) => state.storage.getAlarm())).toBeNull();
   });
 
   it('deploys only the bound tenant despite caller-supplied routing', async () => {
@@ -400,6 +510,7 @@ describe('tenant releases', () => {
     await control('deploy.launch', { sha: 'tenant-release', targets: ['worker'], tenant: 'foreign', accountId: foreignId });
     expect(serving).toBe('tenant-release');
     await revertTenantRelease(env, userId);
+    await revertEnded(userId);
     expect(serving).toBe('channel:1');
     expect(actions).toEqual([
       { tenant: env.TENANT_ID, accountId: userId, action: 'deploy' },

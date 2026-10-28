@@ -55,4 +55,17 @@ describe('SourceSettings', () => {
     expect(active).not.toMatch(/<button[^>]*\sdisabled=""/u);
   });
 
+  it('holds Back to stable while the account runs one, and shows its failure until the selections change', () => {
+    const revert = { revertId: 'revert-1', error: null, startedAt: '2026-08-30T10:06:00.000Z', updatedAt: '2026-08-30T10:06:30.000Z' };
+    const running = renderToStaticMarkup(<SourceSettings deployment={{ ...deploymentStatusFixture, revert: { ...revert, status: 'running' } }} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} />);
+    expect(running).toContain('Going back to stable');
+    expect(running).toMatch(/<button[^>]*\sdisabled=""/u);
+    const failed = { ...deploymentStatusFixture, revert: { ...revert, status: 'failed' as const, error: 'Platform reported channel:1 unhealthy' } };
+    const shown = renderToStaticMarkup(<SourceSettings deployment={failed} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} />);
+    expect(shown).toContain('Back to stable failed: Platform reported channel:1 unhealthy');
+    expect(shown).not.toMatch(/<button[^>]*\sdisabled=""/u);
+    const relaunched = renderToStaticMarkup(<SourceSettings deployment={{ ...failed, desired: { ...failed.desired, updatedAt: '2026-08-30T10:07:00.000Z' } }} onRevertDeployment={noop} onCheckCanonical={noop} saving={false} />);
+    expect(relaunched).not.toContain('Back to stable failed');
+  });
+
 });

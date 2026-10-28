@@ -26,7 +26,7 @@ async function project() {
 }
 
 function manual(name: string, instruction = 'Check the project.'): AutomationDraft {
-  return { name, trigger: { kind: 'manual' }, action: { kind: 'messageProjectAgent', instruction }, enabled: true };
+  return { name, trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageProjectAgent', instruction }, enabled: true };
 }
 
 describe('ProjectAutomationsDO', () => {
@@ -42,7 +42,7 @@ describe('ProjectAutomationsDO', () => {
   it('runs a schedule at its next UTC time and messages its workspace', async () => {
     const submit = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
     const { projectId, workspaceId, automations, alarm } = await project();
-    const created = automationValue(await automations.create({ projectId, draft: { name: 'Nightly audit', trigger: { kind: 'schedule', cron: '0 6 * * *' }, action: { kind: 'messageWorkspace', workspaceId, instruction: 'Audit dependencies as of {{scheduled_for}}.' }, enabled: true } }));
+    const created = automationValue(await automations.create({ projectId, draft: { name: 'Nightly audit', trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'Audit dependencies as of {{scheduled_for}}.' }, enabled: true } }));
     const six = midnight + 6 * HOUR;
     expect(created.nextRunAt?.getTime()).toBe(six);
     expect(await alarm()).toBe(six);
@@ -59,7 +59,7 @@ describe('ProjectAutomationsDO', () => {
   it('never runs a proposal until a person approves it, and refuses an approval of a revision since changed', async () => {
     const submit = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
     const { projectId, automations, alarm } = await project();
-    const draft: AutomationDraft = { name: 'Heartbeat', trigger: { kind: 'schedule', cron: '*/5 * * * *' }, action: { kind: 'messageProjectAgent', instruction: 'Check in.' }, enabled: true };
+    const draft: AutomationDraft = { name: 'Heartbeat', trigger: { kind: 'schedule', cron: '*/5 * * * *' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Check in.' }, enabled: true };
     const asked = { conversationId: 'conversation-1', asked: 'Check in every five minutes', reason: 'A heartbeat finds a stuck project early' };
     const proposed = automationValue(await automations.propose({ projectId, draft, ...asked }));
     expect(proposed).toMatchObject({ createdBy: 'projectAgent', enabled: false, nextRunAt: null, proposal: { conversationId: 'conversation-1', tested: [{ result: 'Would message the project agent', runs: true }, { runs: true }, { runs: true }] } });
@@ -105,7 +105,7 @@ describe('ProjectAutomationsDO', () => {
   it('skips an automation\'s runs past the daily run cap until the next UTC day', async () => {
     vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
     const { projectId, automations } = await project();
-    expect(await automations.updateSettings({ projectId, settings: { concurrency: 2, dailyRunCap: 1 } })).toEqual({ concurrency: 2, dailyRunCap: 1 });
+    expect(await automations.updateSettings({ projectId, settings: { concurrency: 2, dailyRunCap: 1, trusted: [] } })).toEqual({ concurrency: 2, dailyRunCap: 1, trusted: [] });
     const automation = automationValue(await automations.create({ projectId, draft: manual('Triage') }));
     const first = automationValue(await automations.runNow({ projectId, automationId: automation.id, requestedBy: 'Brad' }));
     await runDurableObjectAlarm(automations);
@@ -118,7 +118,7 @@ describe('ProjectAutomationsDO', () => {
   it('ends a run when its workspace reports the turn ended, and sets no alarm while the agent works', async () => {
     const submit = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
     const { projectId, workspaceId, automations, alarm } = await project();
-    const automation = automationValue(await automations.create({ projectId, draft: { name: 'Summary', trigger: { kind: 'manual' }, action: { kind: 'messageWorkspace', workspaceId, instruction: 'Summarize what {{requested_by}} needs.' }, enabled: true } }));
+    const automation = automationValue(await automations.create({ projectId, draft: { name: 'Summary', trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'Summarize what {{requested_by}} needs.' }, enabled: true } }));
     const run = automationValue(await automations.runNow({ projectId, automationId: automation.id, requestedBy: 'Brad' }));
     expect(run.state).toBe('queued');
     await runDurableObjectAlarm(automations);
@@ -142,24 +142,24 @@ describe('ProjectAutomationsDO', () => {
     const { projectId, automations } = await project();
     const refused = (draft: AutomationDraft) => automations.create({ projectId, draft });
     expect(await refused(manual('Pull requests', 'Review {{pull_request.html_url}}'))).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.instruction' } });
-    expect(await refused({ name: 'Nightly', trigger: { kind: 'schedule', cron: '0 6 * * *' }, action: { kind: 'messageProjectAgent', instruction: 'Asked by {{requested_by}}' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.instruction' } });
+    expect(await refused({ name: 'Nightly', trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Asked by {{requested_by}}' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.instruction' } });
     for (const cron of ['61 * * * *', '0 0 30 2 *', 'every 5m']) {
-      expect(await refused({ name: 'Nightly', trigger: { kind: 'schedule', cron }, action: { kind: 'messageProjectAgent', instruction: 'Audit.' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'trigger.cron' } });
+      expect(await refused({ name: 'Nightly', trigger: { kind: 'schedule', cron }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Audit.' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'trigger.cron' } });
     }
-    expect(await refused({ name: 'Elsewhere', trigger: { kind: 'manual' }, action: { kind: 'messageWorkspace', workspaceId: 'not-in-project', instruction: 'Audit.' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.workspaceId' } });
+    expect(await refused({ name: 'Elsewhere', trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId: 'not-in-project', instruction: 'Audit.' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.workspaceId' } });
     expect(await automations.testDraft({ projectId, draft: manual('Pull requests', 'Review {{pull_request.html_url}}'), requestedBy: 'Brad' })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.instruction' } });
     expect((await automations.list(projectId)).automations).toEqual([]);
   });
 
   it('tests a schedule as its next three UTC run times and renders its instruction', async () => {
     const { projectId, workspaceId, automations } = await project();
-    expect(automationValue(await automations.testDraft({ projectId, draft: { name: 'Nightly', trigger: { kind: 'schedule', cron: '0 6 * * *' }, action: { kind: 'messageWorkspace', workspaceId, instruction: '{{automation.name}} for {{scheduled_for}}' }, enabled: true }, requestedBy: 'Brad' }))).toEqual({
+    expect(automationValue(await automations.testDraft({ projectId, draft: { name: 'Nightly', trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: '{{automation.name}} for {{scheduled_for}}' }, enabled: true }, requestedBy: 'Brad' }))).toEqual({
       results: [0, 1, 2].map(day => ({ label: `${new Date(midnight + day * DAY).toISOString().slice(0, 10)} 06:00 UTC`, result: 'Would message release-work', runs: true })),
-      instruction: `Nightly for ${new Date(midnight + 6 * HOUR).toISOString()}`,
+      instruction: `Nightly for ${new Date(midnight + 6 * HOUR).toISOString()}`, checks: [],
     });
     expect(automationValue(await automations.testDraft({ projectId, draft: manual('By hand', 'Started by {{requested_by}}'), requestedBy: 'Brad' }))).toEqual({
       results: [{ label: 'Manual', result: 'Runs only when someone starts it', runs: false }],
-      instruction: 'Started by Brad',
+      instruction: 'Started by Brad', checks: [],
     });
   });
 });

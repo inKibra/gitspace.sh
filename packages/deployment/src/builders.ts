@@ -1,11 +1,14 @@
-import { cp, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { builtinModules } from 'node:module';
 import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from './executable-manifest.js';
 import { WORKER_MANIFEST_FILE, workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { packageMachineNativeRuntime } from './native-build.js';
+import { nativeFileDigest } from './native-runtime.js';
+import { BUN_VERSION, NATIVE_PINS } from './native-pins.js';
+import { PORTABLE_MANIFEST_FILE, portableManifestSchema, type PortableFile } from '@gitspace/protocol/machine-release';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 import { writeBrowserRunner } from '@gitspace/browser-runner';
 
@@ -136,9 +139,8 @@ async function prepareExecutableOutput(outDir: string): Promise<void> {
   }
 }
 
-/** Independently complete machine generation, including authenticated migrations and native runtime. */
-export async function buildMachineBundle(root: string, outDir: string): Promise<BuiltExecutableArtifact> {
-  await prepareExecutableOutput(outDir);
+/** The machine host, its workers and its updater: JavaScript that is the same on every platform. */
+async function buildMachineJavaScript(root: string, outDir: string): Promise<void> {
   const entrypoints = [
     [join(root, 'packages/account-machine/src/runtime.ts'), 'machine'],
     [join(root, 'packages/account-machine/src/terminal-worker.ts'), 'machine-worker'],
@@ -157,9 +159,48 @@ export async function buildMachineBundle(root: string, outDir: string): Promise<
     });
     if (!result.success) throw new AggregateError(result.logs, 'Machine executable build failed');
   }
+}
+
+/** Independently complete machine generation, including authenticated migrations and native runtime. */
+export async function buildMachineBundle(root: string, outDir: string): Promise<BuiltExecutableArtifact> {
+  await prepareExecutableOutput(outDir);
+  await buildMachineJavaScript(root, outDir);
   const native = await packageMachineNativeRuntime(root, outDir);
   const envelope = await createExecutableArtifactManifest(outDir, 'machine', native.abi);
   return { path: outDir, hash: envelope.manifest.treeHash, ...envelope };
+}
+
+async function portableInventory(root: string, directory = root): Promise<PortableFile[]> {
+  const files: PortableFile[] = [];
+  for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await portableInventory(root, path));
+    else if (entry.isFile()) files.push({ path: relative(root, path).split(sep).join('/'), ...await nativeFileDigest(path) });
+    else throw new Error(`Portable release contains a link or special file: ${path}`);
+  }
+  return files;
+}
+
+/**
+ * The portable machine release, the same for every platform: the machine and CLI JavaScript, and a manifest naming
+ * them and each platform's pinned natives. Writes `<outDir>/portable.manifest.json` and the files it names under
+ * `<outDir>/portable/`; returns the manifest.
+ */
+export async function buildPortableRelease(root: string, outDir: string): Promise<BuiltArtifact> {
+  if (Bun.version !== BUN_VERSION) throw new Error(`The portable release runs on Bun ${BUN_VERSION} and must be built by it, not ${Bun.version}`);
+  await mkdir(outDir, { recursive: true });
+  if ((await readdir(outDir)).length !== 0) throw new Error(`Portable release output must be a new empty directory: ${outDir}`);
+  const files = join(outDir, 'portable');
+  await buildMachineJavaScript(root, join(files, 'machine'));
+  const cli = await Bun.build({
+    entrypoints: [join(root, 'packages/cli/src/index.ts')], target: 'bun', outdir: join(files, 'cli'),
+    naming: { entry: 'gitspace.js', asset: '[name]-[hash].[ext]' }, minify: true,
+  });
+  if (!cli.success) throw new AggregateError(cli.logs, 'CLI build failed');
+  const manifest = portableManifestSchema.parse({ schemaVersion: 1, bunVersion: BUN_VERSION, files: await portableInventory(files), natives: NATIVE_PINS });
+  const path = join(outDir, PORTABLE_MANIFEST_FILE);
+  await writeFile(path, JSON.stringify(manifest), { flag: 'wx' });
+  return { path, hash: `sha256:${(await nativeFileDigest(path)).sha256}` };
 }
 
 

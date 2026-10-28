@@ -261,7 +261,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   };
   // The wire view omits each release's worker upload metadata.
   const deploymentView = (status: DeploymentStatus) => ({
-    desired: status.desired, current: status.current, machineExecution: status.machineExecution, launch: status.launch, canonical: status.canonical,
+    desired: status.desired, current: status.current, machineExecution: status.machineExecution, launch: status.launch, canonical: status.canonical, revert: status.revert,
     releases: status.releases.map(({ sha, label, source, builtBy, createdAt, artifacts, omp, status: outcome, error }) => ({ sha, label, source, builtBy, createdAt, artifacts, omp, status: outcome, error })),
   });
   const deploymentStatus = server.implement(deploymentStatusContract).handler(async ({ errors }) => {

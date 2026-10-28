@@ -701,6 +701,14 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             });
             return completed(input, { workspaceId: target.id, name: target.name, ...accepted });
           }
+          case 'links': return completed(input, (await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).list(identity.projectId)).links);
+          case 'link': {
+            // Any agent of the project links this workspace or a named one; the project agent names one.
+            const workspaceId = args.workspaceId ?? identity.workspaceId;
+            const by = identity.workspaceId === baseWorkspaceId ? 'the project agent' : `the agent of ${(await authority().getWorkspace(identity.workspaceId))?.name ?? identity.workspaceId}`;
+            return completed(input, automationValue(await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).link({ projectId: identity.projectId, subject: args.subject, workspaceId, source: 'agent', detail: by })));
+          }
+          case 'unlink': return completed(input, { unlinked: await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).unlink({ projectId: identity.projectId, subject: args.subject }) });
           default: return completed(input, await changeAgentWorkspace(env, identity, args));
         }
       }

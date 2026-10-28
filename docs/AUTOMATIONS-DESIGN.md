@@ -1,6 +1,6 @@
 # Automations: when something happens in a project, do something
 
-> **Status: Draft for planning (2026-10-20; subject links, mentions, label triggers and replay decided 2026-10-27).** Decisions from the 2026-10-20 and 2026-10-27 discussions; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
+> **Status: A0 and A1 built (2026-10-27); A2 and A3 planned. Decisions from 2026-10-20; subject links, mentions, label triggers and replay decided 2026-10-27.** Decisions from the 2026-10-20 and 2026-10-27 discussions; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
 
 ## 1. Summary
 
@@ -23,7 +23,7 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
 ## 3. What exists today
 
 - **Project crons** (`ProjectCronsDO`, `@gitspace/protocol/cron-contract`): a schedule and a prompt sent to the project agent or a given workspace. A run is submitted to the workspace runtime with request id `cron:<run>`, so a lost reply cannot submit twice; runs that wait past the queue limit are withdrawn as "Skipped: workspace busy".
-- **The GitHub App** (`GitHubAppDO`): receives signed webhooks, records every delivery (event, action, installation, repository, outcome) and acts only on `push` and installation events. Everything else is recorded and dropped.
+- **The GitHub App** (`GitHubAppDO`): receives signed webhooks and records every delivery (event, action, installation, repository, outcome). A `push` moves the project's origin head; installation events change what it covers; the events automations start on are kept trimmed with the delivery and sent to the automations of every project using the repository (A1).
 - **Projects** name their repository (`repositoryReference`); workspaces have a branch and start in Plan, Code or Review.
 - **Cost protection** (SIMPLIFICATION #32): the storage breaker, the watchdog and the spend digest cover every run's objects.
 
@@ -38,11 +38,11 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
   2. when GitSpace starts a workspace for the subject (an automation, a label, the project agent);
   3. by branch: a pull request whose head branch is a workspace's branch, and an issue the pull request closes ("Fixes #388").
 
-  A stronger link replaces a weaker one; two workspaces on one branch resolve to the one active most recently, and the run records the choice. A link to a closed workspace reopens it.
-- **Linked workspaces get events through automations** (decided 2026-10-27): *Send to the linked workspace* is an action, either waking its agent or adding a notice that leaves it asleep, and *linked* is a filter. Installing the GitHub App adds four default automations to the project, editable and removable like any other: review feedback from people (reviews and review comments) wakes the agent; failed checks on a linked branch wake it; comments mentioning the tenant's bot wake it; merged or closed adds a notice. An event on a linked subject that no automation matches is not sent.
+  A stronger link replaces a weaker one; two workspaces on one branch resolve to the one active most recently, and the run records the choice. A link to a closed workspace reopens it. A workspace started for a subject works on its own branch, named after its mode and subject (`review-pr-1143`, `plan-issue-391`); a start for a subject that already has a workspace is skipped.
+- **Linked workspaces get events through automations** (decided 2026-10-27): *Send to the linked workspace* is an action, either waking its agent or adding a notice that leaves it asleep, and *linked* is a filter. Installing the GitHub App adds four default automations to the project once (a project linked earlier gets them with its first delivery), editable and removable like any other: review feedback from people (reviews and review comments) wakes the agent; failed checks on a linked branch wake it; comments mentioning the tenant's bot wake it; merged or closed adds a notice. An event on a linked subject that no automation matches is not sent, and one that several automations send to the same workspace is sent once.
 - **Mentions:** the tenant's own bot (`@gitspace-<handle>`, e.g. `@gitspace-bradleat`; there is no shared GitSpace bot). *Mentions the bot* is a filter on comment and review events; the default mentions automation sends the comment to the subject's linked workspace, or to the project agent when it has none, which may start or link one.
 - **Action:**
-  - *Start a workspace for the subject*: mode (Plan, Code, Review), agent, and an instruction. The rendered instruction plus the event is the workspace's first message.
+  - *Start a workspace for the subject*: mode (Plan, Code, Review) and an instruction; a label trigger can start in the label's mode. The rendered instruction plus the event is the workspace's first message. The workspace's own agent runs it (open question 2).
 - **Instructions** (decided 2026-10-27): plain text with placeholders naming a field of the event, `{{pull_request.html_url}}`, `{{pull_request.base.ref}}`; no helpers. The editor's **Insert a field** lists the chosen event's fields; a placeholder naming a field the event does not have is refused when the automation is saved. Test with a past event shows the rendered instruction.
   - *Send to the linked workspace* (wakes its agent, or a notice), *message a workspace*, or *message the project agent*.
   - *Ask the project agent*: the event and its provenance (§6) go to the project agent, which decides with its tools to start a workspace, message one, or skip. For judgement calls ("is this release worth a blog post?"); it costs one agent turn per event.
@@ -54,7 +54,7 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
 Outsiders' text must not reach an agent that has write tools, secrets or your machine.
 
 - An event runs only if its **actor** has write access to the repository (checked through the GitHub App when the event arrives) or is on the project's **trust list** (GitHub logins kept in GitSpace).
-- The actor is the author for an issue or pull request, and the commenter for a comment: a comment on a trusted pull request from an untrusted account is untrusted.
+- The actor is the author for an issue or pull request, and the commenter for a comment: a comment on a trusted pull request from an untrusted account is untrusted. Labeling, closing or reopening is the act of whoever did it; a push is the pusher's. A check suite carries only GitHub's result and is not checked, and events GitSpace's own App identity sent are trusted.
 - An untrusted event matches no automation (decided 2026-10-27: there is no approval step). It appears in recent runs as "Skipped: author not trusted"; to let that author's events run, add them to the trust list.
 - Schedules and manual runs are trusted.
 
@@ -110,10 +110,11 @@ A top-level page that replaces Crons in the sidebar, with the project chosen in 
 | ID | Milestone | Exit criteria |
 |---|---|---|
 | **A0** | Schedules | `ProjectAutomationsDO`; crons migrated; schedule and manual triggers; message the project agent / a workspace; runs and history; Automations page replaces Crons. |
-| **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch); Send to the linked workspace and the four default automations; mentions of the tenant's bot; trust and approval; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped as not trusted; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
+| **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch); Send to the linked workspace and the four default automations; mentions of the tenant's bot; trust; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped as not trusted; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
 | **A2** | Loops and decisions | Provenance; round and daily caps; *ask the project agent*. Golden test: CI fails on a run's PR, the workspace is told, the fix pushes, CI passes; a release produced by a run does not start a new run. |
 | **A3** | Lifecycle | Subject-closed notices; 7-day auto-close and checkout release. |
 
 ## 13. Open questions
 
 1. Pull requests as the requester: author mode (`docs/GITHUB-INTEGRATION-DESIGN.md` §6) is decided but not built, so every pull request is the bot's; its tenant default and per-project setting need a place in the UI (Settings → GitHub).
+2. Choosing the agent a started workspace runs (`reviewer`, as the mock shows): a workspace's main agent is not selectable today (agent definitions name subagents), so A1 starts the workspace's own agent.

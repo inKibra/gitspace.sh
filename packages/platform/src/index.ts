@@ -8,12 +8,13 @@ import { sendSpendDigestIfDue } from './spend-digest.js';
 const STORAGE_WATCHDOG_CRON = '*/10 * * * *';
 import { legacyPlatformDeployRequestSchema, platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
 import { CloudflareR2PlatformClient } from './storage-provider.js';
-import { CreditLedgerDO, isCreditLedgerRecord, type CreditLedgerRecord } from './credit-ledger.js';
-import { deployChannelTenant, deployTenantWorker, revertTenantWorker, type DeployResult } from './deployer.js';
+import { CreditLedgerDO, isCreditLedgerRecord } from './credit-ledger.js';
+import { deployTenantWorker, type DeployResult } from './deployer.js';
 import { TenantControlDO } from './tenant-control.js';
 import { defaultFrontendResponse } from './default-release.js';
 import { machineClientResponse } from './default-client.js';
 import { defaultMachineResponse } from './default-native.js';
+import { nativeMirrorResponse } from './native-mirror.js';
 import { invokeCompute } from './compute-provider.js';
 import { fetchUsageReport, usageReportKey, usageReportSchema, usageReportScripts, usageSpikes, utcDate, utcDayWindow, HOURLY_SPIKE_FLOORS, SPIKE_FLOORS, SPIKE_RATIO, type UsageReport } from './usage-report.js';
 
@@ -116,7 +117,7 @@ async function handleTenantBootstrap(request: Request, env: Env, tenant: string)
     await storage.ensureBucket({ bucketName: blobBucket });
     await deployments.providerToken();
     const current = await deployments.getState();
-    const deployed: DeployResult = current.active ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag } } : await deployChannelTenant(env, tenant);
+    const deployed: DeployResult = current.active ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag } } : await deployments.deploy(tenant, { kind: 'bootstrap' }, null);
     if (deployed.status === 'error') return platformError(deployed.error.status, deployed.error.code, deployed.error.message);
     return Response.json({ tenant, relayUrl: 'https://' + tenant + env.TENANT_HOST_SUFFIX, accountUrl: 'https://' + tenant + '.gitspace.sh', deployment: deployed.value });
   } catch (error) { return platformError(409, 'TENANT_PROVISIONING_FAILED', error instanceof Error ? error.message : 'Tenant provisioning failed'); }
@@ -198,29 +199,6 @@ async function handleTokenAdmin(request: Request, env: Env, tenant: string): Pro
   return Response.json({ token, appliedMigrationTag: state.appliedMigrationTag, active: state.active?.sha ?? null });
 }
 
-/** One `worker-deploy` ledger entry per swap; an unconfigured credit account is logged, never a deploy failure. */
-async function meterDeploy(env: Env, tenant: string, sha: string): Promise<void> {
-  const credits = env.CREDITS.getByName(tenant);
-  const account = await credits.getAccount();
-  if (account.status === 'error') {
-    console.error(JSON.stringify({ event: 'deploy-metering-skipped', tenant, code: account.error.code }));
-    return;
-  }
-  const now = new Date().toISOString();
-  const ledger: CreditLedgerRecord = {
-    id: `deploy:${tenant}:${sha}:${crypto.randomUUID()}`,
-    resource: 'worker-deploy',
-    quantity: '1',
-    rateVersion: 'cloudflare-2026-08-27',
-    debitMicros: Number(env.DEPLOY_SETTLEMENT_MICROS),
-    windowStart: now,
-    windowEnd: now,
-    createdAt: now,
-  };
-  const applied = await credits.applyUsage(ledger);
-  if (applied.status === 'error') console.error(JSON.stringify({ event: 'deploy-metering-failed', tenant, code: applied.error.code }));
-}
-
 /** Account for dispatched requests without making credit availability an access policy. */
 async function meterDispatch(env: Env, tenant: string): Promise<void> {
   try {
@@ -249,7 +227,8 @@ async function meterDispatch(env: Env, tenant: string): Promise<void> {
   }
 }
 
-/** Tenant-authenticated worker swap: `deploy` a staged release or `revert` to the previous release / our channel. */
+/** Tenant-authenticated worker swap: `deploy` a staged release or `revert` to the previous release / our channel. The
+ * swap runs in the tenant's deployment object and finishes (metered) even when this request's caller leaves. */
 async function handleTenantDeployment(request: Request, env: Env, tenant: string, action: 'deploy' | 'revert', operator = false): Promise<Response> {
   if (request.method !== 'POST') return platformError(405, 'METHOD_NOT_ALLOWED', 'Tenant deployment supports POST');
   if (operator) {
@@ -293,10 +272,10 @@ async function handleTenantDeployment(request: Request, env: Env, tenant: string
   } else {
     const parsed = platformRevertRequestSchema.safeParse(body);
     if (!parsed.success) return platformError(400, 'INVALID_DEPLOY_REQUEST', parsed.error.message);
-    result = await revertTenantWorker(env, tenant, parsed.data);
+    const { operationId, ...revert } = parsed.data;
+    result = await env.DEPLOYMENTS.getByName(tenant).deploy(tenant, { kind: 'revert', request: revert }, operationId ?? null);
   }
   if (result.status === 'error') return platformError(result.error.status, result.error.code, result.error.message);
-  await meterDeploy(env, tenant, result.value.sha);
   return Response.json(result.value);
 }
 
@@ -370,6 +349,15 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   if (!config) return platformError(409, 'TENANT_UNPROVISIONED', 'Tenant resource namespace is missing');
   if (path === '/machine-release' || path === '/machine-release/blob') return defaultMachineResponse(request, env, tenant);
   if (path.startsWith('/machine-release/client/')) return machineClientResponse(request, env, tenant, path);
+  if (path === '/machine-release/natives') return nativeMirrorResponse(request, env);
+  const operation = /^\/operations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/u.exec(path);
+  if (operation && request.method === 'GET') {
+    // Waits while the swap still runs: the caller that started it may have left without its answer.
+    const result = await deployments.operation(operation[1]!);
+    if (!result) return platformError(404, 'OPERATION_NOT_FOUND', 'No deployment was started under this operation id');
+    if (result.status === 'error') return platformError(result.error.status, result.error.code, result.error.message);
+    return Response.json(result.value);
+  }
   if (path === '/state' && request.method === 'GET') {
     const [control, deployment] = await Promise.all([env.TENANT_CONTROL.getByName(tenant).get(), deployments.getState()]);
     return Response.json({ control, deployment: { active: deployment.active?.sha ?? null } }, { headers: { 'cache-control': 'private, no-store' } });
@@ -475,7 +463,7 @@ export default {
     const defaultFrontend = await defaultFrontendResponse(request, env.RELEASES);
     if (defaultFrontend) return defaultFrontend;
 
-    const resource = /^\/__platform\/tenants\/([a-z0-9-]+)(\/(?:state|storage|provider|machine-release)(?:\/.*)?)$/u.exec(url.pathname);
+    const resource = /^\/__platform\/tenants\/([a-z0-9-]+)(\/(?:state|storage|provider|machine-release|operations)(?:\/.*)?)$/u.exec(url.pathname);
     if (resource && tenantIdSchema.safeParse(resource[1]).success) return handleTenantResource(request, env, resource[1]!, resource[2]!);
     const adminMatch = CREDIT_ADMIN_PATH.exec(url.pathname);
     if (adminMatch) return handleCreditAdmin(request, env, adminMatch[1]!);

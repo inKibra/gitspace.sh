@@ -5,6 +5,7 @@ import {
   type GitHubAppManifestForm, type GitHubAppOwner, type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
 } from '@gitspace/protocol/github';
 import { accountAccessResponse, activeAccount } from './account-access.js';
+import { AutomationEventSchema, automationEvent, type AutomationEvent } from './automation-events.js';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
@@ -18,6 +19,8 @@ const UNINSTALL_RETRY_MS = 5 * 60_000;
 /** An installation token is reused while more than this remains of its hour. */
 const TOKEN_REUSE_MARGIN_MS = 5 * 60_000;
 const KEPT_DELIVERIES = 500;
+/** A pull request's changed files are read up to GitHub's own limit for the endpoint. */
+const PULL_REQUEST_FILE_PAGES = 30;
 const LISTED_DELIVERIES = 50;
 const REPOSITORY_PAGE_SIZE = 100;
 const REPOSITORY_PAGES = 100;
@@ -97,6 +100,8 @@ interface DeliveryRow extends Record<string, SqlStorageValue> {
   repository: string | null;
   received_at: number;
   outcome: string;
+  /** The delivery as automations read it (`AutomationEvent`); null for events automations do not start on. */
+  event_json: string | null;
 }
 /** A project whose remote is on GitHub; `repository` is lowercased `owner/name` for matching. */
 interface RepositoryProject {
@@ -244,6 +249,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
         outcome TEXT NOT NULL
       );
     `);
+    if (!ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(deliveries)').toArray().some(column => column.name === 'event_json')) ctx.storage.sql.exec('ALTER TABLE deliveries ADD COLUMN event_json TEXT');
   }
 
   async state(): Promise<GitHubState> {
@@ -361,8 +367,10 @@ export class GitHubAppDO extends BudgetedDurableObject {
     // A delivery can change what an installation covers: tokens are minted afresh after it.
     this.issued.clear();
     let payload: DeliveryPayload | null = null;
+    let raw: unknown = null;
     try {
-      payload = DeliveryPayloadSchema.parse(JSON.parse(payloadJson));
+      raw = JSON.parse(payloadJson);
+      payload = DeliveryPayloadSchema.parse(raw);
     } catch {
       // Recorded below as unreadable.
     }
@@ -375,7 +383,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
     if (inserted.length === 0) return;
     let outcome: string;
     try {
-      outcome = payload ? await this.deliver(event, payload) : 'dropped: unreadable payload';
+      outcome = payload ? await this.deliver(event, deliveryId, payload, raw) : 'dropped: unreadable payload';
     } catch (error) {
       outcome = `failed: ${error instanceof Error ? error.message : String(error)}`;
       console.error(JSON.stringify({ event: 'github_delivery_failed', deliveryId, githubEvent: event, message: outcome }));
@@ -418,23 +426,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** A token for one covered repository, narrowed to it and to reading or writing its contents (and workflow files). */
   async repositoryToken(repository: string, access: GitHubRepositoryAccess): Promise<GitHubRepositoryToken> {
-    const installationId = this.coverage(repository);
-    if (installationId === null) throw new Error(`No GitHub App installation covers ${repository}`);
-    // An installation token lasts an hour: machines authenticate git to GitHub on every fetch and push, and minted one
-    // each time (about 5,400 a day). Reused until shortly before it expires; held in memory only.
-    const key = `${installationId}:${repository.toLowerCase()}:${access}`;
-    const held = this.issued.get(key);
-    if (held && Date.parse(held.expiresAt) - Date.now() > TOKEN_REUSE_MARGIN_MS) return held;
-    const jwt = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
-    const name = repository.slice(repository.indexOf('/') + 1);
-    const permissions: Record<string, string> = access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' };
-    const issued = await githubRequest(`/app/installations/${installationId}/access_tokens`, {
-      method: 'POST', token: jwt, body: { repositories: [name], permissions },
-      schema: z.object({ token: z.string().min(1), expires_at: z.string().datetime() }),
-    });
-    const token = { token: issued.token, expiresAt: issued.expires_at };
-    this.issued.set(key, token);
-    return token;
+    return this.installationToken(repository, access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' });
   }
 
   /**
@@ -455,6 +447,49 @@ export class GitHubAppDO extends BudgetedDurableObject {
     return false;
   }
 
+  /** The tenant's bot as people mention it, `@<slug>`; null without an App. */
+  botHandle(): string | null {
+    const app = this.app();
+    return app ? `@${app.slug}` : null;
+  }
+
+  /** Whether `login` may write to `repository` (admin, maintain or write), read through the installation covering it. */
+  async canWrite(repository: string, login: string): Promise<boolean> {
+    const token = await this.installationToken(repository, { metadata: 'read' });
+    try {
+      const access = await githubRequest(`/repos/${repository}/collaborators/${encodeURIComponent(login)}/permission`, { token: token.token, schema: z.object({ permission: z.string() }) });
+      return access.permission === 'admin' || access.permission === 'write';
+    } catch (error) {
+      // Not a collaborator, or not a user at all (an App's bot).
+      if (error instanceof GitHubApiError && error.status === 404) return false;
+      throw error;
+    }
+  }
+
+  /** The paths a pull request changes, read through the installation covering its repository. */
+  async pullRequestFiles(repository: string, number: number): Promise<string[]> {
+    const token = await this.installationToken(repository, { pull_requests: 'read', metadata: 'read' });
+    const paths: string[] = [];
+    for (let page = 1; page <= PULL_REQUEST_FILE_PAGES; page++) {
+      const files = await githubRequest(`/repos/${repository}/pulls/${number}/files?per_page=${REPOSITORY_PAGE_SIZE}&page=${page}`, { token: token.token, schema: z.array(z.object({ filename: z.string(), previous_filename: z.string().optional() })) });
+      for (const file of files) paths.push(file.filename, ...(file.previous_filename ? [file.previous_filename] : []));
+      if (files.length < REPOSITORY_PAGE_SIZE) break;
+    }
+    return paths;
+  }
+
+  /** The repository's recorded deliveries as automations read them, newest first: Test with a past event replays them. */
+  recordedEvents(repository: string, limit: number): AutomationEvent[] {
+    return this.ctx.storage.sql.exec<DeliveryRow>('SELECT * FROM deliveries WHERE event_json IS NOT NULL AND lower(repository) = lower(?) ORDER BY received_at DESC, rowid DESC LIMIT ?', repository, limit).toArray()
+      .map(row => AutomationEventSchema.parse(JSON.parse(row.event_json ?? 'null')));
+  }
+
+  /** One recorded delivery as automations read it, if it belongs to `repository`. */
+  recordedEvent(repository: string, deliveryId: string): AutomationEvent | null {
+    const row = this.ctx.storage.sql.exec<DeliveryRow>('SELECT * FROM deliveries WHERE id = ? AND event_json IS NOT NULL AND lower(repository) = lower(?)', deliveryId, repository).toArray()[0];
+    return row ? AutomationEventSchema.parse(JSON.parse(row.event_json ?? 'null')) : null;
+  }
+
   /** The App's OAuth client id: a shared guide's reader signs in through the App's user authorization. */
   readerClientId(): string {
     const app = this.app();
@@ -471,7 +506,27 @@ export class GitHubAppDO extends BudgetedDurableObject {
     return this.state();
   }
 
-  private async deliver(event: string, payload: DeliveryPayload): Promise<string> {
+  /** An installation token narrowed to one covered repository and `permissions`. A token lasts an hour: machines
+   * authenticate git to GitHub on every fetch and push, and minted one each time (about 5,400 a day). Reused until
+   * shortly before it expires; held in memory only. */
+  private async installationToken(repository: string, permissions: Readonly<Record<string, 'read' | 'write'>>): Promise<GitHubRepositoryToken> {
+    const installationId = this.coverage(repository);
+    if (installationId === null) throw new Error(`No GitHub App installation covers ${repository}`);
+    const key = `${installationId}:${repository.toLowerCase()}:${JSON.stringify(permissions)}`;
+    const held = this.issued.get(key);
+    if (held && Date.parse(held.expiresAt) - Date.now() > TOKEN_REUSE_MARGIN_MS) return held;
+    const jwt = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
+    const name = repository.slice(repository.indexOf('/') + 1);
+    const issued = await githubRequest(`/app/installations/${installationId}/access_tokens`, {
+      method: 'POST', token: jwt, body: { repositories: [name], permissions },
+      schema: z.object({ token: z.string().min(1), expires_at: z.string().datetime() }),
+    });
+    const token = { token: issued.token, expiresAt: issued.expires_at };
+    this.issued.set(key, token);
+    return token;
+  }
+
+  private async deliver(event: string, deliveryId: string, payload: DeliveryPayload, raw: unknown): Promise<string> {
     const action = payload.action ?? null;
     const installationId = payload.installation?.id ?? null;
     if (installationId === null) return 'recorded';
@@ -491,7 +546,9 @@ export class GitHubAppDO extends BudgetedDurableObject {
       return 'installation removed';
     }
     if (!claimed) return 'recorded: installation not started from GitSpace';
-    if (event === 'push') return this.recordPush(payload);
+    const routed = await this.routeToAutomations(event, deliveryId, raw);
+    if (event === 'push') return routed === null ? this.recordPush(payload) : `${await this.recordPush(payload)}; ${routed}`;
+    if (routed !== null) return routed;
     if (event === 'installation_repositories') {
       await this.syncInstallation(installationId, false);
       return 'repositories refreshed';
@@ -501,6 +558,24 @@ export class GitHubAppDO extends BudgetedDurableObject {
       return 'installation refreshed';
     }
     return event === 'installation' && action === 'suspend' ? 'installation suspended on GitHub' : 'recorded';
+  }
+
+  /** An event automations start on is kept trimmed (Test with a past event replays it) and sent to the automations of
+   * every project whose remote is its repository (several may share one). Null for other events. */
+  private async routeToAutomations(event: string, deliveryId: string, raw: unknown): Promise<string | null> {
+    const app = this.app();
+    const normalized = automationEvent({ event, deliveryId, payload: raw, slug: app?.slug ?? null, receivedAt: Date.now() });
+    if (!normalized) return null;
+    this.ctx.storage.sql.exec('UPDATE deliveries SET event_json = ? WHERE id = ?', JSON.stringify(normalized), deliveryId);
+    const repository = normalized.repository.toLowerCase();
+    const projects = (await this.repositoryProjects()).filter((project) => project.repository === repository);
+    const bot = app ? `@${app.slug}` : null;
+    const results = await Promise.allSettled(projects.map((project) =>
+      this.env.PROJECT_AUTOMATIONS.getByName(`${this.env.ACCOUNT_ID}:${project.id}`).receive({ projectId: project.id, event: normalized, bot })));
+    const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []);
+    const runs = results.reduce((sum, result) => sum + (result.status === 'fulfilled' ? result.value : 0), 0);
+    const sent = `automations: ${runs} ${runs === 1 ? 'run' : 'runs'} in ${projects.length} ${projects.length === 1 ? 'project' : 'projects'}`;
+    return failures.length === 0 ? sent : `${sent}; ${failures.length} failed: ${failures[0]}`;
   }
 
   /** A push to a branch moves that branch's origin head in every project whose remote is the repository (several may
@@ -603,6 +678,14 @@ export class GitHubAppDO extends BudgetedDurableObject {
     for (const [projectId, text] of notices) {
       this.ctx.waitUntil(this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).runtimeProjectNotice({ projectId, workspaceId: projectId }, text)
         .catch((error: unknown) => console.error('GitHub link notice was not sent', { projectId, error })));
+    }
+    // A project its repository's installation newly covers gets the default automations that send events to linked
+    // workspaces (docs/AUTOMATIONS-DESIGN.md §4), once.
+    const bot = this.botHandle();
+    for (const projectId of after.keys()) {
+      if (before.has(projectId) || bot === null) continue;
+      this.ctx.waitUntil(this.env.PROJECT_AUTOMATIONS.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).addDefaults({ projectId, bot })
+        .catch((error: unknown) => console.error('Default automations were not added', { projectId, error })));
     }
     // Machines re-apply each checkout's origin route (installation tokens or the SSH key) as they do Git settings.
     if (notices.length > 0) this.ctx.waitUntil(notifyMachines(this.env, 'all', ['settings']));

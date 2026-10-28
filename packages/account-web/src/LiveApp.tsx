@@ -39,6 +39,7 @@ import { useOriginCheck } from './useOriginCheck.js';
 import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useRepositoryTree } from './useRepositoryTree.js';
+import { useBackToStable } from './useBackToStable.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadDriveArtifact, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
@@ -638,10 +639,10 @@ function GitSpaceProduct() {
   useEffect(() => { void currentDevice().then(setBrowserDevice); }, []);
   const currentBrowserView = devicesValue?.find(device => device.current);
   const canManageMcp = Boolean(browserDevice && currentBrowserView?.current && currentBrowserView.deviceId === browserDevice.deviceId && currentBrowserView.kind === 'browser' && currentBrowserView.active && currentBrowserView.scope === 'user' && currentBrowserView.capabilities.includes('devices.manage'));
-  // Settings → Source reads the same status entry LiveWorkspace polls; revert is only offered there.
+  // Settings → Source reads the same status entry LiveWorkspace polls, and follows Back to stable in it.
   const settingsDeploymentQuery = useResultQuery(rpcClient.deployment.status, {}, { enabled: runtimeMetadataEnabled });
   const settingsDeploymentValue = useRetainedQueryValue(settingsDeploymentQuery, 'deployment');
-  const revertDeployment = useResultMutation(rpcClient.deployment.revert);
+  const backToStable = useBackToStable(settingsDeploymentValue, settingsDeploymentQuery.refetch);
   const checkCanonicalSource = useResultMutation(rpcClient.deployment.checkCanonical);
   const composioSetupQuery = useResultQuery(rpcClient.mcp.composio.setup.get, {});
   const composioSetupValue = useRetainedQueryValue(composioSetupQuery, 'composio-setup');
@@ -826,12 +827,12 @@ function GitSpaceProduct() {
   };
   const revertToChannel = async (): Promise<void> => {
     setSettingsError(null);
-    const result = await revertDeployment.mutateAsync({});
-    if (result.status === 'error') {
-      setSettingsError(rpcErrorMessage(result.error, 'Revert release'));
-      throw result.error;
+    try {
+      await backToStable.revert();
+    } catch (error) {
+      setSettingsError(rpcErrorMessage(error, 'Back to stable'));
+      throw error;
     }
-    await settingsDeploymentQuery.refetch();
   };
   const checkCanonical = async (): Promise<void> => {
     setSettingsError(null);
@@ -1088,7 +1089,7 @@ function GitSpaceProduct() {
     projects={(productProjectsValue ?? []).map((project) => ({ id: project.id, name: project.name }))}
     onBack={() => navigateProduct(optionalQueryParameter('project') ? 'agent' : 'projects', 'replace')}
     onComplete={completeOnboarding}
-    saving={ensureStarterProject.state === 'pending' || updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setRuntimeSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending' || revertDeployment.state === 'pending'}
+    saving={ensureStarterProject.state === 'pending' || updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setRuntimeSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending'}
     error={settingsError}
   /></>;
   if (!draft.onboardingComplete || forceOnboarding) return page('onboarding');

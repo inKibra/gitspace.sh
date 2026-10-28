@@ -501,6 +501,28 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   },
   "automations.test": {
     "readOnlyHint": true,
+    "openWorldHint": true
+  },
+  "automations.events": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "automations.runOnEvent": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+  },
+  "automations.link": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "automations.unlink": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
     "openWorldHint": false
   },
   "automations.updateSettings": {

@@ -221,6 +221,9 @@ export const releaseRecordSchema = z.object({
     /** Read-only history from releases built before the cloud runtime cutover. */
     omp: releaseArtifactSchema.nullable().optional(),
     frontend: releaseArtifactSchema.nullable(),
+    /** The portable machine release built with the machine (`portable.manifest.json`, see `machine-release`); absent
+     * on releases built before it and from source trees that cannot build one. */
+    portable: releaseArtifactSchema.optional(),
   }),
   worker: workerReleaseMetadataSchema.nullable(),
   /** Read-only history; new releases cannot stage an OMP runtime. */
@@ -285,6 +288,18 @@ export const launchProgressSchema = z.object({
 });
 export type LaunchProgress = z.infer<typeof launchProgressSchema>;
 
+/** The account's latest Back to stable. The account runs it to its end whether or not a browser follows it: the
+ * platform swaps the Worker to the default release, and only a swap that succeeded returns every selection to the
+ * channel. */
+export const revertProgressSchema = z.object({
+  revertId: z.string().uuid(),
+  status: z.enum(['running', 'succeeded', 'failed']),
+  error: z.string().max(4_096).nullable(),
+  startedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type RevertProgress = z.infer<typeof revertProgressSchema>;
+
 export const deploymentStatusSchema = z.object({
   desired: tenantDesiredSchema,
   current: z.object({
@@ -299,6 +314,7 @@ export const deploymentStatusSchema = z.object({
   machineExecution: z.record(idSchema, machineExecutionAdmissionSchema).optional(),
   launch: launchProgressSchema.nullable(),
   canonical: canonicalHeadSchema.nullable(),
+  revert: revertProgressSchema.nullable(),
 });
 export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 
@@ -338,6 +354,9 @@ export const platformRevertRequestSchema = z.object({
   to: z.enum(['previous', 'channel']),
   /** The restored release must advertise this inference capability; the platform refuses one that does not. */
   inferenceVersion: z.literal(1).optional(),
+  /** Names the swap: the platform keeps its outcome under this id, at `GET /__platform/tenants/<tenant>/operations/<id>`,
+   * for a caller that did not get the answer. The same id never starts a second swap. */
+  operationId: z.string().uuid().optional(),
 });
 export type PlatformRevertRequest = z.infer<typeof platformRevertRequestSchema>;
 

@@ -5,7 +5,7 @@ import { accountLiveKey, liveNoticeMessageSchema, workspaceLiveKey, type LiveKey
 import { workspaceStatusMessageSchema } from '@gitspace/protocol/account-directory';
 import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
-import type { ProviderView } from '@gitspace/protocol';
+import type { ProviderView, ReleaseArtifact } from '@gitspace/protocol';
 import { executionHash, loadEnvironmentBundle, serviceIngressContent, type LifecycleRun } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
@@ -329,7 +329,7 @@ describe('account cloud RPC without machines', () => {
     expect(await rpc('mcp.grants.list', { projectId })).toMatchObject({ status: 'ok', value: [] });
     expect(await rpc('mcp.grants.put', { projectId, connectionId: 'plugin', enabled: true, projectSpaceEnabled: false, workspacesEnabled: true, expectedRevision: 0 })).toMatchObject({ status: 'ok', value: { projectId, workspacesEnabled: true, projectSpaceEnabled: false, revision: 1 } });
     expect(await rpc('mcp.grants.put', { projectId: 'foreign', connectionId: 'plugin', enabled: true, projectSpaceEnabled: true, workspacesEnabled: true, expectedRevision: 0 })).toMatchObject({ status: 'error' });
-    const automationDraft = { name: 'Review', trigger: { kind: 'manual' }, action: { kind: 'messageWorkspace', workspaceId: spaceId, instruction: 'Review what {{requested_by}} asked for' }, enabled: true };
+    const automationDraft = { name: 'Review', trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId: spaceId, instruction: 'Review what {{requested_by}} asked for' }, enabled: true };
     const created = z.object({ status: z.literal('ok'), value: z.object({ id: z.string(), projectId: z.string(), revision: z.number(), createdBy: z.string(), proposal: z.null() }) }).parse(await rpc('automations.create', { projectId, draft: automationDraft }));
     expect(created.value).toMatchObject({ projectId, revision: 1, createdBy: 'person' });
     expect(await rpc('automations.list', { projectId })).toMatchObject({ status: 'ok', value: { automations: [{ id: created.value.id }], settings: { concurrency: 2, dailyRunCap: 50 } } });
@@ -854,6 +854,17 @@ describe('cloud projects and workspace relations with no machines', () => {
     expect(await inspectorClient(fixture).deployment.status({})).toMatchObject({ status: 'ok', value: {
       desired: { worker: null, machine: null, frontend: null }, current: { machines: {} }, releases: [], launch: null,
     } });
+  });
+
+  it('reports a release with its portable machine release to the browser', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: null } })));
+    const portable: ReleaseArtifact = { key: 'releases/portable-view/portable.manifest.json', hash: `sha256:${'e'.repeat(64)}`, size: 6_392 };
+    await env.TENANT_RELEASES.getByName(fixture.userId).stage({
+      sha: 'portable-view', label: 'portable view', source: null, worker: null,
+      artifacts: { worker: null, machine: { key: 'releases/portable-view/machine.manifest.json', hash: `sha256:${'f'.repeat(64)}`, size: 1 }, frontend: null, portable },
+    }, 'builder');
+    expect(await inspectorClient(fixture).deployment.status({})).toMatchObject({ status: 'ok', value: { releases: [{ sha: 'portable-view', artifacts: { portable } }] } });
   });
 });
 

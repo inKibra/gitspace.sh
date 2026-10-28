@@ -201,6 +201,93 @@ describe('canonical cache deployment sources', () => {
     } finally { journal.close(); }
   });
 
+  it.each([true, false])('uploads the portable release a source builds (%p), each file before its manifest, and stages it with the machine', async portable => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-portable-launch-'));
+    roots.push(root);
+    const checkout = join(root, 'canonical-checkout');
+    const deployment = join(import.meta.dir, '../../deployment/src');
+    await mkdir(join(checkout, 'packages/deployment/src'), { recursive: true });
+    await mkdir(join(checkout, 'packages/account-machine'), { recursive: true });
+    await mkdir(join(checkout, 'packages/protocol'), { recursive: true });
+    await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'machine-source-fixture', private: true }));
+    await writeFile(join(checkout, 'packages/account-machine/package.json'), JSON.stringify({ name: '@gitspace/account-machine', gitspace: { inferenceVersion: 1 } }));
+    await writeFile(join(checkout, 'packages/protocol/package.json'), JSON.stringify({ name: '@gitspace/protocol' }));
+    await writeFile(join(checkout, 'packages/deployment/src/builders.ts'), `
+      import { mkdir, writeFile } from 'node:fs/promises';
+      import { dirname, join } from 'node:path';
+      import { createExecutableArtifactManifest } from ${JSON.stringify(join(deployment, 'executable-manifest.ts'))};
+      import { BUN_VERSION, NATIVE_PINS } from ${JSON.stringify(join(deployment, 'native-pins.ts'))};
+      const hex = bytes => new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
+      export async function buildMachineBundle(_root, output) {
+        await mkdir(output, { recursive: true });
+        await writeFile(join(output, 'machine.js'), 'export {};');
+        const envelope = await createExecutableArtifactManifest(output, 'machine');
+        return { path: output, hash: envelope.manifest.treeHash, ...envelope };
+      }
+      ${portable ? `export async function buildPortableRelease(_root, output) {
+        const files = [];
+        for (const path of ['cli/gitspace.js', 'machine/machine.js', 'machine/machine-worker.js', 'machine/host-runtime.js', 'machine/machine-update.js', 'machine/machine-bootstrap.js']) {
+          const content = 'export const path = ' + JSON.stringify(path) + ';';
+          await mkdir(dirname(join(output, 'portable', path)), { recursive: true });
+          await writeFile(join(output, 'portable', path), content);
+          files.push({ path, sha256: hex(content), size: content.length });
+        }
+        const manifest = JSON.stringify({ schemaVersion: 1, bunVersion: BUN_VERSION, files, natives: NATIVE_PINS });
+        await writeFile(join(output, 'portable.manifest.json'), manifest);
+        return { path: join(output, 'portable.manifest.json'), hash: 'sha256:' + hex(manifest) };
+      }` : ''}
+    `);
+    for (const command of [
+      [process.execPath, 'install', '--lockfile-only', '--ignore-scripts'],
+      ['git', 'init', '-b', 'main'],
+      ['git', 'add', '.'],
+      ['git', '-c', 'user.name=Machine Test', '-c', 'user.email=machine@example.invalid', 'commit', '-m', 'source'],
+    ]) {
+      const child = Bun.spawn(command, { cwd: checkout, stdout: 'pipe', stderr: 'pipe' });
+      if (await child.exited !== 0) throw new Error(await new Response(child.stderr).text());
+    }
+    const journal = new ExecutorJournal(join(root, 'attempts.sqlite'));
+    journal.installAttachment(cache(checkout));
+    const uploads: Array<{ key: string; size: number; hash: `sha256:${string}` }> = [];
+    let staged: ReleaseRecord | null = null;
+    const launcher = new DeploymentLauncher({
+      attachments: () => journal.attachments(), machineId: 'builder', buildRoot: join(root, 'builds'),
+      blobs: { put: async (key, bytes) => {
+        const hash: `sha256:${string}` = `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
+        uploads.push({ key, size: bytes.byteLength, hash });
+        return hash;
+      } },
+      authority: {
+        reportLaunchProgress: async () => {},
+        stageRelease: async input => {
+          staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'skipped', frontend: 'skipped', machines: {} }, error: null });
+          return staged;
+        },
+        launchRelease: async sha => {
+          if (!staged || staged.sha !== sha) throw new Error('Release was not staged');
+          return { record: staged, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() } };
+        },
+      },
+    });
+    try {
+      const record = await launcher.launchAndWait({ source: { kind: 'workspace', workspaceId: 'workspace' }, targets: ['machine'] });
+      const prefix = `releases/${record.sha}/`;
+      const portableUploads = uploads.filter(upload => upload.key.startsWith(`${prefix}portable`));
+      if (!portable) {
+        expect(portableUploads).toEqual([]);
+        expect(record.artifacts.portable).toBeUndefined();
+        return;
+      }
+      expect(portableUploads.map(upload => upload.key).sort()).toEqual([
+        `${prefix}portable.manifest.json`,
+        ...['cli/gitspace.js', 'machine/host-runtime.js', 'machine/machine-bootstrap.js', 'machine/machine-update.js', 'machine/machine-worker.js', 'machine/machine.js'].map(path => `${prefix}portable/${path}`),
+      ]);
+      const manifest = portableUploads.at(-1)!;
+      expect(manifest.key).toBe(`${prefix}portable.manifest.json`);
+      expect(record.artifacts.portable).toEqual({ key: manifest.key, hash: manifest.hash, size: manifest.size });
+    } finally { journal.close(); }
+  });
+
   it.each(['attaching', 'detached'] as const)('refuses a %s cache instead of building its retained files', state => {
     const local = cache('/retained');
     expect(() => deploymentSource([{ ...local, attachment: { ...local.attachment, state } }], 'builder', 'workspace')).toThrow('ready live cache');

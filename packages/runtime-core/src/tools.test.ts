@@ -463,7 +463,7 @@ test('a rejected tool call names only the problems of the method it asked for, o
   expect(create).toContain('bogus');
   expect(create).not.toMatch(/"get"|workspaceId|instruction/);
   expect(reject({ method: 'launch' })).toMatch(/method: unknown value, expected one of .*status, progress, start, create, open/);
-  expect(reject({ name: 'x' })).toMatch(/method: required, one of .*start, create, open, restore, setRelations$/);
+  expect(reject({ name: 'x' })).toMatch(/method: required, one of .*start, create, open, restore, setRelations, links, link, unlink$/);
   expect(parseToolArguments('space_workspace', RuntimeWorkspaceArgumentsSchema, { method: 'status' })).toEqual({ method: 'status' });
 });
 

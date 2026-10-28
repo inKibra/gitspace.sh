@@ -1,6 +1,6 @@
 # Machine distribution: one platform-neutral release per launch
 
-> **Status: Decided direction (2026-10-28), not built.** Replaces the per-platform client builds and the pin-based account installer (SIMPLIFICATION entry 107).
+> **Status: Decided direction (2026-10-28). D0 built (2026-10-28): every machine launch and default-release build also produces the portable release, and its natives are mirrored by hash; checks 1 and 4 done (§8). D1–D3 not built.** Replaces the per-platform client builds and the pin-based account installer (SIMPLIFICATION entry 107).
 
 ## 1. Summary
 
@@ -9,7 +9,7 @@ A launch builds one platform-neutral release: the machine and CLI JavaScript, pl
 ## 2. What exists today
 
 - **A machine build is almost entirely platform-neutral.** The Darktop build of `b3ec7e0f` holds `machine.js`, `host-runtime.js`, `machine-bootstrap.js`, `machine-update.js` and `machine-worker.js` (about 11 MB), `native/bin/rg` and `native/bin/git-lfs` (about 20 MB), and `machine-native.json` requiring Bun 1.4.0 and a glibc floor. No `.node` addons; nothing is compiled.
-- **The native files are upstream releases, already pinned for all four platforms in source:** git-lfs 3.8.0 and ripgrep 14.1.1 (`packages/deployment/src/native-build.ts`), Bun 1.4.0 (`release.ts`), for darwin-arm64, darwin-x64, linux-arm64 and linux-x64.
+- **The native files are upstream releases, pinned for all four platforms in one source file,** `packages/deployment/src/native-pins.ts`: Bun 1.4.0, ripgrep 14.1.1 and git-lfs 3.8.0 for darwin-arm64, darwin-x64, linux-arm64 and linux-x64. The per-platform build (`native-build.ts`, `release.ts`) reads its own platform's entries from it and checks the archive and the extracted executable against them.
 - **Why a build is per platform today:** a build packs the natives of the platform it runs on, records its ABI from the host (`readelf` glibc versions on Linux, the build host's OS on macOS), and compiles the CLI with `bun build --compile`. `release.ts` refuses to build one platform on another for these reasons. A launch on Darktop therefore produces a Linux x64 build only, and a Mac paired to the account falls back to the pinned default release.
 - **Installers:** the global `gitspace.sh/install` reads one stable channel (it served a 2026-09-05 client that could not read today's pairing tokens until 2026-10-28, entry 105). The account installer (entry 107) serves the client of the account's pinned default, which is older than the account's own release.
 - **The machine runtime already runs JavaScript on a private Bun** (`release.ts`: "A private Bun preserves process.execPath for machine and supervisor children"); only the CLI is compiled.
@@ -19,6 +19,14 @@ A launch builds one platform-neutral release: the machine and CLI JavaScript, pl
 - **One build per launch, on any Linux:** the account's build machine, or a Cloudflare cloud machine when the account has none. Output: the JavaScript bundles and a manifest.
 - **The manifest** names, per platform, each native file (Bun, `rg`, `git-lfs`) by upstream URL, SHA-256, size and its ABI floor (glibc version, macOS version), pinned in source beside the hashes. No binaries ride in the release; a host fetches natives by hash and keeps them across releases.
 - **Mirror:** native files are stored in the platform's R2 by SHA-256 the first time a build names them; installs and updates fetch from the mirror, never from GitHub at install time.
+
+As built (D0), in code the "portable release" (`@gitspace/protocol/machine-release`):
+
+- `buildPortableRelease(root, out)` (`packages/deployment/src/builders.ts`) writes `out/portable.manifest.json` and the files it names under `out/portable/`: `machine/` (`machine.js`, `machine-worker.js`, `host-runtime.js`, `machine-update.js`, `machine-bootstrap.js` and their source maps, the same bundles as a machine generation) and `cli/gitspace.js` (the CLI as JavaScript, about 0.9 MB; `bun cli/gitspace.js` runs it). It takes about a second; no native file is downloaded or packed. It refuses to run on a Bun other than the pinned one. Not in it: the distribution runtime's `host.js` and `rpc-probe.js`, which embed one platform generation's machine manifest hash (`GITSPACE_INITIAL_MACHINE_MANIFEST_HASH`); D1 decides what an installed host trusts first.
+- The manifest (`portableManifestSchema`) holds `bunVersion`, every file's path, SHA-256 and size, and `natives`: for each of the four platforms exactly one `bun`, `rg` and `git-lfs`, each with `version`, upstream `url` (only that project's GitHub release downloads), `sha256` and `size` of the asset, `member` (the executable inside the archive), `executable` (its SHA-256 and size once extracted) and `abi` (`{ os: 'linux', glibc }`, null when statically linked, or `{ os: 'darwin', macos }`). A native whose ABI is for the other OS, a missing platform or tool, a non-upstream URL, or a Bun other than `bunVersion` is refused.
+- **Launches:** the launcher (`deployment-launcher.ts`) builds it with the machine target when the source tree has `buildPortableRelease`, uploads each file to the account's DATA at `releases/<sha>/portable/<path>` and then the manifest at `releases/<sha>/portable.manifest.json`, and stages it as the release record's `artifacts.portable`. Before staging, the account checks the manifest's digest and that every file it names is in DATA with that SHA-256 and size, then asks the platform to mirror the natives (`POST /machine-release/natives`); either failing refuses the stage. The per-platform machine artifact is built and staged as before. Order of rollout: the platform serves `/machine-release/natives` before any account stages a portable release, and an account Worker from before D0 refuses a stage that names `portable` (its stage input is strict), so a machine launches with this launcher only once its account's Worker is from D0 or later; launching all targets together, as "Launch canonical develop" does, updates both.
+- **Defaults:** the default-release build (`default-release-cli.ts build`) builds it into the default as `portable` (`defaults/releases/<commit>/portable.manifest.json`, files under `…/portable/`), verified with the rest of the default.
+- **Mirror:** `natives/sha256/<sha256>` in the platform's releases bucket (`RELEASES`). The copy runs where R2 credentials are: the platform worker for launches (the building machine has none; R2 also checks the SHA-256 on store), and the default-release publish job, which holds the releases-bucket key, for defaults, before it publishes the default. Both use `mirrorNatives`: an asset the mirror holds is not downloaded again, and a download whose bytes differ from the pinned SHA-256 or size is refused before anything is stored.
 
 ## 4. Install
 
@@ -47,10 +55,17 @@ Verification only: a small macOS and arm64 job installs a published release from
 
 ## 8. To check before building
 
-1. Cloudflare containers can run the build (Bun, git; a JavaScript build).
+1. Cloudflare containers can run the build (Bun, git; a JavaScript build). **Checked (D0): yes.** The cloud machine image (`packages/sandbox-worker/Dockerfile`, final stage: `cloudflare/sandbox:0.12.9`, Ubuntu 22.04, Bun 1.4.0 at `/usr/local/bin/bun`, git 2.34.1, git-lfs, binutils) was rebuilt locally without its `/opt/gitspace` runtime layers and run with standard-1's limits (`docker run --cpus 0.5 --memory 4g`). In it: `git clone` of the repository at `23cb05f0` plus the D0 change, `bun install --frozen-lockfile` (64 s, peak RSS 304 MiB), `buildPortableRelease` (4 s, peak RSS 241 MiB), then `bun portable/cli/gitspace.js --version` printed `1.0.0`. The checkout with `node_modules` is 3.0 GB of standard-1's 8 GB disk; the release is 33 MB.
 2. Upstream Bun, `rg` and `git-lfs` run on macOS when fetched by `curl` (no quarantine attribute), proven by the verification job.
 3. Where the CLI uses `process.execPath` to start the host (a compiled CLI's path is `gitspace`; under the wrapper it is Bun).
-4. The ABI floors per platform, pinned once from the upstream files.
+4. The ABI floors per platform, pinned once from the upstream files. **Checked (D0):** the twelve assets were downloaded with `curl`, hashed with `sha256sum` (the archive digests equal the ones already pinned from upstream's checksums), and each executable extracted (`unzip -p`, `tar -xzOf`) and hashed. Linux floor: the newest `GLIBC_` version `readelf --version-info` lists, null when `readelf -l` shows no interpreter (static). macOS floor: the Mach-O `LC_BUILD_VERSION` minos. Result, pinned in `native-pins.ts`:
+
+   | Platform | Bun 1.4.0 | ripgrep 14.1.1 | git-lfs 3.8.0 | Platform floor |
+   |---|---|---|---|---|
+   | darwin-arm64 | macOS 13.0 | macOS 13.0 | macOS 13.0 | macOS 13.0 |
+   | darwin-x64 | macOS 13.0 | macOS 14.0 | macOS 13.0 | macOS 14.0 |
+   | linux-arm64 | glibc 2.17 | glibc 2.18 | static | glibc 2.18 |
+   | linux-x64 | glibc 2.17 | static (musl) | static | glibc 2.17 |
 
 ## 9. What it replaces
 
@@ -60,7 +75,7 @@ The per-platform client builds and `bun build --compile` CLI; the pin-based acco
 
 | ID | Milestone | Exit |
 |---|---|---|
-| D0 | Platform-neutral release | A launch produces JavaScript + a per-platform native manifest; natives mirrored by hash; checks 1 and 4 done |
+| D0 | Platform-neutral release (built) | A launch produces JavaScript + a per-platform native manifest; natives mirrored by hash; checks 1 and 4 done |
 | D1 | Install | The account installer installs the account's release on all four platforms with one command; checks 2 and 3 done; the verification job passes |
 | D2 | Updates | The host updater follows launches on all four platforms; the pin-based installer and per-platform client builds are deleted |
 | D3 | AOT | Behind a setting: background AOT compile and swap, CLI first; after #166 |

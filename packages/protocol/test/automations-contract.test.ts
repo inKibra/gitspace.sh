@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  automationConditionKinds,
   describeAutomationSchedule,
   nextAutomationRunAt,
   parseAutomationSchedule,
   renderAutomationInstruction,
   unknownAutomationPlaceholders,
+  type AutomationTrigger,
 } from '../src/automations-contract.js';
 
 const next = (expression: string, after: string) => new Date(nextAutomationRunAt(expression, Date.parse(after))).toISOString();
@@ -47,8 +49,18 @@ describe('automation schedules (UTC cron)', () => {
 
 describe('automation instructions', () => {
   it('names the placeholders a trigger does not provide', () => {
-    expect(unknownAutomationPlaceholders('Audit {{automation.name}} at {{ scheduled_for }} for {{pull_request.html_url}}', 'schedule')).toEqual(['pull_request.html_url']);
-    expect(unknownAutomationPlaceholders('{{scheduled_for}}', 'manual')).toEqual(['scheduled_for']);
+    expect(unknownAutomationPlaceholders('Audit {{automation.name}} at {{ scheduled_for }} for {{pull_request.html_url}}', { kind: 'schedule', cron: '0 6 * * *' })).toEqual(['pull_request.html_url']);
+    expect(unknownAutomationPlaceholders('{{scheduled_for}}', { kind: 'manual' })).toEqual(['scheduled_for']);
+  });
+
+  it('offers a trigger of several events only the fields and conditions every one of them has', () => {
+    const review: AutomationTrigger = { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }] };
+    const feedback: AutomationTrigger = { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] };
+    expect(unknownAutomationPlaceholders('{{review.state}} on {{pull_request.html_url}} by {{sender.login}}', review)).toEqual([]);
+    expect(unknownAutomationPlaceholders('{{review.state}} on {{pull_request.html_url}} by {{sender.login}}', feedback)).toEqual(['review.state']);
+    expect(automationConditionKinds(review)).toEqual(['linked', 'mentionsBot', 'baseBranch', 'author', 'reviewState']);
+    expect(automationConditionKinds(feedback)).toEqual(['linked', 'mentionsBot', 'baseBranch', 'author']);
+    expect(automationConditionKinds({ kind: 'label' })).toEqual([]);
   });
 
   it('fills placeholders with the run values', () => {
