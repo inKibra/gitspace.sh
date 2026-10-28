@@ -2402,7 +2402,11 @@ async function accountChannelResponse(request: Request, env: Env, pathname: stri
         await response.body?.cancel();
         return new Response('Pinned account frontend unavailable', { status: 503 });
       }
-      return response;
+      if (pathname.startsWith('/assets/')) return response;
+      // The document names the hashed assets of whichever release is pinned now, so the browser revalidates it.
+      const headers = new Headers(response.headers);
+      headers.set('cache-control', 'no-cache');
+      return new Response(response.body, { status: response.status, headers });
     } catch { return new Response('Pinned account frontend unavailable', { status: 503 }); }
   }
   const assets = env.ASSETS;

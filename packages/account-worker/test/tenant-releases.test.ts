@@ -550,15 +550,21 @@ describe('tenant releases', () => {
     const pin = `${commit}:${'b'.repeat(64)}`;
     const runtime = { ...env, DEFAULT_ACCOUNT_RELEASE: pin };
     let available = true;
-    network.use(http.get(`${env.PLATFORM_URL}/v1/default-releases/${pin}/frontend/`, ({ request }) => {
+    network.use(http.get(`${env.PLATFORM_URL}/v1/default-releases/${pin}/frontend/*`, ({ request }) => {
       expect(request.headers.get('authorization')).toBeNull();
       expect(request.headers.get('cookie')).toBeNull();
-      return available ? new HttpResponse('<main>Pinned default</main>', { headers: { 'content-type': 'text/html', 'x-gitspace-frontend-release': pin } }) : new HttpResponse(null, { status: 503 });
+      const headers = { 'x-gitspace-frontend-release': pin, 'cache-control': 'public, max-age=31536000, immutable' };
+      if (new URL(request.url).pathname.endsWith('/assets/app-1.js')) return new HttpResponse('export {};', { headers: { ...headers, 'content-type': 'text/javascript' } });
+      return available ? new HttpResponse('<main>Pinned default</main>', { headers: { ...headers, 'content-type': 'text/html' } }) : new HttpResponse(null, { status: 503 });
     }));
     const response = await worker.fetch(new Request(`${origin}/`, { headers: { authorization: 'Bearer private-browser-token', cookie: 'private-cookie' } }), runtime);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('<main>Pinned default</main>');
     expect(response.headers.get('x-gitspace-frontend-release')).toBe(pin);
+    // A later pin changes the document's assets, so the document is revalidated while hashed assets stay cached.
+    expect(response.headers.get('cache-control')).toBe('no-cache');
+    expect((await worker.fetch(new Request(`${origin}/settings`), runtime)).headers.get('cache-control')).toBe('no-cache');
+    expect((await worker.fetch(new Request(`${origin}/assets/app-1.js`), runtime)).headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     available = false;
     expect((await worker.fetch(new Request(`${origin}/`), runtime)).status).toBe(503);
   });
