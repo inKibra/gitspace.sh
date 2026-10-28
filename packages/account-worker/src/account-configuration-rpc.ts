@@ -489,6 +489,9 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   });
   const automationsOverview = server.implement(automationsOverviewContract).handler(async ({ input, errors }) => {
     try {
+      // Projects the GitHub App covered before the default automations existed get them on the first overview.
+      await env.GITHUB_APP.getByName(userId).provideAutomationDefaults()
+        .catch((error: unknown) => console.error('Default automations were not added', { error }));
       return ok(await projects.automationOverview(input.limit ?? 50));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'automationsOverview', message: failure(error) }));

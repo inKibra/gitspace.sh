@@ -1,13 +1,18 @@
 import { env, runDurableObjectAlarm, SELF } from 'cloudflare:test';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { createBrowserClient } from 'result-rpc/client';
+import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, signDeviceInvite } from '@gitspace/protocol';
+import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
+import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import type { AutomationDraft } from '@gitspace/protocol/automations-contract';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { archiveCloudWorkspace } from '../src/cloud-workspace-lifecycle.js';
-import { automationValue } from '../src/project-automations.js';
+import { ProjectAutomationsDO, automationValue } from '../src/project-automations.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { network } from './network.js';
+import { tenantRootPrivateKey } from './setup.js';
 
 const API = 'https://api.github.com';
 const WEBHOOK_SECRET = 'webhook-secret-from-github';
@@ -95,6 +100,33 @@ async function installed(writers: readonly string[]) {
   const runs = async () => automationValue(await automations.runs({ projectId }));
   return { projectId, searchId, authority, automations, send, work, runs, submitted, noticed };
 }
+
+/** A browser enrolled on the account (whose vault `installed` bootstrapped), calling the account's RPC as a person. */
+async function signedClient() {
+  const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+  await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).setHandle('bootstrap', 0, env.TENANT_ID);
+  const browserKey = crypto.getRandomValues(new Uint8Array(32));
+  const invite = signDeviceInvite({ version: 1, userId: env.ACCOUNT_ID, inviteId: crypto.randomUUID(), kind: 'browser', label: null, scope: { kind: 'user' }, capabilities: ['rpc.read', 'rpc.write'], canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'https://api.gitspace.sh' }, tenantRootPrivateKey);
+  const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(browserKey)), label: 'Browser', boundAt: Date.now(), signingPrivateKey: browserKey });
+  const enrolled = await vault.enrollDevice({ invite, binding });
+  if (enrolled.status !== 'ok') throw new Error(enrolled.error.message);
+  return createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({
+    homeUrl: `https://${env.TENANT_ID}.gitspace.sh/rpc`,
+    fetch: createSignedRpcFetch({ deviceId: binding.deviceId, userId: env.ACCOUNT_ID, signingPrivateKey: browserKey, fetch: async (input: RequestInfo | URL, init?: RequestInit) => SELF.fetch(new Request(input, init)) }),
+  }) });
+}
+
+/** A project on the covered repository that never got the default automations, as one linked before they existed. */
+async function linkedBeforeDefaults(): Promise<string> {
+  const projectId = crypto.randomUUID();
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const created = await authority.bootstrap({ id: projectId, name: 'Pantry before A1', repositoryReference: 'git@github.com:inKibra/pantry.git', baseBranch: 'main', createdBy: 'user' });
+  await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(await authority.setProjectLifecycle(created.revision, 'active'));
+  return projectId;
+}
+
+const DEFAULT_NAMES = ['Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace'];
+const defaultsOf = async (projectId: string) => (await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).list(projectId)).automations.filter(automation => automation.isDefault).map(automation => automation.name);
 
 const pull = (number: number, change: { author: string; base?: string; head: string; draft?: boolean; body?: string }) => ({
   number, title: `Change ${number}`, html_url: `https://github.com/inKibra/pantry/pull/${number}`, body: change.body ?? '', draft: change.draft ?? false, merged: false,
@@ -255,6 +287,41 @@ describe('automations on GitHub events', () => {
     await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: reviewId, text: expect.stringContaining('Rename this.') })));
     expect(submitted).not.toHaveBeenCalledWith(expect.objectContaining({ workspaceId: searchId }));
     expect((await automations.list(projectId)).links.find(link => link.subject.number === 14)).toMatchObject({ workspaceId: reviewId, source: 'person', detail: 'Brad' });
+  });
+
+  it('gives a project the App covered before the defaults existed its defaults once, on the automations overview', async () => {
+    const { projectId: installedId } = await installed([]);
+    await vi.waitFor(async () => expect(await defaultsOf(installedId)).toEqual(DEFAULT_NAMES));
+    const earlier = await linkedBeforeDefaults();
+    expect(await defaultsOf(earlier)).toEqual([]);
+    const added = vi.spyOn(ProjectAutomationsDO.prototype, 'addDefaults');
+    const client = await signedClient();
+    const overview = await client.automations.overview({});
+    expect(overview).toMatchObject({ status: 'ok', value: { projects: expect.arrayContaining([expect.objectContaining({ projectId: earlier, total: 4, on: 4 })]) } });
+    expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES);
+    // Later overviews open no project's automations for it again.
+    expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
+    expect(added.mock.calls.filter(([input]) => input.projectId === earlier)).toHaveLength(1);
+  });
+
+  it('does not bring back a default a person deleted', async () => {
+    const { send } = await installed([]);
+    const earlier = await linkedBeforeDefaults();
+    // Its first delivery gave it the defaults; the App has not recorded that.
+    await send('issues', { action: 'opened', sender: { login: 'bradleat' }, issue: { number: 3, title: 'A question', html_url: 'https://github.com/inKibra/pantry/issues/3', user: { login: 'bradleat' }, labels: [] } });
+    expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES);
+    const automations = env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${earlier}`);
+    const closed = (await automations.list(earlier)).automations.find(automation => automation.name === 'Merged or closed');
+    automationValue(await automations.delete({ projectId: earlier, automationId: closed?.id ?? '' }));
+    expect(await (await signedClient()).automations.overview({})).toMatchObject({ status: 'ok' });
+    expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES.filter(name => name !== 'Merged or closed'));
+  });
+
+  it('gives a project created under an existing installation its defaults', async () => {
+    await installed([]);
+    const created = await (await signedClient()).project.create({ name: 'Pantry again', baseBranch: 'main', repositoryUrl: 'https://github.com/inKibra/pantry' });
+    if (created.status === 'error') throw created.error;
+    expect(await defaultsOf(created.value.project.id)).toEqual(DEFAULT_NAMES);
   });
 
   it('refuses conditions the trigger does not offer and a start without a mode outside a label trigger', async () => {

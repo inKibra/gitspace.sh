@@ -239,6 +239,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
         deadline INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS pending_requests (requested_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS automation_defaults (project_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS deliveries (
         id TEXT PRIMARY KEY,
         event TEXT NOT NULL,
@@ -445,6 +446,24 @@ export class GitHubAppDO extends BudgetedDurableObject {
       throw new Error(`${repository} is private and the GitHub App is not installed on it, so GitSpace cannot check who may read it. Install the App on ${repository} in Settings → GitHub.`);
     }
     return false;
+  }
+
+  /** Every project the App covers gets the default automations once (docs/AUTOMATIONS-DESIGN.md §4), whenever its
+   * coverage began: projects linked before the defaults existed, and projects created under an existing installation.
+   * A project that received them is recorded here, so later calls open no project's automations; its automations object
+   * adds them at most once, so a default a person deleted does not come back. */
+  async provideAutomationDefaults(): Promise<void> {
+    const bot = this.botHandle();
+    if (bot === null) return;
+    const provided = new Set(this.ctx.storage.sql.exec<{ project_id: string }>('SELECT project_id FROM automation_defaults').toArray().map(row => row.project_id));
+    const due = [...this.links(await this.repositoryProjects()).keys()].filter(projectId => !provided.has(projectId));
+    const results = await Promise.allSettled(due.map(async projectId => {
+      await this.env.PROJECT_AUTOMATIONS.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).addDefaults({ projectId, bot });
+      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO automation_defaults(project_id) VALUES (?)', projectId);
+    }));
+    for (const [index, result] of results.entries()) {
+      if (result.status === 'rejected') console.error('Default automations were not added', { projectId: due[index], error: result.reason });
+    }
   }
 
   /** The tenant's bot as people mention it, `@<slug>`; null without an App. */
@@ -679,14 +698,8 @@ export class GitHubAppDO extends BudgetedDurableObject {
       this.ctx.waitUntil(this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).runtimeProjectNotice({ projectId, workspaceId: projectId }, text)
         .catch((error: unknown) => console.error('GitHub link notice was not sent', { projectId, error })));
     }
-    // A project its repository's installation newly covers gets the default automations that send events to linked
-    // workspaces (docs/AUTOMATIONS-DESIGN.md §4), once.
-    const bot = this.botHandle();
-    for (const projectId of after.keys()) {
-      if (before.has(projectId) || bot === null) continue;
-      this.ctx.waitUntil(this.env.PROJECT_AUTOMATIONS.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).addDefaults({ projectId, bot })
-        .catch((error: unknown) => console.error('Default automations were not added', { projectId, error })));
-    }
+    // Every covered project gets the default automations that send events to linked workspaces, once.
+    this.ctx.waitUntil(this.provideAutomationDefaults());
     // Machines re-apply each checkout's origin route (installation tokens or the SSH key) as they do Git settings.
     if (notices.length > 0) this.ctx.waitUntil(notifyMachines(this.env, 'all', ['settings']));
   }

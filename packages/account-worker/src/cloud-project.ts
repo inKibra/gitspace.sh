@@ -1,4 +1,5 @@
 import { cloudResourceId, normalizeRemoteRepositoryUrl, type CloudProjectOperation, type CloudProjectSummary, type CloudWorkspaceDefinition } from '@gitspace/protocol';
+import { githubRepositoryOf } from '@gitspace/protocol/github';
 import type { SpaceView } from '@gitspace/protocol/rpc-contract';
 import { emptyRelations, emptyStack, emptyWorkspaceStatus, validateStack, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { gitAuthorizationHeaders } from '@gitspace/runtime-workspace-do';
@@ -79,6 +80,11 @@ export async function createCloudProject(env: Env, userId: string, input: { name
     // The base workspace object starts from its definition and the active project, never reading its project to seed itself.
     await env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).seedWorkspace(base, active);
     const project = await index.put(active);
+    // A repository the GitHub App already covers gives the project its default automations now.
+    if (repositoryReference && githubRepositoryOf(repositoryReference) !== null) {
+      await env.GITHUB_APP.getByName(userId).provideAutomationDefaults()
+        .catch((error: unknown) => console.error('Default automations were not added', { projectId, error }));
+    }
     return { project, operation };
   } catch (error) {
     // A project that never became active is deleted, never left half-created in the directory.
