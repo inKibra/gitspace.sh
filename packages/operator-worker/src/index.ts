@@ -257,7 +257,10 @@ const operatorWorker = {
     if (userId && verified.status === 'error' && verified.error.expired) return Response.json(publicError(SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE), { status: 401 });
     if (!userId || verified.status === 'error') return Response.json(publicError('ROOT_UNAUTHORIZED', 'Recovery signature is invalid'), { status: 401 });
     const account = await accountRegistry(env).get(userId);
-    if (!account || account.handle !== body.handle || account.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is unavailable'), { status: 403 });
+    if (!account) return Response.json(publicError('ACCOUNT_NOT_FOUND', 'No account uses this recovery key'), { status: 404 });
+    if (account.handle !== body.handle) return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is unavailable'), { status: 403 });
+    if (account.status === 'provisioning' || account.status === 'failed') return Response.json(publicError('ACCOUNT_INCOMPLETE', 'Account setup has not finished'), { status: 409 });
+    if (account.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is unavailable'), { status: 403 });
     const platform = await operatorPlatformRequest(env, account.handle);
     if (platform.control.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is blocked'), { status: 403 });
     return Response.json({ status: 'ok', value: { userId, handle: account.handle, relayUrl: 'https://' + account.handle + '.gssh.dev', accountUrl: 'https://' + account.handle + '.gitspace.sh', apiUrl: 'https://' + account.handle + '.gitspace.sh' } });
