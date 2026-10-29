@@ -35,11 +35,13 @@ export function useCloudSessionControls(snapshot: RuntimeSnapshot, conversationI
   }, [projectId, workspaceId, conversationId, key]);
   const conversation = snapshot.conversations.find((item) => item.id === conversationId);
   const questionRevision = snapshot.questions.filter((item) => item.conversationId === conversationId).map((item) => `${item.id}:${JSON.stringify(item.answer)}`).join('|');
+  // A queued or steered message is taken while the conversation keeps running: its user message is the only sign.
+  const newestInput = conversation?.messages.findLast((message) => message.role === 'user')?.id;
   useEffect(() => {
     live.current = true;
     const controller = new AbortController();
     void run({ type: 'control' }, controller.signal).catch(() => {});
     return () => { controller.abort(); live.current = false; revision.current++; };
-  }, [run, conversation?.status, questionRevision]);
+  }, [run, conversation?.status, questionRevision, newestInput]);
   return { result: accepted?.key === key ? accepted.value : null, error, pending, run };
 }

@@ -12,7 +12,7 @@ function control(sessionId: string) { return SessionControlSchema.parse({ sessio
 let root: Root;
 let container: HTMLDivElement;
 let state: CloudSessionControls;
-function View({ conversationId }: { conversationId: string }) { state = useCloudSessionControls(snapshot, conversationId); return <span>{state.result?.control.sessionId ?? 'loading'}</span>; }
+function View({ conversationId, source = snapshot }: { conversationId: string; source?: typeof snapshot }) { state = useCloudSessionControls(source, conversationId); return <span>{state.result?.control.sessionId ?? 'loading'}</span>; }
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); rpc.session.mockReset(); container = document.createElement('div'); document.body.append(container); root = createRoot(container); });
 afterEach(async () => { await act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 
@@ -36,4 +36,14 @@ it('keeps provider catalog errors actionable and recovers controls on retry', as
   await act(async () => { await state.run({ type: 'control' }); });
   expect(state.error).toBeNull();
   expect(container.textContent).toBe('main');
+});
+
+it('reads the queue again when a queued message is taken while the conversation keeps running', async () => {
+  const running = (messages: Array<{ id: string; role: 'user' | 'assistant' }>) => RuntimeSnapshotSchema.parse({ ...snapshot, conversations: [{ id: 'main', parentId: null, title: 'Workspace', status: 'running', messages: messages.map(message => ({ ...message, content: [{ type: 'text', text: message.id }], createdAt: '2026-10-29T18:00:00.000Z' })) }] });
+  const queued = { ...control('main'), queue: { steering: [], followUp: ['next'] } };
+  rpc.session.mockResolvedValueOnce({ status: 'ok', value: { control: queued } }).mockResolvedValueOnce({ status: 'ok', value: { control: control('main') } });
+  await act(() => root.render(<View conversationId="main" source={running([{ id: 'first', role: 'user' }, { id: 'reply', role: 'assistant' }])} />));
+  expect(state.result?.control.queue.followUp).toEqual(['next']);
+  await act(() => root.render(<View conversationId="main" source={running([{ id: 'first', role: 'user' }, { id: 'reply', role: 'assistant' }, { id: 'next', role: 'user' }])} />));
+  expect(state.result?.control.queue.followUp).toEqual([]);
 });

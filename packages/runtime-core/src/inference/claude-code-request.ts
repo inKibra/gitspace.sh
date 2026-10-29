@@ -308,7 +308,17 @@ export async function claudeCode(profileId: string, images?: ImageRequestTranspo
       let response: Response;
       if (transport) {
         sentHeaders.delete('content-length');
-        response = await transport({ url, method: init?.method ?? 'POST', headers: [...sentHeaders], payload, attest: digits !== null });
+        // The inference Worker's call cannot carry an AbortSignal: an aborted request stops waiting for it at once (Stop
+        // waits for the request to end), and its response is cancelled whenever it arrives.
+        const signal = init?.signal ?? undefined;
+        signal?.throwIfAborted();
+        const sending = transport({ url, method: init?.method ?? 'POST', headers: [...sentHeaders], payload, attest: digits !== null });
+        const aborted = Promise.withResolvers<never>();
+        const onAbort = () => aborted.reject(signal?.reason);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        try { response = await Promise.race([sending, aborted.promise]); }
+        catch (error) { void sending.then(late => late.body?.cancel(), () => undefined); throw error; }
+        finally { signal?.removeEventListener('abort', onAbort); }
       } else {
         const sent = attest(payload, digits!, sentHeaders);
         response = await fetch(input, { ...init, ...HALF_DUPLEX, headers: sent.headers, body: sent.body, redirect: 'manual' });

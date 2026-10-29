@@ -395,3 +395,20 @@ it('refuses a subscription request before sending it when a stored image is not 
   await expect(expandedRequest(request(11), read, seed => new XxHash64(seed))).rejects.toThrow('smaller than its reference states');
   await expect(expandedRequest(request(9), read, seed => new XxHash64(seed))).rejects.toThrow('larger than its reference states');
 });
+
+it('stops waiting for the inference Worker the moment its request is aborted, and cancels the response that arrives later', async () => {
+  const { references } = stored([noise(3, 7)]);
+  const late = Promise.withResolvers<Response>();
+  let cancelled = false;
+  const transport = await claudeCode('profile', async () => late.promise);
+  const body = payload();
+  body.messages[0]!.content.push(imageBlock(references[0]!));
+  const controller = new AbortController();
+  const sending = transport.fetch(MESSAGES, { ...await serialize(transport, body), signal: controller.signal });
+  controller.abort(new Error('Stopped'));
+  await expect(sending).rejects.toThrow('Stopped');
+  late.resolve(new Response(new ReadableStream({ cancel() { cancelled = true; } })));
+  await late.promise;
+  await Promise.resolve(); await Promise.resolve();
+  expect(cancelled).toBe(true);
+});
