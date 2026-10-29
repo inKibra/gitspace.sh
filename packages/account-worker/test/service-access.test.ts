@@ -57,7 +57,7 @@ describe('private hosted service access', () => {
     await relay.serviceApprove({ hostname, deviceId, state, returnTo: '/' });
     const ticket = await relay.serviceApprove({ hostname, deviceId, state, returnTo: '/' });
     expect(await relay.serviceRedeem(ticket, hostname, state)).not.toBeNull();
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 900_001);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 8 * 60 * 60_000 + 1);
     try {
       await runInDurableObject(relay, async (instance, context) => {
         await instance.alarm();
@@ -91,6 +91,8 @@ describe('private hosted service access', () => {
     expect(response.headers.get('location')).toBe('/private');
     const cookies = response.headers.get('set-cookie')!;
     expect(cookies).toContain(`${SERVICE_COOKIE}=`);
+    // The browser keeps the session cookie as long as the session lasts: 8 hours.
+    expect(cookies.split(',').find(cookie => cookie.trim().startsWith(`${SERVICE_COOKIE}=`))).toContain('Max-Age=28800');
     expect(cookies).not.toContain('Domain=');
     expect((await exports.default.fetch(callback)).status).toBe(401);
     const token = cookies.split(`${SERVICE_COOKIE}=`)[1]!.split(';')[0]!;
@@ -98,7 +100,7 @@ describe('private hosted service access', () => {
     expect(await relay.serviceValidate(token, `other--${env.TENANT_ID}-srv.gssh.dev`)).toBeNull();
     expect(await env.RELAY.getByName('foreign-tenant-fixture').serviceValidate(token, hostname)).toBeNull();
   });
-  it('expires approval tickets and host cookies', async () => {
+  it('expires approval tickets after a minute and sessions after 8 hours', async () => {
     const relay = env.RELAY.getByName(env.RELAY_NAME);
     const state = crypto.randomUUID();
     const deviceId = await enrollBrowser();
@@ -111,7 +113,9 @@ describe('private hosted service access', () => {
     try {
       expect(await relay.serviceRedeem(ticket, hostname, state)).toBeNull();
       expect(await relay.serviceValidate(live.token, hostname)).toMatchObject({ caller: { kind: 'device', deviceId } });
-      clock.mockReturnValue(now + 900_001);
+      clock.mockReturnValue(now + 8 * 60 * 60_000 - 60_000);
+      expect(await relay.serviceValidate(live.token, hostname)).toMatchObject({ caller: { kind: 'device', deviceId } });
+      clock.mockReturnValue(now + 8 * 60 * 60_000 + 1);
       expect(await relay.serviceValidate(live.token, hostname)).toBeNull();
     } finally { clock.mockRestore(); }
   });

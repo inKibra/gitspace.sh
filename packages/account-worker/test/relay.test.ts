@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SERVICE_SESSION_MS } from '../src/service-sessions.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { env, exports } from 'cloudflare:workers';
 import { runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
@@ -635,7 +636,7 @@ describe('portable RelayDO', () => {
     if (reason === 'revocation') await env.CREDENTIALS.getByName(env.ACCOUNT_ID).revokeDeviceGrant(browserId);
     else if (reason === 'logout') await exports.default.fetch(new Request(`https://${hostname}/__gitspace/logout`, { method: 'POST', headers: { origin: `https://${hostname}`, cookie: `__Host-gitspace-service=${session.token}` } }));
     else {
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 900_001);
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + SERVICE_SESSION_MS + 1);
       await runDurableObjectAlarm(relay);
     }
     expect((await closed).code).toBe(1008);
@@ -723,7 +724,7 @@ describe('portable RelayDO', () => {
     client.addEventListener('close', closed.resolve, { once: true });
     if (reason === 'the workspace retiring') await relay.browserRelayRetireWorkspace('project-a', 'space-a');
     else {
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 900_001);
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + SERVICE_SESSION_MS + 1);
       // Expired is refused at once, before the alarm removes it.
       expect((await exports.default.fetch(new Request(`https://${hostname}/app`, { headers: { cookie }, redirect: 'manual' }))).status).toBe(303);
       await runDurableObjectAlarm(relay);

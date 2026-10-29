@@ -29,7 +29,7 @@ const StoredHolders = z.object({ projectId: z.string(), workspaceId: z.string(),
 /** A take over or Resume agent on a cloud tab: the tabs you held before and after, and the tab's page (null once it
  * is gone). */
 export type BrowserHoldChange = { before: RuntimeBrowserHolder[]; after: RuntimeBrowserHolder[]; page: { url: string; title: string } | null };
-/** A service session lasts 15 minutes from each mint; a request that finds it older than this mints again. */
+/** A service session lasts 8 hours from each mint (SERVICE_SESSION_MS); a request that finds it older than this mints again. */
 const SERVICE_RENEW_MS = 10 * 60_000;
 const RunResult = z.object({ ok: z.boolean(), value: z.unknown().optional(), view: z.string().optional(), viewError: z.string().optional(), error: z.string().optional(), state: z.unknown(), stateError: z.string().optional(), logs: z.array(z.string()), truncated: z.boolean() });
 const Targets = z.object({ targetInfos: z.array(z.object({ targetId: z.string(), type: z.string(), url: z.string(), title: z.string() })) });

@@ -46,7 +46,7 @@ import { z } from 'zod';
 import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
 import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
 import { serveIngress } from './service-ingress.js';
-import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_STATE_COOKIE } from './service-sessions.js';
+import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_SESSION_MS, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { BROWSER_UPLOAD_PATH, browserRouteReply, readBrowserSignedRequest, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
 import { BROWSER_COMMENT_PATH, BROWSER_WORKSPACES_PATH, type RuntimeBrowserCommentThread } from '@gitspace/protocol-runtime';
@@ -1188,7 +1188,7 @@ export default {
         const redeemed = await relay.serviceRedeem(url.searchParams.get('ticket') ?? '', url.hostname, serviceCookie(request, SERVICE_STATE_COOKIE));
         if (!redeemed) return jsonError(401, 'SERVICE_TICKET_REJECTED', 'Service login expired or was already used');
         const headers = new Headers({ location: redeemed.returnTo, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
-        headers.append('set-cookie', `${SERVICE_COOKIE}=${redeemed.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900`);
+        headers.append('set-cookie', `${SERVICE_COOKIE}=${redeemed.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SERVICE_SESSION_MS / 1000}`);
         headers.append('set-cookie', `${SERVICE_STATE_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
         return new Response(null, { status: 303, headers });
       }

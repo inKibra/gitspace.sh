@@ -17,8 +17,9 @@ export type ServiceDeviceAuthority = { expiresAt: number | null };
 export type ServiceWorkspace = { projectId: string; workspaceId: string };
 export const SERVICE_COOKIE = '__Host-gitspace-service';
 export const SERVICE_STATE_COOKIE = '__Host-gitspace-service-state';
-/** How long a session lasts from its approval or, for a cloud browser, from each mint. */
-const SERVICE_SESSION_MS = 15 * 60_000;
+/** How long a session lasts from its approval or, for a cloud browser, from each mint; never past its device's grant.
+ * Only a browser enrolled in this account can approve one. */
+export const SERVICE_SESSION_MS = 8 * 60 * 60_000;
 const AUTHORITY_CACHE_MS = 5_000;
 function devicePrefix(deviceId: string): string { return `service-device:${encodeURIComponent(deviceId)}:`; }
 function cloudPrefix(workspace: ServiceWorkspace): string { return `service-cloud:${encodeURIComponent(workspace.projectId)}:${encodeURIComponent(workspace.workspaceId)}:`; }
@@ -95,7 +96,7 @@ export class ServiceSessions {
     });
   }
   /** The cloud browser's session for one of its workspace's hostnames, which the caller has checked: the one it holds,
-   * now lasting another 15 minutes from this mint, or a new one. Keeping the token keeps its open WebSockets. */
+   * now lasting another 8 hours from this mint, or a new one. Keeping the token keeps its open WebSockets. */
   cloud(hostname: string, workspace: ServiceWorkspace): Promise<{ token: string; expiresAt: number }> {
     return this.storage.transaction(async tx => {
       const index = `${cloudPrefix(workspace)}${encodeURIComponent(hostname)}`;
