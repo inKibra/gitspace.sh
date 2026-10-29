@@ -2,7 +2,7 @@ import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/prom
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { builtinModules } from 'node:module';
 import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from './executable-manifest.js';
-import { WORKER_MANIFEST_FILE, workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { WORKER_MANIFEST_FILE, resourceSourceSchema, workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { packageMachineNativeRuntime } from './native-build.js';
@@ -273,7 +273,8 @@ const wranglerSchema = z.object({
 export async function workerMetadataFromWrangler(root: string): Promise<WorkerReleaseMetadata> {
   const source = await readFile(join(root, 'packages/account-worker/wrangler.jsonc'), 'utf8');
   const config = wranglerSchema.parse(JSON.parse(stripJsonComments(source)));
-  const resources: unknown = JSON.parse(await readFile(join(root, 'packages/account-worker/worker-bindings.json'), 'utf8'));
+  // A release names only sources this code binds; deployers skip ones they do not know, so a typo is caught here.
+  const resources = z.array(z.object({ source: resourceSourceSchema }).passthrough()).parse(JSON.parse(await readFile(join(root, 'packages/account-worker/worker-bindings.json'), 'utf8')));
   return workerReleaseMetadataSchema.parse({
     mainModule: 'worker.mjs',
     compatibilityDate: config.compatibility_date,

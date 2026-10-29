@@ -122,6 +122,8 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
       { name: 'PROVIDER_TOKEN', source: 'provider-token' },
       { name: 'STATIC_FILES', source: 'public-assets' },
       { name: 'INFERENCE', source: 'inference-service' },
+      // Named by a release built by newer code than this deployer.
+      { name: 'FROM_A_NEWER_RELEASE', source: 'source-from-a-newer-release' },
     ],
     migrations: migrationTags.map((tag) => ({ tag, newSqliteClasses: [`Class${tag}`], deletedClasses: [] })),
   };
@@ -450,6 +452,8 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
       ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
     });
+    // A source this deployer does not know is skipped, not a reason to refuse the release.
+    expect(upload.metadata.bindings.map(binding => binding.name)).not.toContain('FROM_A_NEWER_RELEASE');
 
     // The release is kept in RELEASES as sent: the manifest and each module beside it.
     const stored = await env.RELEASES.get('tenants/bravo/abc123/worker.manifest.json');

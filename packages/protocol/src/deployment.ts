@@ -75,6 +75,10 @@ export const workerBundleSchema = z.object({
 }).strict();
 
 /** Worker metadata the platform needs to upload the worker; derived from the workspace's wrangler config. */
+/** The resource sources this code binds. A release names only these when it is built. */
+export const resourceSourceSchema = z.enum(['object-storage', 'object-storage-name', 'artifacts', 'worker-loader', 'browser-rendering', 'workers-ai', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'inference-service', 'literal']);
+export type ResourceSource = z.infer<typeof resourceSourceSchema>;
+
 export const workerReleaseMetadataSchema = z.object({
   mainModule: z.string().min(1).max(160),
   compatibilityDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
@@ -82,7 +86,9 @@ export const workerReleaseMetadataSchema = z.object({
   durableObjects: z.array(z.object({ name: idSchema, className: idSchema })).max(64),
   resources: z.array(z.object({
     name: idSchema,
-    source: z.enum(['object-storage', 'object-storage-name', 'artifacts', 'worker-loader', 'browser-rendering', 'workers-ai', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'inference-service', 'literal']),
+    /** A source this code knows (`resourceSourceSchema`) or, in a release built by newer code, one it does not: a
+     * deployer skips those rather than refusing the release. */
+    source: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
     value: z.string().max(4096).optional(),
   })).max(64),
   /** Ordered migration tags; the platform applies only the ones after the tenant's current tag. */

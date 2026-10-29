@@ -128,6 +128,9 @@ export function scriptUploadMetadata(
       case 'application-url': value = 'https://' + tenant.id + '.gitspace.sh'; break;
       case 'transport-url': value = 'https://' + tenant.id + '.gssh.dev'; break;
       case 'literal': if (resource.value === undefined) throw new Error('Literal binding value is required'); value = resource.value; break;
+      // A source from a release built by newer code than this deployer: bound by nothing here, so the release is
+      // deployed without it rather than refused.
+      default: continue;
     }
     bindings.push({ type: 'plain_text', name: resource.name, text: value });
   }
