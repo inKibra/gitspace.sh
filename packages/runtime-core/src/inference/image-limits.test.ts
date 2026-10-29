@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
 import type { Context, ImageContent, Message } from '@earendil-works/pi-ai';
 import { fitRequestImages, imageLimits, type ImageLimits } from './image-limits.js';
+import { imageReference } from './image-requests.js';
 
 /** A PNG that declares `width`x`height` in its IHDR; nothing after the header is needed to read its size. */
 function png(width: number, height: number, padding = 0): ImageContent {
@@ -45,7 +46,7 @@ it('sends at most 16 images, leaving out the oldest in blocks of 8 so one more i
 
 it('leaves out the oldest images until the request fits its byte budget', () => {
   const image = png(100, 100, 3_000);
-  const limits: ImageLimits = { ...opus, maxPerRequest: 4, maxRequestBytes: image.data.length * 2 + 200 };
+  const limits: ImageLimits = { ...opus, maxInlinePerRequest: 4, maxRequestBytes: image.data.length * 2 + 200 };
   const fitted = fitRequestImages({ messages: ['a', 'b', 'c', 'd'].map(id => screenshot(image, id)) }, limits);
   expect(sent(fitted).filter(part => part === 'image')).toHaveLength(2);
   expect(sent(fitted).slice(0, 2)).toEqual(['capture a', '[Image not shown: older images were left out to keep this request within its image limits. Capture it again if you need it.]']);
@@ -61,4 +62,34 @@ it('sends at most 10 MB of images however few there are, and always the newest',
   const typical = png(1280, 800, 450_000);
   const many = sent(fitRequestImages({ messages: Array.from({ length: 26 }, (_, index) => screenshot(typical, String(index))) }, opus)).filter(part => part === 'image');
   expect(many).toHaveLength(10);
+});
+
+/** A stored image: its reference in place of its bytes. */
+const stored = (id: string, size = 600_000, width = 1280, height = 800): ImageContent => ({ type: 'image', mimeType: 'image/png', data: imageReference({ workspaceId: 'w1', size, width, height, sha256: id.padStart(64, '0') }) });
+
+it('leaves a stored image larger than the model accepts out of every request, saying why, as it does an inline one', () => {
+  const fitted = sent(fitRequestImages({ messages: [screenshot(stored('1', 600_000, 3000, 900), '1'), screenshot(stored('2'), '2'), screenshot(stored('3', 600_000, 0, 0), '3')] }, opus));
+  expect(fitted).toEqual(['capture 1', '[Image not shown: it is 3000x900, larger than the 2000x2000 the model accepts.]', 'capture 2', 'image', 'capture 3', 'image']);
+});
+
+it('sends stored images up to the model\'s own limits, not the cap on images held in the request', () => {
+  // 60 stored screenshots of 600 KB (36 MB of base64 once written in) against Opus's 32 MiB: the oldest go in blocks of 8.
+  const fitted = sent(fitRequestImages({ messages: Array.from({ length: 60 }, (_, index) => screenshot(stored(String(index)), String(index))) }, opus));
+  const kept = fitted.filter(part => part === 'image');
+  expect(kept.length).toBeGreaterThan(16);
+  expect(kept.length * 800_000).toBeLessThanOrEqual(33_554_432);
+  expect(fitted.at(-1)).toBe('image');
+  // A model with a count of 20: 24 stored images send the newest 16 after one block of 8 goes.
+  expect(sent(fitRequestImages({ messages: Array.from({ length: 24 }, (_, index) => screenshot(stored(String(index), 1_000), String(index))) }, { ...opus, maxPerRequest: 20 })).filter(part => part === 'image')).toHaveLength(16);
+});
+
+it('holds at most 16 images in a request beside any number of stored ones', () => {
+  const messages = [
+    ...Array.from({ length: 20 }, (_, index) => screenshot(png(100, 100), `held ${index}`)),
+    ...Array.from({ length: 20 }, (_, index) => screenshot(stored(String(index), 1_000), `stored ${index}`)),
+  ];
+  const fitted = sent(fitRequestImages({ messages }, opus));
+  // The oldest 8 held images go; the 12 newer held and all 20 stored are sent.
+  expect(fitted.filter(part => part === 'image')).toHaveLength(32);
+  expect(fitted.slice(0, 2)).toEqual(['capture held 0', '[Image not shown: older images were left out to keep this request within its image limits. Capture it again if you need it.]']);
 });

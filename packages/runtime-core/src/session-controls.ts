@@ -6,6 +6,7 @@ import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema
 import { QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
+import type { ToolServices } from './tools.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab } from '@gitspace/protocol-runtime';
@@ -103,6 +104,8 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
+  /** Stores a person's attached image and returns the block naming it, as tool images are (`ToolServices['images']`). */
+  images: ToolServices['images'];
   /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null);
    * `tabGroup` the group's id. */
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
@@ -290,7 +293,8 @@ export function createSessionControls(services: SessionControlServices) {
           const model = await services.admitInference({ conversationId: String(target.id), requestId, selection });
           await services.configureModel(target.id, model);
           await applyInferenceThinking(target, model);
-          await target.submit({ type: 'input', requestId, content: command.images?.length ? [{ type: 'text', text: command.text }, ...command.images] : command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
+          const images = command.images?.length ? await Promise.all(command.images.map(image => services.images.store(image))) : [];
+          await target.submit({ type: 'input', requestId, content: images.length ? [{ type: 'text', text: command.text }, ...images] : command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
         });
         break;
       }

@@ -39,25 +39,19 @@ function contentText(content: unknown): string {
   }).join('');
 }
 
-const IMAGE_MIME_TYPES: Record<MessageImage['mimeType'], true> = {
-  'image/png': true,
-  'image/jpeg': true,
-  'image/webp': true,
-};
+const IMAGE_MIME_TYPES: readonly MessageImage['mimeType'][] = ['image/png', 'image/jpeg', 'image/webp'];
+
+/** A stored image's data is a `gs-image:` reference; a row names it with its type until the workspace resolves it. */
+const STORED_IMAGE = 'gs-image:v1:';
 
 function contentImages(content: unknown): MessageImage[] {
   if (!Array.isArray(content)) return [];
   const images: MessageImage[] = [];
   for (const part of content) {
     const item = record(part);
-    if (
-      item?.type !== 'image'
-      || typeof item.data !== 'string'
-      || !item.data
-      || typeof item.mimeType !== 'string'
-      || IMAGE_MIME_TYPES[item.mimeType as MessageImage['mimeType']] !== true
-    ) continue;
-    images.push({ data: item.data, mimeType: item.mimeType as MessageImage['mimeType'] });
+    const mimeType = IMAGE_MIME_TYPES.find(type => type === item?.mimeType);
+    if (item?.type !== 'image' || typeof item.data !== 'string' || !item.data || !mimeType) continue;
+    images.push(item.data.startsWith(STORED_IMAGE) ? { url: `${item.data};${mimeType}`, mimeType } : { data: item.data, mimeType });
   }
   return images;
 }
@@ -66,7 +60,7 @@ function richImages(id: string, content: unknown): RichContentBlock[] {
   return contentImages(content).map((image, index) => ({
     id: `${id}:${index}`,
     type: 'image',
-    url: `data:${image.mimeType};base64,${image.data}`,
+    url: 'url' in image ? image.url : `data:${image.mimeType};base64,${image.data}`,
     alt: `Tool output image ${index + 1}`,
   }));
 }

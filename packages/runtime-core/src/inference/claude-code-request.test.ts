@@ -1,7 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createModels, type Api, type Model } from '@earendil-works/pi-ai';
-import { claudeCode, ENCODE_UNITS, XxHash64 } from './claude-code-request.js';
+import { claudeCode, XxHash64 } from './claude-code-request.js';
+import { createHash } from 'node:crypto';
+import { ENCODE_UNITS, expandedRequest, imageReference, type ImageReader, type ImageRequestTransport } from './image-requests.js';
 
 const MASK = 0xffffffffffffffffn;
 const PRIME1 = 0x9e3779b185ebca87n;
@@ -315,4 +317,81 @@ it('restores tool names in the streamed response', async () => {
   network(() => new Response('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t2","name":"_read","input":{}}}\n\n', { headers: { 'content-type': 'text/event-stream' } }));
   const response = await send(payload());
   expect(await response.text()).toContain('"name":"read"');
+});
+
+/** Images as the workspace object serves them: streamed in uneven pieces, by reference. */
+function stored(images: Uint8Array[]) {
+  const references = images.map(bytes => imageReference({ workspaceId: 'ws-1', size: bytes.byteLength, width: 1, height: 1, sha256: createHash('sha256').update(bytes).digest('hex') }));
+  const read: ImageReader = async reference => {
+    const bytes = images[references.indexOf(reference)];
+    if (!bytes) throw new Error(`No image ${reference}`);
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({ pull(controller) { if (offset >= bytes.byteLength) return controller.close(); controller.enqueue(bytes.slice(offset, offset += 7001)); } });
+  };
+  return { references, read };
+}
+
+/** The inference Worker's send, with this file's XXH64 for the WASM one. */
+function worker(read: ImageReader, seen: boolean[] = []): ImageRequestTransport {
+  return async request => {
+    seen.push(request.attest);
+    const { length, body } = await expandedRequest(request, read, seed => new XxHash64(seed));
+    return fetch(request.url, { method: request.method, headers: [...request.headers, ['content-length', String(length)]], body });
+  };
+}
+
+const imageBlock = (data: string) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data } });
+
+it('sends a subscription request with stored images byte for byte as the same request inline, attested over the images', async () => {
+  // Images across encode chunks, one of two bytes; text with multi-byte characters across text chunks between them.
+  const images = [noise(100_001, 1), noise(2, 2), noise(48 * 1024 * 3 + 1, 3)];
+  const { references, read } = stored(images);
+  const body = (data: (index: number) => string) => {
+    const value = payload();
+    value.messages[0]!.content[0]!.text = `${user} 😀é中 ${'x'.repeat(ENCODE_UNITS)}`;
+    value.messages[0]!.content.push(imageBlock(data(0)), { type: 'text', text: `the image ${references[0]}` });
+    value.messages[2]!.content[0]!.content = [imageBlock(data(1)), { type: 'text', text: 'é' }, imageBlock(data(2))];
+    return value;
+  };
+  const sent = network();
+  const attests: boolean[] = [];
+  const transport = await claudeCode('profile', worker(read, attests));
+  await transport.fetch(MESSAGES, await serialize(transport, body(index => references[index]!)));
+  const inline = await serialize(transport, body(index => Buffer.from(images[index]!).toString('base64')));
+  expect(attests).toEqual([true]);
+  expect(sent[0]!.bytes).toEqual(attestedWhole(inline.body));
+  expect(sent[0]!.headers.get('content-length')).toBe(String(sent[0]!.bytes.byteLength));
+});
+
+it('sends any other request with stored images, OpenAI data URLs included, as the same request inline and unattested', async () => {
+  const images = [noise(5, 4)];
+  const { references, read } = stored(images);
+  const body = (data: string) => JSON.stringify({ input: [{ role: 'user', content: [{ type: 'input_image', image_url: `data:image/png;base64,${data}` }, { type: 'input_text', text: `see ${references[0]}` }] }] });
+  const sent = network();
+  const attests: boolean[] = [];
+  const transport = await claudeCode('profile', worker(read, attests));
+  await transport.fetch('https://api.openai.com/v1/responses', { method: 'POST', headers: { authorization: 'Bearer sk-proj' }, body: body(references[0]!) });
+  expect(attests).toEqual([false]);
+  expect(sent[0]!.body).toBe(body(Buffer.from(images[0]!).toString('base64')));
+});
+
+it('refuses a request carrying stored images where no inference Worker can send it, as Anthropic would', async () => {
+  const { references } = stored([noise(3, 5)]);
+  const sent = network();
+  const transport = await claudeCode('profile');
+  const body = payload();
+  body.messages[0]!.content.push(imageBlock(references[0]!));
+  const response = await transport.fetch(MESSAGES, await serialize(transport, body));
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ type: 'error', error: { type: 'invalid_request_error', message: expect.stringContaining('only the inference Worker can send') } });
+  expect(sent).toHaveLength(0);
+});
+
+it('refuses a subscription request before sending it when a stored image is not the size its reference states', async () => {
+  const bytes = noise(10, 6);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const read: ImageReader = async () => new Response(new Uint8Array(bytes)).body!;
+  const request = (size: number) => ({ url: MESSAGES, method: 'POST', headers: [], attest: true, payload: JSON.stringify({ system: [{ type: 'text', text: 'x-anthropic-billing-header: cc_version=1; cc_entrypoint=cli; cch=00000;' }], messages: [imageBlock(imageReference({ workspaceId: 'ws-1', size, width: 1, height: 1, sha256 }))] }) });
+  await expect(expandedRequest(request(11), read, seed => new XxHash64(seed))).rejects.toThrow('smaller than its reference states');
+  await expect(expandedRequest(request(9), read, seed => new XxHash64(seed))).rejects.toThrow('larger than its reference states');
 });

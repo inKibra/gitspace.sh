@@ -21,7 +21,10 @@ const completed: ToolServices['invoke'] = async input => ({ status: 'completed',
 /** Outputs the workspace kept, by reference. */
 const kept = new Map<string, string>();
 const keptReference = (key: ToolResultKey) => toolResultReference({ workspaceId: 'workspace', ...key });
+/** Images the workspace stored, by the data each entered history with. */
+const storedImages: string[] = [];
 const services: ToolServices = {
+  images: { async store(image) { storedImages.push(image.data); return { ...image, data: `stored:${image.data}` }; } },
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
   question: async () => 'answered', instructions: async () => '', preflight: async () => {},
@@ -93,20 +96,22 @@ test('every registered tool advertises its real object contract and executes thr
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
-test('an image the conversation\'s model cannot take never enters history; the agent is told why instead', async () => {
+test('an image the conversation\'s model cannot take never enters history, and one it can enters as its stored bytes', async () => {
   const png = (width: number, height: number) => {
     const bytes = new Uint8Array(33);
     bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
     new DataView(bytes.buffer).setUint32(16, width); new DataView(bytes.buffer).setUint32(20, height);
     return { type: 'image' as const, mimeType: 'image/png', data: btoa(String.fromCharCode(...bytes)) };
   };
+  storedImages.length = 0;
   const vision: Model<Api> = { ...model, input: ['text', 'image'], inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4_718_592 } } } };
   const fixture = await registered([[call('read', samples.read ?? {})]], async input => ({ status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: 'Two captures' }, png(1440, 5400), png(1280, 800)] }), operations, [], vision);
   try {
     await fixture.root.submit({ type: 'input', content: 'Read the screenshots.' }, BACKGROUND_CONTEXT);
     await fixture.root.waitForIdle(BACKGROUND_CONTEXT);
     const [result] = (await fixture.root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
-    expect(result?.content.map(part => part.type === 'image' ? `image ${part.data === png(1280, 800).data ? '1280x800' : 'other'}` : part.text)).toEqual([
+    expect(storedImages).toEqual([png(1280, 800).data]);
+    expect(result?.content.map(part => part.type === 'image' ? `image ${part.data === `stored:${png(1280, 800).data}` ? '1280x800' : 'other'}` : part.text)).toEqual([
       'Two captures',
       '[Image not shown: it is 1440x5400, larger than the 2000x2000 the model accepts. Crop it, capture only the visible viewport, or describe what you need from it.]',
       'image 1280x800',
@@ -487,7 +492,7 @@ test('an output longer than the transcript keeps is kept whole; the model sees i
     const reference = keptReference({ conversationId: String(root.id), callId: 'long-output' });
     expect(kept.get(reference)).toBe(output);
     expect(RuntimeFullOutputDetailsSchema.parse(result.details).fullOutput).toEqual({ reference, bytes: output.length, lines: 5000, keptBytes: output.length });
-    expect(result.content.filter(item => item.type === 'image')).toEqual([image]);
+    expect(result.content.filter(item => item.type === 'image')).toEqual([{ ...image, data: `stored:${image.data}` }]);
     const shown = result.content.flatMap(item => item.type === 'text' ? [item.text] : []);
     expect(shown).toHaveLength(1);
     const lines = shown[0]!.split('\n');

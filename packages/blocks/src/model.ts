@@ -1,10 +1,12 @@
 import { z } from 'zod';
 
 const base = z.object({ id: z.string().min(1) });
-const messageImageSchema = z.object({
-  data: z.string().min(1),
-  mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
-});
+/** An image a message carries: its bytes, or (a stored image) a URL. A transcript row names a stored image as
+ * `gs-image:…;<mimeType>` until the workspace that serves the row resolves it to a URL a browser can load. */
+const messageImageSchema = z.union([
+  z.object({ data: z.string().min(1), mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']) }),
+  z.object({ url: z.string().min(1), mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']) }),
+]);
 
 export const messageBlockSchema = base.extend({
   type: z.literal('message'),

@@ -23,6 +23,7 @@ import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSe
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
 import { serveArtifactFile } from './artifact-file-url.js';
+import { serveRuntimeImage } from './runtime-images.js';
 import { serveGuideShare } from './guide-shares.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
@@ -3216,6 +3217,7 @@ const worker = {
     const distribution = await accountDistributionResponse(request, env, url.pathname);
     if (distribution) return distribution;
     if (url.pathname.startsWith('/files/')) return serveArtifactFile(request, env);
+    if (url.pathname.startsWith('/images/')) return serveRuntimeImage(request, env);
     if (url.pathname.startsWith('/v1/shared-guides/')) {
       const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
       return denied ?? serveGuideShare(request, env, url);

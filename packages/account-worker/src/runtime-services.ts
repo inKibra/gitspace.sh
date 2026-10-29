@@ -58,6 +58,7 @@ type ServicesOptions = {
   /** The workspace object's own environment, called in-process. */
   environment: WorkspaceEnvironment;
   documentMarkdown: DocumentMarkdown;
+  images: WorkspaceRuntimeOptions['tools']['images'];
 };
 /** What `machines attach` did: requested (or found) an attachment, or asked the user to approve one. */
 type MachineAttachOutcome =
@@ -873,7 +874,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   return {
     browser: browser.manage,
-    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab,
+    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, images: options.images,
       // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.

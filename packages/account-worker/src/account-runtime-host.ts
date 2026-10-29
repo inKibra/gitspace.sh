@@ -21,6 +21,7 @@ import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { remoteDefaultBranch } from './cloud-project.js';
+import { createRuntimeImages } from './runtime-images.js';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the origin's history,
  * imported natively from a public origin or streamed with installation-token reads from a covered one. */
@@ -90,7 +91,8 @@ export async function createAccountWorkspaceRuntime(
   // the workspace's first open on.
   const tasksTable = ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").toArray().length > 0;
   const retrying = tasksTable ? ctx.storage.sql.exec<{ conversation_id: number }>("SELECT DISTINCT conversation_id FROM tasks WHERE status != 'terminal' AND background = 0").toArray().map(row => String(row.conversation_id)) : [];
-  const inference = await createCloudRuntimeInference(ctx, env, identity, retrying);
+  const images = await createRuntimeImages(env, identity.workspaceId);
+  const inference = await createCloudRuntimeInference(ctx, env, identity, retrying, images.send);
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
   const judge = async (conversationId: string, state: string, questions: Record<string, string>) => {
@@ -109,7 +111,7 @@ export async function createAccountWorkspaceRuntime(
   const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
   let runtime: WorkspaceRuntime | undefined;
   const documentMarkdown = createDocumentMarkdown(ctx.storage, env.AI);
-  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, documentMarkdown, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
+  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, documentMarkdown, images: { store: images.store }, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });
@@ -148,6 +150,7 @@ export async function createAccountWorkspaceRuntime(
       else await lfs.releasePublication();
     },
     documentMarkdown,
+    imageUrl: images.url,
     initialCheckpoint: async () => {
       const branchRef = await ref();
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length), readSourceCheckpoint(ctx.storage));

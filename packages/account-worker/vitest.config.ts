@@ -19,6 +19,8 @@ export default defineConfig({
       miniflare: {
         serviceBindings: {
           ASSETS: async () => new Response(null, { status: 404 }),
+          // No test sends a model request through fetch; the inference Worker is checked where it runs.
+          INFERENCE: async () => new Response(null, { status: 503 }),
         },
         bindings: {
           AUTH_PUBLIC_KEY: Buffer.from(rootPublicKey).toString('base64'),

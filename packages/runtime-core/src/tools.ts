@@ -1,4 +1,5 @@
 import { AssistantEntry, ToolResultEntry, ToolTask, defineTool, type Harness, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from '@earendil-works/pi-durable';
+import type { ImageContent } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { z } from 'zod';
 import type { JsonValue, Context } from '@earendil-works/chord';
@@ -32,6 +33,9 @@ export type ToolServices = {
   takeoverTab(input: { conversationId: string; args: RuntimeAskTakeoverArguments }): Promise<RuntimeTakeoverTab>;
   /** Tool output longer than the transcript keeps, kept whole (docs/SIMPLIFICATION.md, Oversized tool results). */
   results: ToolResultStore;
+  /** Stores an image's bytes and returns the block that names them (`gs-image:` data), so history never holds images:
+   * the inference Worker writes the bytes into the requests that send them. */
+  images: { store(image: ImageContent): Promise<ImageContent> };
 };
 const workspaceId = z.string().min(1).optional();
 const get = z.object({ method: z.literal('get'), workspaceId });
@@ -308,9 +312,11 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         const result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools } : {}) });
         if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
         const content = result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }];
-        // An image the conversation's model cannot take never enters history: every later request would resend it.
+        // An image the conversation's model cannot take never enters history: every later request would resend it. One
+        // it can take enters as a reference to its stored bytes.
         const ref = content.some(item => item.type === 'image') ? (await api.agent(context)).model : undefined;
-        const output = ref === undefined ? content : admitToolImages(content, imageLimits(api.models.getModel(ref.provider, ref.modelId)));
+        const admitted = ref === undefined ? content : admitToolImages(content, imageLimits(api.models.getModel(ref.provider, ref.modelId)));
+        const output = await Promise.all(admitted.map(item => item.type === 'image' ? services.images.store(item) : item));
         return { output, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
       const result = await (safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run));

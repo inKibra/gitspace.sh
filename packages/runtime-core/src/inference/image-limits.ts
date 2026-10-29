@@ -1,23 +1,34 @@
 import { DEFAULT_IMAGE_LIMITS } from '@earendil-works/pi-durable/tools';
 import type { Api, Context, ImageContent, Model, TextContent } from '@earendil-works/pi-ai';
+import { imageDataBytes, parseImageReference } from './image-requests.js';
 
 /**
  * What a model accepts of images, from pi-ai's per-model `inputLimits` (Opus 5.5: 2000x2000 px, 4.5 MB of base64, 600
- * per request, 32 MiB per request), else pi's defaults. Nothing resizes images yet: one over these limits is replaced
- * by a note saying why, so a single oversized screenshot cannot fail every later turn of a conversation.
+ * per request, 32 MiB per request), else pi's defaults, and what GitSpace sends of images held in the request itself.
+ * Nothing resizes images yet: one over the size limits is replaced by a note saying why, so a single oversized screenshot
+ * cannot fail every later turn of a conversation.
  */
-export interface ImageLimits { maxWidth: number; maxHeight: number; maxBytes: number; maxPerRequest: number; maxImageBytes: number; maxRequestBytes: number | null }
+export interface ImageLimits {
+  maxWidth: number; maxHeight: number; maxBytes: number;
+  /** The model's per-request count and size; null when it states no size. */
+  maxPerRequest: number; maxRequestBytes: number | null;
+  /** Images whose bytes are in the conversation (stored before images became references): the workspace object holds
+   * every one it sends. */
+  maxInlinePerRequest: number; maxInlineBytes: number;
+}
 
 /**
- * GitSpace's own ceiling on the images in one request, below what models accept: a workspace object builds each request
- * in its 128 MB isolate (the history, then the serialized body and its bytes), and 26 screenshots (15.9 MB of a 17.6 MB
- * request) exhausted it on every attempt. 16 images, or 10 MB of base64 (above 16 typical screenshots, so the count
- * decides unless images are unusually large), whichever comes first.
+ * GitSpace's ceiling on images held in a request: a workspace object builds each request in its 128 MB isolate, and 26
+ * screenshots (15.9 MB of a 17.6 MB request) exhausted it on every attempt. 16 images, or 10 MB of base64, whichever
+ * comes first. Stored images (references) are not held: the inference Worker writes them in, so only the model's limits
+ * apply to them.
  */
-const REQUEST_IMAGES = 16;
-const REQUEST_IMAGE_BYTES = 10 * 1024 * 1024;
-/** A subagent's ceiling: up to 4 of them run at once in the same object, each doing one task, so each sends at most 4
- * images or 4 MB of them (dropped in blocks of 2). */
+const INLINE_REQUEST_IMAGES = 16;
+const INLINE_REQUEST_IMAGE_BYTES = 10 * 1024 * 1024;
+/** A model that states no per-request count is sent at most this many. */
+const UNSTATED_REQUEST_IMAGES = 16;
+/** A subagent's ceiling on held images: up to 4 of them run at once in the same object, each doing one task, so each
+ * holds at most 4 images or 4 MB of them (dropped in blocks of 2). */
 export const SUBAGENT_REQUEST_IMAGES = 4;
 export const SUBAGENT_REQUEST_IMAGE_BYTES = 4 * 1024 * 1024;
 
@@ -27,9 +38,10 @@ export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined):
     maxWidth: images?.resize?.maxWidth ?? DEFAULT_IMAGE_LIMITS.maxWidth,
     maxHeight: images?.resize?.maxHeight ?? DEFAULT_IMAGE_LIMITS.maxHeight,
     maxBytes: images?.resize?.maxBytes ?? DEFAULT_IMAGE_LIMITS.maxBytes,
-    maxPerRequest: Math.min(images?.maxPerRequest ?? REQUEST_IMAGES, REQUEST_IMAGES),
-    maxImageBytes: REQUEST_IMAGE_BYTES,
+    maxPerRequest: images?.maxPerRequest ?? UNSTATED_REQUEST_IMAGES,
     maxRequestBytes: model?.inputLimits?.maxRequestBytes ?? null,
+    maxInlinePerRequest: INLINE_REQUEST_IMAGES,
+    maxInlineBytes: INLINE_REQUEST_IMAGE_BYTES,
   };
 }
 
@@ -69,10 +81,13 @@ export function imageDimensions(image: Pick<ImageContent, 'data' | 'mimeType'>):
 
 const megabytes = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MB`;
 
-/** Why an image cannot be sent to a model with `limits`, or null when it can. */
+/** Why an image cannot be sent to a model with `limits`, or null when it can. A stored image's size and dimensions are
+ * its reference's. */
 export function imageRefusal(image: Pick<ImageContent, 'data' | 'mimeType'>, limits: ImageLimits): string | null {
-  if (image.data.length > limits.maxBytes) return `${megabytes(image.data.length)}, more than the ${megabytes(limits.maxBytes)} the model accepts`;
-  const size = imageDimensions(image);
+  const bytes = imageDataBytes(image.data);
+  if (bytes > limits.maxBytes) return `${megabytes(bytes)}, more than the ${megabytes(limits.maxBytes)} the model accepts`;
+  const reference = parseImageReference(image.data);
+  const size = reference ? reference.width > 0 && reference.height > 0 ? reference : null : imageDimensions(image);
   if (!size) return null;
   if (size.width > limits.maxWidth || size.height > limits.maxHeight) return `${size.width}x${size.height}, larger than the ${limits.maxWidth}x${limits.maxHeight} the model accepts`;
   return null;
@@ -89,12 +104,12 @@ export function admitToolImages<T extends TextContent | ImageContent>(content: r
 
 /**
  * The request to send, fitted to its image limits: an image over the size limits becomes a note; past the per-request
- * count or byte budget, the oldest images become notes in blocks of half the count limit, so the omitted set (and the
- * prompt cache before it) changes once per block rather than on every turn. Stored history is unchanged; only what is
- * sent differs.
+ * count or byte budget (the model's for every image, GitSpace's for images held in the request), the oldest images
+ * become notes in blocks of half the held-image count limit, so the omitted set (and the prompt cache before it)
+ * changes once per block rather than on every turn. Stored history is unchanged; only what is sent differs.
  */
 export function fitRequestImages(context: Context, limits: ImageLimits): Context {
-  type Located = { message: number; part: number; bytes: number };
+  type Located = { message: number; part: number; bytes: number; held: boolean };
   const images: Located[] = [];
   const refusals = new Map<string, string>();
   let textBytes = 0;
@@ -105,15 +120,21 @@ export function fitRequestImages(context: Context, limits: ImageLimits): Context
       if (part.type === 'text') { textBytes += part.text.length; return; }
       const refusal = imageRefusal(part, limits);
       if (refusal !== null) refusals.set(`${index}:${partIndex}`, `[Image not shown: it is ${refusal}.]`);
-      else images.push({ message: index, part: partIndex, bytes: part.data.length });
+      else images.push({ message: index, part: partIndex, bytes: imageDataBytes(part.data), held: parseImageReference(part.data) === null });
     });
   });
-  const block = Math.max(1, Math.floor(limits.maxPerRequest / 2));
-  let omitted = images.length > limits.maxPerRequest ? Math.ceil((images.length - limits.maxPerRequest) / block) * block : 0;
+  const block = Math.max(1, Math.floor(limits.maxInlinePerRequest / 2));
   // Kept images are the newest; the model's request budget counts text too, as the request does.
-  const budget = Math.min(limits.maxImageBytes, limits.maxRequestBytes === null ? Infinity : limits.maxRequestBytes - textBytes);
-  // The newest image is always sent: it alone is within `maxBytes`, below the budget.
-  while (omitted < images.length - 1 && images.slice(omitted).reduce((total, image) => total + image.bytes, 0) > budget) omitted = Math.min(images.length - 1, omitted + block);
+  const budget = limits.maxRequestBytes === null ? Infinity : limits.maxRequestBytes - textBytes;
+  const fits = (kept: readonly Located[]) => {
+    const held = kept.filter(image => image.held);
+    return kept.length <= limits.maxPerRequest && held.length <= limits.maxInlinePerRequest
+      && held.reduce((total, image) => total + image.bytes, 0) <= limits.maxInlineBytes
+      && kept.reduce((total, image) => total + image.bytes, 0) <= budget;
+  };
+  // The newest image is always sent: it alone is within `maxBytes`, below every budget.
+  let omitted = 0;
+  while (omitted < images.length - 1 && !fits(images.slice(omitted))) omitted = Math.min(images.length - 1, omitted + block);
   for (const image of images.slice(0, omitted)) refusals.set(`${image.message}:${image.part}`, '[Image not shown: older images were left out to keep this request within its image limits. Capture it again if you need it.]');
   if (refusals.size === 0) return context;
   return {

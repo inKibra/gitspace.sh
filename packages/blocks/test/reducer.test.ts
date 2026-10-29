@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { coalesceTransportEvents, reduceTranscriptToTurns } from '../src/index.js';
 
+const STORED = `gs-image:v1:ws-1:6:1x1:${'a'.repeat(64)}`;
+
 describe('reduceTranscriptToTurns', () => {
   it('groups one main-agent turn with a canonical completed execution', () => {
     const turns = reduceTranscriptToTurns([
@@ -32,12 +34,14 @@ describe('reduceTranscriptToTurns', () => {
       { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [
         { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' },
         { type: 'image', mimeType: 'image/svg+xml', data: 'PHN2Zz4=' },
+        { type: 'image', mimeType: 'image/jpeg', data: STORED },
       ] } } },
     ]);
 
+    // A stored image is named with its type until the workspace serving the row resolves it to a URL.
     expect(turns[0]?.user).toEqual(expect.objectContaining({
       text: '',
-      images: [{ mimeType: 'image/png', data: 'aW1hZ2U=' }],
+      images: [{ mimeType: 'image/png', data: 'aW1hZ2U=' }, { mimeType: 'image/jpeg', url: `${STORED};image/jpeg` }],
     }));
   });
 
@@ -54,6 +58,7 @@ describe('reduceTranscriptToTurns', () => {
         content: [
           { type: 'text', text: 'Opened screenshot.png' },
           { type: 'image', mimeType: 'image/webp', data: 'aW1hZ2U=' },
+          { type: 'image', mimeType: 'image/png', data: STORED },
         ],
       } } },
     ]);
@@ -63,6 +68,7 @@ describe('reduceTranscriptToTurns', () => {
       result: [
         { type: 'code', text: 'Opened screenshot.png' },
         { type: 'image', url: 'data:image/webp;base64,aW1hZ2U=', alt: 'Tool output image 1' },
+        { type: 'image', url: `${STORED};image/png`, alt: 'Tool output image 2' },
       ],
     });
   });

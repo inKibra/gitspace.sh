@@ -155,9 +155,21 @@ type Projection = { rows: Map<string, ProjectedRow>; turns: Map<string, Transcri
 /** A turn-aligned run of entries: `entries[0]` opens a turn unless `complete` is false at the start. */
 type Window = { entries: EntryRecord[]; hasOlder: boolean; newest: boolean; nextTurn?: EntryRecord };
 
+/** A browser-loadable URL for a stored image a transcript row names (`gs-image:…;<mimeType>`); the same for the same
+ * image within its validity window, so content read in parts stays one text. */
+export type TranscriptImageUrl = (stored: string) => string;
+
+/** `item` with each stored image's URL resolved. */
+function withImageUrls<T>(item: T, imageUrl: TranscriptImageUrl | undefined): T {
+  if (!imageUrl) return item;
+  const text = JSON.stringify(item);
+  if (!text.includes('"gs-image:v1:')) return item;
+  return JSON.parse(text, (key, value: unknown) => key === 'url' && typeof value === 'string' && value.startsWith('gs-image:v1:') ? imageUrl(value) : value);
+}
+
 /** Transcript pages are projected per request from a bounded, turn-aligned window of Pi entries.
  * Nothing is persisted: Pi's entries are the only transcript storage. */
-export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader) {
+export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl) {
   async function live(conversationId: ConversationId): Promise<boolean> {
     for (const status of LIVE_STATUSES) {
       const query: TaskQuery = { conversationId, status, background: false };
@@ -237,7 +249,7 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
   }
 
   function row(projection: Projection, id: string, value: ProjectedRow): TranscriptRow {
-    return { id, ordinal: value.ordinal, turnId: value.turn, turnStatus: projection.turns.get(value.turn) ?? 'done', contentRevision: value.revision, ...previewTranscriptItem(value.item) };
+    return { id, ordinal: value.ordinal, turnId: value.turn, turnStatus: projection.turns.get(value.turn) ?? 'done', contentRevision: value.revision, ...previewTranscriptItem(withImageUrls(value.item, imageUrl)) };
   }
 
   /** Newest windows first until `found` matches; bounded by SEARCH_WINDOWS. */
@@ -324,7 +336,7 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       const found = newest ? await locate(conversationId, Number(newest.id), request.rowId) : undefined;
       const value = found?.projection.rows.get(request.rowId);
       if (!value) throw new Error('Transcript row not found');
-      const text = JSON.stringify(value.item);
+      const text = JSON.stringify(withImageUrls(value.item, imageUrl));
       if (request.offset > text.length) throw new Error('Transcript content offset is out of range');
       const end = Math.min(text.length, request.offset + TRANSCRIPT_CONTENT_CHARACTERS);
       return { text: text.slice(request.offset, end), offset: request.offset, nextOffset: end < text.length ? end : null, totalCharacters: text.length, contentRevision: value.revision };

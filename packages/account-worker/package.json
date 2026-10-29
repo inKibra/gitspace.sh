@@ -24,6 +24,7 @@
     "@gitspace/blocks": "workspace:*",
     "@gitspace/browser-extension": "workspace:*",
     "@gitspace/catalog": "workspace:*",
+    "@gitspace/inference-worker": "workspace:*",
     "@gitspace/mcp-server": "workspace:*",
     "@gitspace/protocol": "workspace:*",
     "@gitspace/protocol-agent": "workspace:*",

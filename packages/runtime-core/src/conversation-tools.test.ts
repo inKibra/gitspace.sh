@@ -57,7 +57,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, admitInference, configureModel, catalog,
+    harness, root, lifecycle, admitInference, configureModel, catalog, images: { store: async image => ({ ...image, data: `stored:${image.data}` }) },
     reload: async () => {},
     ...(files ? { loadAgentDefinitions: async () => files } : {}),
     browser: async id => { browserTargets.push(id); return { groups: [], records: [] }; },
@@ -393,6 +393,17 @@ test('default and named admissions apply effort while explicit conversation thin
     await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Use the selected model without inheriting the previous role effort.' });
     await f.root.waitForIdle(context);
     expect(f.requests.map(value => value.reasoning)).toEqual(['high', 'low', undefined, 'medium', undefined]);
+  } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
+});
+
+test("a person's attached images enter the conversation as the image store returns them", async () => {
+  const f = await fixture();
+  try {
+    await f.controls.execute(String(f.root.id), { type: 'prompt', text: 'Look at this.', images: [{ type: 'image', mimeType: 'image/png', data: 'iVBORw0K' }] });
+    await f.root.waitForIdle(context);
+    const messages = (await f.root.entries({}, 100, undefined, context)).items.flatMap(entry => entry.model ?? []);
+    const images = messages.flatMap(message => message.role === 'user' && typeof message.content !== 'string' ? message.content.filter(block => block.type === 'image') : []);
+    expect(images).toEqual([{ type: 'image', mimeType: 'image/png', data: 'stored:iVBORw0K' }]);
   } finally { await f.lifecycle.stop(String(f.root.id)); await f.harness.close(context); }
 });
 

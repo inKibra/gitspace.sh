@@ -1,0 +1,17 @@
+{
+  "name": "@gitspace/inference-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "deploy": "wrangler deploy --config wrangler.jsonc"
+  },
+  "dependencies": {
+    "@gitspace/runtime-core": "workspace:*",
+    "xxhash-wasm": "1.1.0"
+  }
+}

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Api, Model } from '@earendil-works/pi-ai';
+import { attestationOffset, CCH_PLACEHOLDER, CCH_SEED, ENCODE_UNITS, requestImages, type ImageRequestTransport } from './image-requests.js';
 
 /**
  * Claude subscription (OAuth) requests are billed to the plan only when they look like Claude Code's: pi-ai sends a
@@ -17,8 +18,6 @@ import type { Api, Model } from '@earendil-works/pi-ai';
 const CLAUDE_CODE_VERSION = '2.1.280';
 const CLAUDE_CODE_INSTRUCTION = "You are Claude Code, Anthropic's official CLI for Claude.";
 const FINGERPRINT_SALT = '59cf53e54c78';
-const CCH_PLACEHOLDER = 'cch=00000';
-const CCH_SEED = 0x4d659218e32a3268n;
 const TOOL_PREFIX = '_';
 const BUILTIN_TOOLS: Record<string, true> = { web_search: true, code_execution: true, text_editor: true, computer: true };
 const AGENT_BETAS = ['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14', 'thinking-token-count-2026-05-13', 'context-management-2025-06-27', 'prompt-caching-scope-2026-01-05', 'mid-conversation-system-2026-04-07', 'fallback-credit-2026-06-01']; // gitleaks:allow (public Anthropic beta names)
@@ -187,9 +186,6 @@ async function shapePayload(payload: unknown, model: Model<Api>, identity: { dev
 }
 
 const encoder = new TextEncoder();
-const BILLING_BLOCK = '"system":[{"type":"text","text":"x-anthropic-billing-header:';
-/** UTF-16 code units encoded at a time: at most three UTF-8 bytes each. */
-export const ENCODE_UNITS = 0x4000;
 const scratch = new Uint8Array(ENCODE_UNITS * 3);
 /** Node and Bun send a stream body only half duplex; Workers accept the option. */
 const HALF_DUPLEX = { duplex: 'half' };
@@ -210,19 +206,33 @@ function* ranges(body: string, digits: number): Generator<{ start: number; end: 
   }
 }
 
-/** The headers and body a shaped subscription request goes out with: the attestation hashes the body's UTF-8 with the
- * placeholder in place, then is written over that placeholder in the billing block (message text serializes first and
- * may contain the same placeholder). The body is encoded as it is sent, chunk by chunk, never as a whole. */
-function attest(body: unknown, incoming: Headers, identity: { sessionId: string }): { headers: Headers; body: ReadableStream<Uint8Array>; json: string } {
+/** Claude Code's headers on a pi-ai subscription request, all but its Content-Length. Throws when pi-ai's request does
+ * not present the Claude Code release the shape is made for: it would be billed as a third-party request. */
+function claudeCodeHeaders(incoming: Headers, identity: { sessionId: string }): Headers {
   const version = /^claude-cli\/([^\s(]+)/.exec(incoming.get('user-agent') ?? '')?.[1];
   if (!version) throw new Error('Claude subscription request has no claude-cli user agent; not sent as a third-party request');
   if (version !== CLAUDE_CODE_VERSION) throw new Error(`pi-ai presents Claude Code ${version} but requests are shaped as ${CLAUDE_CODE_VERSION}; update CLAUDE_CODE_VERSION. Not sent as a third-party request`);
-  if (typeof body !== 'string') throw new Error('Claude subscription request body is not serialized JSON; not sent as a third-party request');
-  const block = body.indexOf(BILLING_BLOCK);
-  if (block === -1) throw new Error("Claude subscription request does not start with Claude Code's system block; not sent as a third-party request");
-  const at = body.indexOf(CCH_PLACEHOLDER, block);
-  if (at === -1) throw new Error('Claude subscription billing block has no attestation placeholder; not sent as a third-party request');
-  const digits = at + 'cch='.length;
+  const headers = new Headers(incoming);
+  const betas = (incoming.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
+  headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(betas.includes(EFFORT_BETA) ? [EFFORT_BETA] : []), ...betas])].join(','));
+  headers.set('user-agent', `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`);
+  headers.set('x-claude-code-session-id', identity.sessionId);
+  for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS)) headers.set(name, value);
+  headers.delete('content-length');
+  return headers;
+}
+
+/** The billing block's attestation digits in a serialized subscription body; throws when it has none. */
+function attestationDigits(body: string): number {
+  const digits = attestationOffset(body);
+  if (digits === null) throw new Error("Claude subscription request does not start with Claude Code's system block or has no attestation placeholder; not sent as a third-party request");
+  return digits;
+}
+
+/** The headers and body a shaped subscription request goes out with: the attestation hashes the body's UTF-8 with the
+ * placeholder in place, then is written over that placeholder in the billing block (message text serializes first and
+ * may contain the same placeholder). The body is encoded as it is sent, chunk by chunk, never as a whole. */
+function attest(body: string, digits: number, headers: Headers): { headers: Headers; body: ReadableStream<Uint8Array> } {
   const hash = new XxHash64(CCH_SEED);
   let length = 0;
   for (const { start, end } of ranges(body, digits)) {
@@ -241,14 +251,8 @@ function attest(body: unknown, incoming: Headers, identity: { sessionId: string 
       controller.enqueue(bytes);
     },
   });
-  const headers = new Headers(incoming);
-  const betas = (incoming.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
-  headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(betas.includes(EFFORT_BETA) ? [EFFORT_BETA] : []), ...betas])].join(','));
-  headers.set('user-agent', `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`);
-  headers.set('x-claude-code-session-id', identity.sessionId);
-  for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS)) headers.set(name, value);
   headers.set('content-length', String(length));
-  return { headers, body: typeof FixedLengthStream === 'function' ? stream.pipeThrough(new FixedLengthStream(length)) : stream, json: body };
+  return { headers, body: typeof FixedLengthStream === 'function' ? stream.pipeThrough(new FixedLengthStream(length)) : stream };
 }
 
 const CLAUDE_CODE_BLOCKS: Record<string, true> = { text: true, image: true, document: true, tool_use: true, tool_result: true, thinking: true, redacted_thinking: true, tool_addition: true, tool_removal: true };
@@ -271,24 +275,48 @@ function requestShape(body: string): JsonShape {
 }
 type JsonShape = { [key: string]: string | number | boolean | Record<string, number> | JsonShape[] };
 /** Transport for admitted credentials: `fetch` never follows redirects, and with `onPayload` Claude subscription
- * requests go out as Claude Code's. */
-export async function claudeCode(profileId: string): Promise<{ fetch: typeof fetch; onPayload(payload: unknown, model: Model<Api>): Promise<unknown> }> {
+ * requests go out as Claude Code's. A request carrying stored image references goes through `images` (the inference
+ * Worker), which writes the images in, and for a subscription request attests the result; any other request is sent
+ * from here. */
+export async function claudeCode(profileId: string, images?: ImageRequestTransport): Promise<{ fetch: typeof fetch; onPayload(payload: unknown, model: Model<Api>): Promise<unknown> }> {
   const identity = { deviceId: await sha256Hex(`gitspace-claude-device-v1:${profileId}`), sessionId: crypto.randomUUID() };
   return {
     onPayload: (payload, model) => shapePayload(payload, model, identity),
     async fetch(input, init) {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const headers = new Headers(init?.headers);
-      if (!url.startsWith('https://api.anthropic.com/v1/messages') || !headers.get('authorization')?.startsWith('Bearer sk-ant-oat')) return fetch(input, { ...init, redirect: 'manual' });
-      let sent: { headers: Headers; body: ReadableStream<Uint8Array>; json: string };
+      const body = typeof init?.body === 'string' ? init.body : null;
+      const stored = body !== null && requestImages(body).length > 0;
+      const subscription = url.startsWith('https://api.anthropic.com/v1/messages') && headers.get('authorization')?.startsWith('Bearer sk-ant-oat') === true;
+      if (!subscription && !stored) return fetch(input, { ...init, redirect: 'manual' });
+      let payload: string;
+      let sentHeaders: Headers;
+      let digits: number | null = null;
+      let transport: ImageRequestTransport | null = null;
       // A refused request answers as Anthropic's own 400 would: the SDK reports a throw from fetch as a retried
       // "Connection error." and drops the reason.
-      try { sent = attest(init?.body, headers, identity); }
-      catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
-      const response = await fetch(input, { ...init, ...HALF_DUPLEX, headers: sent.headers, body: sent.body, redirect: 'manual' });
+      try {
+        if (body === null) throw new Error('Claude subscription request body is not serialized JSON; not sent as a third-party request');
+        payload = body;
+        if (stored) {
+          if (!images) throw new Error('This request carries stored images, which only the inference Worker can send');
+          transport = images;
+        }
+        sentHeaders = subscription ? claudeCodeHeaders(headers, identity) : headers;
+        if (subscription) digits = attestationDigits(payload);
+      } catch (error) { return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: error instanceof Error ? error.message : String(error) } }, { status: 400 }); }
+      let response: Response;
+      if (transport) {
+        sentHeaders.delete('content-length');
+        response = await transport({ url, method: init?.method ?? 'POST', headers: [...sentHeaders], payload, attest: digits !== null });
+      } else {
+        const sent = attest(payload, digits!, sentHeaders);
+        response = await fetch(input, { ...init, ...HALF_DUPLEX, headers: sent.headers, body: sent.body, redirect: 'manual' });
+      }
+      if (!subscription) return response;
       if (response.status >= 400) {
         const text = await response.clone().text();
-        if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: sent.headers.get('anthropic-beta'), shape: requestShape(sent.json) }));
+        if (text.includes('extra usage')) console.error(JSON.stringify({ event: 'claude_subscription_billed_as_third_party', status: response.status, betas: sentHeaders.get('anthropic-beta'), shape: requestShape(payload) }));
       }
       return unprefixToolUse(response);
     },

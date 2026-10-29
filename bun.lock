@@ -111,6 +111,7 @@
         "@gitspace/browser-extension": "workspace:*",
         "@gitspace/browser-runner": "workspace:*",
         "@gitspace/catalog": "workspace:*",
+        "@gitspace/inference-worker": "workspace:*",
         "@gitspace/mcp-server": "workspace:*",
         "@gitspace/protocol": "workspace:*",
         "@gitspace/protocol-agent": "workspace:*",
@@ -242,6 +243,14 @@
         "@types/react-dom": "^19.2.4",
         "typescript": "^5.9.3",
         "wrangler": "^4.127.0",
+      },
+    },
+    "packages/inference-worker": {
+      "name": "@gitspace/inference-worker",
+      "version": "0.0.0",
+      "dependencies": {
+        "@gitspace/runtime-core": "workspace:*",
+        "xxhash-wasm": "1.1.0",
       },
     },
     "packages/mcp-server": {
@@ -738,6 +747,8 @@
     "@gitspace/design-tests": ["@gitspace/design-tests@workspace:packages/design-tests"],
 
     "@gitspace/docs": ["@gitspace/docs@workspace:packages/docs"],
+
+    "@gitspace/inference-worker": ["@gitspace/inference-worker@workspace:packages/inference-worker"],
 
     "@gitspace/mcp-server": ["@gitspace/mcp-server@workspace:packages/mcp-server"],
 
@@ -2774,6 +2785,8 @@
     "ws": ["ws@8.21.1", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw=="],
 
     "wsl-utils": ["wsl-utils@0.3.1", "", { "dependencies": { "is-wsl": "^3.1.0", "powershell-utils": "^0.1.0" } }, "sha512-g/eziiSUNBSsdDJtCLB8bdYEUMj4jR7AGeUo96p/3dTafgjHhpF4RiCFPiRILwjQoDXx5MqkBr4fwWtR3Ky4Wg=="],
+
+    "xxhash-wasm": ["xxhash-wasm@1.1.0", "", {}, "sha512-147y/6YNh+tlp6nd/2pWq38i9h6mz/EuQ6njIrmW8D1BS5nCqs0P6DG+m6zTGnNz5I+uhZ0SHxBs9BsPrwcKDA=="],
 
     "y18n": ["y18n@5.0.8", "", {}, "sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA=="],
 

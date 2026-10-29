@@ -34,6 +34,8 @@ interface Env {
   PLATFORM_URL: string;
   DEFAULT_ACCOUNT_RELEASE?: string;
   PLATFORM_SERVICE?: Fetcher;
+  /** The inference Worker (packages/inference-worker), bound by the platform's `inference-service` source. */
+  INFERENCE: Service<import('@gitspace/inference-worker').InferenceEntrypoint>;
   PLATFORM_TOKEN: string;
   STORAGE_BUCKET: string;
   GITSPACE_OMP_BROKER_TOKEN: string;

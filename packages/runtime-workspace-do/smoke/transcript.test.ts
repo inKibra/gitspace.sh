@@ -127,3 +127,25 @@ test('workspace turn reports show as compact rows, never as the user\'s messages
     expect(new Set(rows.map(row => row.turnId)).size).toBe(2);
   });
 });
+
+test('stored images show by the URL the workspace resolves, in rows and in full content; inline images stay as they are', async () => {
+  await fixture(async (_harness, storage, root) => {
+    const stored = `gs-image:v1:ws-1:6:1x1:${'a'.repeat(64)}`;
+    await root.commit(async tx => {
+      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', mimeType: 'image/png', data: stored }, { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' }], timestamp: 1 }] });
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'toolCall', id: 'shot', name: 'read', arguments: { path: 'shot.png' } }], 2)] });
+      await tx.appendEntry(root.id, { kind: 'pi.tool-result', model: [{ role: 'toolResult', toolCallId: 'shot', toolName: 'read', content: [{ type: 'image', mimeType: 'image/webp', data: stored }], isError: false, timestamp: 3 }] });
+    }, context);
+    const reader = createTranscriptReader(storage, none, undefined, value => `/images/${encodeURIComponent(value)}`);
+    const page = await reader.page(root.id, { generation: null, before: null, after: null, around: null });
+    const rows = JSON.stringify(page.rows);
+    expect(rows).toContain(`"url":"/images/${encodeURIComponent(`${stored};image/png`)}"`);
+    expect(rows).toContain(`"url":"/images/${encodeURIComponent(`${stored};image/webp`)}"`);
+    expect(rows).toContain('"data":"aW1hZ2U="');
+    expect(rows).not.toContain(`"url":"${stored}`);
+    const tool = page.rows.find(row => row.item.type === 'tool-call');
+    if (!tool) throw new Error('Tool row missing');
+    const content = await reader.content(root.id, { generation: page.generation, rowId: tool.id, offset: 0 });
+    expect(content.text).toContain(`"url":"/images/${encodeURIComponent(`${stored};image/webp`)}"`);
+  });
+});

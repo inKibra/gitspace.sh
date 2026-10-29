@@ -36,7 +36,7 @@ function MessageAttachments({ images }: { images: MessageImage[] }) {
     alt={`Attached image ${index + 1}`}
     key={`${image.mimeType}:${index}`}
     label={`Open attached image ${index + 1}`}
-    src={`data:${image.mimeType};base64,${image.data}`}
+    src={'url' in image ? image.url : `data:${image.mimeType};base64,${image.data}`}
   />)}</>;
 }
 

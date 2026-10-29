@@ -242,7 +242,7 @@ describe('bounded transcript previews', () => {
     expect(image.truncated).toBe(true);
     expect(image.item).toMatchObject({ id: 'image', type: 'image', url: '' });
     expect(transcriptItemSchema.safeParse(image.item).success).toBe(true);
-    expect(imageMessage.images![1]!.data).toBe(large);
+    expect(imageMessage.images![1]).toMatchObject({ data: large });
   });
 });
 

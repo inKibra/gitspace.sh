@@ -185,7 +185,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       const agent = await runtime.snapshot(AgentDoc, runtime.conversationId, context);
       const limits = imageLimits(agent?.model ? options.models.getModel(agent.model.provider, agent.model.modelId) : undefined);
       const request = { messages: [...outgoing] };
-      const fitted = fitRequestImages(request, { ...limits, maxPerRequest: Math.min(limits.maxPerRequest, SUBAGENT_REQUEST_IMAGES), maxImageBytes: Math.min(limits.maxImageBytes, SUBAGENT_REQUEST_IMAGE_BYTES) });
+      const fitted = fitRequestImages(request, { ...limits, maxInlinePerRequest: Math.min(limits.maxInlinePerRequest, SUBAGENT_REQUEST_IMAGES), maxInlineBytes: Math.min(limits.maxInlineBytes, SUBAGENT_REQUEST_IMAGE_BYTES) });
       if (fitted !== request) return { messages: fitted.messages };
     }
     return described || lean || repaired ? { messages: outgoing } : undefined;

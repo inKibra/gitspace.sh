@@ -8,7 +8,8 @@
     "./inference": "./src/inference/index.ts",
     "./session-controls": "./src/session-controls.ts",
     "./retained-rules": "./src/retained-rules.ts",
-    "./history": "./src/history.ts"
+    "./history": "./src/history.ts",
+    "./image-requests": "./src/inference/image-requests.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

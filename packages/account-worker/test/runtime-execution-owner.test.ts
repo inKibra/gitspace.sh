@@ -49,7 +49,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     };
     let runtime: WorkspaceRuntime | undefined;
     const attachRequests: string[] = [];
-    const services = createRuntimeServices({ ctx, env, identity, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
+    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
       if (!runtime) throw new Error('Runtime not initialized');
       attachRequests.push(machineId);
       return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);

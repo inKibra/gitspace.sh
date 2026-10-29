@@ -50,7 +50,7 @@ async function watchFixture(ctx: DurableObjectState) {
   const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: 'e'.repeat(40) });
   const runtime: WorkspaceRuntime = await createWorkspaceRuntime({
     storage: ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
-    tools: { invoke: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool} ran` }] }), prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => '', preflight: async () => {} },
+    tools: { images: { store: async image => image }, invoke: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool} ran` }] }), prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => '', preflight: async () => {} },
     operations: { execute: unsupported, reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: async () => {} },
     code: { readFile: async () => null, listSnapshotPaths: async () => [], changedSnapshotPaths: unsupported, mergeSnapshot: unsupported, writeSnapshot: unsupported, reader: () => ({ readTree: async () => [], readBlob: async () => null, close: async () => {} }) },
     initialCheckpoint: async () => checkpoint,

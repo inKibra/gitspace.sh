@@ -23,7 +23,7 @@ async function open(browser: NonNullable<SessionControlServices['browser']> = un
   const root = await harness.root(context);
   const lifecycle = createConversationLifecycle({ report: error => { throw error; }, harness, storage, admitInference: unexpected, configureModel: unexpected });
   const controls = createSessionControls({
-    harness, root, lifecycle, admitInference: unexpected, configureModel: unexpected, reload: async () => {},
+    harness, root, lifecycle, admitInference: unexpected, configureModel: unexpected, reload: async () => {}, images: { store: async image => image },
     catalog: async () => ({ models: [{ provider: 'test', id: 'astra', name: 'Astra', contextWindow: 100000 }], roles }),
     browser,
     history: { conversation: unexpected, recent: async () => ({ anchorId: null, prompts: [], tokens: null }), page: unexpected, resolve: unexpected, transcriptPage: unexpected, transcriptContent: unexpected, usage: unexpected },

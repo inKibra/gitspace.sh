@@ -12,6 +12,7 @@ import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import { claudeCode } from './claude-code-request.js';
+import type { ImageRequestTransport } from './image-requests.js';
 import type { RequestGate, RequestPermit } from './request-gate.js';
 export * from './selection.js';
 export * from './catalog.js';
@@ -22,6 +23,8 @@ export * from './helpers.js';
 export * from './published-catalog.js';
 export * from './vision.js';
 export * from './request-gate.js';
+export * from './image-requests.js';
+export { imageDimensions } from './image-limits.js';
 
 export type VaultModelsOptions = {
   profileId: string;
@@ -35,6 +38,8 @@ export type VaultModelsOptions = {
   /** The workspace object's gate, shared by all of its catalogs: every attempt holds a permit while it builds and
    * uploads its body. */
   gate: RequestGate;
+  /** Sends a request carrying stored image references (the inference Worker); without it such a request is refused. */
+  images?: ImageRequestTransport;
 };
 /** What one admitted request adds to its profile's catalog. A pinned model resolves as it was admitted even after the
  * catalog changes or drops it. */
@@ -141,7 +146,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
   }
   /** The catalog as one request uses it: `list`'s models, dispatched with `pins` and Claude Code's request shape. */
   async function view(list: readonly Provider[], pins: CredentialPins, fastMode: boolean): Promise<Models> {
-    const claude = await claudeCode(options.profileId);
+    const claude = await claudeCode(options.profileId, options.images);
     const cloudFetch = claude.fetch;
     const providerById = new Map(list.map(provider => [provider.id, provider]));
     /** Best-effort, as pi's registry: a provider whose listing throws lists nothing. */

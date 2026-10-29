@@ -7,6 +7,10 @@ import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durab
 import { createModels } from '@earendil-works/pi-ai';
 import { createConversationLifecycle } from '@gitspace/runtime-core';
 import { createSessionControls, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
+import type { ImageRequestTransport } from '@gitspace/runtime-core/image-requests';
+
+/** No request in these tests carries a stored image. */
+const noImages: ImageRequestTransport = async () => { throw new Error('No request here carries a stored image'); };
 
 async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInference'> & { session: Pick<SessionControlServices, 'catalog' | 'reload'> }) {
   const storage = new MemoryStorage();
@@ -20,7 +24,7 @@ async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInfere
   const lifecycle = createConversationLifecycle({ harness, storage, configureModel, admitInference: runtime.admitInference });
   const unavailable = async (): Promise<never> => { throw new Error('Unused history operation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session,
+    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session, images: { store: async image => image },
     history: {
       conversation: unavailable, resolve: unavailable, usage: unavailable,
       recent: async () => ({ anchorId: null, prompts: [], tokens: null }),
@@ -59,7 +63,7 @@ describe('durable inference selection intent', () => {
       return Response.json([], { headers: { etag: 'catalog-1' } });
     });
     const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
-    const runtime = await createCloudRuntimeInference(state, environment, identity, []);
+    const runtime = await createCloudRuntimeInference(state, environment, identity, [], noImages);
     const catalog = await runtime.session.catalog();
     const first = catalog.models[0]!;
     const second = catalog.models.find(model => model.id !== first.id)!;
@@ -78,8 +82,8 @@ describe('durable inference selection intent', () => {
     await expect(runtime.admitInference({ conversationId: 'conversation', requestId: 'removed', selection: { kind: 'explicit', provider: 'openai', modelId: 'removed' } })).rejects.toThrow('openai/removed is not available');
     // A reopened instance knows a conversation's admitted model before any hook binds it only when it restored the
     // conversation as retrying: pi checks the model of a request a reset interrupted first.
-    expect((await createCloudRuntimeInference(state, environment, identity, [])).models.getModel('openai', first.id)).toBeUndefined();
-    const recovered = await createCloudRuntimeInference(state, environment, identity, ['conversation']);
+    expect((await createCloudRuntimeInference(state, environment, identity, [], noImages)).models.getModel('openai', first.id)).toBeUndefined();
+    const recovered = await createCloudRuntimeInference(state, environment, identity, ['conversation'], noImages);
     expect(recovered.models.getModel('openai', first.id)).toMatchObject({ provider: 'openai', id: first.id });
     expect(await recovered.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
     const recoveredCatalog = await recovered.session.catalog();
@@ -108,7 +112,7 @@ describe('durable inference selection intent', () => {
       cloudResolveCredential: resolveCredential,
     };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json([]));
-    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), []);
+    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], noImages);
     const historical = await runtime.session.catalog();
     expect(historical.models.some(model => model.provider === 'anthropic')).toBe(true);
     expect(historical.roles).toEqual([]);
@@ -146,7 +150,7 @@ describe('durable inference selection intent', () => {
       cloudResolveCredential: rejectMutation, cloudCredentialFailure: rejectMutation,
     };
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(rejectMutation);
-    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), []);
+    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], noImages);
     const catalog = await runtime.session.catalog();
     expect(catalog).toEqual({
       models: [{ provider: 'studio', id: 'custom-chat:0', name: 'Custom Chat', contextWindow: 32768 }],
@@ -174,6 +178,7 @@ describe('durable inference selection intent', () => {
       { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env,
       RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }),
       [],
+      noImages,
     );
     const f = await sessionFixture(runtime);
     try {
@@ -210,7 +215,7 @@ describe('durable inference selection intent', () => {
       cloudResolveCredential: async () => { throw new Error('Admission must not resolve provider credentials'); },
     };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json([], { headers: { etag: 'catalog-1' } }));
-    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), []);
+    const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], noImages);
     const model = (await runtime.session.catalog()).models[0]!;
     profile = { ...profile, settings: { 'modelRoles.default': `openai/${model.id}` } };
     // Each listed view asks the vault for its accounts once when the router lists available models.

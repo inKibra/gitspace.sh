@@ -49,7 +49,7 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
       code,
       lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs,
       initialCheckpoint: async () => { sourceReads++; return empty ? null : checkpoint; },
-      tools: { invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => '', preflight: unsupported },
+      tools: { images: { store: async image => image }, invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, instructions: async () => '', preflight: unsupported },
       operations: { execute: unsupported, reconcile: unsupported, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: unsupported },
       retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
       onReport: error => { throw error; }, admitInference: unsupported, bindInferenceConversation: async () => undefined, refuseRequest: unsupported,
