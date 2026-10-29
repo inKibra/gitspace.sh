@@ -6,7 +6,7 @@ import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionCont
 import {
   createVaultModels, createRunModelsRouter, createDurableModelsStore, createRequestGate,
   resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
-  type CredentialPins, type ImageRequestTransport, type VaultModels,
+  type CredentialPins, type VaultModels, type VaultModelsOptions,
 } from '@gitspace/runtime-core/inference';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
@@ -18,7 +18,7 @@ const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stri
 
 /** Only the Workspace DO calls this factory; no bearer or refresh token enters runtime state. `retrying` names the
  * conversations whose generation or compaction a reset interrupted and pi retries when the runtime opens. */
-export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, retrying: readonly string[], images: ImageRequestTransport) {
+export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, retrying: readonly string[], images: NonNullable<VaultModelsOptions['images']>) {
   // A stub per call: this outlives any one, and one that saw an error stays broken.
   const vault = () => env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const scopes = new WeakMap<AbortSignal, { admission: Admission; models: Models }>();

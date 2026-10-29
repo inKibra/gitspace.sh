@@ -3,7 +3,8 @@
  * image block by a reference (`gs-image:v1:…`, `@gitspace/runtime-core/image-requests`). Content-addressed: the same
  * image stored twice is one object. They are never collected while the workspace lives and are shredded with it.
  *
- * - `store` writes an admitted image and returns its block naming the stored bytes.
+ * - `store` writes an admitted image and returns its block naming the stored bytes; `load` returns a stored image's
+ *   block with its bytes again, for a codemode script.
  * - `send` is the inference transport: the inference Worker streams the request, reading each image through `read`,
  *   which serves this workspace's images only.
  * - `url` resolves a transcript row's stored image to `/images/…`, a URL signed for a window of whole hours: the same
@@ -40,6 +41,14 @@ export async function createRuntimeImages(env: Env, workspaceId: string) {
       const { width, height } = imageDimensions(image) ?? { width: 0, height: 0 };
       const stored = await files.put(scopeId, bytes);
       return { ...image, data: imageReference({ workspaceId, size: stored.size, width, height, sha256: stored.blobHash.slice('sha256:'.length) }) };
+    },
+    async load(image: ImageContent): Promise<ImageContent> {
+      const stored = parseImageReference(image.data);
+      if (!stored) return image;
+      if (stored.workspaceId !== workspaceId) throw new Error(`Image ${image.data} is not this workspace's`);
+      const bytes = await files.bytes(scopeId, { blobHash: `sha256:${stored.sha256}`, size: stored.size }, stored.size);
+      if (!bytes) throw new Error(`Image ${image.data} is not stored`);
+      return { ...image, data: Buffer.from(bytes).toString('base64') };
     },
     send: (request: ImageRequest): Promise<Response> => env.INFERENCE.send(request, read),
     /** `stored` is `<reference>;<mimeType>`, as a transcript row names a stored image; one this workspace cannot

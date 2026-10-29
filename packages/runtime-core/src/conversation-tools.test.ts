@@ -57,7 +57,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const browserTargets: string[] = [];
   const unexpectedHistory = async (): Promise<never> => { throw new Error('Unexpected history mutation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, admitInference, configureModel, catalog, images: { store: async image => ({ ...image, data: `stored:${image.data}` }) },
+    harness, root, lifecycle, admitInference, configureModel, catalog, images: { store: async image => ({ ...image, data: `stored:${image.data}` }), load: async image => ({ ...image, data: image.data.replace(/^stored:/u, '') }) },
     reload: async () => {},
     ...(files ? { loadAgentDefinitions: async () => files } : {}),
     browser: async id => { browserTargets.push(id); return { groups: [], records: [] }; },

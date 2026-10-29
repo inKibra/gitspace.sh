@@ -15,7 +15,14 @@ export interface ImageLimits {
   /** Images whose bytes are in the conversation (stored before images became references): the workspace object holds
    * every one it sends. */
   maxInlinePerRequest: number; maxInlineBytes: number;
+  /** The model's provider writes image bytes into its request itself instead of sending the base64 text it is given
+   * (Bedrock Converse, Cursor): its stored images are loaded into the request, so they are held like inline ones. */
+  storedInline: boolean;
 }
+
+/** Providers that decode an image's base64 to bytes themselves, so a stored image's reference cannot pass through
+ * them: Bedrock Converse (the AWS SDK's binary fields) and Cursor (protobuf). */
+const BYTE_IMAGE_APIS: Record<string, true> = { 'bedrock-converse-stream': true, 'cursor-agent': true };
 
 /**
  * GitSpace's ceiling on images held in a request: a workspace object builds each request in its 128 MB isolate, and 26
@@ -32,7 +39,7 @@ const UNSTATED_REQUEST_IMAGES = 16;
 export const SUBAGENT_REQUEST_IMAGES = 4;
 export const SUBAGENT_REQUEST_IMAGE_BYTES = 4 * 1024 * 1024;
 
-export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined): ImageLimits {
+export function imageLimits(model: { api?: Api; inputLimits?: Model<Api>['inputLimits'] } | undefined): ImageLimits {
   const images = model?.inputLimits?.images;
   return {
     maxWidth: images?.resize?.maxWidth ?? DEFAULT_IMAGE_LIMITS.maxWidth,
@@ -42,6 +49,7 @@ export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined):
     maxRequestBytes: model?.inputLimits?.maxRequestBytes ?? null,
     maxInlinePerRequest: INLINE_REQUEST_IMAGES,
     maxInlineBytes: INLINE_REQUEST_IMAGE_BYTES,
+    storedInline: model?.api !== undefined && BYTE_IMAGE_APIS[model.api] === true,
   };
 }
 
@@ -120,7 +128,7 @@ export function fitRequestImages(context: Context, limits: ImageLimits): Context
       if (part.type === 'text') { textBytes += part.text.length; return; }
       const refusal = imageRefusal(part, limits);
       if (refusal !== null) refusals.set(`${index}:${partIndex}`, `[Image not shown: it is ${refusal}.]`);
-      else images.push({ message: index, part: partIndex, bytes: imageDataBytes(part.data), held: parseImageReference(part.data) === null });
+      else images.push({ message: index, part: partIndex, bytes: imageDataBytes(part.data), held: limits.storedInline || parseImageReference(part.data) === null });
     });
   });
   const block = Math.max(1, Math.floor(limits.maxInlinePerRequest / 2));

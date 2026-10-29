@@ -24,7 +24,7 @@ const keptReference = (key: ToolResultKey) => toolResultReference({ workspaceId:
 /** Images the workspace stored, by the data each entered history with. */
 const storedImages: string[] = [];
 const services: ToolServices = {
-  images: { async store(image) { storedImages.push(image.data); return { ...image, data: `stored:${image.data}` }; } },
+  images: { async store(image) { storedImages.push(image.data); return { ...image, data: `stored:${image.data}` }; }, load: async image => ({ ...image, data: image.data.replace(/^stored:/u, '') }) },
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
   question: async () => 'answered', instructions: async () => '', preflight: async () => {},
@@ -525,6 +525,27 @@ test('a codemode child gets the whole output the transcript cut, and one past 25
     expect(keptHuge.length).toBeLessThanOrEqual(TOOL_RESULT_MAX_BYTES);
     expect(keptHuge.length).toBeGreaterThan(TOOL_RESULT_MAX_BYTES - 30);
     expect(huge.startsWith(keptHuge)).toBe(true);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 15_000);
+
+test('a codemode child\'s image enters history stored, and the script receives its bytes', async () => {
+  storedImages.length = 0;
+  const header = new Uint8Array(33);
+  header.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 2, 128, 0, 0, 1, 224]);
+  const screenshot = { type: 'image' as const, mimeType: 'image/png', data: btoa(String.fromCharCode(...header)) };
+  const vision: Model<Api> = { ...model, input: ['text', 'image'], inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4_718_592 } } } };
+  const outcomes: unknown[] = [];
+  const { harness, root } = await registered([[call('codemode', { code: 'shoot' })]], async input => {
+    if (input.tool === 'read') return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [screenshot] };
+    if (!input.codemodeTools) throw new Error('Missing codemode authority');
+    outcomes.push(await input.codemodeTools({ tool: 'read', args: { path: 'shot.png' }, callId: 'shot', signal: AbortSignal.timeout(5000) }));
+    return completed(input);
+  }, operations, [], vision);
+  try {
+    await root.submit({ type: 'input', content: 'Take a screenshot in a script.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
+    expect(storedImages).toEqual([screenshot.data]);
+    expect(outcomes).toEqual([{ status: 'completed', value: [screenshot] }]);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 15_000);
 

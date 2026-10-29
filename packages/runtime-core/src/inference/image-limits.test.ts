@@ -72,6 +72,13 @@ it('leaves a stored image larger than the model accepts out of every request, sa
   expect(fitted).toEqual(['capture 1', '[Image not shown: it is 3000x900, larger than the 2000x2000 the model accepts.]', 'capture 2', 'image', 'capture 3', 'image']);
 });
 
+it('holds stored images to the inline caps for a provider that writes image bytes itself, since they are loaded into its request', () => {
+  const bedrock = imageLimits({ api: 'bedrock-converse-stream', inputLimits: { maxRequestBytes: 33_554_432, images: { maxPerRequest: 600, resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4_718_592 } } } });
+  const kept = sent(fitRequestImages({ messages: Array.from({ length: 60 }, (_, index) => screenshot(stored(String(index)), String(index))) }, bedrock)).filter(part => part === 'image');
+  expect(kept.length).toBeLessThanOrEqual(16);
+  expect(kept.length * 800_000).toBeLessThanOrEqual(10 * 1024 * 1024);
+});
+
 it('sends stored images up to the model\'s own limits, not the cap on images held in the request', () => {
   // 60 stored screenshots of 600 KB (36 MB of base64 once written in) against Opus's 32 MiB: the oldest go in blocks of 8.
   const fitted = sent(fitRequestImages({ messages: Array.from({ length: 60 }, (_, index) => screenshot(stored(String(index)), String(index))) }, opus));

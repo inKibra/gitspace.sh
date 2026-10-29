@@ -42,7 +42,7 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
     } };
   const options_: RuntimeHarnessOptions = {
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
-    tools: { images: { store: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },
+    tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
     retainedRules: { loadRules: async () => [], judge: unused, matchAst: unused }, editTool: () => 'edit',
     onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: (signal, reason) => { refused.set(signal, reason); },

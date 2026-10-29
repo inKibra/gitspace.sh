@@ -140,7 +140,7 @@ test('real durable authority completes a caught denied read after an effect with
     let effects = 0;
     const results: RuntimeToolResult[] = [];
     const services: ToolServices = {
-      images: { store: async image => image },
+      images: { store: async image => image, load: async image => image },
       async invoke(input) {
         if (input.tool === 'codemode') {
           const first = await sandbox.execute(input);
@@ -188,7 +188,7 @@ test('an MCP result past what the transcript keeps reaches mcp.call whole, the s
     const kept = createToolResultStore(ctx.storage.sql, 'workspace', WORKSPACE_TOOL_RESULTS_MAX_BYTES);
     const completedWith = (input: { requestId: string; attemptId: string }, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
     const services: ToolServices = {
-      images: { store: async image => image },
+      images: { store: async image => image, load: async image => image },
       async invoke(input) {
         if (input.tool === 'codemode') { const result = await sandbox.execute(input); results.push(result); return result; }
         if (input.tool === 'mcp_discover') return completedWith(input, [{ name: 'list_comments', description: 'Every comment of a file' }]);

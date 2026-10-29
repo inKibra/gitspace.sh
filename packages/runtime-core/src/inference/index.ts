@@ -2,7 +2,7 @@ import { createModels, lazyStream, type Api, type Model, type Context, type Tran
 import { z } from 'zod';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { isModelType } from '@earendil-works/pi-ai';
-import type { Credential, ProviderResponse } from '@earendil-works/pi-ai';
+import type { Credential, ImageContent, Message, ProviderResponse, TextContent } from '@earendil-works/pi-ai';
 import { applyProviderCatalog, limitContextWindows } from './catalog.js';
 import { createLegacyCloudProviders } from './providers/index.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
@@ -12,7 +12,7 @@ import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import { claudeCode } from './claude-code-request.js';
-import type { ImageRequestTransport } from './image-requests.js';
+import { parseImageReference, type ImageRequestTransport } from './image-requests.js';
 import type { RequestGate, RequestPermit } from './request-gate.js';
 export * from './selection.js';
 export * from './catalog.js';
@@ -38,8 +38,10 @@ export type VaultModelsOptions = {
   /** The workspace object's gate, shared by all of its catalogs: every attempt holds a permit while it builds and
    * uploads its body. */
   gate: RequestGate;
-  /** Sends a request carrying stored image references (the inference Worker); without it such a request is refused. */
-  images?: ImageRequestTransport;
+  /** The workspace's stored images: `send` sends a request carrying their references (the inference Worker); `load`
+   * returns one's bytes, for a provider that writes image bytes itself. Without them a request with stored images is
+   * refused. */
+  images?: { send: ImageRequestTransport; load(image: ImageContent): Promise<ImageContent> };
 };
 /** What one admitted request adds to its profile's catalog. A pinned model resolves as it was admitted even after the
  * catalog changes or drops it. */
@@ -146,7 +148,25 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
   }
   /** The catalog as one request uses it: `list`'s models, dispatched with `pins` and Claude Code's request shape. */
   async function view(list: readonly Provider[], pins: CredentialPins, fastMode: boolean): Promise<Models> {
-    const claude = await claudeCode(options.profileId, options.images);
+    const claude = await claudeCode(options.profileId, options.images?.send);
+    /** The context a request sends: fitted to the model's image limits, and for a provider that writes image bytes
+     * itself, with its stored images' bytes loaded in place of their references. */
+    async function requestContext(model: Model<Api>, context: Context): Promise<Context> {
+      const limits = imageLimits(model);
+      const fitted = fitRequestImages(context, limits);
+      if (!limits.storedInline) return fitted;
+      const loaded = (content: Array<TextContent | ImageContent>) => Promise.all(content.map(async part => {
+        if (part.type !== 'image' || !parseImageReference(part.data)) return part;
+        if (!options.images) throw new Error(`${model.provider} needs this request's stored images loaded, and no image store is available`);
+        return options.images.load(part);
+      }));
+      const messages = await Promise.all(fitted.messages.map(async (message): Promise<Message> => {
+        if (message.role === 'toolResult') return { ...message, content: await loaded(message.content) };
+        if (message.role === 'user' && typeof message.content !== 'string') return { ...message, content: await loaded(message.content) };
+        return message;
+      }));
+      return { ...fitted, messages };
+    }
     const cloudFetch = claude.fetch;
     const providerById = new Map(list.map(provider => [provider.id, provider]));
     /** Best-effort, as pi's registry: a provider whose listing throws lists nothing. */
@@ -306,7 +326,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       stream<T extends Api>(model: Model<T>, context: Context, request?: ModelsApiStreamOptions<T>) {
         return lazyStream(model, async () => {
           rejectOverrides(request);
-          const fitted = fitRequestImages(context, imageLimits(model));
+          const fitted = await requestContext(model, context);
           return streamAttempts(model, (models, attempt, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, fitted, Object.assign({}, request, {
             fetch: attempt.fetch, onPayload: claude.onPayload,
             onResponse: async (response: ProviderResponse, selected: Model<Api>) => { attempt.observe(response); await request?.onResponse?.(response, selected); },
@@ -314,7 +334,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
         });
       },
       complete: (model, context, request) => facade.stream(model, context, request).result(),
-      streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); const fitted = fitRequestImages(context, imageLimits(model)); return streamAttempts(model, (models, attempt, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, fitted, { ...request, fetch: attempt.fetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); }),
+      streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); const fitted = await requestContext(model, context); return streamAttempts(model, (models, attempt, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, fitted, { ...request, fetch: attempt.fetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); }),
       completeSimple: (model, context, request) => facade.streamSimple(model, context, request).result(),
       streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
       fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),

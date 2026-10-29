@@ -33,9 +33,10 @@ export type ToolServices = {
   takeoverTab(input: { conversationId: string; args: RuntimeAskTakeoverArguments }): Promise<RuntimeTakeoverTab>;
   /** Tool output longer than the transcript keeps, kept whole (docs/SIMPLIFICATION.md, Oversized tool results). */
   results: ToolResultStore;
-  /** Stores an image's bytes and returns the block that names them (`gs-image:` data), so history never holds images:
-   * the inference Worker writes the bytes into the requests that send them. */
-  images: { store(image: ImageContent): Promise<ImageContent> };
+  /** `store` saves an image's bytes and returns the block that names them (`gs-image:` data), so history never holds
+   * images: the inference Worker writes the bytes into the requests that send them. `load` is its reverse, for a
+   * consumer that needs the bytes themselves (a codemode script); a block with its bytes is returned as it is. */
+  images: { store(image: ImageContent): Promise<ImageContent>; load(image: ImageContent): Promise<ImageContent> };
 };
 const workspaceId = z.string().min(1).optional();
 const get = z.object({ method: z.literal('get'), workspaceId });
@@ -297,14 +298,16 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
           const error = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
           if (status.success && status.data.executorStatus === 'interrupted') return { status: 'interrupted', error };
           if (result.isError) return { status: 'failed', error };
+          // History names a child's images by reference; the script gets their bytes, as a tool's output always gave it.
+          const content = await Promise.all(result.content.map(item => item.type === 'image' ? services.images.load(item) : item));
           const kept = RuntimeFullOutputDetailsSchema.safeParse(result.details);
-          if (!kept.success) return { status: 'completed', value: RuntimeJsonSchema.parse(result.content) };
+          if (!kept.success) return { status: 'completed', value: RuntimeJsonSchema.parse(content) };
           // The transcript holds the part of a longer output the model saw; the script gets all of it.
           const { fullOutput } = kept.data;
           if (fullOutput.keptBytes < fullOutput.bytes) return { status: 'failed', error: `${input.tool} ran, but its output (${(fullOutput.bytes / 1024 / 1024).toFixed(1)} MB) is over the ${TOOL_RESULT_MAX_BYTES / 1024 / 1024} MB a tool result keeps, so codemode cannot receive it whole; ${fullOutput.reference} holds part of it.` };
           const text = await services.results.text({ conversationId: String(api.conversationId), callId: input.callId });
-          const at = result.content.findIndex(item => item.type === 'text');
-          return { status: 'completed', value: RuntimeJsonSchema.parse(result.content.filter((item, index) => item.type !== 'text' || index === at).map(item => item.type === 'text' ? { type: 'text', text } : item)) };
+          const at = content.findIndex(item => item.type === 'text');
+          return { status: 'completed', value: RuntimeJsonSchema.parse(content.filter((item, index) => item.type !== 'text' || index === at).map(item => item.type === 'text' ? { type: 'text', text } : item)) };
           } catch (error) {
             return { status: admitted ? 'interrupted' : 'failed', error: error instanceof Error ? error.message : String(error) };
           }

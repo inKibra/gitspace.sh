@@ -7,10 +7,10 @@ import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durab
 import { createModels } from '@earendil-works/pi-ai';
 import { createConversationLifecycle } from '@gitspace/runtime-core';
 import { createSessionControls, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
-import type { ImageRequestTransport } from '@gitspace/runtime-core/image-requests';
+import type { VaultModelsOptions } from '@gitspace/runtime-core/inference';
 
 /** No request in these tests carries a stored image. */
-const noImages: ImageRequestTransport = async () => { throw new Error('No request here carries a stored image'); };
+const noImages: NonNullable<VaultModelsOptions['images']> = { send: async () => { throw new Error('No request here carries a stored image'); }, load: async () => { throw new Error('No request here carries a stored image'); } };
 
 async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInference'> & { session: Pick<SessionControlServices, 'catalog' | 'reload'> }) {
   const storage = new MemoryStorage();
@@ -24,7 +24,7 @@ async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInfere
   const lifecycle = createConversationLifecycle({ harness, storage, configureModel, admitInference: runtime.admitInference });
   const unavailable = async (): Promise<never> => { throw new Error('Unused history operation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session, images: { store: async image => image },
+    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session, images: { store: async image => image, load: async image => image },
     history: {
       conversation: unavailable, resolve: unavailable, usage: unavailable,
       recent: async () => ({ anchorId: null, prompts: [], tokens: null }),

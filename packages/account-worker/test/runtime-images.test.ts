@@ -21,6 +21,9 @@ it('stores an image once by its bytes, with the dimensions its header declares, 
   const image = await images.store({ type: 'image', mimeType: 'image/png', data: Buffer.from(png).toString('base64') });
   expect(image).toEqual({ type: 'image', mimeType: 'image/png', data: `gs-image:v1:ws-images:${png.byteLength}:640x480:${Buffer.from(await crypto.subtle.digest('SHA-256', png)).toString('hex')}` });
   expect(await images.store(image)).toEqual(image);
+  // A codemode script gets the stored image's bytes back; another workspace's image is not this one's to read.
+  expect(await images.load(image)).toEqual({ type: 'image', mimeType: 'image/png', data: Buffer.from(png).toString('base64') });
+  await expect(images.load({ ...image, data: image.data.replace('ws-images', 'ws-other') })).rejects.toThrow("is not this workspace's");
 
   const url = images.url(`${image.data};image/png`);
   vi.setSystemTime(Date.UTC(2026, 9, 29, 12, 50));
