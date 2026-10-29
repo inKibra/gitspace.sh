@@ -213,6 +213,7 @@
       "dependencies": {
         "@aws-sdk/client-s3": "3.1132.0",
         "@gitspace/browser-runner": "workspace:*",
+        "@gitspace/inference-worker": "workspace:*",
         "@gitspace/protocol": "workspace:*",
         "@noble/curves": "^2.2.0",
         "better-result": "3.0.1",
@@ -249,8 +250,14 @@
       "name": "@gitspace/inference-worker",
       "version": "0.0.0",
       "dependencies": {
+        "@earendil-works/pi-ai": "1.3.0",
         "@gitspace/runtime-core": "workspace:*",
+        "esbuild": "^0.28.1",
         "xxhash-wasm": "1.1.0",
+      },
+      "devDependencies": {
+        "miniflare": "4.20260302.0",
+        "vitest": "^4.1.11",
       },
     },
     "packages/mcp-server": {
@@ -2898,6 +2905,8 @@
 
     "@gitspace/docs/@cloudflare/workers-types": ["@cloudflare/workers-types@5.20260904.1", "", {}, "sha512-SbulPvrdb4j5iISDr81Iw+YpNCG4Bb6xRqV3arkgn/Ib6STMaoG63lhPnuWqmZdakOn0qS1OUudBMdxtBFx0Jg=="],
 
+    "@gitspace/inference-worker/miniflare": ["miniflare@4.20260302.0", "", { "dependencies": { "@cspotcode/source-map-support": "0.8.1", "sharp": "^0.34.5", "undici": "7.18.2", "workerd": "1.20260302.0", "ws": "8.18.0", "youch": "4.1.0-beta.10" }, "bin": { "miniflare": "bootstrap.js" } }, "sha512-joGFywlo7HdfHXXGOkc6tDCVkwjEncM0mwEsMOLWcl+vDVJPj9HRV7JtEa0+lCpNOLdYw7mZNHYe12xz9KtJOw=="],
+
     "@gitspace/operator-web/vite": ["vite@7.3.6", "", { "dependencies": { "esbuild": "^0.27.0 || ^0.28.0", "fdir": "^6.5.0", "picomatch": "^4.0.3", "postcss": "^8.5.6", "rollup": "^4.43.0", "tinyglobby": "^0.2.15" }, "optionalDependencies": { "fsevents": "~2.3.3" }, "peerDependencies": { "@types/node": "^20.19.0 || >=22.12.0", "jiti": ">=1.21.0", "less": "^4.0.0", "lightningcss": "^1.21.0", "sass": "^1.70.0", "sass-embedded": "^1.70.0", "stylus": ">=0.54.8", "sugarss": "^5.0.0", "terser": "^5.16.0", "tsx": "^4.8.1", "yaml": "^2.4.2" }, "optionalPeers": ["@types/node", "jiti", "less", "lightningcss", "sass", "sass-embedded", "stylus", "sugarss", "terser", "tsx", "yaml"], "bin": { "vite": "bin/vite.js" } }, "sha512-4XP60spRGjSZFf1qYH+dJIkK2znL3zQfl9KkOV9MkkRR/3Dls0dxaBsQPTloEc5BLXWPL9vsOxopxyKoMmDueg=="],
 
     "@gitspace/runtime-workspace-do/miniflare": ["miniflare@4.20260302.0", "", { "dependencies": { "@cspotcode/source-map-support": "0.8.1", "sharp": "^0.34.5", "undici": "7.18.2", "workerd": "1.20260302.0", "ws": "8.18.0", "youch": "4.1.0-beta.10" }, "bin": { "miniflare": "bootstrap.js" } }, "sha512-joGFywlo7HdfHXXGOkc6tDCVkwjEncM0mwEsMOLWcl+vDVJPj9HRV7JtEa0+lCpNOLdYw7mZNHYe12xz9KtJOw=="],
@@ -3188,6 +3197,14 @@
 
     "@cloudflare/vitest-pool-workers/wrangler/workerd": ["workerd@1.20260302.0", "", { "optionalDependencies": { "@cloudflare/workerd-darwin-64": "1.20260302.0", "@cloudflare/workerd-darwin-arm64": "1.20260302.0", "@cloudflare/workerd-linux-64": "1.20260302.0", "@cloudflare/workerd-linux-arm64": "1.20260302.0", "@cloudflare/workerd-windows-64": "1.20260302.0" }, "bin": { "workerd": "bin/workerd" } }, "sha512-FhNdC8cenMDllI6bTktFgxP5Bn5ZEnGtofgKipY6pW9jtq708D1DeGI6vGad78KQLBGaDwFy1eThjCoLYgFfog=="],
 
+    "@gitspace/inference-worker/miniflare/undici": ["undici@7.18.2", "", {}, "sha512-y+8YjDFzWdQlSE9N5nzKMT3g4a5UBX1HKowfdXh0uvAnTaqqwqB92Jt4UXBAeKekDs5IaDKyJFR4X1gYVCgXcw=="],
+
+    "@gitspace/inference-worker/miniflare/workerd": ["workerd@1.20260302.0", "", { "optionalDependencies": { "@cloudflare/workerd-darwin-64": "1.20260302.0", "@cloudflare/workerd-darwin-arm64": "1.20260302.0", "@cloudflare/workerd-linux-64": "1.20260302.0", "@cloudflare/workerd-linux-arm64": "1.20260302.0", "@cloudflare/workerd-windows-64": "1.20260302.0" }, "bin": { "workerd": "bin/workerd" } }, "sha512-FhNdC8cenMDllI6bTktFgxP5Bn5ZEnGtofgKipY6pW9jtq708D1DeGI6vGad78KQLBGaDwFy1eThjCoLYgFfog=="],
+
+    "@gitspace/inference-worker/miniflare/ws": ["ws@8.18.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-8VbfWfHLbbwu3+N6OKsOMpBdT4kXPDDB9cJk2bJ6mh9ucxdlnNvH1e+roYkKmN9Nxw2yjz7VzeO9oOz2zJ04Pw=="],
+
+    "@gitspace/inference-worker/miniflare/youch": ["youch@4.1.0-beta.10", "", { "dependencies": { "@poppinss/colors": "^4.1.5", "@poppinss/dumper": "^0.6.4", "@speed-highlight/core": "^1.2.7", "cookie": "^1.0.2", "youch-core": "^0.3.3" } }, "sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ=="],
+
     "@gitspace/runtime-workspace-do/miniflare/undici": ["undici@7.18.2", "", {}, "sha512-y+8YjDFzWdQlSE9N5nzKMT3g4a5UBX1HKowfdXh0uvAnTaqqwqB92Jt4UXBAeKekDs5IaDKyJFR4X1gYVCgXcw=="],
 
     "@gitspace/runtime-workspace-do/miniflare/workerd": ["workerd@1.20260302.0", "", { "optionalDependencies": { "@cloudflare/workerd-darwin-64": "1.20260302.0", "@cloudflare/workerd-darwin-arm64": "1.20260302.0", "@cloudflare/workerd-linux-64": "1.20260302.0", "@cloudflare/workerd-linux-arm64": "1.20260302.0", "@cloudflare/workerd-windows-64": "1.20260302.0" }, "bin": { "workerd": "bin/workerd" } }, "sha512-FhNdC8cenMDllI6bTktFgxP5Bn5ZEnGtofgKipY6pW9jtq708D1DeGI6vGad78KQLBGaDwFy1eThjCoLYgFfog=="],
@@ -3423,6 +3440,16 @@
     "@cloudflare/vitest-pool-workers/wrangler/workerd/@cloudflare/workerd-linux-arm64": ["@cloudflare/workerd-linux-arm64@1.20260302.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-7M25noGI4WlSBOhrIaY8xZrnn87OQKtJg9YWAO2EFqGjF1Su5QXGaLlQVF4fAKbqTywbHnI8BAuIsIlUSNkhCg=="],
 
     "@cloudflare/vitest-pool-workers/wrangler/workerd/@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260302.0", "", { "os": "win32", "cpu": "x64" }, "sha512-jK1L3ADkiWxFzlqZTq2iHW1Bd2Nzu1fmMWCGZw4sMZ2W1B2WCm2wHwO2SX/py4BgylyEN3wuF+5zagbkNKht9A=="],
+
+    "@gitspace/inference-worker/miniflare/workerd/@cloudflare/workerd-darwin-64": ["@cloudflare/workerd-darwin-64@1.20260302.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-cGtxPByeVrgoqxbmd8qs631wuGwf8yTm/FY44dEW4HdoXrb5jhlE4oWYHFafedkQCvGjY1Vbs3puAiKnuMxTXQ=="],
+
+    "@gitspace/inference-worker/miniflare/workerd/@cloudflare/workerd-darwin-arm64": ["@cloudflare/workerd-darwin-arm64@1.20260302.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-WRGqV6RNXM3xoQblJJw1EHKwx9exyhB18cdnToSCUFPObFhk3fzMLoQh7S+nUHUpto6aUrXPVj6R/4G3UPjCxw=="],
+
+    "@gitspace/inference-worker/miniflare/workerd/@cloudflare/workerd-linux-64": ["@cloudflare/workerd-linux-64@1.20260302.0", "", { "os": "linux", "cpu": "x64" }, "sha512-gG423mtUjrmlQT+W2+KisLc6qcGcBLR+QcK5x1gje3bu/dF3oNiYuqY7o58A+sQk6IB849UC4UyNclo1RhP2xw=="],
+
+    "@gitspace/inference-worker/miniflare/workerd/@cloudflare/workerd-linux-arm64": ["@cloudflare/workerd-linux-arm64@1.20260302.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-7M25noGI4WlSBOhrIaY8xZrnn87OQKtJg9YWAO2EFqGjF1Su5QXGaLlQVF4fAKbqTywbHnI8BAuIsIlUSNkhCg=="],
+
+    "@gitspace/inference-worker/miniflare/workerd/@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260302.0", "", { "os": "win32", "cpu": "x64" }, "sha512-jK1L3ADkiWxFzlqZTq2iHW1Bd2Nzu1fmMWCGZw4sMZ2W1B2WCm2wHwO2SX/py4BgylyEN3wuF+5zagbkNKht9A=="],
 
     "@gitspace/runtime-workspace-do/miniflare/workerd/@cloudflare/workerd-darwin-64": ["@cloudflare/workerd-darwin-64@1.20260302.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-cGtxPByeVrgoqxbmd8qs631wuGwf8yTm/FY44dEW4HdoXrb5jhlE4oWYHFafedkQCvGjY1Vbs3puAiKnuMxTXQ=="],
 

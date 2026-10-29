@@ -69,7 +69,6 @@
     "PLATFORM_URL": "https://platform.test",
     "PLATFORM_SERVICE_NAME": "gitspace-platform-test",
     "PUBLIC_ASSETS_SERVICE": "public-assets-test",
-    "INFERENCE_SERVICE_NAME": "inference-test",
     "R2_PARENT_ACCESS_KEY_ID": "test-parent-access-key",
     "USAGE_REPORT_SCRIPTS": "usage-test-tenant",
     "WATCHDOG_EMAIL_FROM": "watchdog@alerts.example.test",

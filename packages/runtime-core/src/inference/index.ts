@@ -1,18 +1,15 @@
-import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type AuthResult, type AssistantMessageEvent, type AssistantMessageEventStream, type AssistantImages, type ClassifierResult } from '@earendil-works/pi-ai';
+import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type AuthResult, type AssistantMessage, type AssistantMessageEvent, type AssistantMessageEventStream, type AssistantImages, type ClassifierResult } from '@earendil-works/pi-ai';
 import { z } from 'zod';
-import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { isModelType } from '@earendil-works/pi-ai';
-import type { Credential, ImageContent, Message, ProviderResponse, TextContent } from '@earendil-works/pi-ai';
-import { applyProviderCatalog, limitContextWindows } from './catalog.js';
-import { createLegacyCloudProviders } from './providers/index.js';
+import type { Credential, ProviderResponse } from '@earendil-works/pi-ai';
+import { limitContextWindows } from './catalog.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
-import { admitProfileProviders, contextWindowLimits } from './admission.js';
+import { contextWindowLimits } from './admission.js';
+import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRunner, type InferenceAttempt } from './attempts.js';
 import { fitRequestImages, imageLimits } from './image-limits.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
-import { withPublishedCatalog } from './published-catalog.js';
 import { claudeCode } from './claude-code-request.js';
-import { parseImageReference, type ImageRequestTransport } from './image-requests.js';
 import type { RequestGate, RequestPermit } from './request-gate.js';
 export * from './selection.js';
 export * from './catalog.js';
@@ -24,6 +21,8 @@ export * from './published-catalog.js';
 export * from './vision.js';
 export * from './request-gate.js';
 export * from './image-requests.js';
+export * from './attempts.js';
+export { claudeCode, XxHash64, type ClaudeCodeTransport } from './claude-code-request.js';
 export { imageDimensions } from './image-limits.js';
 
 export type VaultModelsOptions = {
@@ -38,10 +37,9 @@ export type VaultModelsOptions = {
   /** The workspace object's gate, shared by all of its catalogs: every attempt holds a permit while it builds and
    * uploads its body. */
   gate: RequestGate;
-  /** The workspace's stored images: `send` sends a request carrying their references (the inference Worker); `load`
-   * returns one's bytes, for a provider that writes image bytes itself. Without them a request with stored images is
-   * refused. */
-  images?: { send: ImageRequestTransport; load(image: ImageContent): Promise<ImageContent> };
+  /** Where each request attempt is built and sent: in a workspace, the inference worker, so the object holds neither
+   * request bodies nor images; in this isolate by default (`createAttemptRunner`). */
+  run?: AttemptRunner;
 };
 /** What one admitted request adds to its profile's catalog. A pinned model resolves as it was admitted even after the
  * catalog changes or drops it. */
@@ -52,11 +50,10 @@ export type VaultModels = Models & {
    * models. Provider data, the published-catalog overlay and refreshes stay this catalog's. */
   scope(request: VaultModelsScope): Promise<Models>;
 };
-/** One request on one account. Its transport reports the provider's answer, error statuses included (pi's
- * `onResponse` misses a rejected Anthropic request), so a failure knows the provider's reset. It holds a gate permit
- * from before the provider builds its body until `fetch` settles; `release` frees it if the attempt ends sooner. */
+/** One request on one account. It reports the provider's answer, error statuses included (pi's `onResponse` misses a
+ * rejected Anthropic request), so a failure knows the provider's reset. It holds a gate permit from before its body is
+ * built until the provider answers (`fetch` settles, or the runner reports the response); `release` frees it sooner. */
 type Attempt = { fetch: typeof fetch; observe(response: ProviderResponse): void; release(): void; status?: number; headers: Readonly<Record<string, string>> };
-const noAmbient = { env: async () => undefined, fileExists: async () => false };
 const credentialHeader = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie|host|chatgpt-account-id)$/iu;
 
 function rejectOverrides(options: unknown): void {
@@ -66,29 +63,6 @@ function rejectOverrides(options: unknown): void {
     if (['apiKey', 'env', 'fetch', 'transformHeaders', 'credentials', 'profile', 'bearerToken', 'baseUrl', 'onPayload', 'client', 'region', 'project', 'location', 'endpoint'].includes(key)) throw new Error(`Profile-managed inference forbids request override ${key}`);
     if (key === 'headers' && value && typeof value === 'object' && Object.keys(value).some(name => credentialHeader.test(name))) throw new Error('Profile-managed inference forbids credential headers');
     if (key === 'providerOptions') rejectOverrides(value);
-  }
-}
-
-const cloudflareKeySchema = z.object({ token: z.string().min(1), accountId: z.string().min(1) });
-
-function requestAuth(resolved: ResolvedCredential): AuthResult {
-  const credential = resolved.credential;
-  if (credential.type === 'api_key') {
-    // Workers AI needs the account id in its URL; the key is stored as {"token","accountId"}.
-    if (resolved.provider !== 'cloudflare-workers-ai') return { auth: { apiKey: credential.key } };
-    let parsed: unknown;
-    try { parsed = JSON.parse(credential.key); } catch { throw new Error('Cloudflare Workers AI key must be {"token":"…","accountId":"…"}'); }
-    const key = cloudflareKeySchema.parse(parsed);
-    return { auth: { apiKey: key.token }, env: { CLOUDFLARE_ACCOUNT_ID: key.accountId } };
-  }
-  switch (resolved.provider) {
-    case 'google-gemini-cli': case 'google-antigravity':
-      if (!credential.projectId) throw new Error('Google OAuth account has no authorized project');
-      return { auth: { apiKey: JSON.stringify({ access: credential.access, projectId: credential.projectId }) } };
-    case 'openai-codex':
-      if (!credential.accountId) throw new Error('Codex OAuth account has no account identity');
-      return { auth: { apiKey: credential.access, headers: { 'ChatGPT-Account-ID': credential.accountId } } };
-    default: return { auth: { apiKey: credential.access, ...(credential.baseUrl ? { baseUrl: credential.baseUrl } : {}), ...(credential.headers ? { headers: credential.headers } : {}) } };
   }
 }
 
@@ -105,10 +79,10 @@ function subscriptionModel<T extends Api>(model: Model<T>): Model<T> {
 
 export async function createVaultModels(options: VaultModelsOptions): Promise<VaultModels> {
   const settings = options.settings ?? {};
-  const source = options.providers ?? [...builtinProviders().map(provider => withPublishedCatalog(provider)), ...createLegacyCloudProviders()];
-  const listed = admitProfileProviders(settings, source.map(applyProviderCatalog));
+  const listed = profileProviders(settings, options.providers ?? inferenceProviderSource());
+  const run = options.run ?? createAttemptRunner({ providers: () => listed });
   const catalog = (list: readonly Provider[]) => {
-    const models = createModels({ authContext: noAmbient, modelsStore: options.modelsStore });
+    const models = createModels({ authContext: noAmbientAuth, modelsStore: options.modelsStore });
     for (const provider of list) models.setProvider({ ...provider, auth: { apiKey: { name: 'Public catalog', resolve: async () => ({ auth: { apiKey: 'catalog-only' }, source: 'Public catalog' }) } } });
     return models;
   };
@@ -148,25 +122,9 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
   }
   /** The catalog as one request uses it: `list`'s models, dispatched with `pins` and Claude Code's request shape. */
   async function view(list: readonly Provider[], pins: CredentialPins, fastMode: boolean): Promise<Models> {
-    const claude = await claudeCode(options.profileId, options.images?.send);
-    /** The context a request sends: fitted to the model's image limits, and for a provider that writes image bytes
-     * itself, with its stored images' bytes loaded in place of their references. */
-    async function requestContext(model: Model<Api>, context: Context): Promise<Context> {
-      const limits = imageLimits(model);
-      const fitted = fitRequestImages(context, limits);
-      if (!limits.storedInline) return fitted;
-      const loaded = (content: Array<TextContent | ImageContent>) => Promise.all(content.map(async part => {
-        if (part.type !== 'image' || !parseImageReference(part.data)) return part;
-        if (!options.images) throw new Error(`${model.provider} needs this request's stored images loaded, and no image store is available`);
-        return options.images.load(part);
-      }));
-      const messages = await Promise.all(fitted.messages.map(async (message): Promise<Message> => {
-        if (message.role === 'toolResult') return { ...message, content: await loaded(message.content) };
-        if (message.role === 'user' && typeof message.content !== 'string') return { ...message, content: await loaded(message.content) };
-        return message;
-      }));
-      return { ...fitted, messages };
-    }
+    // One Claude Code session per view, for every attempt it makes wherever it runs.
+    const session = { profileId: options.profileId, sessionId: crypto.randomUUID() };
+    const claude = await claudeCode(session);
     const cloudFetch = claude.fetch;
     const providerById = new Map(list.map(provider => [provider.id, provider]));
     /** Best-effort, as pi's registry: a provider whose listing throws lists nothing. */
@@ -187,15 +145,19 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       if (model.provider === 'google-vertex') throw new Error('Ambient Google Vertex credentials are not admitted by inference profiles');
       if (model.headers && Object.keys(model.headers).some(name => credentialHeader.test(name))) throw new Error('Profile catalog contains credential headers');
     }
-    /** Each dispatch gets its own Models/auth object; concurrent accounts never share a credential slot. */
-    async function bound(providerId: string, credentialId: string, forceRefresh = false, signal?: AbortSignal) {
+    async function resolveCredential(providerId: string, credentialId: string, forceRefresh = false, signal?: AbortSignal): Promise<ResolvedCredential> {
       signal?.throwIfAborted();
       const resolved = await options.vault.resolve({ profileId: options.profileId, credentialId, forceRefresh, ...(signal ? { signal } : {}) });
       if (resolved.id !== credentialId || resolved.provider !== providerId) throw new Error('Vault returned a different account scope');
+      return resolved;
+    }
+    /** Each dispatch gets its own Models/auth object; concurrent accounts never share a credential slot. */
+    async function bound(providerId: string, credentialId: string, forceRefresh = false, signal?: AbortSignal) {
+      const resolved = await resolveCredential(providerId, credentialId, forceRefresh, signal);
       const provider = providerById.get(providerId);
       if (!provider) throw new Error(`Unknown provider ${providerId}`);
       const resolvedAuth = requestAuth(resolved);
-      const models = createModels({ authContext: noAmbient, modelsStore: options.modelsStore });
+      const models = createModels({ authContext: noAmbientAuth, modelsStore: options.modelsStore });
       models.setProvider({ ...(fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal }) => { signal.throwIfAborted(); return { ...resolvedAuth, source: 'Profile vault' }; } } } });
       return models;
     }
@@ -223,14 +185,14 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       const until = kind === 'rotate' ? providerResetAt(attempt.headers, Date.now()) : undefined;
       return options.vault.recordFailure({ profileId: options.profileId, credentialId: candidate.id, kind, reason, ...(until === undefined ? {} : { until }) });
     }
-    async function* streamAttempts(model: AnyModel, invoke: (models: Models, attempt: Attempt, subscription: boolean) => AssistantMessageEventStream, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
+    async function* streamAttempts(model: AnyModel, invoke: (credential: ResolvedCredential, attempt: Attempt, subscription: boolean) => AsyncIterable<AssistantMessageEvent>, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
       canonical(model);
       const candidates = await orderedAccounts({ ...options, provider: model.provider });
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index]!;
         for (let refresh = 0; refresh < 2; refresh++) {
-          let models: Models;
-          try { models = await bound(model.provider, candidate.id, refresh === 1, signal); }
+          let credential: ResolvedCredential;
+          try { credential = await resolveCredential(model.provider, candidate.id, refresh === 1, signal); }
           catch (error) {
             if (refresh === 1 && index < candidates.length - 1 && !signal?.aborted) break;
             throw error;
@@ -241,7 +203,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           let failure: Extract<AssistantMessageEvent, { type: 'error' }> | undefined;
           const deferred: AssistantMessageEvent[] = [];
           try {
-            for await (const event of invoke(models, attempt, candidate.type === 'oauth')) {
+            for await (const event of invoke(credential, attempt, candidate.type === 'oauth')) {
               if (event.type === 'error') { failure = event; break; }
               if (event.type === 'start') { deferred.push(event); continue; }
               if (!published) { for (const start of deferred) yield start; deferred.length = 0; published = true; }
@@ -307,6 +269,29 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
         return [...chat.filter(model => keptChat.has(model)), ...models.filter(model => !isModelType(model, 'chat'))];
       });
     }
+    /** One attempt of a streamed request, on the account `streamAttempts` chose: its images fitted to the model's limits
+     * by reference, built and sent by the runner. The gate permit is held until the provider answers. */
+    function attempted(method: InferenceAttempt['method'], model: Model<Api>, context: Context, request?: { signal?: AbortSignal; onResponse?: (response: ProviderResponse, model: Model<Api>) => unknown }) {
+      const fitted = fitRequestImages(context, imageLimits(model));
+      return async function* (credential: ResolvedCredential, attempt: Attempt, subscription: boolean): AsyncGenerator<AssistantMessageEvent> {
+        const sent: InferenceAttempt = { method, model: subscription ? subscriptionModel(model) : model, context: fitted, options: attemptOptions(request), credential, settings, fastMode, claude: session };
+        let ended = false;
+        for await (const event of run(sent, request?.signal)) {
+          attempt.release();
+          if (event.type !== 'response') { ended = event.type === 'done' || event.type === 'error'; yield event; continue; }
+          const response = { status: event.status, headers: event.headers };
+          attempt.observe(response);
+          await request?.onResponse?.(response, model);
+        }
+        // A stream cancelled by an abort, or cut off with its worker, ends as a provider's would: with an error event, so
+        // the request settles instead of waiting for an answer that cannot come.
+        if (!ended) {
+          const aborted = request?.signal?.aborted === true;
+          const message: AssistantMessage = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, stopReason: aborted ? 'aborted' : 'error', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, errorMessage: aborted ? 'Request was aborted' : 'The inference worker ended the request without an answer' };
+          yield { type: 'error', reason: aborted ? 'aborted' : 'error', error: message };
+        }
+      };
+    }
     const facade: Models = {
       getProviders: () => list.map(provider => ({ ...provider, auth: { apiKey: { name: 'Profile vault', resolve: async () => facade.getAuth(provider.id) } }, stream<T extends Api>(model: Model<T>, context: TranscriptContext, request?: ApiStreamOptions<T>) { rejectOverrides(request); return facade.stream<T>(model, context, request === undefined ? undefined : Object.assign({}, request, { transformHeaders: undefined })); }, streamSimple: (model, context, request) => facade.streamSimple(model, context, request), generateImages: (model, context, request) => facade.generateImages(model, context, request), classify: (model, context, request) => facade.classify(model, context, request), fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request), cancelDeferred: (model, handle, request) => facade.cancelDeferred(model, handle, request) })),
       getProvider: id => facade.getProviders().find(provider => provider.id === id),
@@ -324,17 +309,10 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       logout: async () => { throw new Error('Logout requires the signed profile management endpoint'); },
       refresh,
       stream<T extends Api>(model: Model<T>, context: Context, request?: ModelsApiStreamOptions<T>) {
-        return lazyStream(model, async () => {
-          rejectOverrides(request);
-          const fitted = await requestContext(model, context);
-          return streamAttempts(model, (models, attempt, subscription) => models.stream<T>(subscription ? subscriptionModel(model) : model, fitted, Object.assign({}, request, {
-            fetch: attempt.fetch, onPayload: claude.onPayload,
-            onResponse: async (response: ProviderResponse, selected: Model<Api>) => { attempt.observe(response); await request?.onResponse?.(response, selected); },
-          })), request?.signal);
-        });
+        return lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, attempted('stream', model, context, request), request?.signal); });
       },
       complete: (model, context, request) => facade.stream(model, context, request).result(),
-      streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); const fitted = await requestContext(model, context); return streamAttempts(model, (models, attempt, subscription) => models.streamSimple(subscription ? subscriptionModel(model) : model, fitted, { ...request, fetch: attempt.fetch, onPayload: claude.onPayload, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); }),
+      streamSimple: (model, context, request) => lazyStream(model, async () => { rejectOverrides(request); return streamAttempts(model, attempted('streamSimple', model, context, request), request?.signal); }),
       completeSimple: (model, context, request) => facade.streamSimple(model, context, request).result(),
       streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
       fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),

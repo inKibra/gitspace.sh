@@ -22,6 +22,7 @@ import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { remoteDefaultBranch } from './cloud-project.js';
 import { createRuntimeImages } from './runtime-images.js';
+import { inferenceWorkerRunner } from './inference-runner.js';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the origin's history,
  * imported natively from a public origin or streamed with installation-token reads from a covered one. */
@@ -92,7 +93,7 @@ export async function createAccountWorkspaceRuntime(
   const tasksTable = ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").toArray().length > 0;
   const retrying = tasksTable ? ctx.storage.sql.exec<{ conversation_id: number }>("SELECT DISTINCT conversation_id FROM tasks WHERE status != 'terminal' AND background = 0").toArray().map(row => String(row.conversation_id)) : [];
   const images = await createRuntimeImages(env, identity.workspaceId);
-  const inference = await createCloudRuntimeInference(ctx, env, identity, retrying, { send: images.send, load: images.load });
+  const inference = await createCloudRuntimeInference(ctx, env, identity, retrying, inferenceWorkerRunner(ctx, env, identity.workspaceId));
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
   const judge = async (conversationId: string, state: string, questions: Record<string, string>) => {

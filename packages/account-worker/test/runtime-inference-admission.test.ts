@@ -7,10 +7,10 @@ import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durab
 import { createModels } from '@earendil-works/pi-ai';
 import { createConversationLifecycle } from '@gitspace/runtime-core';
 import { createSessionControls, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
-import type { VaultModelsOptions } from '@gitspace/runtime-core/inference';
+import { createAttemptRunner } from '@gitspace/runtime-core/inference';
 
-/** No request in these tests carries a stored image. */
-const noImages: NonNullable<VaultModelsOptions['images']> = { send: async () => { throw new Error('No request here carries a stored image'); }, load: async () => { throw new Error('No request here carries a stored image'); } };
+/** No test here sends a model request; attempts would run in this isolate. */
+const noImages = createAttemptRunner();
 
 async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInference'> & { session: Pick<SessionControlServices, 'catalog' | 'reload'> }) {
   const storage = new MemoryStorage();

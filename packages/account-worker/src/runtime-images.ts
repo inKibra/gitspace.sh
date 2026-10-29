@@ -5,14 +5,13 @@
  *
  * - `store` writes an admitted image and returns its block naming the stored bytes; `load` returns a stored image's
  *   block with its bytes again, for a codemode script.
- * - `send` is the inference transport: the inference Worker streams the request, reading each image through `read`,
- *   which serves this workspace's images only.
+ * - Model requests read images through `ImageReader` in the inference worker (`inference-runner.ts`), never here.
  * - `url` resolves a transcript row's stored image to `/images/…`, a URL signed for a window of whole hours: the same
  *   for one image all hour, so transcript content read in parts stays one text, and valid two to three hours.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { ImageContent } from '@earendil-works/pi-ai';
-import { imageReference, parseImageReference, type ImageReader, type ImageRequest } from '@gitspace/runtime-core/image-requests';
+import { imageReference, parseImageReference } from '@gitspace/runtime-core/image-requests';
 import { imageDimensions } from '@gitspace/runtime-core/inference';
 import { DriveFiles } from './drive-files.js';
 import { serveArtifactGrant } from './artifact-file-url.js';
@@ -27,13 +26,6 @@ export async function createRuntimeImages(env: Env, workspaceId: string) {
   const files = new DriveFiles(tenantStore(env), env.ACCOUNT_ID);
   const scopeId = `space:${workspaceId}`;
   const urlKey = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).scopeKey(URL_KEY_SCOPE);
-  const read: ImageReader = async reference => {
-    const image = parseImageReference(reference);
-    if (!image || image.workspaceId !== workspaceId) throw new Error(`Image ${reference} is not this workspace's`);
-    const object = await files.get(scopeId, { blobHash: `sha256:${image.sha256}`, size: image.size });
-    if (!object) throw new Error(`Image ${reference} is not stored`);
-    return object.body;
-  };
   return {
     async store(image: ImageContent): Promise<ImageContent> {
       if (parseImageReference(image.data)) return image;
@@ -50,7 +42,6 @@ export async function createRuntimeImages(env: Env, workspaceId: string) {
       if (!bytes) throw new Error(`Image ${image.data} is not stored`);
       return { ...image, data: Buffer.from(bytes).toString('base64') };
     },
-    send: (request: ImageRequest): Promise<Response> => env.INFERENCE.send(request, read),
     /** `stored` is `<reference>;<mimeType>`, as a transcript row names a stored image; one this workspace cannot
      * serve stays as it is. */
     url(stored: string): string {

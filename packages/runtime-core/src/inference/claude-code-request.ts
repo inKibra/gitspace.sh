@@ -275,11 +275,13 @@ function requestShape(body: string): JsonShape {
 }
 type JsonShape = { [key: string]: string | number | boolean | Record<string, number> | JsonShape[] };
 /** Transport for admitted credentials: `fetch` never follows redirects, and with `onPayload` Claude subscription
- * requests go out as Claude Code's. A request carrying stored image references goes through `images` (the inference
- * Worker), which writes the images in, and for a subscription request attests the result; any other request is sent
- * from here. */
-export async function claudeCode(profileId: string, images?: ImageRequestTransport): Promise<{ fetch: typeof fetch; onPayload(payload: unknown, model: Model<Api>): Promise<unknown> }> {
-  const identity = { deviceId: await sha256Hex(`gitspace-claude-device-v1:${profileId}`), sessionId: crypto.randomUUID() };
+ * requests go out as Claude Code's. */
+export interface ClaudeCodeTransport { fetch: typeof fetch; onPayload(payload: unknown, model: Model<Api>): Promise<unknown> }
+/** `identity` is the Claude Code session requests are shaped as: the device is the profile's, the session the caller's.
+ * A request carrying stored image references goes through `images`, which writes the images in and, for a subscription
+ * request, attests the result; any other request is sent from here. */
+export async function claudeCode(session: { profileId: string; sessionId: string }, images?: ImageRequestTransport): Promise<ClaudeCodeTransport> {
+  const identity = { deviceId: await sha256Hex(`gitspace-claude-device-v1:${session.profileId}`), sessionId: session.sessionId };
   return {
     onPayload: (payload, model) => shapePayload(payload, model, identity),
     async fetch(input, init) {

@@ -121,7 +121,6 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
       { name: 'TENANT', source: 'tenant-id' },
       { name: 'PROVIDER_TOKEN', source: 'provider-token' },
       { name: 'STATIC_FILES', source: 'public-assets' },
-      { name: 'INFERENCE', source: 'inference-service' },
       // Named by a release built by newer code than this deployer.
       { name: 'FROM_A_NEWER_RELEASE', source: 'source-from-a-newer-release' },
     ],
@@ -448,7 +447,6 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
         { type: 'plain_text', name: 'TENANT', text: 'bravo' },
         { type: 'secret_text', name: 'PROVIDER_TOKEN', text: token },
         { type: 'service', name: 'STATIC_FILES', service: 'public-assets-test' },
-        { type: 'service', name: 'INFERENCE', service: 'inference-test', entrypoint: 'InferenceEntrypoint' },
       ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
     });

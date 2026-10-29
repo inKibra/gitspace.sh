@@ -13,7 +13,7 @@
   ],
   "worker_loaders": [{ "binding": "CODEMODE_LOADER" }],
   // The browser runner module is generated, not committed (packages/browser-runner).
-  "build": { "command": "bun ../browser-runner/src/write.ts src/generated/browser-runner.js" },
+  "build": { "command": "bun ../browser-runner/src/write.ts src/generated/browser-runner.js && bun ../inference-worker/src/write.ts src/generated/inference-worker.js" },
   "browser": { "binding": "BROWSER" },
   "durable_objects": {
     "bindings": [

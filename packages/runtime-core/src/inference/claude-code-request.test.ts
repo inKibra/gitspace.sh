@@ -127,7 +127,7 @@ async function serialize(transport: { onPayload(payload: unknown, model: Model<A
 }
 
 async function send(body: Record<string, unknown>, headers: Record<string, string> = oauth) {
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   return transport.fetch(MESSAGES, await serialize(transport, body, headers));
 }
 
@@ -148,7 +148,7 @@ it('hashes input fed in pieces as XXH64 of the whole, wherever it is split', () 
 });
 
 it('streams a subscription body in bounded chunks with its Content-Length, byte for byte as attesting it whole, on every attempt', async () => {
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   const sent = network();
   // Emoji and multi-byte characters lie across the chunk edges, each shift putting a different one on them.
   for (let shift = 0; shift < 5; shift++) {
@@ -170,7 +170,7 @@ it('streams a subscription body in bounded chunks with its Content-Length, byte 
 });
 
 it('attests in the billing block when a chunk edge cuts through it or through a quoted placeholder', async () => {
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   const sent = network();
   const marked = payload();
   marked.messages[0]!.content[0]!.text = 'MARK';
@@ -198,7 +198,7 @@ it('sends the body through a FixedLengthStream of its byte length where Workers 
       lengths.push(expected);
     }
   });
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   const sent = network();
   const body = payload();
   body.messages[0]!.content[0]!.text = '😀é中'.repeat(ENCODE_UNITS);
@@ -216,7 +216,7 @@ it('sends a pi-ai Claude subscription request as the SDK serialized the shaped p
   models.setProvider({ ...provider, auth: { apiKey: { name: 'Subscription token', resolve: async () => ({ auth: { apiKey: 'sk-ant-oat01-x' } }) } } });
   const model = models.getModel('anthropic', 'claude-opus-5-5');
   if (!model) throw new Error('Anthropic catalog model missing');
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   const shaped: unknown[] = [];
   const sent = network(() => new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', { headers: { 'content-type': 'text/event-stream' } }));
   await models.streamSimple(model, { systemPrompt: 'Project instructions', messages: [{ role: 'user', content: user, timestamp: 1 }] }, {
@@ -304,7 +304,7 @@ it('shapes requests holding blocks it does not touch, whatever their fields, and
 });
 
 it('leaves API-key and other providers untouched', async () => {
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   expect(await transport.onPayload(payload(), { ...anthropic, api: 'openai-responses' })).toBeUndefined();
   const sent = network();
   const body = JSON.stringify(payload());
@@ -355,7 +355,7 @@ it('sends a subscription request with stored images byte for byte as the same re
   };
   const sent = network();
   const attests: boolean[] = [];
-  const transport = await claudeCode('profile', worker(read, attests));
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() }, worker(read, attests));
   await transport.fetch(MESSAGES, await serialize(transport, body(index => references[index]!)));
   const inline = await serialize(transport, body(index => Buffer.from(images[index]!).toString('base64')));
   expect(attests).toEqual([true]);
@@ -369,7 +369,7 @@ it('sends any other request with stored images, OpenAI data URLs included, as th
   const body = (data: string) => JSON.stringify({ input: [{ role: 'user', content: [{ type: 'input_image', image_url: `data:image/png;base64,${data}` }, { type: 'input_text', text: `see ${references[0]}` }] }] });
   const sent = network();
   const attests: boolean[] = [];
-  const transport = await claudeCode('profile', worker(read, attests));
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() }, worker(read, attests));
   await transport.fetch('https://api.openai.com/v1/responses', { method: 'POST', headers: { authorization: 'Bearer sk-proj' }, body: body(references[0]!) });
   expect(attests).toEqual([false]);
   expect(sent[0]!.body).toBe(body(Buffer.from(images[0]!).toString('base64')));
@@ -378,7 +378,7 @@ it('sends any other request with stored images, OpenAI data URLs included, as th
 it('refuses a request carrying stored images where no inference Worker can send it, as Anthropic would', async () => {
   const { references } = stored([noise(3, 5)]);
   const sent = network();
-  const transport = await claudeCode('profile');
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() });
   const body = payload();
   body.messages[0]!.content.push(imageBlock(references[0]!));
   const response = await transport.fetch(MESSAGES, await serialize(transport, body));
@@ -400,7 +400,7 @@ it('stops waiting for the inference Worker the moment its request is aborted, an
   const { references } = stored([noise(3, 7)]);
   const late = Promise.withResolvers<Response>();
   let cancelled = false;
-  const transport = await claudeCode('profile', async () => late.promise);
+  const transport = await claudeCode({ profileId: 'profile', sessionId: crypto.randomUUID() }, async () => late.promise);
   const body = payload();
   body.messages[0]!.content.push(imageBlock(references[0]!));
   const controller = new AbortController();

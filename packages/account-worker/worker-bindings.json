@@ -43,10 +43,6 @@
     "source": "platform-service"
   },
   {
-    "name": "INFERENCE",
-    "source": "inference-service"
-  },
-  {
     "name": "PLATFORM_TOKEN",
     "source": "provider-token"
   },

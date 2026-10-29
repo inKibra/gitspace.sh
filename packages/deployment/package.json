@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@gitspace/browser-runner": "workspace:*",
+    "@gitspace/inference-worker": "workspace:*",
     "@aws-sdk/client-s3": "3.1132.0",
     "@gitspace/protocol": "workspace:*",
     "@noble/curves": "^2.2.0",

@@ -1,10 +1,12 @@
 import { env } from 'cloudflare:test';
+import { exports } from 'cloudflare:workers';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { afterEach, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { createRuntimeImages } from '../src/runtime-images.js';
+import { readWorkspaceImage } from '../src/image-reader.js';
 
 const origin = `https://${env.TENANT_ID}.gitspace.sh`;
 const get = (path: string) => worker.fetch(new Request(new URL(path, origin)), env);
@@ -41,4 +43,14 @@ it('stores an image once by its bytes, with the dimensions its header declares, 
 
   vi.setSystemTime(Date.UTC(2026, 9, 29, 15, 0));
   expect((await get(url)).status).toBe(404);
+});
+
+it('reads a workspace\'s stored image through its reader', async () => {
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)), vaultKey: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))) });
+  const images = await createRuntimeImages(env, 'ws-reader');
+  const stored = await images.store({ type: 'image', mimeType: 'image/png', data: Buffer.from(png).toString('base64') });
+  const reader = exports.ImageReader({ props: { workspaceId: 'ws-reader' } });
+  expect(new Uint8Array(await new Response(await reader.read(stored.data)).arrayBuffer())).toEqual(png);
+  // A reader made for another workspace refuses the reference, whatever it names.
+  await expect(readWorkspaceImage(env, 'ws-other', stored.data)).rejects.toThrow("is not this workspace's");
 });

@@ -68,6 +68,7 @@ export {
   UserSettingsDO, UserSkillsDO, UserStorageDO,
 } from './application.js';
 export { BrowserSessionCdp, BrowserSessionDO, BrowserSessionFiles } from './browser-session.js';
+export { ImageReader } from './image-reader.js';
 export { StorageMigrationDO } from './storage-migration.js';
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';

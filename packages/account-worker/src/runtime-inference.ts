@@ -6,7 +6,7 @@ import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionCont
 import {
   createVaultModels, createRunModelsRouter, createDurableModelsStore, createRequestGate,
   resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
-  type CredentialPins, type VaultModels, type VaultModelsOptions,
+  type AttemptRunner, type CredentialPins, type VaultModels,
 } from '@gitspace/runtime-core/inference';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
@@ -18,7 +18,7 @@ const key = (kind: string, ...parts: string[]) => `runtime-inference:${JSON.stri
 
 /** Only the Workspace DO calls this factory; no bearer or refresh token enters runtime state. `retrying` names the
  * conversations whose generation or compaction a reset interrupted and pi retries when the runtime opens. */
-export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, retrying: readonly string[], images: NonNullable<VaultModelsOptions['images']>) {
+export async function createCloudRuntimeInference(ctx: DurableObjectState, env: Env, identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>, retrying: readonly string[], run: AttemptRunner) {
   // A stub per call: this outlives any one, and one that saw an error stays broken.
   const vault = () => env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const scopes = new WeakMap<AbortSignal, { admission: Admission; models: Models }>();
@@ -41,7 +41,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         write: (name, value) => ctx.storage.put(key('catalog', name), value),
         delete: async name => { await ctx.storage.delete(key('catalog', name)); },
       });
-      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: store, pins: pinsFor(profile.id, 'catalog'), gate, images, vault: {
+      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: store, pins: pinsFor(profile.id, 'catalog'), gate, run, vault: {
         list: (profileId, provider) => vault().cloudCredentialAccounts(profileId, provider),
         resolve: input => { input.signal?.throwIfAborted(); return vault().cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
         recordFailure: input => vault().cloudCredentialFailure(input),

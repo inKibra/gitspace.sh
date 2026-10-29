@@ -11,6 +11,7 @@ import { BUN_VERSION, NATIVE_PINS } from './native-pins.js';
 import { PORTABLE_MANIFEST_FILE, portableManifestSchema, type PortableFile } from '@gitspace/protocol/machine-release';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 import { writeBrowserRunner } from '@gitspace/browser-runner';
+import { writeInferenceWorker } from '@gitspace/inference-worker';
 
 /**
  * Builders for the three account-owned GitSpace release targets. The
@@ -106,6 +107,8 @@ async function buildWorkerEntrypoint(entrypoint: string, sha: string, outDir: st
 export async function buildWorkerRelease(root: string, sha: string, outDir: string): Promise<BuiltArtifact> {
   // Generated for each build, never committed: the browser runner module the session object loads for scripts.
   await writeBrowserRunner(join(root, 'packages/account-worker/src/generated/browser-runner.js'));
+  // The inference worker the workspace objects load for model requests (packages/inference-worker).
+  await writeInferenceWorker(join(root, 'packages/account-worker/src/generated/inference-worker.js'));
   return buildWorkerEntrypoint(join(root, 'packages/account-worker/src/index.ts'), sha, outDir);
 }
 

@@ -4,14 +4,21 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/build.ts",
+    "./worker": "./src/index.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "deploy": "wrangler deploy --config wrangler.jsonc"
+    "test": "vitest run"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "1.3.0",
     "@gitspace/runtime-core": "workspace:*",
+    "esbuild": "^0.28.1",
     "xxhash-wasm": "1.1.0"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260302.0",
+    "vitest": "^4.1.11"
   }
 }

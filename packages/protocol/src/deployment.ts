@@ -76,7 +76,7 @@ export const workerBundleSchema = z.object({
 
 /** Worker metadata the platform needs to upload the worker; derived from the workspace's wrangler config. */
 /** The resource sources this code binds. A release names only these when it is built. */
-export const resourceSourceSchema = z.enum(['object-storage', 'object-storage-name', 'artifacts', 'worker-loader', 'browser-rendering', 'workers-ai', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'inference-service', 'literal']);
+export const resourceSourceSchema = z.enum(['object-storage', 'object-storage-name', 'artifacts', 'worker-loader', 'browser-rendering', 'workers-ai', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']);
 export type ResourceSource = z.infer<typeof resourceSourceSchema>;
 
 export const workerReleaseMetadataSchema = z.object({
