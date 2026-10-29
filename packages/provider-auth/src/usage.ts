@@ -55,17 +55,6 @@ export async function collectUsage(credential: StoredOAuthCredential, fetcher: t
         report.limits.push(limit);
       }
     }
-  } else if (credential.provider === 'cursor') {
-    const bucket = z.object({ numRequests: numeric.optional(), used: numeric.optional(), amountUsed: numeric.optional(), usdUsed: numeric.optional(), maxRequestUsage: numeric.optional(), limit: numeric.optional(), amountLimit: numeric.optional(), usdLimit: numeric.optional() });
-    const data = await payload(credential, 'https://api2.cursor.sh/auth/usage', z.record(z.string(), z.unknown()), fetcher);
-    const reset = z.union([z.string(), z.number()]).safeParse(data.billingCycleEnd ?? data.endOfMonth ?? data.resetsAt ?? data.nextReset);
-    for (const [id, raw] of Object.entries(data)) {
-      const parsed = bucket.safeParse(raw); if (!parsed.success) continue;
-      const value = parsed.data; const used = value.numRequests ?? value.used ?? value.amountUsed ?? value.usdUsed; const limit = value.maxRequestUsage ?? value.limit ?? value.amountLimit ?? value.usdLimit;
-      if (used === undefined) continue;
-      const remaining = limit === undefined ? null : Math.max(0, limit - used);
-      report.limits.push({ id, label: id, scope: 'account', window: 'Monthly', unit: value.usdUsed !== undefined ? 'usd' : 'requests', used, limit: limit ?? null, remaining, remainingFraction: limit !== undefined && limit > 0 && remaining !== null ? Math.min(1, remaining / limit) : null, resetsAt: reset.success ? timestamp(reset.data) : null, status: limit === undefined ? 'unknown' : used >= limit ? 'exhausted' : 'ok' });
-    }
   } else if (credential.provider === 'google-antigravity') {
     if (!credential.projectId) throw new ProviderUsageError(credential.provider, 'invalid-response');
     const quota = z.object({ remainingFraction: numeric.optional(), resetTime: z.string().optional(), windowId: z.string().optional(), windowLabel: z.string().optional() });

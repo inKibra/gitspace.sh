@@ -25,12 +25,12 @@ const clients = {
     client_secret: atob('R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY='),
   },
 } as const satisfies {
-  [Provider in Exclude<LoginState['provider'], 'cursor'>]: Provider extends 'google-gemini-cli' | 'google-antigravity'
+  [Provider in LoginState['provider']]: Provider extends 'google-gemini-cli' | 'google-antigravity'
     ? { client_id: string; client_secret: string }
     : { client_id: string };
 };
 
-export function oauthClient(provider: Exclude<WorkerOAuthProvider, 'cursor'>): { client_id: string } & Record<string, string> {
+export function oauthClient(provider: WorkerOAuthProvider): { client_id: string } & Record<string, string> {
   switch (provider) {
     case 'anthropic':
     case 'openai-codex':

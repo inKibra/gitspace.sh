@@ -31,9 +31,13 @@ flowchart LR
 - **What stays in the workspace object:** pi-durable (agent loop, history, tools, compaction), the model catalog as
   data, account choice, credential pins, failover between accounts, the request gate, durable retries, and fitting
   images to the model's limits (references carry size and dimensions, so no bytes are needed).
-- **What moves to the inference worker:** everything that builds and sends one request: pi-ai providers, Claude Code
-  shaping and its billing attestation, and the vision fallback (a model request like any other). `generate_image`
-  brings image bytes in, so it moves with the ingest phase below.
+- **What moves to the inference worker:** every chat request (`stream`, `streamSimple`), which builds and sends one
+  request: pi-ai providers, Claude Code shaping and its billing attestation, and the vision fallback (a model request
+  like any other).
+- **What stays in the workspace object:** `generate_image` and `classify` (`generateImages`, `classify`). One call
+  sends a prompt and at most a few images and gets one image or a short answer back, unlike a chat request carrying a
+  whole context's images. `generate_image` loads stored input images (`images.load`) and stores its output as a
+  reference.
 
 ## The attempt boundary
 
@@ -69,9 +73,8 @@ One model request attempt is one RPC call, `run(attempt)`, on the loaded worker'
     reference for a valid-base64 stand-in that names it (`restoreStandIns`); the SDK base64-encodes the bytes back
     unchanged into its JSON body and sends it through the global `fetch`, where the wrapper turns the stand-ins back
     into references and streams the images in. pi-ai's Bedrock code, auth and reply parsing are used as they are.
-  - **Cursor** stores images in content-addressed protobuf blobs of its conversation state. For now the worker reads a
-    Cursor request's images into its own isolate (never into the workspace object); streaming raw bytes into those
-    blobs needs Cursor's blob store reworked.
+- **Cursor** was removed (2026-10-29): its own provider, sign-in, token refresh and usage. Its protobuf requests carried
+  images inside content-addressed history blobs, which the streaming transport cannot reach, and nobody used it.
 
 ## Ingest (second phase)
 
@@ -102,13 +105,13 @@ From a Durable Object in a throwaway dispatch namespace, as the workspace object
 - Built module, live (2026-10-29), from a Durable Object loading the exact generated module with images read from
   R2 through a namespaced reader: Anthropic subscription with 2 images 200 "Red, Blue" in 3.9 s; Bedrock through the
   AWS SDK with stand-ins, 2 images 200 "Red, blue" in 2.7 s, and 6.4 MB of images 200 and correct in 5.3 s.
-- Not run live: OpenAI, Google, Cursor (no usable credential here).
+- Not run live: OpenAI, Google (no usable credential here).
 
 ## Test matrix before cutover
 
 `packages/inference-worker/test/providers.test.ts` runs the built module in workerd with a fake reader and fake
 upstreams, and checks the exact bytes each provider sends: Claude subscription (images written in, attestation over
-the expanded body), OpenAI, Google, Gemini CLI, Bedrock through the AWS SDK, Cursor's protobuf; another workspace's
+the expanded body), OpenAI, Google, Gemini CLI, Bedrock through the AWS SDK; another workspace's
 reference is refused before anything is sent. `runtime-core` tests the attempt codec, cancel and the stand-ins;
 `account-worker` tests the real `ImageReader`.
 
@@ -117,8 +120,8 @@ reference is refused before anything is sent. `runtime-core` tests the attempt c
 1. **Platform ignores resource sources it does not know** (instead of refusing the release), so removing
    `inference-service` later cannot break restoring older releases.
 2. **Inference worker**: the attempt boundary, the loaded worker with streaming expansion, `ImageReader`, Bedrock
-   stand-ins, the global-`fetch` path for Google, Cursor's interim.
-3. **Cutover** in one release: the workspace uses the inference worker for every request; delete the platform
+   stand-ins, the global-`fetch` path for Google; Cursor removed.
+3. **Cutover** in one release: the workspace uses the inference worker for every chat request; delete the platform
    `inference-service` source and `INFERENCE_SERVICE_NAME`, the deployed `gitspace-inference-rebuild-20260913` script
    (after the release), the image-bytes provider list (`BYTE_IMAGE_APIS`, `storedInline`) and `images.load` in the
    models layer.

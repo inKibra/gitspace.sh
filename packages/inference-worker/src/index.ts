@@ -64,7 +64,7 @@ export class Inference extends WorkerEntrypoint<InferenceWorkerEnv> {
     if (!runner) {
       // One loaded worker serves one workspace, so its reader is the same for every attempt.
       interceptStandIns(this.env);
-      runner = createAttemptRunner({ images: { transport: transport(this.env), read: reference => this.env.READER.read(reference) } });
+      runner = createAttemptRunner({ imageTransport: transport(this.env) });
     }
     const run = runner;
     return attemptEventStream(signal => run(attempt, signal));

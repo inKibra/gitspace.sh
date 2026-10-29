@@ -34,26 +34,7 @@ beforeAll(async () => {
         compatibilityDate: '2026-02-01', compatibilityFlags: ['nodejs_compat'],
         serviceBindings: { READER: { name: 'reader', entrypoint: 'Reader' } },
         outboundService: async request => {
-          // A body is read until it ends or goes quiet: Cursor's request stream stays open for the whole turn.
-          const reader = request.body?.getReader();
-          const chunks: Uint8Array[] = [];
-          for (;;) {
-            if (!reader) break;
-            const next = await Promise.race([reader.read(), new Promise<null>(resolve => setTimeout(() => resolve(null), 300))]);
-            if (next === null || next.done) break;
-            chunks.push(next.value);
-          }
-          void reader?.cancel().catch(() => undefined);
-          sent.push({ url: request.url, headers: Object.fromEntries(request.headers), body: Uint8Array.from(chunks.flatMap(chunk => [...chunk])) });
-          if (request.url.includes('AgentService/Run')) {
-            // Cursor speaks Connect: a refused turn ends with an end-of-stream frame (flag 2) carrying the error.
-            const end = new TextEncoder().encode(JSON.stringify({ error: { code: 'invalid_argument', message: 'test upstream' } }));
-            const frame = new Uint8Array(5 + end.length);
-            frame[0] = 2;
-            new DataView(frame.buffer).setUint32(1, end.length);
-            frame.set(end, 5);
-            return new Response(frame, { status: 200, headers: { 'content-type': 'application/connect+proto' } });
-          }
+          sent.push({ url: request.url, headers: Object.fromEntries(request.headers), body: new Uint8Array(await request.arrayBuffer()) });
           return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'test upstream' }, message: 'test upstream' }), { status: 400, headers: { 'content-type': 'application/json', 'x-amzn-errortype': 'ValidationException' } });
         },
       },
@@ -134,14 +115,6 @@ it('sends a Bedrock request through the AWS SDK with the images written in and b
   expect(body).not.toContain('AEdTSU1H');
   expect(Number(request.headers['content-length'])).toBe(request.body.length);
   expect(events.at(-1)).toMatchObject({ type: 'error' });
-});
-
-it('sends a Cursor request with the images\' raw bytes in its protobuf', async () => {
-  const { request } = await run(model('cursor', 'claude-4.5-sonnet'), oauth);
-  const body = request.body;
-  const needle = imageBytes(5000).subarray(0, 64);
-  const found = body.findIndex((_, index) => needle.every((byte, offset) => body[index + offset] === byte));
-  expect(found).toBeGreaterThanOrEqual(0);
 });
 
 it('refuses a request naming another workspace\'s image with the reason, as the provider would', async () => {

@@ -14,10 +14,6 @@ describe('portable refresh rotation safety', () => {
     await expect(refreshCredential(credential, fetcher)).rejects.toMatchObject({ kind: 'network', message: 'Provider request outcome is uncertain' });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
-  it('classifies Cursor rejection through the same refresh failure contract', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('private provider error', { status: 401 }));
-    await expect(refreshCredential({ ...credential, provider: 'cursor' }, fetcher)).rejects.toMatchObject({ provider: 'cursor', kind: 'rejected', status: 401, message: 'Provider rejected request' });
-  });
   it('rejects successful responses with missing tokens instead of committing a broken rotation', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ access_token: '', expires_in: 3600 }));
     await expect(refreshCredential(credential, fetcher)).rejects.toMatchObject({ kind: 'invalid-response' });
@@ -48,7 +44,7 @@ describe('durable cloud login secret and state boundaries', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
   it('erases secrets on cancellation and refuses further polling', async () => {
-    const transition = await beginLogin({ provider: 'cursor' });
+    const transition = await beginLogin({ provider: 'anthropic' });
     const cancelled = cancelLogin(transition.state);
     const fetcher = vi.fn<typeof fetch>();
     expect(cancelled.state).not.toHaveProperty('verifier');

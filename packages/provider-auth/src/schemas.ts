@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /** Sign-in flows GitSpace implements itself (cloud state machines in login.ts). */
-export const gitspaceOAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity', 'cursor']);
+export const gitspaceOAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity']);
 /** Sign-in flows run from Pi's own provider registry (@earendil-works/pi-ai). */
 export const upstreamOAuthProviderSchema = z.enum(['openai', 'github-copilot', 'openrouter', 'xai', 'kimi-coding', 'meta']);
 export type UpstreamOAuthProvider = z.infer<typeof upstreamOAuthProviderSchema>;
@@ -19,7 +19,6 @@ const pending = { ...base, authorizationUrl: z.url(), nextPollAt: z.iso.datetime
 export const loginStateSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('code'), provider: z.enum(['anthropic', 'google-gemini-cli', 'google-antigravity']), authorizationUrl: z.url(), verifier: z.string().min(43), csrf: z.string().min(32), redirectUri: z.url(), projectId: z.string().optional() }),
   z.object({ ...pending, kind: z.literal('device'), provider: z.literal('openai-codex'), deviceAuthId: z.string().min(1), userCode: z.string().min(1), intervalMs: z.number().positive() }),
-  z.object({ ...pending, kind: z.literal('cursor'), provider: z.literal('cursor'), verifier: z.string().min(43), uuid: z.string().uuid(), intervalMs: z.number().positive() }),
   z.object({ ...base, kind: z.literal('project'), credential: storedOAuthCredentialSchema, operation: z.string().min(1), nextPollAt: z.iso.datetime() }),
   z.object({ ...base, kind: z.literal('project-input'), credential: storedOAuthCredentialSchema }),
   z.object({ ...base, kind: z.literal('complete') }),

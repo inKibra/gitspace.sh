@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { beginLoginInputSchema, loginResponseSchema, type LoginState, type LoginTransition, type LoginView, type StoredOAuthCredential } from './schemas';
-import { request, parseProvider, tokenSchema, cursorTokenSchema, jwt, cursorExpiry, ProviderRefreshError } from './refresh';
+import { request, parseProvider, tokenSchema, jwt, ProviderRefreshError } from './refresh';
 import { oauthClient } from './catalog';
 import { discoverProject, pollProject } from './project';
 
@@ -18,7 +18,6 @@ export function publicLogin(state: LoginState): LoginView {
   switch (state.kind) {
     case 'code': return { ...base, kind: 'code', authorizationUrl: state.authorizationUrl, prompt: state.provider === 'anthropic' ? 'After signing in, paste the code#state shown by Anthropic.' : 'After consent, copy the entire final redirect URL from the address bar, even if localhost cannot connect.' };
     case 'device': return { ...base, kind: 'device', authorizationUrl: state.authorizationUrl, userCode: state.userCode, nextPollAt: state.nextPollAt };
-    case 'cursor': return { ...base, kind: 'poll', authorizationUrl: state.authorizationUrl, nextPollAt: state.nextPollAt };
     case 'project': return { ...base, kind: 'poll', nextPollAt: state.nextPollAt };
     case 'project-input': return { ...base, kind: 'project-input', prompt: 'Enter the Google Cloud project ID authorized for this account.' };
     case 'complete': return { ...base, kind: 'complete' };
@@ -43,10 +42,6 @@ export async function beginLogin(input: z.input<typeof beginLoginInputSchema>, f
   }
   const verifier = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const challenge = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  if (provider === 'cursor') {
-    const uuid = crypto.randomUUID();
-    return pending({ kind: 'cursor', provider, expiresAt, uuid, verifier, intervalMs: 1000, nextPollAt: new Date(Date.now() + 1000).toISOString(), authorizationUrl: `https://cursor.com/loginDeepControl?${new URLSearchParams({ challenge, uuid, mode: 'login', redirectTarget: 'cli' })}` });
-  }
   const csrf = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
   const redirectUri = provider === 'anthropic' ? 'https://platform.claude.com/oauth/code/callback' : provider === 'google-gemini-cli' ? 'http://127.0.0.1:8085/oauth2callback' : 'http://127.0.0.1:51121/oauth-callback';
   const params = new URLSearchParams({ response_type: 'code', client_id: oauthClient(provider).client_id, redirect_uri: redirectUri, state: csrf, code_challenge: challenge, code_challenge_method: 'S256' });
@@ -56,7 +51,6 @@ export async function beginLogin(input: z.input<typeof beginLoginInputSchema>, f
 }
 async function exchange(state: LoginState, code: string, verifier: string, redirectUri: string, csrf: string | undefined, fetcher: typeof fetch): Promise<StoredOAuthCredential> {
   const provider = state.provider;
-  if (provider === 'cursor') throw new ProviderLoginError('invalid-state', 'Cursor does not exchange codes');
   const anthropic = provider === 'anthropic';
   const fields = { grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirectUri, ...oauthClient(provider), ...(anthropic ? { state: csrf ?? '' } : {}) };
   const token = parseProvider(provider, tokenSchema, await request(provider, anthropic ? 'https://platform.claude.com/v1/oauth/token' : provider === 'openai-codex' ? 'https://auth.openai.com/oauth/token' : 'https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': anthropic ? 'application/json' : 'application/x-www-form-urlencoded' }, body: anthropic ? JSON.stringify(fields) : new URLSearchParams(fields) }, fetcher));
@@ -102,14 +96,6 @@ export async function pollLogin(state: LoginState, fetcher: typeof fetch = fetch
   if (state.kind === 'complete' || state.kind === 'cancelled') throw new ProviderLoginError('invalid-state', 'Login is terminal');
   if (Date.parse(state.nextPollAt) > Date.now()) return pending(state);
   if (state.kind === 'project') return pollProject(state, fetcher);
-  if (state.kind === 'cursor') {
-    const raw = await request('cursor', `https://api2.cursor.sh/auth/poll?${new URLSearchParams({ uuid: state.uuid, verifier: state.verifier })}`, {}, fetcher, [404]);
-    if (raw === null) { const intervalMs = Math.min(10_000, state.intervalMs * 1.2); return pending({ ...state, intervalMs, nextPollAt: new Date(Date.now() + intervalMs).toISOString() }); }
-    const token = parseProvider('cursor', cursorTokenSchema, raw);
-    const sub = jwt(token.accessToken).sub;
-    if (!token.refreshToken || typeof sub !== 'string' || !sub.trim()) throw new ProviderRefreshError('cursor', 'invalid-response', 'Cursor token omitted refresh token or account identity', 200);
-    return completed(state, { provider: 'cursor', access: token.accessToken, refresh: token.refreshToken, expires: cursorExpiry(token.accessToken), accountId: sub.split('|').at(-1) });
-  }
   const raw = await request('openai-codex', 'https://auth.openai.com/api/accounts/deviceauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_auth_id: state.deviceAuthId, user_code: state.userCode }) }, fetcher, [403, 404]);
   if (raw === null) return pending({ ...state, nextPollAt: new Date(Date.now() + state.intervalMs).toISOString() });
   const token = parseProvider('openai-codex', z.object({ authorization_code: z.string().min(1), code_verifier: z.string().min(1) }), raw);

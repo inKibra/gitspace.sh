@@ -6,7 +6,7 @@ import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
-import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeAutomationsArgumentsSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { automationValue } from './project-automations.js';
@@ -49,7 +49,7 @@ type ServicesOptions = {
   identity: RuntimeIdentity;
   runtime(): WorkspaceRuntime;
   schedule(timestamp: number): Promise<void>;
-  generateImage(input: { args: Invocation['args']; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']>;
+  generateImage(input: { args: z.infer<typeof RuntimeGenerateImageArgumentsSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']>;
   judge: RetainedRuleServices['judge'];
   model: RuntimeModelHelper;
   instructionLoader: RuntimeInstructionLoader;
@@ -647,7 +647,12 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
       if (input.tool === 'sync') return sync(input);
-      if (input.tool === 'generate_image') return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: await options.generateImage(input) };
+      if (input.tool === 'generate_image') {
+        // Input images may be stored ones: the image provider gets their bytes.
+        const args = RuntimeGenerateImageArgumentsSchema.parse(input.args);
+        const images = args.images ? await Promise.all(args.images.map(image => options.images.load(image))) : undefined;
+        return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: await options.generateImage({ ...input, args: { ...args, ...(images ? { images } : {}) } }) };
+      }
       if (input.tool === 'report_issue') return completed(input, await appendRuntimeQa(env, identity, input.attemptId, RuntimeReportIssueArgumentsSchema.parse(input.args)));
       if (runtimeSpaceToolNames.includes(input.tool)) return completed(input, await invokeRuntimeSpaceTool(env, identity, input));
       if (input.tool === 'space_workspace') {

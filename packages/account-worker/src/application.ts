@@ -1578,7 +1578,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: descriptor !== undefined, loginable: oauth || descriptor?.supportsApiKey === true,
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
-        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'cursor', 'google-antigravity'].includes(provider),
+        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'google-antigravity'].includes(provider),
         accounts: owned.map(account => {
           const { out } = accountHealth(health.get(account.id), now);
           return { id: account.id, type: account.type, label: accountLabel(account.id, account), email: account.email, disabled: account.disabled, outUntil: out ? new Date(out.until).toISOString() : null, outReason: out?.reason ?? null };

@@ -130,7 +130,6 @@ describe('portable refresh adapters', () => {
     ['openai-codex', 'https://auth.openai.com/oauth/token'],
     ['google-gemini-cli', 'https://oauth2.googleapis.com/token'],
     ['google-antigravity', 'https://oauth2.googleapis.com/token'],
-    ['cursor', 'https://api2.cursor.sh/auth/exchange_user_api_key'],
   ] as const)('refreshes %s using Worker-compatible fetch', async (provider, expectedUrl) => {
     let requestedUrl = '';
     const refreshed = await refreshCredential({
@@ -141,9 +140,7 @@ describe('portable refresh adapters', () => {
       ...(provider.startsWith('google-') ? { projectId: 'project-a' } : {}),
     }, async (input) => {
       requestedUrl = String(input);
-      const body = provider === 'cursor'
-        ? { accessToken: 'access-new', refreshToken: 'refresh-new' }
-        : { access_token: 'access-new', refresh_token: 'refresh-new', expires_in: 3600 };
+      const body = { access_token: 'access-new', refresh_token: 'refresh-new', expires_in: 3600 };
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },

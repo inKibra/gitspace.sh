@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
-import { RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
   createVaultModels, createRunModelsRouter, createDurableModelsStore, createRequestGate,
@@ -177,7 +177,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         write: (hash, description) => ctx.storage.put(key('image-description', hash), description),
       } });
     },
-    async generateImage(input: { args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
+    async generateImage(input: { args: z.infer<typeof RuntimeGenerateImageArgumentsSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const models = await admittedView(input.conversationId, admission, false).models;
       return generateProfileImage(models, input.args, input.signal, admission.profile.settings);

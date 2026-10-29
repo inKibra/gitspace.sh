@@ -1154,7 +1154,7 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     signed/replay-protected access requests, at-rest vault sealing, per-request
     refresh leases, revision-CAS token rotation, refresh-uncertain fail-closed
     state, and machine-sealed access responses. Anthropic, OpenAI Codex, Google
-    Gemini CLI, Google Antigravity, and Cursor refresh under Workers and pass
+    Gemini CLI, and Google Antigravity refresh under Workers and pass
     local DO simulations. None are copied now: one narrow
     `@oh-my-pi/pi-ai` patch adds a Worker-only bounded HTTP/error core plus
     provider-specific portable refresh modules; each original OMP adapter calls

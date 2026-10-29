@@ -12,7 +12,7 @@ import { admitProfileProviders } from './admission.js';
 import { applyProviderCatalog } from './catalog.js';
 import { claudeCode, type ClaudeCodeTransport } from './claude-code-request.js';
 import { fastServingProvider } from './fast.js';
-import { parseImageReference, type ImageReader, type ImageRequestTransport } from './image-requests.js';
+import { parseImageReference, type ImageRequestTransport } from './image-requests.js';
 import { createLegacyCloudProviders } from './providers/index.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import type { ResolvedCredential } from './selection.js';
@@ -114,9 +114,9 @@ const GLOBAL_FETCH_APIS: Readonly<Record<string, true>> = { 'google-generative-a
 export interface AttemptRunnerOptions {
   /** The providers an attempt's model may name; the profile's admitted ones by default. */
   providers?(settings: InferenceProfile['settings']): readonly Provider[];
-  /** The workspace's stored images: `transport` sends a request carrying references, writing each image in as the
-   * request streams out; `read` opens one image's bytes. Without them an attempt with stored images is refused. */
-  images?: { transport: ImageRequestTransport; read: ImageReader };
+  /** Sends a request carrying the workspace's stored images, writing each in as the request streams out. Without it an
+   * attempt with stored images is refused. */
+  imageTransport?: ImageRequestTransport;
 }
 
 /** Runs attempts in this isolate: pi-ai builds and sends each request, with Claude Code's shape for a subscription. */
@@ -132,7 +132,7 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
     if (!shaping) {
       // One shape per requesting view; a view lives as long as an admission, so a few are held at a time.
       if (shapes.size >= 64) shapes.delete(shapes.keys().next().value!);
-      shaping = claudeCode(attempt.claude, runner.images?.transport);
+      shaping = claudeCode(attempt.claude, runner.imageTransport);
       shapes.set(key, shaping);
     }
     const shape = await shaping;
@@ -147,15 +147,6 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
     let context = attempt.context;
     const tokens: string[] = [];
     if (attempt.model.api === 'bedrock-converse-stream') context = await replaceImages(context, async part => { const token = standIn(part.data); tokens.push(token); return token; });
-    else if (attempt.model.api === 'cursor-agent') {
-      // Cursor's protobuf body carries raw image bytes, also inside its content-addressed history blobs: its images are
-      // read into this isolate (the inference worker's, never the workspace object's) until it can stream them.
-      const images = runner.images;
-      context = await replaceImages(context, async part => {
-        if (!images) throw new Error('This request carries stored images, which only the inference worker can send');
-        return Buffer.from(await new Response(await images.read(part.data)).arrayBuffer()).toString('base64');
-      });
-    }
     try {
       const models = createModels({ authContext: noAmbientAuth, modelsStore: new InMemoryModelsStore() });
       const auth = requestAuth(attempt.credential);

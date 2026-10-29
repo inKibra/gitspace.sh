@@ -10,7 +10,6 @@ export class ProviderRefreshError extends Error {
 }
 const objectSchema = z.record(z.string(), z.unknown());
 export const tokenSchema = z.object({ access_token: z.string().min(1), refresh_token: z.string().optional(), expires_in: z.number().positive().finite(), id_token: z.string().optional(), account: z.object({ uuid: z.string().optional(), email_address: z.string().optional() }).optional(), organization: z.object({ uuid: z.string().optional() }).optional() });
-export const cursorTokenSchema = z.object({ accessToken: z.string().min(1), refreshToken: z.string().optional() });
 /** Never includes provider response bodies, tokens or request URLs in errors. */
 export async function request(provider: WorkerOAuthProvider, url: string, init: RequestInit, fetcher: typeof fetch, pendingStatuses: readonly number[] = []): Promise<Record<string, unknown> | null> {
   let response: Response;
@@ -48,16 +47,8 @@ export function jwt(token: string): Record<string, unknown> {
   try { return objectSchema.parse(JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(part.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))))); }
   catch { return {}; }
 }
-export function cursorExpiry(token: string): number {
-  const exp = jwt(token).exp;
-  return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 - 300_000 : Date.now() + 3_600_000;
-}
 export async function refreshCredential(credential: StoredOAuthCredential, fetcher: typeof fetch = fetch): Promise<StoredOAuthCredential> {
   const provider = credential.provider;
-  if (provider === 'cursor') {
-    const data = parseProvider(provider, cursorTokenSchema, await request(provider, 'https://api2.cursor.sh/auth/exchange_user_api_key', { method: 'POST', headers: { Authorization: `Bearer ${credential.refresh}`, 'Content-Type': 'application/json' }, body: '{}' }, fetcher));
-    return { ...credential, access: data.accessToken, refresh: data.refreshToken || credential.refresh, expires: cursorExpiry(data.accessToken) };
-  }
   const anthropic = provider === 'anthropic';
   const fields = { grant_type: 'refresh_token', refresh_token: credential.refresh, ...oauthClient(provider) };
   const url = anthropic ? 'https://api.anthropic.com/v1/oauth/token' : provider === 'openai-codex' ? 'https://auth.openai.com/oauth/token' : 'https://oauth2.googleapis.com/token';
