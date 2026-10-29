@@ -30,6 +30,22 @@ This account release flow governs tenant source deployments.
   source workspace, release, targets, and observed result. A successful build
   or accepted launch is not proof that the tenant runs the new code.
 
+## Platform and tenant split
+
+Accounts upgrade their own GitSpace through releases; anything in the platform (`packages/platform`, the platform
+Worker, platform-level scripts and bindings) is frozen for every tenant until the operator changes it. Keep the platform
+as thin as possible.
+
+- The platform owns only what needs the operator's Cloudflare credentials or must hold across tenants: routing hosts to
+  tenants, uploading a tenant script with its bindings and migrations (then health check and revert), provisioning
+  storage and Artifacts, scoped storage credentials, suspend, quarantine, credits and billing, compute-provider secrets,
+  and usage and storage watchdogs.
+- Everything else ships in the tenant release, including new workers (load them with the tenant's Worker Loader, not
+  as platform scripts), routes, file serving and compatibility checks.
+- A new platform resource source, route or platform-level script needs the user's explicit approval.
+- The platform deploys releases it does not fully understand: it ignores resource sources it does not know rather than
+  refusing the release.
+
 ## Browser-first workflow
 
 Create and recover accounts at [gitspace.sh](https://gitspace.sh). Manage projects, workspaces, agents, and releases in the browser. Cloud-only use requires no local CLI.
