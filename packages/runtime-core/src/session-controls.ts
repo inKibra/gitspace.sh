@@ -197,6 +197,15 @@ export function createSessionControls(services: SessionControlServices) {
     if (!child && ['agentSetup', 'saveAgentDefinition', 'prompt', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(command.type)) await loadDefinitions(target);
     await target.commit(async tx => { await tx.doc(SessionControlsDoc, target.id); }, ctx);
     const mutate = (apply: (draft: z.infer<typeof ControlsSchema>) => void) => target.commit(async tx => { const draft = await tx.doc(SessionControlsDoc, target.id); apply(draft); draft.revision++; }, ctx);
+    /** Admits the conversation's selected model for one request and configures it. Every model request runs on an
+     * admission; it is also how a reopened runtime learns the conversation's model, which pi checks before any hook
+     * binds the request: a compaction asked for after a restart failed for want of it. */
+    const admitted = async (requestId: string) => {
+      const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, target.id, ctx))?.selection ?? { kind: 'default' as const };
+      const model = await services.admitInference({ conversationId: String(target.id), requestId, selection });
+      await services.configureModel(target.id, model);
+      return model;
+    };
     switch (command.type) {
       case 'browserStatus': case 'browserRevoke': case 'browserReconcile': case 'browserDiscard': case 'browserArtifact': {
         if (!canApprove) throw new Error('Browser management requires human capability');
@@ -289,10 +298,7 @@ export function createSessionControls(services: SessionControlServices) {
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {
           const requestId = crypto.randomUUID();
-          const selection = child?.model ? { kind: 'explicit' as const, ...child.model } : (await harness.snapshot(SessionControlsDoc, target.id, ctx))?.selection ?? { kind: 'default' as const };
-          const model = await services.admitInference({ conversationId: String(target.id), requestId, selection });
-          await services.configureModel(target.id, model);
-          await applyInferenceThinking(target, model);
+          await applyInferenceThinking(target, await admitted(requestId));
           const images = command.images?.length ? await Promise.all(command.images.map(image => services.images.store(image))) : [];
           await target.submit({ type: 'input', requestId, content: images.length ? [{ type: 'text', text: command.text }, ...images] : command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
         });
@@ -327,7 +333,7 @@ export function createSessionControls(services: SessionControlServices) {
         }
         draft.revision++;
       }, ctx); break;
-      case 'compact': await target.compact(command.instructions, ctx); break;
+      case 'compact': await admitted(crypto.randomUUID()); await target.compact(command.instructions, ctx); break;
       case 'clearQueue': await target.commit(async tx => {
         const inbox = await tx.doc(InboxDoc, target.id);
         for (const item of inbox.items) if (item.mode !== 'write') tx.settleSubmission(item.id, { status: 'unanswered', reason: 'withdrawn' });
