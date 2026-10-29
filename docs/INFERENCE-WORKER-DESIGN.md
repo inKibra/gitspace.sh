@@ -1,6 +1,8 @@
 # Inference worker
 
-Status: built (2026-10-29), pending its release. Replaces the platform-level inference Worker shipped in `e978eceb`.
+Status: live (2026-10-29, `6214f49f`; platform `ce24c703`, `gitspace-inference-rebuild-20260913` deleted). Replaces the
+platform-level inference Worker shipped in `e978eceb`. Checked live on PPVA (Bedrock): a prompt with an image answered
+correctly.
 
 ## Goal
 
