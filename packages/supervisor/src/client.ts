@@ -1,8 +1,8 @@
 import { createConnection } from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
-import { BrokerReplySchema, DAEMON_BROKER_WORKER_ARG, SupervisorRequestError, type DaemonRequest, type DaemonResponse } from './protocol.js';
+import { BrokerReplySchema, DAEMON_BROKER_WORKER_ARG, SHUTDOWN_DEADLINE_MS, SupervisorRequestError, type DaemonRequest, type DaemonResponse } from './protocol.js';
 import { getDaemonRuntimeDir } from './process-identity.js';
 
 /** A broker exits after sitting idle, so a socket that existed may be gone by the next request. */
@@ -57,17 +57,22 @@ export function daemonClientForProject(projectDirectory: string): Promise<Daemon
       if (!brokerGone(error)) throw error;
     }
     const entry = process.env.GITSPACE_SUPERVISOR_WORKER_ENTRY ?? fileURLToPath(new URL('./entry.ts', import.meta.url));
-    const child = spawn(process.execPath, [entry, DAEMON_BROKER_WORKER_ARG], { detached: true, stdio: 'ignore', env: { ...process.env, GITSPACE_SUPERVISOR_PROJECT: project } });
-    child.unref();
+    let broker: ChildProcess | undefined;
     let spawnError: Error | undefined;
-    child.once('error', error => { spawnError = error; });
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + SHUTDOWN_DEADLINE_MS + 10_000;
     while (Date.now() < deadline) {
       if (spawnError) throw spawnError;
+      // A broker still shutting down keeps its lock, so one started meanwhile exits at once; another is started once it
+      // has, until the old broker is gone.
+      if (!broker || broker.exitCode !== null) {
+        broker = spawn(process.execPath, [entry, DAEMON_BROKER_WORKER_ARG], { detached: true, stdio: 'ignore', env: { ...process.env, GITSPACE_SUPERVISOR_PROJECT: project } });
+        broker.unref();
+        broker.once('error', error => { spawnError = error; });
+      }
       try { await probe.request({ op: 'list' }); return client; } catch (error) {
         if (!brokerGone(error)) throw error;
       }
-      await Bun.sleep(25);
+      await Bun.sleep(100);
     }
     throw new Error('GitSpace supervisor failed to become reachable');
   })();

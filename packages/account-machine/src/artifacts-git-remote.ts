@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -95,17 +96,47 @@ const PUSH = ['-c', 'core.hooksPath=/dev/null', 'push'];
 /** A pack of whole objects: no deltas computed or reused, none against objects the remote holds. */
 const WHOLE_OBJECTS = ['-c', 'pack.window=0', '-c', 'pack.depth=0', '-c', 'pack.allowPackReuse=false'];
 
+/** How a pushed pack (not a ref update) is refused when a second push, built as `pushToArtifacts` describes, can pass. */
+const PACK_REFUSAL = /\bHTTP 500\b|delta base is missing|OFS_DELTA base not found|reachable object is missing|missing necessary objects/u;
+
+/** The commits `remote` holds without their parents. Artifacts advertises none, but a fetch reports those of the
+ * history it sends; it refuses a commits-only (filtered) fetch with HTTP 400, so this downloads the tips' trees. */
+async function remoteShallowBoundaries(remote: string, auth: Record<string, string>): Promise<string[]> {
+  const directory = await mkdtemp(join(tmpdir(), 'gitspace-boundaries-'));
+  try {
+    await git(directory, ['init', '--quiet', '--bare']);
+    await git(directory, ['fetch', '--quiet', '--update-shallow', '--no-tags', remote, '+refs/*:refs/remote/*'], auth);
+    const shallow = join(directory, 'shallow');
+    return existsSync(shallow) ? (await readFile(shallow, 'utf8')).split('\n').filter(Boolean) : [];
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
 /**
- * Artifacts' receive-pack refuses some packs of deltas and accepts the same objects sent whole: with HTTP 500 (djmc,
- * 2026-10-19: 164 objects, 146 deltas, refused every time), or saying a delta's base is missing though it advertised
- * that base (inkibra-cell-executor-sandbox-spike, 2026-10-28, every sync for two days). A push refused either way is
- * sent once more without deltas.
+ * Artifacts' receive-pack refuses some pushes that a second, differently built one passes:
+ * - packs of deltas, which it accepts sent whole: with HTTP 500 (djmc, 2026-10-19: 164 objects, 146 deltas, refused
+ *   every time), saying a delta's base is missing though it advertised that base (inkibra-cell-executor-sandbox-spike,
+ *   2026-10-28), or saying an offset delta's base, always in the same pack, is not found (three inkibra-core workspaces
+ *   since 2026-10-23);
+ * - packs leaving out commits it lacks. It advertises no shallow boundaries, so git counts the history below them,
+ *   which this checkout may hold, as the remote's and omits it: the executor-sandbox push, sent whole, was refused with
+ *   `reachable object is missing` for a merged parent that the remote held only as the parent of a boundary.
+ * A refused push is sent once more without deltas, with the remote's boundaries added to the push's own.
  */
-async function pushToArtifacts(repositoryPath: string, refspec: string[], environment: Record<string, string>): Promise<void> {
-  try { await git(repositoryPath, [...PUSH, ...refspec], environment); }
+async function pushToArtifacts(input: { repositoryPath: string; remote: string; refspec: string; force: boolean; auth: Record<string, string>; shallow: Record<string, string> }): Promise<void> {
+  const target = [...(input.force ? ['--force'] : []), input.remote, input.refspec];
+  try { await git(input.repositoryPath, [...PUSH, ...target], { ...input.auth, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }); }
   catch (error) {
-    if (!(error instanceof ArtifactsGitError) || !/\bHTTP 500\b|delta base is missing/u.test(error.message)) throw error;
-    await git(repositoryPath, [...WHOLE_OBJECTS, ...PUSH, '--no-thin', ...refspec], environment);
+    if (!(error instanceof ArtifactsGitError) || !PACK_REFUSAL.test(error.message)) throw error;
+    // The push's own boundaries: the one publication set, or the checkout's.
+    const ownFile = input.shallow.GIT_SHALLOW_FILE ?? await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
+    const own = existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n') : [];
+    // A remote whose tips cannot be fetched (it answers HTTP 500 for a missing object) gets the whole-object push alone.
+    const remote = await remoteShallowBoundaries(input.remote, input.auth).catch(() => []);
+    const directory = await mkdtemp(join(tmpdir(), 'gitspace-push-'));
+    try {
+      await writeFile(join(directory, 'shallow'), [...new Set([...own, ...remote].filter(Boolean))].map(commit => `${commit}\n`).join(''));
+      await git(input.repositoryPath, [...WHOLE_OBJECTS, ...PUSH, '--no-thin', ...target], { ...input.auth, GIT_SHALLOW_FILE: join(directory, 'shallow'), GIT_LFS_SKIP_PUSH: '1' });
+    } finally { await rm(directory, { recursive: true, force: true }); }
   }
 }
 
@@ -145,7 +176,7 @@ export class ArtifactsGitRemote {
     }
     await withShallowBoundary(boundary, async shallow => {
       const auth = await this.auth(input.binding, 'write');
-      await this.transfer(input.binding, pushToArtifacts(input.repositoryPath, ['--force', auth.remote, `${commit}:${input.checkpointRef}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, force: true, auth: auth.environment, shallow }));
     });
   }
 
@@ -167,7 +198,7 @@ export class ArtifactsGitRemote {
       if (current === input.commit) return;
       if (current !== undefined) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
       const auth = await this.auth(input.binding, 'write');
-      await this.transfer(input.binding, pushToArtifacts(input.repositoryPath, [auth.remote, `${input.commit}:${input.ref}`], { ...auth.environment, ...shallow, GIT_LFS_SKIP_PUSH: '1' }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, force: false, auth: auth.environment, shallow }));
     });
   }
 

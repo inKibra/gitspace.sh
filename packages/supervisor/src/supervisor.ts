@@ -25,6 +25,10 @@ const RecoveryOutputSchema = StoredOutputSchema.extend({
   spec: { ...spec, envNames: [...new Set([...(envNames ?? []), ...Object.keys(env ?? {})])] },
 }));
 const finished = (run: Running) => run.stored.daemon.state === 'exited' || run.stored.daemon.state === 'failed';
+/** A finished record answers a caller waiting on or reconnecting to its process; a broker start deletes those finished
+ * longer ago than this (one checkout had kept 2,669, which every start read). */
+const RETAIN_FINISHED_MS = 24 * 60 * 60_000;
+const expired = (daemon: Stored['daemon'], now: number) => (daemon.state === 'exited' || daemon.state === 'failed') && now - Date.parse(daemon.finishedAt ?? daemon.createdAt) > RETAIN_FINISHED_MS;
 
 export class ProcessSupervisor {
   private readonly runs = new Map<string, Running>();
@@ -71,17 +75,19 @@ export class ProcessSupervisor {
     try { return !await sameProcess(stored.identity); } catch { return false; }
   }
   async recover(): Promise<void> {
+    const now = Date.now();
     await mkdir(join(this.root, 'completions'), { recursive: true, mode: 0o700 });
     for (const file of await readdir(join(this.root, 'completions'))) {
       if (!file.endsWith('.json')) continue;
       const record = StoredDaemonSchema.parse(JSON.parse(await readFile(join(this.root, 'completions', file), 'utf8')));
+      if (expired(record.daemon, now)) { await rm(join(this.root, 'completions', file), { force: true }); continue; }
       this.completions.set(`${record.daemon.id}:${record.daemon.restartCount}`, { op: 'describe', daemon: record.daemon, spec: record.spec });
     }
     await mkdir(join(this.root, 'daemons'), { recursive: true, mode: 0o700 });
     for (const directory of await readdir(join(this.root, 'daemons'), { withFileTypes: true })) {
       if (!directory.isDirectory()) continue;
       const { output: text, outputOffset, ...stored } = RecoveryOutputSchema.parse(JSON.parse(await readFile(join(this.root, 'daemons', directory.name, 'meta.json'), 'utf8')));
-      if (!stored.spec.persist) {
+      if (!stored.spec.persist || expired(stored.daemon, now)) {
         await rm(join(this.root, 'daemons', directory.name), { recursive: true, force: true });
         continue;
       }
@@ -94,7 +100,7 @@ export class ProcessSupervisor {
           stored.daemon.state = 'stopping';
           stored.daemon.failure = 'Supervisor restarted; surviving execution requires explicit stop before restart';
         } else {
-          stored.daemon.state = 'failed'; stored.daemon.pid = null;
+          stored.daemon.state = 'failed'; stored.daemon.pid = null; stored.daemon.finishedAt = new Date(now).toISOString();
           delete stored.daemon.nextRestartCount;
           stored.daemon.failure = 'Execution interrupted: recorded execution no longer exists; no automatic replay';
         }
@@ -215,7 +221,7 @@ export class ProcessSupervisor {
       throw new Error('Process environment bindings are unavailable; supply a fresh start after confirmed cleanup');
     }
     run.stopping = false; run.recovered = false; run.stoppingTask = undefined;
-    daemon.state = 'starting'; daemon.exitCode = null; delete daemon.failure; delete daemon.readiness; delete daemon.nextRestartCount; delete daemon.keptOutput;
+    daemon.state = 'starting'; daemon.exitCode = null; delete daemon.failure; delete daemon.readiness; delete daemon.nextRestartCount; delete daemon.keptOutput; delete daemon.finishedAt;
     const readinessCursor = run.stored.cursor;
     // Commit an unresolved claim before spawn. Recovery never replays this claim.
     run.stored.claimBoot = await bootIdentity();
@@ -268,7 +274,7 @@ export class ProcessSupervisor {
       }
     } catch {
       await this.closeKept(run);
-      daemon.state = 'failed'; daemon.failure = 'Process launch failed'; daemon.pid = null;
+      daemon.state = 'failed'; daemon.failure = 'Process launch failed'; daemon.pid = null; daemon.finishedAt = new Date().toISOString();
       await this.persist(run); this.changed(run);
       // Spawn errors may contain resolved environment values; never persist or return them.
       throw new Error('Process launch failed');
@@ -287,6 +293,7 @@ export class ProcessSupervisor {
     run.stored.daemon.pid = null;
     run.stored.identity = null;
     run.stored.daemon.state = run.stored.daemon.failure ? 'failed' : 'exited';
+    run.stored.daemon.finishedAt = new Date().toISOString();
     const { restart } = run.stored.spec;
     const restarting = !this.closing && !run.stopping && (restart === 'always' || (restart === 'on-failure' && code !== 0));
     if (restarting) run.stored.daemon.nextRestartCount = run.stored.daemon.restartCount + 1;
@@ -354,6 +361,7 @@ export class ProcessSupervisor {
     // Clear it only after the identity-verified cleanup barrier above succeeds.
     if (run.recovered) delete run.stored.daemon.failure;
     run.stored.daemon.state = run.stored.daemon.failure ? 'failed' : 'exited';
+    run.stored.daemon.finishedAt = new Date().toISOString();
     run.stored.daemon.pid = null; run.stored.identity = null;
     delete run.stored.daemon.nextRestartCount;
     await this.persist(run); this.changed(run);

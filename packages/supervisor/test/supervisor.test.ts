@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { mkdtemp, mkdir, readFile, readdir, writeFile, rm } from 'node:fs/promises';
+import { z } from 'zod';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProcessSupervisor } from '../src/supervisor.js';
@@ -402,4 +403,33 @@ test('kept output stops at its byte limit before a character it would split, and
   if (exited.op !== 'wait') throw new Error('Unexpected response');
   expect(await readFile(path, 'utf8')).toBe('éééé');
   expect(exited.daemon.keptOutput).toEqual({ bytes: 8, droppedBytes: 3 });
+});
+test('a supervisor start deletes processes finished more than a day ago and keeps those finished since', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'supervisor-prune-'));
+  const first = new ProcessSupervisor(root);
+  await first.recover();
+  try {
+    for (const name of ['old', 'recent']) {
+      await first.request({ op: 'start', spec: spec(name, 'echo done') });
+      await first.request({ op: 'wait', name, for: 'exit', timeoutMs: 5000 });
+    }
+    const old = await first.request({ op: 'describe', name: 'old' });
+    if (old.op !== 'describe') throw new Error('Unexpected response');
+    await first.request({ op: 'shutdown' });
+    // The record and its completion as they would read had it finished two days ago.
+    const finishedAt = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+    for (const file of [join(root, 'daemons', 'old', 'meta.json'), join(root, 'completions', `${old.daemon.id}:0.json`)]) {
+      const record = z.looseObject({ daemon: z.looseObject({}) }).parse(JSON.parse(await readFile(file, 'utf8')));
+      await writeFile(file, JSON.stringify({ ...record, daemon: { ...record.daemon, finishedAt } }));
+    }
+    const next = new ProcessSupervisor(root);
+    await next.recover();
+    await expect(next.request({ op: 'describe', name: 'old' })).rejects.toThrow('Unknown process old');
+    await expect(next.request({ op: 'describe', name: 'old', instanceId: old.daemon.id, restartCount: 0 })).rejects.toThrow('Unknown process old');
+    const recent = await next.request({ op: 'describe', name: 'recent' });
+    expect(recent.op === 'describe' && recent.daemon.state).toBe('exited');
+    await next.request({ op: 'shutdown' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

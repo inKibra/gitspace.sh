@@ -400,11 +400,13 @@ it('sends a push Artifacts refuses for its deltas again as whole objects, and re
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
-    // How Artifacts' receive-pack refuses a pack of deltas: HTTP 500 (djmc, 2026-10-19), or a delta whose base it says it
-    // lacks (inkibra-cell-executor-sandbox-spike, 2026-10-28). The same objects sent whole pass.
+    // How Artifacts' receive-pack refuses a pack of deltas: HTTP 500 (djmc, 2026-10-19), a delta whose base it says it
+    // lacks (inkibra-cell-executor-sandbox-spike, 2026-10-28), or an offset delta whose base it cannot find in the same
+    // pack (tonetempo-challenges-and-streaks, 2026-10-27). The same objects sent whole pass.
     const refusals = [
       "echo 'error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500' >&2; echo 'send-pack: unexpected disconnect while reading sideband packet' >&2",
       "echo 'error: remote unpack failed: receive-pack delta base is missing' >&2; echo ' ! [remote rejected] HEAD -> refs/gitspace/snapshot (receive-pack delta base is missing)' >&2",
+      "echo 'error: remote unpack failed: OFS_DELTA base not found' >&2; echo ' ! [remote rejected] HEAD -> refs/gitspace/snapshot (OFS_DELTA base not found)' >&2",
     ];
     for (const [index, refusal] of refusals.entries()) {
       writeFileSync(join(bin, 'git'), `#!/bin/sh
@@ -435,4 +437,31 @@ exec '${realGit}' "$@"
     await expect(f.publish()).rejects.toThrow('pre-receive hook declined');
     expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(1);
   } finally { process.env.PATH = path; }
+});
+
+it('sends history below the remote\'s unadvertised shallow boundary when a push merging it is refused', async () => {
+  const f = fixture();
+  // The boundary discovery fetches from a scratch repository, which needs the remote's address rewrite too.
+  const config = join(f.root, 'gitconfig');
+  writeFileSync(config, `[url "${f.remote}"]\n\tinsteadOf = https://artifacts.invalid/repository\n`);
+  const previous = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = config;
+  try {
+    writeFileSync(join(f.root, 'file'), 'a'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'A');
+    const a = git(f.root, 'rev-parse', 'HEAD');
+    writeFileSync(join(f.root, 'file'), 'b'); git(f.root, 'commit', '-am', 'B');
+    const b = git(f.root, 'rev-parse', 'HEAD');
+    // The remote holds B without its parent, seeded from a depth-1 copy as a machine seed is.
+    const seed = join(f.root, 'seed.git');
+    git(f.root, 'clone', '--quiet', '--bare', '--depth', '1', `file://${f.root}`, seed);
+    git(seed, 'push', '--quiet', f.remote, `${b}:refs/heads/main`);
+    // Merging A back in, as a merge of develop brought back a commit the remote held only as a boundary's parent.
+    const merge = git(f.root, 'commit-tree', '-p', b, '-p', a, '-m', 'merge', `${b}^{tree}`);
+    git(f.root, 'update-ref', f.checkpointRef, merge);
+    await f.publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'test', repository: 'test' }, checkpointRef: f.checkpointRef, headCommit: merge, remoteHead: b });
+    expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(merge);
+    expect(git(f.remote, 'cat-file', '-t', a)).toBe('commit');
+  } finally {
+    if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previous;
+  }
 });

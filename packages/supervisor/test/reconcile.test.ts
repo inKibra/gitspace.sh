@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { daemonClientForProject } from '../src/client.js';
 import { reconcileBrokers } from '../src/reconcile.js';
 import { getDaemonRuntimeDir } from '../src/process-identity.js';
-import type { DaemonStartSpec } from '../src/protocol.js';
+import { ProcessIdentitySchema, type DaemonStartSpec } from '../src/protocol.js';
 
 const sleeper = (cwd: string): DaemonStartSpec => ({ name: 'dev-server', application: '/bin/sh', args: ['-c', 'exec sleep 300'], env: {}, cwd, pty: false, restart: 'no', persist: true, detached: false });
 const running = (pid: number | null | undefined) => pid != null && existsSync(`/proc/${pid}`);
@@ -70,3 +70,25 @@ test('a request after its broker exited (idle or reconciled) starts a new broker
     await rm(base, { recursive: true, force: true });
   }
 }, 30_000);
+
+test('a broker whose shutdown fails exits, and the next request reaches a new broker instead of being refused', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'gitspace-broker-stuck-'));
+  process.env.GITSPACE_SUPERVISOR_HOME = join(base, 'home');
+  const project = join(base, 'project');
+  await mkdir(project);
+  const orphan = join(base, 'orphan.pid');
+  const client = await daemonClientForProject(project);
+  try {
+    // The shell exits at once; its setsid child keeps the output pipe open, so the shutdown cannot confirm the exit.
+    await client.request({ op: 'start', spec: { ...sleeper(project), name: 'leaky', args: ['-c', `setsid sh -c 'echo $$ > ${orphan}; exec sleep 300' &`] } });
+    const owner = ProcessIdentitySchema.parse(JSON.parse(await readFile(join(getDaemonRuntimeDir(project), 'broker.lock', 'owner.json'), 'utf8')));
+    await expect(client.request({ op: 'shutdown' })).rejects.toThrow('Process exit stream did not close after termination');
+    expect((await client.request({ op: 'watch', timeoutMs: 1 })).op).toBe('watch');
+    expect(running(owner.pid)).toBe(false);
+  } finally {
+    const pid = Number(await readFile(orphan, 'utf8').catch(() => '0'));
+    if (pid > 0) process.kill(pid, 'SIGKILL');
+    await (await daemonClientForProject(project)).request({ op: 'shutdown' }).catch(() => null);
+    await rm(base, { recursive: true, force: true });
+  }
+}, 60_000);

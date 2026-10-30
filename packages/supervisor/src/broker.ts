@@ -2,7 +2,7 @@ import { createServer } from 'node:net';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { DaemonRequestSchema, ProcessIdentitySchema, SupervisorRequestError } from './protocol.js';
+import { DaemonRequestSchema, ProcessIdentitySchema, SHUTDOWN_DEADLINE_MS, SupervisorRequestError } from './protocol.js';
 import { getDaemonRuntimeDir, processIdentity, sameProcess } from './process-identity.js';
 import { ProcessSupervisor } from './supervisor.js';
 import { BROKER_RECORD } from './reconcile.js';
@@ -35,6 +35,33 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   const supervisor = new ProcessSupervisor(root);
   await supervisor.recover();
   let lastRequestAt = Date.now();
+  let stopping: Promise<Error | null> | undefined;
+  /** Stops accepting connections, then shuts the supervisor down and removes the socket and lock, whatever the
+   * shutdown's outcome. A caller connecting meanwhile is refused the connection and starts the next broker once this one
+   * has exited, instead of being answered "shutting down" for as long as the shutdown takes or forever if it fails. */
+  const stop = (): Promise<Error | null> => stopping ??= (async () => {
+    server.close();
+    clearInterval(idle);
+    const deadline = Promise.withResolvers<Error>();
+    const timer = setTimeout(() => deadline.resolve(new Error(`Supervisor shutdown did not finish within ${SHUTDOWN_DEADLINE_MS} ms`)), SHUTDOWN_DEADLINE_MS);
+    const outcome = await Promise.race([
+      supervisor.request({ op: 'shutdown' }).then(() => null, (error: unknown) => error instanceof Error ? error : new Error(String(error))),
+      deadline.promise,
+    ]);
+    clearTimeout(timer);
+    if (outcome) console.error('GitSpace supervisor shutdown failed:', outcome.message);
+    // The lock goes last: a broker that takes it next listens on a new socket this one must not remove.
+    await rm(socketPath, { force: true });
+    await rm(lock, { recursive: true, force: true });
+    return outcome;
+  })();
+  const exitAfterStop = () => { void stop().then(() => process.exit(0)); };
+  // Brokers are per project directory and outlive their callers: one whose directory is gone (a deleted checkout, a
+  // test's temporary project) or that sat idle with nothing alive would otherwise run forever. Thousands of them
+  // exhausted a machine's process slots.
+  const idle = setInterval(() => {
+    if (!existsSync(project) || (Date.now() - lastRequestAt > IDLE_EXIT_MS && !supervisor.hasLiveProcesses())) exitAfterStop();
+  }, IDLE_CHECK_MS);
   const server = createServer(socket => {
     let pending = '';
     const controller = new AbortController();
@@ -52,9 +79,13 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
       void (async () => {
         try {
           const request = DaemonRequestSchema.parse(JSON.parse(frame));
+          if (request.op === 'shutdown') {
+            const failure = await stop();
+            socket.end(JSON.stringify(failure ? { ok: false, code: 'SUPERVISOR_FAILURE', error: failure.message } : { ok: true, value: { op: 'shutdown' } }) + '\n', () => process.exit(0));
+            return;
+          }
           const value = await supervisor.request(request, controller.signal);
           socket.end(JSON.stringify({ ok: true, value }) + '\n');
-          if (request.op === 'shutdown') server.close();
         } catch (error) { socket.end(JSON.stringify({ ok: false, code: error instanceof SupervisorRequestError ? error.code : 'SUPERVISOR_FAILURE', error: error instanceof Error ? error.message : String(error) }) + '\n'); }
       })();
     });
@@ -65,24 +96,6 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   await listening.promise;
   await chmod(socketPath, 0o600);
   console.log(`GitSpace supervisor ready: ${socketPath}`);
-  let stopping = false;
-  const stop = async () => {
-    if (stopping) return;
-    stopping = true;
-    await supervisor.request({ op: 'shutdown' });
-    server.close();
-  };
-  process.on('SIGTERM', () => { void stop(); });
-  process.on('SIGINT', () => { void stop(); });
-  // Brokers are per project directory and outlive their callers: one whose directory is gone (a deleted checkout, a
-  // test's temporary project) or that sat idle with nothing alive would otherwise run forever. Thousands of them
-  // exhausted a machine's process slots.
-  const idle = setInterval(() => {
-    if (stopping) return;
-    if (!existsSync(project) || (Date.now() - lastRequestAt > IDLE_EXIT_MS && !supervisor.hasLiveProcesses())) void stop();
-  }, IDLE_CHECK_MS);
-  server.once('close', () => {
-    clearInterval(idle);
-    void Promise.all([rm(socketPath, { force: true }), rm(lock, { recursive: true, force: true })]);
-  });
+  process.on('SIGTERM', exitAfterStop);
+  process.on('SIGINT', exitAfterStop);
 }

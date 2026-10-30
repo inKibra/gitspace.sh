@@ -2,6 +2,9 @@ import { z } from 'zod';
 
 export const DAEMON_BROKER_WORKER_ARG = '--gitspace-supervisor';
 export const TERMINAL_OUTPUT_WORKER_ARG = '--gitspace-terminal-output';
+/** A broker's shutdown still running after this (a process whose output never closes) ends the broker anyway: the
+ * records stay on disk and the next broker recovers them. */
+export const SHUTDOWN_DEADLINE_MS = 30_000;
 export const SupervisorErrorCodeSchema = z.enum(['DETACHED_REQUIRES_PERSISTENCE', 'SUPERVISOR_FAILURE']);
 export class SupervisorRequestError extends Error {
   constructor(readonly code: z.infer<typeof SupervisorErrorCodeSchema>, message: string) {
@@ -31,6 +34,8 @@ export const ProcessIdentitySchema = z.object({ pid: z.number().int().positive()
 export type ProcessIdentity = z.infer<typeof ProcessIdentitySchema>;
 export const DaemonSnapshotSchema = z.object({
   id: z.string(), name, state: DaemonStateSchema, owner: z.string().optional(), createdAt: z.string(),
+  /** When the process last became `exited` or `failed`; cleared when it starts again. */
+  finishedAt: z.string().optional(),
   pid: z.number().int().positive().nullable(), exitCode: z.number().int().nullable(),
   failure: z.string().optional(), restartCount: z.number().int().nonnegative(),
   nextRestartCount: z.number().int().nonnegative().optional(),
