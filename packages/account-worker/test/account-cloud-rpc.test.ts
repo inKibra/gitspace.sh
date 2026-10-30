@@ -540,32 +540,6 @@ describe('account cloud RPC without machines', () => {
     expect((await fixture.vault.cloudResolveCredential({ profileId: 'default', credentialId: storedAccount.id })).credential).toEqual({ type: 'api_key', key: 'default-private-key' });
   });
 
-  it('bypasses recent account usage observations only for an explicit refresh', async () => {
-    const fixture = await account();
-    await fixture.vault.putBrowserApiKey('default', 'openai', 'offline-fixture-key');
-    const [credential] = await fixture.vault.cloudCredentialAccounts('default', 'openai');
-    if (!credential) throw new Error('Expected fixture credential');
-    await runInDurableObject(fixture.vault, async (_instance, state) => {
-      state.storage.sql.exec(
-        'INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, NULL, ?)',
-        'default', credential.id, Date.now(), 'Cached usage observation',
-      );
-    });
-    const client = inspectorClient(fixture);
-    expect(await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: false })).toMatchObject({
-      status: 'ok', value: { errors: [{ provider: 'openai', message: 'Cached usage observation' }] },
-    });
-    // API-key usage is unsupported locally, so refresh can be proven without any provider request.
-    const refreshed = await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: true });
-    if (refreshed.status !== 'ok') throw new Error('Expected refreshed usage');
-    expect(refreshed.value.reports).toEqual([]);
-    expect(refreshed.value.errors).toHaveLength(1);
-    expect(refreshed.value.errors[0]!.message).not.toBe('Cached usage observation');
-    expect(await client.providers.usage({ profileId: 'default', providerId: 'openai', refresh: false })).toMatchObject({
-      status: 'ok', value: { errors: refreshed.value.errors },
-    });
-  });
-
   it('reads committed inference profiles without broker credentials', async () => {
     const fixture = await account();
     const client = inspectorClient(fixture);

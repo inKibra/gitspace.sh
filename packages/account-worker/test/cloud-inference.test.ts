@@ -201,6 +201,29 @@ describe('Cloud inference credential authority', () => {
     expect((await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId: 'workspace-0', vault: selection(vault), now: Date.parse(reset) })).map(account => account.id)).toContain(first!.id);
   });
 
+  it("gives each account its own usage report or the reason its read was refused", async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'reads', provider: 'anthropic', access: 'access-reads', email: 'reads@example.com' },
+      { id: 'refused', provider: 'anthropic', access: 'access-refused', email: 'refused@example.com' },
+    ]));
+    const [reads, refused] = await vault.cloudCredentialAccounts('default');
+    network.use(http.get('https://api.anthropic.com/api/oauth/usage', ({ request }) => request.headers.get('authorization') === 'Bearer access-reads'
+      ? HttpResponse.json({ five_hour: { utilization: 20, resets_at: null } })
+      : HttpResponse.json({ type: 'error', error: { type: 'permission_error', message: 'OAuth token does not meet scope requirement user:profile' } }, { status: 403 })));
+    const usage = await vault.cloudUsage('default', 'anthropic', true);
+    expect(usage.reports.map(report => ({ credentialId: report.credentialId, used: report.limits[0]?.used }))).toEqual([{ credentialId: reads!.id, used: 20 }]);
+    expect(usage.errors).toEqual([{ credentialId: refused!.id, provider: 'anthropic', account: expect.stringContaining('refused@example.com'), message: 'The provider refused the usage read (HTTP 403, permission_error: needs scope user:profile). Sign in again to grant it.' }]);
+    // Once the refused account is fixed, a read within the minute still answers from what was recorded, attributed the
+    // same way; only an explicit refresh reads again.
+    network.use(http.get('https://api.anthropic.com/api/oauth/usage', () => HttpResponse.json({ five_hour: { utilization: 30, resets_at: null } })));
+    const cached = await vault.cloudUsage('default', 'anthropic');
+    expect(cached.reports.map(report => report.credentialId)).toEqual([reads!.id]);
+    expect(cached.errors.map(error => error.credentialId)).toEqual([refused!.id]);
+    const refreshed = await vault.cloudUsage('default', 'anthropic', true);
+    expect(refreshed.reports.map(report => report.credentialId).sort()).toEqual([reads!.id, refused!.id].sort());
+    expect(refreshed.errors).toEqual([]);
+  });
+
   it('signing out a whole provider only disables its accounts', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'only', provider: 'openai-codex', access: 'access-only', accountId: 'account-only' }]));
     const [account] = await vault.cloudCredentialAccounts('default');

@@ -185,15 +185,14 @@ export function UsageView({ sessionId, report, status, error, onLoad, onRefresh,
       <p className="text-caption text-muted-foreground">Account-wide provider windows are separate from this session’s recorded tokens and cost.</p>
       {providerUsage.status === 'loading' ? <p role="status" className="text-caption text-muted-foreground">Loading provider account limits…</p> : null}
       {providerUsage.error ? <p role="alert" className="text-caption text-destructive">{providerUsage.error}</p> : null}
-      {providerUsage.report?.reports.map(account => <div key={`${account.provider}/${account.account}`} className="flex flex-col gap-2">
+      {providerUsage.report?.reports.map(account => <div key={account.credentialId} className="flex flex-col gap-2">
         <h4 className="text-caption font-medium">{account.provider}{account.account ? ` · ${account.account}` : ''}</h4>
         {account.limits.map(limit => <div key={limit.id} className="flex flex-wrap justify-between gap-2 text-caption"><span>{limit.label}{limit.window ? ` · ${limit.window}` : ''} · {limit.scope}</span><span className="tabular-nums">{formatUsageAmount(limit)}{limit.resetsAt ? ` · ${formatUsageReset(limit.resetsAt) ?? limit.resetsAt}` : ''}</span></div>)}
         {account.notes.map(note => <p key={note} className="text-caption text-muted-foreground">{note}</p>)}
         <p className="text-caption text-muted-foreground">Checked {new Date(account.fetchedAt).toLocaleString()}</p>
       </div>)}
-      {providerUsage.report?.accountsWithoutUsage.map(account => <p key={account} className="text-caption text-muted-foreground">Provider limits unavailable for {account}.</p>)}
-      {providerUsage.report?.errors.map(failure => <p key={failure.provider} role="alert" className="text-caption text-destructive">{failure.provider}: {failure.message}</p>)}
-      {providerUsage.report && !providerUsage.report.reports.length && !providerUsage.report.accountsWithoutUsage.length && !providerUsage.report.errors.length ? <p className="text-caption text-muted-foreground">No provider account limits were reported.</p> : null}
+      {providerUsage.report?.errors.map(failure => <p key={failure.credentialId} className="text-caption text-muted-foreground">Provider limits unavailable for {failure.provider}{failure.account ? ` · ${failure.account}` : ''}: {failure.message}</p>)}
+      {providerUsage.report && !providerUsage.report.reports.length && !providerUsage.report.errors.length ? <p className="text-caption text-muted-foreground">No provider account limits were reported.</p> : null}
       {providerUsage.status === 'error' ? <Button variant="secondary" size="compact" type="button" disabled={status === 'loading'} onClick={onRefresh}>Retry provider limits</Button> : null}
     </Section> : null}
   </div></ScrollArea>;

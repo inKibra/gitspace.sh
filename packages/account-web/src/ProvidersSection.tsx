@@ -23,9 +23,10 @@ import {
   InputGroup,
   MenuItem,
   ThinkingIndicator,
-  Tooltip,
+  type IconComponent,
+  type IconComponentProps,
 } from '@gitspace/ui';
-import { ChevronDown, CpuChip01, RefreshCcw01 } from '@untitledui/icons';
+import { AlertCircle, ChevronDown, CpuChip01, DotsHorizontal, RefreshCcw01 } from '@untitledui/icons';
 import { useEffect, useState, type ReactNode } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
@@ -44,7 +45,7 @@ export interface ProviderLoginProps {
 export interface ProvidersSectionProps {
   providers: readonly ProviderView[];
   loading?: boolean;
-  /** The provider list itself failed to load; shown instead of the rows. */
+  /** The provider list itself failed to load; shown instead of the cards. */
   error?: string;
   usage: ProviderUsage | null;
   usageStatus: ProvidersUsageStatus;
@@ -59,13 +60,24 @@ export interface ProvidersSectionProps {
   onSetApiKey(providerId: string, key: string): Promise<void>;
   login: ProviderLoginProps;
 }
+type UsageFailure = ProviderUsage['errors'][number];
 
-const PROVIDER_ICON = glyph(CpuChip01);
 const COMPACT_NUMBER = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 const UNIT_SUFFIX: Readonly<Record<string, string>> = { tokens: ' tokens', requests: ' requests', minutes: ' min', bytes: ' bytes' };
+/** A provider's tile: its initial. One component per letter, so a re-render keeps the tile mounted. */
+const MONOGRAMS = new Map<string, IconComponent>();
 
 function icon(Icon: typeof CpuChip01): ReactNode { return <Icon width={16} height={16} strokeWidth={1.5} />; }
 function errorMessage(error: unknown): string { return rpcErrorMessage(error, 'Provider account operation'); }
+function monogram(name: string): IconComponent {
+  const letter = name.slice(0, 1).toUpperCase();
+  let tile = MONOGRAMS.get(letter);
+  if (!tile) {
+    tile = function Monogram({ className }: IconComponentProps) { return <span aria-hidden className={`text-[12px] font-semibold leading-none ${className ?? ''}`}>{letter}</span>; };
+    MONOGRAMS.set(letter, tile);
+  }
+  return tile;
+}
 
 function formatAmount(value: number, unit: string): string {
   if (unit === 'usd') return `$${value.toFixed(2)}`;
@@ -91,140 +103,114 @@ export function formatUsageReset(resetsAt: string | null, now = Date.now()): str
   return `resets ${formatRelativeTime(at, now)}`;
 }
 
-function UsageLimitRow({ limit, now }: { limit: ProviderUsageLimit; now: number }) {
-  const fraction = limit.remainingFraction === null ? null : Math.min(1, Math.max(0, limit.remainingFraction));
+/** How much of a window is used, 0–1: the share it reports, else what is left subtracted from the whole. */
+function usedShare(limit: ProviderUsageLimit): number | null {
+  const share = limit.unit === 'percent' && limit.used !== null ? limit.used / 100
+    : limit.used !== null && limit.limit ? limit.used / limit.limit
+    : limit.remainingFraction === null ? null : 1 - limit.remainingFraction;
+  return share === null ? null : Math.min(1, Math.max(0, share));
+}
+
+function UsageMeter({ limit, now }: { limit: ProviderUsageLimit; now: number }) {
+  const share = usedShare(limit);
   const reset = formatUsageReset(limit.resetsAt, now);
-  return <div className="flex flex-col gap-1" data-usage-limit={limit.id}>
-    <div className="flex items-center justify-between gap-3 text-caption">
-      <span className="min-w-0 truncate text-foreground">{limit.label}{limit.window ? <span className="text-muted-foreground"> · {limit.window}</span> : null}</span>
-      <span className="shrink-0 tabular-nums text-muted-foreground">{formatUsageAmount(limit)}{reset ? ` · ${reset}` : ''}</span>
+  const label = limit.window && limit.window !== limit.label ? `${limit.label} · ${limit.window}` : limit.label;
+  const high = share !== null && share >= 0.9;
+  return <div className="flex min-w-0 flex-col gap-1" data-usage-limit={limit.id}>
+    <div className="flex items-baseline justify-between gap-2 text-caption">
+      <span className="min-w-0 truncate text-foreground">{label}</span>
+      <span className={`shrink-0 tabular-nums ${high ? 'text-destructive' : 'text-muted-foreground'}`}>{formatUsageAmount(limit)}</span>
     </div>
-    {fraction === null ? null
+    {share === null ? null
       // FLUID-GAP: progress meter (no meter/progress component in the registry) — a 4px track on Fluid tokens.
-      : <div role="meter" aria-label={`${limit.label} remaining`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fraction * 100)} className="h-1 w-full overflow-hidden rounded-full bg-muted">
-          <div className={`h-full ${fraction < 0.1 ? 'bg-destructive' : 'bg-foreground'}`} style={{ width: `${fraction * 100}%` }} />
+      : <div role="meter" aria-label={`${label} used`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(share * 100)} className="h-1 w-full overflow-hidden rounded-full bg-muted">
+          <div className={`h-full ${high ? 'bg-destructive' : 'bg-foreground'}`} style={{ width: `${share * 100}%` }} />
         </div>}
-  </div>;
-}
-function UsageReports({ reports, errors, missingAccounts, supported, status, now }: {
-  reports: readonly ProviderUsageReport[];
-  errors: readonly string[];
-  missingAccounts: readonly string[];
-  supported: boolean;
-  status: ProvidersUsageStatus;
-  now: number;
-}) {
-  const labelled = reports.length > 1 || missingAccounts.length > 0;
-  const message = !supported ? 'Usage reporting is not supported for this provider.'
-    : status === 'loading' ? reports.length ? 'Refreshing usage…' : 'Checking usage…'
-    : reports.length || errors.length || missingAccounts.length ? null
-    : status === 'idle' ? 'Usage has not been checked yet.' : 'Usage unavailable.';
-  // Wraps under the row (the card is flex-wrap); the inset lines the block up
-  // with the header text: media tile (32px) + gap (10px).
-  return <div className="flex basis-full flex-col gap-3 pb-3 pl-[42px] pr-3">
-    {message ? <p role="status" className="text-caption text-muted-foreground">{message}</p> : null}
-    {supported ? errors.map((error) => <p key={error} role="alert" className="text-caption text-destructive">Usage unavailable: {error}</p>) : null}
-    {supported ? missingAccounts.map((account) => <p key={account} className="text-caption text-muted-foreground">Usage unavailable for {account}.</p>) : null}
-    {reports.map((report) => <div key={report.account ?? report.provider} className="flex flex-col gap-2">
-      {labelled && report.account ? <span className="text-caption font-medium text-foreground">{report.account}</span> : null}
-      {report.limits.map((limit) => <UsageLimitRow key={limit.id} limit={limit} now={now} />)}
-      {report.notes.map((note) => <p key={note} className="text-caption text-muted-foreground">{note}</p>)}
-    </div>)}
+    {reset ? <span className="text-[11px] text-muted-foreground">{reset}</span> : null}
   </div>;
 }
 
-function providerBadge(provider: ProviderView): { color: 'green' | 'gray' | 'amber'; label: string } {
-  if (provider.accounts.length > 0 && provider.accounts.every((account) => account.disabled)) return { color: 'amber', label: 'Disabled' };
-  return provider.hasAuth ? { color: 'green', label: 'Connected' } : { color: 'gray', label: 'Not signed in' };
-}
-function providerDescription(provider: ProviderView): string {
-  if (provider.accounts.length) return provider.accounts.length === 1 ? '1 account' : `${provider.accounts.length} accounts`;
-  if (provider.hasAuth) return provider.source ? `Connected via ${provider.source}` : 'Connected';
-  return 'Not connected';
-}
-function accountState(account: ProviderAccount, now: number): { color: 'green' | 'gray' | 'amber'; label: string; reason: string | null } {
-  if (account.disabled) return { color: 'gray', label: 'Disabled', reason: null };
-  const outUntil = account.outUntil === null ? Number.NaN : Date.parse(account.outUntil);
-  if (outUntil > now) return { color: 'amber', label: `Out until ${new Date(outUntil).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`, reason: account.outReason };
-  return { color: 'green', label: 'Active', reason: null };
+/** Whether inference uses an account now: off, paused until a time (a limit or failure cooldown), or in use. */
+function accountState(account: ProviderAccount, now: number): { color: 'green' | 'gray' | 'amber'; label: string; paused: boolean } {
+  if (account.disabled) return { color: 'gray', label: 'Off', paused: false };
+  const until = account.outUntil === null ? Number.NaN : Date.parse(account.outUntil);
+  if (!(until > now)) return { color: 'green', label: 'In use', paused: false };
+  const back = new Date(until);
+  const sameDay = back.toDateString() === new Date(now).toDateString();
+  return { color: 'amber', label: `Paused · back ${sameDay ? back.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : back.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`, paused: true };
 }
 
-function AccountRow({ account, providerId, now, pending, onDisable, onEnable, onRemove }: {
-  account: ProviderAccount;
-  providerId: string;
-  now: number;
-  pending: string | null;
-  onDisable(): void;
-  onEnable(): void;
-  onRemove(): void;
-}) {
-  const state = accountState(account, now);
-  const badge = <Badge variant="dot" color={state.color}>{state.label}</Badge>;
-  const toggle = account.disabled ? 'enable' : 'disable';
-  return <li className="flex items-center justify-between gap-3" data-account={account.id}>
-    <span className="min-w-0 truncate text-caption text-foreground">{account.label}</span>
-    <span className="flex shrink-0 items-center gap-2">
-      {state.reason ? <Tooltip content={state.reason}>{badge}</Tooltip> : badge}
-      <Button variant="secondary" size="compact" type="button" aria-label={`${account.disabled ? 'Enable' : 'Disable'} ${account.label}`} disabled={pending !== null} loading={pending === `${toggle}:${providerId}:${account.id}`} onClick={account.disabled ? onEnable : onDisable}>{account.disabled ? 'Enable' : 'Disable'}</Button>
-      <Button variant="ghost" size="compact" type="button" aria-label={`Remove ${account.label}`} disabled={pending !== null} loading={pending === `remove:${providerId}:${account.id}`} onClick={onRemove}>Remove</Button>
-    </span>
-  </li>;
-}
-
-function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAccounts, usageStatus, now, pending, onSignIn, onAddKey, onDisableAccount, onEnableAccount, onRemoveAccount, index }: {
+/** An account: who it is, whether inference uses it now, its usage windows (or why there are none), and its actions. */
+function AccountRow({ provider, account, report, failure, usageStatus, now, pending, onToggle, onSignInAgain, onReplaceKey, onRemove }: {
   provider: ProviderView;
-  signInMethods: readonly ProviderView[];
-  reports: readonly ProviderUsageReport[];
-  usageErrors: readonly string[];
-  missingAccounts: readonly string[];
+  account: ProviderAccount;
+  report: ProviderUsageReport | undefined;
+  failure: UsageFailure | undefined;
   usageStatus: ProvidersUsageStatus;
   now: number;
   pending: string | null;
+  onToggle(): void;
+  onSignInAgain: (() => void) | null;
+  onReplaceKey(): void;
+  onRemove(): void;
+}) {
+  const state = accountState(account, now);
+  const actions = [
+    { label: account.disabled ? 'Turn on' : 'Turn off', run: onToggle },
+    ...account.type === 'api_key' ? [{ label: 'Replace key', run: onReplaceKey }] : onSignInAgain ? [{ label: 'Sign in again', run: onSignInAgain }] : [],
+    { label: 'Remove…', run: onRemove },
+  ];
+  const busy = pending !== null && pending.endsWith(`:${provider.id}:${account.id}`);
+  const usage = account.disabled ? null
+    : report ? <>
+        <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-3">{report.limits.map((limit) => <UsageMeter key={limit.id} limit={limit} now={now} />)}</div>
+        {report.notes.map((note) => <p key={note} className="text-caption text-muted-foreground">{note}</p>)}
+      </>
+    : failure ? <p className="flex items-start gap-1.5 text-caption text-muted-foreground"><AlertCircle className="mt-px shrink-0" width={14} height={14} strokeWidth={1.5} /><span>Usage unavailable: {failure.message} Inference still uses this account.</span></p>
+    : account.type === 'api_key' ? <p className="text-caption text-muted-foreground">{provider.name} doesn’t report usage for API keys.</p>
+    : !provider.hasUsage ? <p className="text-caption text-muted-foreground">{provider.name} doesn’t report usage.</p>
+    : usageStatus === 'loading' ? <p role="status" className="text-caption text-muted-foreground">Checking usage…</p>
+    : usageStatus === 'idle' ? <p className="text-caption text-muted-foreground">Usage has not been checked yet.</p>
+    : usageStatus === 'ready' ? <p className="text-caption text-muted-foreground">No usage reported.</p>
+    : null;
+  return <li className="flex flex-col gap-3 border-t border-border py-3 first:border-t-0" data-account={account.id}>
+    <div className="flex items-center gap-3">
+      <span className={`flex min-w-0 flex-1 flex-col ${account.disabled ? 'opacity-60' : ''}`}>
+        <span className="truncate text-body text-foreground">{account.label}</span>
+        <span className="text-caption text-muted-foreground">{account.type === 'oauth' ? 'Subscription sign-in' : 'API key'}</span>
+      </span>
+      <Badge variant="dot" size="compact" color={state.color}>{state.label}</Badge>
+      <DropdownMenu>
+        <DropdownTrigger render={<Button variant="ghost" size="icon-compact" type="button" aria-label={`Actions for ${account.label}`} disabled={pending !== null} loading={busy}>{icon(DotsHorizontal)}</Button>} />
+        <DropdownContent align="end">{actions.map((action, index) => <MenuItem key={action.label} index={index} label={action.label} onSelect={action.run} />)}</DropdownContent>
+      </DropdownMenu>
+    </div>
+    {state.paused && account.outReason ? <p className="text-caption text-muted-foreground">{account.outReason}. Inference skips this account until then.</p> : null}
+    {usage}
+  </li>;
+}
+
+/** The ways to add an account: each sign-in method, and an API key when the provider takes one and has none. */
+function AddAccount({ provider, signInMethods, connected, pending, onSignIn, onAddKey }: {
+  provider: ProviderView;
+  signInMethods: readonly ProviderView[];
+  connected: boolean;
+  pending: string | null;
   onSignIn(providerId: string): void;
   onAddKey(): void;
-  onDisableAccount(account: ProviderAccount): void;
-  onEnableAccount(account: ProviderAccount): void;
-  onRemoveAccount(account: ProviderAccount): void;
-  index?: number;
 }) {
-  const badge = providerBadge(provider);
-  const showUsage = provider.hasAuth;
-  const signInLabel = provider.accounts.length ? 'Add account' : 'Sign in';
+  const ways = [
+    ...signInMethods.map((method) => ({ label: signInMethods.length > 1 ? `Sign in with ${method.name}` : 'Sign in', run: () => onSignIn(method.id) })),
+    ...provider.supportsApiKey && !provider.accounts.some((account) => account.type === 'api_key') ? [{ label: 'Add API key', run: onAddKey }] : [],
+  ];
   const signingIn = signInMethods.some((method) => pending === `login:${method.id}`);
-  return <Card size="compact" index={index} className={showUsage || provider.accounts.length ? 'flex-wrap' : undefined} data-provider={provider.id}>
-    <CardMedia icon={PROVIDER_ICON} />
-    <CardHeader><CardTitle>{provider.name}</CardTitle><CardDescription>{providerDescription(provider)}</CardDescription></CardHeader>
-    <CardFooter className="gap-2">
-      <Badge variant="dot" color={badge.color}>{badge.label}</Badge>
-      {provider.supportsApiKey
-        ? <Button variant="secondary" size="compact" type="button" disabled={pending !== null} onClick={onAddKey}>{provider.accounts.some(account => account.type === 'api_key') ? 'Replace API key' : 'Add API key'}</Button>
-        : null}
-      {signInMethods.length > 1
-        ? <DropdownMenu>
-            <DropdownTrigger render={<Button variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} trailingIcon={glyph(ChevronDown)}>{signInLabel}</Button>} />
-            <DropdownContent align="end">
-              {signInMethods.map((method, methodIndex) => <MenuItem key={method.id} index={methodIndex} label={method.name} onSelect={() => onSignIn(method.id)} />)}
-            </DropdownContent>
-          </DropdownMenu>
-        : signInMethods.map((method) => <Button key={method.id} variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} onClick={() => onSignIn(method.id)}>{signInLabel}</Button>)}
-    </CardFooter>
-    {provider.accounts.length
-      // Same inset as the usage block: media tile (32px) + gap (10px).
-      ? <ul aria-label={`${provider.name} accounts`} className="flex basis-full flex-col gap-2 pb-3 pl-[42px] pr-3">
-          {provider.accounts.map((account) => <AccountRow
-            key={account.id}
-            account={account}
-            providerId={provider.id}
-            now={now}
-            pending={pending}
-            onDisable={() => onDisableAccount(account)}
-            onEnable={() => onEnableAccount(account)}
-            onRemove={() => onRemoveAccount(account)}
-          />)}
-        </ul>
-      : null}
-    {showUsage ? <UsageReports reports={reports} errors={usageErrors} missingAccounts={missingAccounts} supported={provider.hasUsage} status={usageStatus} now={now} /> : null}
-  </Card>;
+  const [only] = ways;
+  if (!only) return null;
+  if (ways.length === 1) return <Button variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} onClick={only.run}>{connected ? 'Add account' : only.label}</Button>;
+  return <DropdownMenu>
+    <DropdownTrigger render={<Button variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} trailingIcon={glyph(ChevronDown)}>{connected ? 'Add account' : 'Connect'}</Button>} />
+    <DropdownContent align="end">{ways.map((way, index) => <MenuItem key={way.label} index={index} label={way.label} onSelect={way.run} />)}</DropdownContent>
+  </DropdownMenu>;
 }
 
 function ApiKeyDialog({ provider, onOpenChange, onSubmit }: { provider: ProviderView | null; onOpenChange(open: boolean): void; onSubmit(providerId: string, key: string): Promise<void> }) {
@@ -336,9 +322,7 @@ export function ProvidersSection({ providers, loading = false, error, usage, usa
   const now = Date.now();
   // A login alias shares accounts and usage, but remains a separate sign-in method.
   const groups = new Map<string, { provider: ProviderView; signInMethods: ProviderView[]; index: number }>();
-  const credentialProviders = new Map<string, string>();
   for (const provider of providers) {
-    credentialProviders.set(provider.id, provider.credentialProvider);
     let group = groups.get(provider.credentialProvider);
     if (!group) {
       group = { provider, signInMethods: [], index: groups.size };
@@ -352,11 +336,11 @@ export function ProvidersSection({ providers, loading = false, error, usage, usa
   const codex = groups.get('openai-codex');
   const codexDevice = codex?.signInMethods.find((method) => method.id === 'openai-codex-device' && method.available);
   if (codex && codexDevice) codex.signInMethods = [codexDevice];
-  // Connected accounts first, then providers you can sign in to, then key-only ones.
-  const rank = ({ provider, signInMethods }: { provider: ProviderView; signInMethods: readonly ProviderView[] }): number => (provider.hasAuth ? 0 : provider.loginable || signInMethods.length ? 1 : 2);
-  const visible = [...groups.values()]
-    .filter(({ provider, signInMethods }) => provider.loginable || signInMethods.length || provider.hasAuth || provider.available)
-    .sort((left, right) => rank(left) - rank(right) || left.index - right.index);
+  const visible = [...groups.values()].filter(({ provider, signInMethods }) => provider.loginable || signInMethods.length || provider.hasAuth || provider.available);
+  const connected = visible.filter(({ provider }) => provider.hasAuth);
+  // Providers you can sign in to before key-only ones.
+  const others = visible.filter(({ provider }) => !provider.hasAuth)
+    .sort((left, right) => Number(!(left.provider.loginable || left.signInMethods.length)) - Number(!(right.provider.loginable || right.signInMethods.length)) || left.index - right.index);
   const loginProvider = login.flow ? providers.find((provider) => provider.id === login.flow?.providerId) : null;
   const run = async (key: string, action: () => Promise<void>): Promise<void> => {
     setPending(key);
@@ -369,58 +353,87 @@ export function ProvidersSection({ providers, loading = false, error, usage, usa
       setPending(null);
     }
   };
+  const reports = new Map(usage?.reports.map((report) => [report.credentialId, report]));
+  const failures = new Map(usage?.errors.map((failure) => [failure.credentialId, failure]));
   const reportTimes = usage?.reports.map((report) => Date.parse(report.fetchedAt)).filter(Number.isFinite) ?? [];
   const reportTime = reportTimes.length ? Math.min(...reportTimes) : null;
-  const incomplete = Boolean(usage?.accountsWithoutUsage.length || usage?.errors.length);
   const usageLabel = usageStatus === 'loading' ? 'Checking usage…'
-    : usageStatus === 'error' ? usageError ?? 'Usage unavailable'
-    : usage ? reportTime === null ? 'Usage unavailable'
-      : `${incomplete ? 'Partial usage' : 'Usage'} as of ${new Date(reportTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : usageStatus === 'error' ? `Usage unavailable: ${usageError ?? 'could not fetch usage'}`
+    : usage ? reportTime === null ? usage.errors.length ? 'Usage unavailable' : null
+      : `${usage.errors.length ? 'Partial usage' : 'Usage'} as of ${new Date(reportTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
     : null;
-  const matchesProvider = (id: string, provider: ProviderView): boolean => (credentialProviders.get(id) ?? id) === provider.credentialProvider;
-  return <section className="flex flex-col gap-3" aria-label="Model providers">
-    <div className="flex items-center justify-between gap-3">
-      <h2 className="text-subtitle font-semibold text-foreground">Providers</h2>
-      <span className="flex items-center gap-2">
-        {usageStatus === 'loading' ? <ThinkingIndicator aria-label="Checking usage" /> : null}
-        {usageLabel ? <span className={`text-caption ${usageStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>{usageLabel}</span> : null}
-        <Button variant="ghost" size="icon-compact" type="button" aria-label="Refresh usage" disabled={usageStatus === 'loading'} onClick={() => void onRefreshUsage()}>{icon(RefreshCcw01)}</Button>
-      </span>
+  const signIn = (providerId: string): void => void run(`login:${providerId}`, () => onSignIn(providerId));
+  return <section className="flex flex-col gap-8" aria-label="Model providers">
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-subtitle font-semibold text-foreground">{connected.length && !error && !loading ? 'Connected' : 'Providers'}</h2>
+        <span className="flex items-center gap-2">
+          {usageStatus === 'loading' ? <ThinkingIndicator aria-label="Checking usage" /> : null}
+          {usageLabel ? <span role={usageStatus === 'error' ? 'alert' : undefined} className={`text-caption ${usageStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>{usageLabel}</span> : null}
+          <Button variant="ghost" size="icon-compact" type="button" aria-label="Refresh usage" disabled={usageStatus === 'loading'} onClick={() => void onRefreshUsage()}>{icon(RefreshCcw01)}</Button>
+        </span>
+      </div>
+      {error
+        ? <EmptyState icon={icon(CpuChip01)} title="Providers are unavailable" description={error} action={<Button variant="ghost" type="button" onClick={() => void onRefreshUsage()}>Retry</Button>} />
+        : loading ? <EmptyState icon={<ThinkingIndicator />} title="Loading this profile’s providers…" />
+        : visible.length === 0 ? <EmptyState icon={icon(CpuChip01)} title="No providers in this profile" description="The cloud provider catalog reports no loginable or configured model providers." />
+        : connected.length === 0 ? <p className="text-caption text-muted-foreground">No provider is connected yet. Connect one below.</p>
+        : connected.map(({ provider, signInMethods }, index) => {
+          const using = provider.accounts.filter((account) => accountState(account, now).color === 'green').length;
+          const summary = provider.accounts.length
+            ? using === 0 ? 'No account available right now' : `${using} of ${provider.accounts.length} account${provider.accounts.length === 1 ? '' : 's'} in use`
+            : provider.source ? `Connected via ${provider.source}` : 'Connected';
+          return <CardGroup key={provider.credentialProvider} orientation="inline" border="outlined" proximityHover={false}>
+            <Card size="compact" index={index} className="flex-wrap" data-provider={provider.id}>
+              <CardMedia icon={monogram(provider.name)} />
+              <CardHeader><CardTitle>{provider.name}</CardTitle><CardDescription>{summary}</CardDescription></CardHeader>
+              <CardFooter><AddAccount provider={provider} signInMethods={signInMethods} connected pending={pending} onSignIn={signIn} onAddKey={() => setApiKeyFor(provider)} /></CardFooter>
+              {provider.accounts.length
+                // Lines up with the header text: media tile (32px) + gap (10px).
+                ? <ul aria-label={`${provider.name} accounts`} className="flex basis-full flex-col pb-1 pl-[42px] pr-3">
+                    {provider.accounts.map((account) => <AccountRow
+                      key={account.id}
+                      provider={provider}
+                      account={account}
+                      report={reports.get(account.id)}
+                      failure={failures.get(account.id)}
+                      usageStatus={usageStatus}
+                      now={now}
+                      pending={pending}
+                      onToggle={() => void run(`${account.disabled ? 'enable' : 'disable'}:${provider.id}:${account.id}`, () => (account.disabled ? onEnableAccount : onDisableAccount)(provider.id, account.id))}
+                      onSignInAgain={signInMethods[0] ? () => signIn(signInMethods[0]!.id) : null}
+                      onReplaceKey={() => setApiKeyFor(provider)}
+                      onRemove={() => {
+                        if (!window.confirm(`Remove ${account.label} from ${provider.name}? This cannot be undone. Signing in again creates a new account.`)) return;
+                        void run(`remove:${provider.id}:${account.id}`, () => onRemoveAccount(provider.id, account.id));
+                      }}
+                    />)}
+                  </ul>
+                : null}
+            </Card>
+          </CardGroup>;
+        })}
     </div>
-    {error
-      ? <EmptyState icon={icon(CpuChip01)} title="Providers are unavailable" description={error} action={<Button variant="ghost" type="button" onClick={() => void onRefreshUsage()}>Retry</Button>} />
-      : loading ? <EmptyState icon={<ThinkingIndicator />} title="Loading this profile’s providers…" />
-      : visible.length === 0
-        ? <EmptyState icon={icon(CpuChip01)} title="No providers in this profile" description="The cloud provider catalog reports no loginable or configured model providers." />
-        : <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
-          {visible.map(({ provider, signInMethods }) => <ProviderRow
-            key={provider.credentialProvider}
-            provider={provider}
-            signInMethods={signInMethods}
-            reports={usage?.reports.filter((report) => matchesProvider(report.provider, provider)) ?? []}
-            usageErrors={[...new Set([
-              ...(usage?.errors.filter((item) => item.provider === '*' || matchesProvider(item.provider, provider)).map((item) => item.message) ?? []),
-              ...(usageStatus === 'error' ? [usageError ?? 'Could not fetch usage.'] : []),
-            ])]}
-            missingAccounts={usage?.accountsWithoutUsage.filter((account) => matchesProvider(account.split(': ', 1)[0]!, provider)).map((account) => account.slice(account.indexOf(': ') + 2)) ?? []}
-            usageStatus={usageStatus}
-            now={now}
-            pending={pending}
-            onSignIn={(providerId) => void run(`login:${providerId}`, () => onSignIn(providerId))}
-            onAddKey={() => setApiKeyFor(provider)}
-            onDisableAccount={(account) => void run(`disable:${provider.id}:${account.id}`, () => onDisableAccount(provider.id, account.id))}
-            onEnableAccount={(account) => void run(`enable:${provider.id}:${account.id}`, () => onEnableAccount(provider.id, account.id))}
-            onRemoveAccount={(account) => {
-              if (!window.confirm(`Remove ${account.label} from ${provider.name}? This cannot be undone. Signing in again creates a new account.`)) return;
-              void run(`remove:${provider.id}:${account.id}`, () => onRemoveAccount(provider.id, account.id));
-            }}
-          />)}
-        </CardGroup>}
+    {!error && !loading && others.length
+      ? <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1">
+            <h2 className="text-subtitle font-semibold text-foreground">Add a provider</h2>
+            <p className="text-caption text-muted-foreground">Sign in with a subscription, or add an API key. Each account you add joins the rotation.</p>
+          </div>
+          <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
+            {others.map(({ provider, signInMethods }, index) => <Card key={provider.credentialProvider} size="compact" index={index} data-provider={provider.id}>
+              <CardMedia icon={monogram(provider.name)} />
+              <CardHeader><CardTitle>{provider.name}</CardTitle><CardDescription>{signInMethods.length ? provider.supportsApiKey ? 'Subscription sign-in or API key' : 'Subscription sign-in' : 'API key'}</CardDescription></CardHeader>
+              <CardFooter><AddAccount provider={provider} signInMethods={signInMethods} connected={false} pending={pending} onSignIn={signIn} onAddKey={() => setApiKeyFor(provider)} /></CardFooter>
+            </Card>)}
+          </CardGroup>
+        </div>
+      : null}
     {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
     <p className="text-caption text-muted-foreground">Credentials are encrypted in this inference profile’s vault. Other profiles cannot use them. Removing credentials may interrupt active work, but does not recall requests already sent to a provider.</p>
     <ApiKeyDialog provider={apiKeyFor} onOpenChange={(open) => { if (!open) setApiKeyFor(null); }} onSubmit={onSetApiKey} />
     <Dialog open={login.flow !== null} onOpenChange={(open) => { if (!open) void login.cancel(); }}>
-      {login.flow ? <DialogContent><SignInFlowView key={login.flow.flowId} flow={login.flow} providerName={loginProvider?.name ?? login.flow.providerId} login={login} onRetry={() => { const providerId = login.flow?.providerId; if (providerId) void run(`login:${providerId}`, () => onSignIn(providerId)); }} /></DialogContent> : null}
+      {login.flow ? <DialogContent><SignInFlowView key={login.flow.flowId} flow={login.flow} providerName={loginProvider?.name ?? login.flow.providerId} login={login} onRetry={() => { const providerId = login.flow?.providerId; if (providerId) signIn(providerId); }} /></DialogContent> : null}
     </Dialog>
   </section>;
 }

@@ -1587,40 +1587,45 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     });
   }
 
+  /** Each account's usage: a report or why its read failed. API keys report none, so they are not read. */
   async cloudUsage(profileId: string, providerId: string | null, refresh = false): Promise<ProviderUsage> {
-    const accounts = await this.cloudCredentialAccounts(profileId, providerId ?? undefined);
-    const result: { generatedAt: string; reports: ProviderUsage['reports'][number][]; accountsWithoutUsage: string[]; errors: ProviderUsage['errors'][number][] } = { generatedAt: new Date().toISOString(), reports: [], accountsWithoutUsage: [], errors: [] };
+    const accounts = (await this.cloudCredentialAccounts(profileId, providerId ?? undefined)).filter(account => account.type !== 'api_key');
+    const generatedAt = new Date().toISOString();
+    const reports: ProviderUsage['reports'][number][] = [];
+    const errors: ProviderUsage['errors'][number][] = [];
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
     await Promise.all(accounts.map(async account => {
+      const failed = (message: string): void => { errors.push({ credentialId: account.id, provider: account.provider, account: account.identity, message }); };
       const cached = this.ctx.storage.sql.exec<{ observed_at: number; report_json: string | null; error: string | null }>('SELECT observed_at, report_json, error FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, account.id).toArray()[0];
       if (!refresh && cached && Date.now() - cached.observed_at < 60_000) {
-        if (cached.report_json) result.reports.push(providerUsageReportSchema.parse(JSON.parse(cached.report_json)));
-        else result.accountsWithoutUsage.push(account.identity ?? `${account.provider}:${account.id}`);
-        if (cached.error) result.errors.push({ provider: account.provider, message: cached.error });
+        if (cached.report_json) reports.push({ ...providerUsageReportSchema.parse(JSON.parse(cached.report_json)), credentialId: account.id });
+        if (cached.error) failed(cached.error);
         return;
       }
       try {
         const row = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND rowid = ? AND state = 'active'", profileId, Number(account.id)).toArray()[0];
-        if (!row) throw new Error('Account is no longer active');
+        if (!row) throw new Error('The account is no longer active.');
         const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
-        if (credential.type === 'api_key') throw new Error('Usage reporting is unavailable for this API key');
+        if (credential.type === 'api_key') return;
         const report = await collectUsage(credential);
         this.assertProfileAccess(profileId);
         if (this.credential(row.id, profileId)?.state !== 'active') return;
         this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, ?, NULL) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = excluded.report_json, error = NULL', profileId, account.id, Date.now(), JSON.stringify(report));
-        result.reports.push(report);
+        reports.push({ ...report, credentialId: account.id });
       } catch (error) {
-        // Which way the provider's usage read failed, so the screen says what is wrong; inference is unaffected.
-        const reason = error instanceof ProviderUsageError ? `the provider's usage read was ${error.kind}${error.status ? ` (HTTP ${error.status}${error.reason ? `, ${error.reason}` : ''})` : ''}` : error instanceof Error ? error.message : String(error);
-        const message = `Usage reporting is unavailable: ${reason}; inference remains enabled`;
+        // Which way the provider's usage read failed, as a sentence the account's row shows; inference is unaffected.
+        const message = !(error instanceof ProviderUsageError) ? error instanceof Error ? error.message : String(error)
+          : error.kind === 'rejected' ? `The provider refused the usage read (HTTP ${error.status ?? '?'}${error.reason ? `, ${error.reason}` : ''}).${error.reason?.includes('needs scope') ? ' Sign in again to grant it.' : ''}`
+          : error.kind === 'network' ? 'The usage read did not reach the provider.'
+          : error.kind === 'unsupported' ? 'The provider does not report usage for this account.'
+          : 'The provider answered the usage read with something unexpected.';
         this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, NULL, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = NULL, error = excluded.error', profileId, account.id, Date.now(), message);
-        result.accountsWithoutUsage.push(account.identity ?? `${account.provider}:${account.id}`);
-        result.errors.push({ provider: account.provider, message });
+        failed(message);
       }
     }));
     this.assertProfileAccess(profileId);
-    return result;
+    return { generatedAt, reports, errors };
   }
 
   private cloudAccountHealthReady = false;

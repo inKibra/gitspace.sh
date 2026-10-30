@@ -1236,7 +1236,9 @@ export const ProviderUsageLimitCodec = wire.object({
   status: wire.nullable(wire.string),
 });
 export type ProviderUsageLimit = InputOf<typeof ProviderUsageLimitCodec>;
+/** One account's usage read: `credentialId` is the account's `ProviderAccount.id`. */
 export const ProviderUsageReportCodec = wire.object({
+  credentialId: wire.string,
   provider: wire.string,
   account: wire.nullable(wire.string),
   fetchedAt: wire.string,
@@ -1244,11 +1246,11 @@ export const ProviderUsageReportCodec = wire.object({
   notes: wire.array(wire.string),
 });
 export type ProviderUsageReport = InputOf<typeof ProviderUsageReportCodec>;
+/** Every account that reports usage has a report or an error: why its read failed, as a sentence. */
 export const ProviderUsageCodec = wire.object({
   generatedAt: wire.string,
   reports: wire.array(ProviderUsageReportCodec),
-  accountsWithoutUsage: wire.array(wire.string),
-  errors: wire.array(wire.object({ provider: wire.string, message: wire.string })),
+  errors: wire.array(wire.object({ credentialId: wire.string, provider: wire.string, account: wire.nullable(wire.string), message: wire.string })),
 });
 export type ProviderUsage = InputOf<typeof ProviderUsageCodec>;
 

@@ -16,29 +16,28 @@ function provider(overrides: Partial<ProviderView> & Pick<ProviderView, 'id' | '
 function account(overrides: Partial<ProviderAccount> & Pick<ProviderAccount, 'id' | 'label'>): ProviderAccount {
   return { type: 'oauth', email: null, disabled: false, outUntil: null, outReason: null, ...overrides };
 }
-const anthropic = provider({ id: 'anthropic', name: 'Anthropic', authKind: 'oauth', supportsApiKey: true, hasAuth: true, source: 'oauth', hasUsage: true, accounts: [account({ id: 'cred-1', label: 'Claude Max', email: 'dev@example.com' })] });
+const max = account({ id: 'cred-1', label: 'dev@example.com', email: 'dev@example.com' });
+const ops = account({ id: 'cred-2', label: 'ops@example.com', email: 'ops@example.com' });
+const key = account({ id: 'cred-3', type: 'api_key', label: 'API key ····41aa' });
+const anthropic = provider({ id: 'anthropic', name: 'Anthropic', authKind: 'oauth', supportsApiKey: true, hasAuth: true, hasUsage: true, accounts: [max, ops, key] });
 const openai = provider({ id: 'openai', name: 'OpenAI', supportsOAuth: false, supportsApiKey: true, loginable: false });
 const codex = provider({ id: 'openai-codex', name: 'OpenAI Codex' });
+const gemini = provider({ id: 'google-gemini-cli', name: 'Google Gemini CLI', supportsApiKey: true });
 const hidden = provider({ id: 'ollama', name: 'Ollama', available: false, loginable: false, supportsOAuth: false });
-const usage: ProviderUsage = {
-  generatedAt: '2026-09-01T10:00:00.000Z',
-  reports: [{
-    provider: 'anthropic',
-    account: 'dev@example.com',
-    fetchedAt: '2026-09-01T10:00:00.000Z',
-    limits: [
-      { id: '5h', label: 'Session', scope: 'account', window: '5h', unit: 'percent', used: 62, limit: 100, remaining: 38, remainingFraction: 0.38, resetsAt: new Date(Date.now() + 2 * 3_600_000).toISOString(), status: 'ok' },
-      { id: '7d', label: 'Weekly', scope: 'account', window: '7d', unit: 'tokens', used: 950_000, limit: 1_000_000, remaining: 50_000, remainingFraction: 0.05, resetsAt: null, status: 'warning' },
-    ],
-    notes: ['Limits reset on a rolling window.'],
-  }],
-  accountsWithoutUsage: [],
-  errors: [{ provider: 'openai-codex', message: 'not signed in' }],
-};
+const report = (credentialId: string, fetchedAt = '2026-09-01T10:00:00.000Z'): ProviderUsage['reports'][number] => ({
+  credentialId, provider: 'anthropic', account: 'dev@example.com', fetchedAt, notes: ['Limits reset on a rolling window.'],
+  limits: [
+    { id: '5h', label: '5 hours', scope: 'account', window: '5 hours', unit: 'percent', used: 62, limit: 100, remaining: 38, remainingFraction: 0.38, resetsAt: new Date(Date.now() + 2 * 3_600_000).toISOString(), status: 'ok' },
+    { id: '7d', label: 'Weekly', scope: 'account', window: '7d', unit: 'tokens', used: 950_000, limit: 1_000_000, remaining: 50_000, remainingFraction: 0.05, resetsAt: null, status: 'warning' },
+    { id: 'credits', label: 'Credits', scope: 'account', window: null, unit: 'credits', used: null, limit: null, remaining: null, remainingFraction: 0.25, resetsAt: null, status: null },
+  ],
+});
+const refused = { credentialId: 'cred-2', provider: 'anthropic', account: 'ops@example.com', message: 'The provider refused the usage read (HTTP 403, permission_error: needs scope user:profile). Sign in again to grant it.' };
+const usage: ProviderUsage = { generatedAt: '2026-09-01T10:05:00.000Z', reports: [report('cred-1')], errors: [refused] };
 
 function props(overrides: Partial<ProvidersSectionProps> = {}): ProvidersSectionProps {
   return {
-    providers: [anthropic, openai, codex, hidden],
+    providers: [anthropic, openai, codex, gemini, hidden],
     usage: null,
     usageStatus: 'idle',
     onShow: noop,
@@ -53,151 +52,127 @@ function props(overrides: Partial<ProvidersSectionProps> = {}): ProvidersSection
   };
 }
 
+let root: Root;
+let container: HTMLDivElement;
+beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+});
+afterEach(async () => {
+  await act(() => root.unmount());
+  container.remove();
+  vi.unstubAllGlobals();
+});
+const render = (overrides: Partial<ProvidersSectionProps> = {}) => act(() => root.render(<ProvidersSection {...props(overrides)} />));
+const row = (id: string): Element => {
+  const found = container.querySelector(`[data-account="${id}"]`);
+  if (!found) throw new Error(`No account row ${id}`);
+  return found;
+};
+const card = (id: string): Element => {
+  const found = container.querySelector(`[data-provider="${id}"]`);
+  if (!found) throw new Error(`No provider card ${id}`);
+  return found;
+};
+
 describe('ProvidersSection', () => {
-  it('renders connected and unconnected provider rows with the right actions', () => {
-    const html = renderToStaticMarkup(<ProvidersSection {...props()} />);
-    expect(html).toContain('Anthropic');
-    expect(html).toContain('Connected');
-    expect(html).toContain('aria-label="Disable Claude Max"');
-    expect(html).toContain('Add account');
-    expect(html).toContain('OpenAI Codex');
-    expect(html).toContain('Not signed in');
-    expect(html).toContain('Sign in');
-    expect(html).toContain('Add API key');
-    expect(html).toContain('aria-label="Refresh usage"');
-    expect(html).not.toContain('Ollama');
-    expect(html).not.toContain('role="meter"');
+  it('puts connected providers first with their accounts, and offers the rest under Add a provider with how each connects', async () => {
+    await render();
+    const headings = [...container.querySelectorAll('h2')].map((heading) => heading.textContent);
+    expect(headings).toEqual(['Connected', 'Add a provider']);
+    expect(card('anthropic').textContent).toContain('3 of 3 accounts in use');
+    expect(card('anthropic').textContent).toContain('Add account');
+    expect(card('openai').textContent).toContain('Add API key');
+    expect(card('openai-codex').textContent).toContain('Sign in');
+    expect(card('google-gemini-cli').textContent).toContain('Connect');
+    expect(container.textContent).not.toContain('Ollama');
+    // Sign-in providers before key-only ones.
+    const order = [...container.querySelectorAll('[data-provider]')].map((element) => element.getAttribute('data-provider'));
+    expect(order).toEqual(['anthropic', 'openai-codex', 'google-gemini-cli', 'openai']);
   });
 
-  it('offers supported authentication on empty profiles independently from connected auth kind', () => {
-    const fresh = provider({ id: 'anthropic', name: 'Anthropic', supportsApiKey: true });
-    const html = renderToStaticMarkup(<ProvidersSection {...props({ providers: [fresh] })} />);
-    expect(html).toContain('Sign in');
-    expect(html).toContain('Add API key');
-    expect(html).not.toContain('Replace API key');
-    const connected = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic] })} />);
-    expect(connected).toContain('Add account');
-    expect(connected).toContain('Add API key');
-    expect(connected).not.toContain('Replace API key');
+  it("shows each account's own usage, and a failed read only on the account it failed for", async () => {
+    await render({ usage, usageStatus: 'ready' });
+    expect(row('cred-1').querySelector('[role="meter"][aria-label="5 hours used"]')?.getAttribute('aria-valuenow')).toBe('62');
+    expect(row('cred-1').querySelector('[role="meter"][aria-label="Weekly · 7d used"]')?.getAttribute('aria-valuenow')).toBe('95');
+    expect(row('cred-1').querySelector('[role="meter"][aria-label="Credits used"]')?.getAttribute('aria-valuenow')).toBe('75');
+    expect(row('cred-1').textContent).toContain('62% used');
+    expect(row('cred-1').textContent).toContain('resets in 2h');
+    expect(row('cred-1').textContent).toContain('Limits reset on a rolling window.');
+    expect(row('cred-1').textContent).not.toContain('refused');
+    expect(row('cred-2').textContent).toContain('needs scope user:profile');
+    expect(row('cred-2').textContent).toContain('Inference still uses this account.');
+    expect(row('cred-2').querySelector('[role="meter"]')).toBeNull();
+    expect(row('cred-3').textContent).toContain('Anthropic doesn’t report usage for API keys.');
+    expect(container.textContent).toContain('Partial usage as of');
   });
 
-  it('shows shared credentials and usage once while keeping distinct accounts and providers', () => {
-    const accounts: ProviderView['accounts'] = [
-      account({ id: 'personal', label: 'same@example.com · Personal', email: 'same@example.com' }),
-      account({ id: 'team', label: 'same@example.com · Team', email: 'same@example.com' }),
-    ];
-    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts });
+  it('shows shared credentials and their usage once across sign-in aliases', async () => {
+    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [account({ id: 'personal', label: 'same@example.com · Personal' }), account({ id: 'team', label: 'same@example.com · Team' })] });
     const device = provider({ ...connected, id: 'openai-codex-device', name: 'Codex device code', credentialProvider: connected.id });
-    const separate = provider({ ...anthropic, accounts: [account({ id: 'claude', label: 'same@example.com · Claude', email: 'same@example.com' })] });
-    const html = renderToStaticMarkup(<ProvidersSection {...props({
-      providers: [device, separate, connected],
-      usage: { ...usage, reports: [{ ...usage.reports[0]!, provider: connected.id }], errors: [] },
-    })} />);
-    expect(html).toContain('Anthropic');
-    expect(html.match(/aria-label="Disable /g)).toHaveLength(3);
-    expect(html).toContain('aria-label="Disable same@example.com · Personal"');
-    expect(html).toContain('aria-label="Disable same@example.com · Team"');
-    expect(html.match(/62% used/g)).toHaveLength(1);
+    await render({ providers: [device, connected], usage: { ...usage, reports: [{ ...report('personal'), provider: device.id }], errors: [] }, usageStatus: 'ready' });
+    expect(container.querySelectorAll('[data-account]')).toHaveLength(2);
+    expect(container.querySelectorAll('[role="meter"][aria-label="5 hours used"]')).toHaveLength(1);
+    expect(row('team').textContent).toContain('No usage reported.');
   });
 
-  it('renders usage limits with meters and resets without errors for disconnected providers', () => {
-    const html = renderToStaticMarkup(<ProvidersSection {...props({ usage, usageStatus: 'ready' })} />);
-    expect(html).toContain('62% used');
-    expect(html).toContain('resets in 2h');
-    expect(html).toContain('950K / 1M tokens');
-    expect(html).toContain('role="meter"');
-    expect(html).toContain('aria-valuenow="38"');
-    expect(html).toContain('Limits reset on a rolling window.');
-    // Codex has no auth, so its usage error is not shown under the row.
-    expect(html).not.toContain('not signed in');
+  it('says on each account whether usage is unchecked, being checked, or from the last read, and dates usage by the oldest report', async () => {
+    await render({ providers: [anthropic] });
+    expect(row('cred-1').textContent).toContain('Usage has not been checked yet.');
+    await render({ providers: [anthropic], usageStatus: 'loading' });
+    expect(row('cred-1').textContent).toContain('Checking usage…');
+    await render({ providers: [anthropic], usage, usageStatus: 'loading' });
+    expect(row('cred-1').querySelector('[role="meter"]')).not.toBeNull();
+    const oldest = '2026-09-01T08:00:00.000Z';
+    await render({ providers: [anthropic], usage: { ...usage, reports: [report('cred-1'), report('cred-2', oldest)], errors: [] }, usageStatus: 'ready' });
+    expect(container.textContent).toContain(`Usage as of ${new Date(oldest).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
+    await render({ providers: [anthropic], usage, usageStatus: 'error', usageError: 'Connection lost' });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('Usage unavailable: Connection lost');
+    expect(row('cred-1').querySelector('[role="meter"]')).not.toBeNull();
   });
 
-  it('identifies the connected Codex account without usage instead of showing a successful fetch time', () => {
-    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [account({ id: 'codex', label: 'bradleat@inkibra.com', email: 'bradleat@inkibra.com' })] });
-    const html = renderToStaticMarkup(<ProvidersSection {...props({
-      providers: [connected],
-      usageStatus: 'ready',
-      usage: { generatedAt: usage.generatedAt, reports: [], accountsWithoutUsage: ['openai-codex: bradleat@inkibra.com'], errors: [] },
-    })} />);
-    expect(html).toContain('Usage unavailable for bradleat@inkibra.com.');
-    expect(html).not.toContain('Usage as of');
-    expect(html).not.toContain('role="meter"');
-    expect(html).not.toContain('0% used');
+  it('marks an account off, paused only while its outUntil is in the future, or in use', async () => {
+    const paused = account({ id: 'paused', label: 'out@example.com', outUntil: new Date(Date.now() + 3_600_000).toISOString(), outReason: 'Weekly usage limit reached' });
+    const recovered = account({ id: 'recovered', label: 'back@example.com', outUntil: new Date(Date.now() - 60_000).toISOString(), outReason: 'Rate limited' });
+    const off = account({ id: 'off', label: 'old@example.com', disabled: true });
+    await render({ providers: [provider({ ...codex, hasAuth: true, accounts: [paused, recovered, off] })] });
+    expect(row('paused').textContent).toContain('Paused · back');
+    expect(row('paused').textContent).toContain('Weekly usage limit reached. Inference skips this account until then.');
+    expect(row('recovered').textContent).toContain('In use');
+    expect(row('recovered').textContent).not.toContain('Rate limited');
+    expect(row('off').textContent).toContain('Off');
+    expect(card('openai-codex').textContent).toContain('1 of 3 accounts in use');
   });
 
-  it('keeps partial reports visible and identifies missing accounts and provider and aggregate errors once across aliases', () => {
-    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [
-      account({ id: 'personal', label: 'personal@example.com', email: 'personal@example.com' }),
-      account({ id: 'team', label: 'team@example.com', email: 'team@example.com' }),
-    ] });
-    const device = provider({ ...connected, id: 'openai-codex-device', name: 'Codex device code', credentialProvider: connected.id });
-    const html = renderToStaticMarkup(<ProvidersSection {...props({
-      providers: [device, connected],
-      usageStatus: 'ready',
-      usage: {
-        generatedAt: '2026-09-01T15:00:00.000Z',
-        reports: [{ ...usage.reports[0]!, provider: device.id, account: 'personal@example.com' }],
-        accountsWithoutUsage: ['openai-codex-device: team@example.com'],
-        errors: [{ provider: device.id, message: 'Team quota request failed' }, { provider: '*', message: 'Some usage requests timed out' }],
-      },
-    })} />);
-    expect(html.match(/62% used/g)).toHaveLength(1);
-    expect(html).toContain('Usage unavailable for team@example.com.');
-    expect(html.match(/Team quota request failed/g)).toHaveLength(1);
-    expect(html.match(/Some usage requests timed out/g)).toHaveLength(1);
-    const reportTime = new Date(usage.reports[0]!.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    expect(html).toContain(`Partial usage as of ${reportTime}`);
-    expect(html).not.toContain(`as of ${new Date('2026-09-01T15:00:00.000Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+  it("acts on the account whose menu was used: turning it off or on, and removing it only after confirming", async () => {
+    const onDisableAccount = vi.fn(async (): Promise<void> => undefined);
+    const onEnableAccount = vi.fn(async (): Promise<void> => undefined);
+    const onRemoveAccount = vi.fn(async (): Promise<void> => undefined);
+    const confirm = vi.fn((_message: string): boolean => false);
+    vi.stubGlobal('confirm', confirm);
+    const off = account({ id: 'off', label: 'old@example.com', disabled: true });
+    await render({ providers: [provider({ ...codex, hasAuth: true, accounts: [max, off] })], onDisableAccount, onEnableAccount, onRemoveAccount });
+    const choose = async (accountLabel: string, action: string) => {
+      await act(async () => { container.querySelector<HTMLButtonElement>(`button[aria-label="Actions for ${accountLabel}"]`)!.click(); });
+      const item = [...document.querySelectorAll('[role="menuitem"]')].find((element) => element.textContent?.includes(action));
+      if (!(item instanceof HTMLElement)) throw new Error(`No menu item ${action}`);
+      await act(async () => { item.click(); });
+    };
+    await choose('dev@example.com', 'Turn off');
+    expect(onDisableAccount).toHaveBeenCalledExactlyOnceWith('openai-codex', 'cred-1');
+    await choose('old@example.com', 'Turn on');
+    expect(onEnableAccount).toHaveBeenCalledExactlyOnceWith('openai-codex', 'off');
+    await choose('dev@example.com', 'Remove…');
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('dev@example.com'));
+    expect(onRemoveAccount).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await choose('dev@example.com', 'Remove…');
+    expect(onRemoveAccount).toHaveBeenCalledExactlyOnceWith('openai-codex', 'cred-1');
   });
 
-  it('shows aggregate failures on supported connected cards without treating unsupported providers as failed', () => {
-    const html = renderToStaticMarkup(<ProvidersSection {...props({
-      providers: [anthropic, provider({ ...openai, hasAuth: true })],
-      usageStatus: 'ready',
-      usage: { generatedAt: usage.generatedAt, reports: [], accountsWithoutUsage: [], errors: [{ provider: '*', message: 'Usage service offline' }] },
-    })} />);
-    expect(html.match(/Usage unavailable: Usage service offline/g)).toHaveLength(1);
-    expect(html).toContain('Usage reporting is not supported for this provider.');
-    expect(html).not.toContain('Usage as of');
-  });
-
-  it('distinguishes supported idle and loading cards from a completed empty response', () => {
-    const idle = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic] })} />);
-    expect(idle).toContain('Usage has not been checked yet.');
-    const loading = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic], usageStatus: 'loading' })} />);
-    expect(loading).toContain('role="status"');
-    expect(loading).toContain('Checking usage…');
-    expect(loading).not.toContain('Usage has not been checked yet.');
-    const empty = renderToStaticMarkup(<ProvidersSection {...props({
-      providers: [anthropic],
-      usageStatus: 'ready',
-      usage: { generatedAt: usage.generatedAt, reports: [], accountsWithoutUsage: [], errors: [] },
-    })} />);
-    expect(empty).toContain('Usage unavailable.');
-    expect(empty).not.toContain('Usage as of');
-  });
-
-  it('preserves known usage during refresh and exposes transport errors on the connected card', () => {
-    const refreshing = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic], usage, usageStatus: 'loading' })} />);
-    expect(refreshing).toContain('62% used');
-    expect(refreshing).toContain('Refreshing usage…');
-    const failed = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic], usage, usageStatus: 'error', usageError: 'Connection lost' })} />);
-    expect(failed).toContain('62% used');
-    expect(failed).toContain('Usage unavailable: Connection lost');
-    expect(failed).not.toContain('Usage as of');
-  });
-
-  it('timestamps available data using the oldest report rather than the request completion', () => {
-    const fetchedAt = '2026-09-01T08:00:00.000Z';
-    const html = renderToStaticMarkup(<ProvidersSection {...props({
-      providers: [anthropic],
-      usageStatus: 'ready',
-      usage: { ...usage, reports: [usage.reports[0]!, { ...usage.reports[0]!, account: 'other@example.com', fetchedAt }], errors: [] },
-    })} />);
-    expect(html).toContain(`Usage as of ${new Date(fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
-  });
-
-  it('shows the list failure instead of rows and the usage error in the header', () => {
+  it('shows the list failure instead of cards and the usage error in the header', () => {
     const html = renderToStaticMarkup(<ProvidersSection {...props({ error: 'machine offline', usageStatus: 'error', usageError: 'usage timed out' })} />);
     expect(html).toContain('Providers are unavailable');
     expect(html).toContain('machine offline');
@@ -217,77 +192,14 @@ describe('ProvidersSection', () => {
   });
 });
 
-describe('ProvidersSection account controls', () => {
-  let root: Root;
-  let container: HTMLDivElement;
-  beforeEach(() => {
-    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-    container = document.createElement('div');
-    document.body.append(container);
-    root = createRoot(container);
-  });
-  afterEach(async () => {
-    await act(() => root.unmount());
-    container.remove();
-    vi.unstubAllGlobals();
-  });
-  const accountRow = (id: string): Element | null => container.querySelector(`[data-account="${id}"]`);
-  const labelled = (label: string): HTMLButtonElement | null => container.querySelector(`button[aria-label="${label}"]`);
-  const render = (accounts: readonly ProviderAccount[], overrides: Partial<ProvidersSectionProps> = {}) =>
-    act(() => root.render(<ProvidersSection {...props({ providers: [provider({ ...codex, hasAuth: true, accounts: [...accounts] })], ...overrides })} />));
-  const live = account({ id: 'live', label: 'live@example.com' });
-  const off = account({ id: 'off', label: 'old@example.com', disabled: true });
-
-  it('gives each account on a provider its own state and Disable or Enable control', async () => {
-    const onDisableAccount = vi.fn(async (): Promise<void> => undefined);
-    const onEnableAccount = vi.fn(async (): Promise<void> => undefined);
-    await render([live, off], { onDisableAccount, onEnableAccount });
-    expect(accountRow('live')?.textContent).toContain('Active');
-    expect(accountRow('off')?.textContent).toContain('Disabled');
-    expect(labelled('Remove live@example.com')).not.toBeNull();
-    expect(labelled('Remove old@example.com')).not.toBeNull();
-    expect(labelled('Enable live@example.com')).toBeNull();
-    expect(labelled('Disable old@example.com')).toBeNull();
-    await act(async () => labelled('Disable live@example.com')!.click());
-    expect(onDisableAccount).toHaveBeenCalledWith('openai-codex', 'live');
-    await act(async () => labelled('Enable old@example.com')!.click());
-    expect(onEnableAccount).toHaveBeenCalledWith('openai-codex', 'off');
-    expect(onDisableAccount).toHaveBeenCalledTimes(1);
-  });
-
-  it('removes an account only after the user confirms', async () => {
-    const confirm = vi.fn((_message: string): boolean => false);
-    vi.stubGlobal('confirm', confirm);
-    const onRemoveAccount = vi.fn(async (): Promise<void> => undefined);
-    await render([live, off], { onRemoveAccount });
-    await act(async () => labelled('Remove live@example.com')!.click());
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('live@example.com'));
-    expect(onRemoveAccount).not.toHaveBeenCalled();
-    confirm.mockReturnValue(true);
-    await act(async () => labelled('Remove live@example.com')!.click());
-    expect(onRemoveAccount).toHaveBeenCalledExactlyOnceWith('openai-codex', 'live');
-  });
-
-  it('marks an account out only while its outUntil is in the future', async () => {
-    const out = account({ id: 'out', label: 'out@example.com', outUntil: new Date(Date.now() + 3_600_000).toISOString(), outReason: 'Weekly usage used up' });
-    const recovered = account({ id: 'recovered', label: 'back@example.com', outUntil: new Date(Date.now() - 60_000).toISOString(), outReason: 'Rate limited' });
-    await render([out, recovered, live]);
-    expect(accountRow('out')?.textContent).toContain('Out until ');
-    expect(accountRow('out')?.textContent).not.toContain('Active');
-    expect(accountRow('recovered')?.textContent).toContain('Active');
-    expect(accountRow('recovered')?.textContent).not.toContain('Out until');
-    expect(accountRow('live')?.textContent).toContain('Active');
-  });
-});
-
 describe('SignInFlowView', () => {
   const login = { respond: rejects, cancel: rejects };
   const flow = (events: ProviderLoginFlow['events']): ProviderLoginFlow => ({ flowId: 'flow-1', profileId: 'default', providerId: 'anthropic', events });
   // Title/Description need Base UI's dialog root context; the popup itself is portaled and never server-renders.
-  const render = (current: ProviderLoginFlow): string => renderToStaticMarkup(<Dialog open><SignInFlowView flow={current} providerName="Anthropic" login={{ flow: current, ...login }} onRetry={noop} /></Dialog>);
+  const renderFlow = (current: ProviderLoginFlow): string => renderToStaticMarkup(<Dialog open><SignInFlowView flow={current} providerName="Anthropic" login={{ flow: current, ...login }} onRetry={noop} /></Dialog>);
 
   it('renders the pending state before the provider answers', () => {
-    const html = render(flow([]));
+    const html = renderFlow(flow([]));
     expect(html).toContain('Sign in to Anthropic');
     expect(html).toContain('Starting sign-in…');
     expect(html).toContain('Cancel');
@@ -299,7 +211,7 @@ describe('SignInFlowView', () => {
       { type: 'progress', message: 'Waiting for the callback…' },
       { type: 'prompt', promptId: 'code', message: 'Paste the authorization code', placeholder: 'code#state' },
     ];
-    const html = render(flow(events));
+    const html = renderFlow(flow(events));
     expect(html).toContain('https://claude.ai/oauth/authorize?state=abc');
     expect(html).toContain('href="https://claude.ai/oauth/authorize?state=abc"');
     expect(html).toContain('target="_blank"');
@@ -313,7 +225,7 @@ describe('SignInFlowView', () => {
   });
 
   it('shows device authorization without asking the user to paste a callback', () => {
-    const html = render({
+    const html = renderFlow({
       flowId: 'device-flow',
       profileId: 'client-a',
       providerId: 'openai-codex-device',
@@ -328,12 +240,12 @@ describe('SignInFlowView', () => {
 
   it('renders success and failure terminal states', () => {
     const ok = flow([{ type: 'done', ok: true, provider: anthropic }]);
-    const okHtml = render(ok);
-    expect(okHtml).toContain('Signed in to Anthropic as dev@example.com.');
+    const okHtml = renderFlow(ok);
+    expect(okHtml).toContain('Signed in to Anthropic as dev@example.com');
     expect(okHtml).toContain('Close');
     expect(okHtml).not.toContain('Retry');
     const failed = flow([{ type: 'auth', url: 'https://example.com', launchUrl: null, instructions: null }, { type: 'done', ok: false, error: 'state mismatch' }]);
-    const failedHtml = render(failed);
+    const failedHtml = renderFlow(failed);
     expect(failedHtml).toContain('state mismatch');
     expect(failedHtml).toContain('Retry');
     expect(failedHtml).not.toContain('Open sign-in page');

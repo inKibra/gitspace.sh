@@ -600,7 +600,8 @@ const CardTitle = forwardRef<HTMLSpanElement, HTMLAttributes<HTMLSpanElement>>(
     // so giving those spans overflow-hidden + ellipsis renders the … there
     // instead; minmax(0,1fr) clamps the implicit track to the clipped grid's
     // width so the ellipsis falls inside the visible box. All of it is inert
-    // while titles wrap normally.
+    // while titles wrap normally. Only the inline axis clips: the cap-height trim leaves ascenders above the line
+    // box, and clipping both axes cut their tops off.
     return (
       <span
         ref={ref}
@@ -613,7 +614,7 @@ const CardTitle = forwardRef<HTMLSpanElement, HTMLAttributes<HTMLSpanElement>>(
         {...props}
       >
         <span
-          className={cn("col-start-1 row-start-1 invisible min-w-0 overflow-hidden text-ellipsis", trim)}
+          className={cn("col-start-1 row-start-1 invisible min-w-0 overflow-x-clip text-ellipsis", trim)}
           style={{ fontVariationSettings: fontWeights.semibold }}
           aria-hidden="true"
         >
@@ -621,7 +622,7 @@ const CardTitle = forwardRef<HTMLSpanElement, HTMLAttributes<HTMLSpanElement>>(
         </span>
         <span
           className={cn(
-            "col-start-1 row-start-1 min-w-0 overflow-hidden text-ellipsis text-foreground transition-[font-variation-settings] duration-80",
+            "col-start-1 row-start-1 min-w-0 overflow-x-clip text-ellipsis text-foreground transition-[font-variation-settings] duration-80",
             trim
           )}
           style={{
