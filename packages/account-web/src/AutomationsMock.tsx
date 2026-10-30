@@ -39,6 +39,8 @@ interface Automation {
   builtIn?: true;
   /** Made by the project agent and not yet switched on by a person. */
   proposed?: { at: string; asked: string; reason: string; tested: readonly { event: string; result: string; runs: boolean }[] };
+  /** How a watched repository's events reach this automation. */
+  delivery?: string;
 }
 
 const AUTOMATIONS: readonly Automation[] = [
@@ -121,6 +123,50 @@ const AUTOMATIONS: readonly Automation[] = [
     then: <>Send to its linked workspace as a notice · the agent stays asleep</>,
     modes: [], last: { at: '1 h ago', status: 'finished' },
   },
+];
+
+const GITSPACE = 'GitSpace';
+const UPSTREAM = 'inKibra/gitspace.sh';
+const FORK = 'bradleat/gitspace.sh';
+/** What the GitSpace project builds: upstream GitSpace, or a fork it was pointed at. */
+type GitSpaceSource = 'upstream' | 'fork';
+const SOURCE_LABEL: Record<GitSpaceSource, string> = { upstream: `Upstream · ${UPSTREAM} · develop`, fork: `Fork · ${FORK} · ui-experiments` };
+
+function gitspaceAutomations(source: GitSpaceSource): readonly Automation[] {
+  return [
+    {
+      id: 'gitspace-release', name: 'GitSpace releases', enabled: true, builtIn: true,
+      when: <>Watch {code(UPSTREAM)}{source === 'fork' ? <>, the upstream of {code(FORK)},</> : null} · release published</>,
+      onlyIf: [<>tag is {code('v*')}</>],
+      then: source === 'upstream'
+        ? <>Message the project agent · it offers to launch the release's build, which GitHub already built</>
+        : <>Message the project agent · it offers to merge the tag into {code('ui-experiments')} in a workspace and open a pull request, then to build and launch it once merged</>,
+      delivery: 'Checked every hour. Turn on Release in your GitHub App for instant delivery.',
+      modes: [], last: { at: '2 d ago', status: 'finished' },
+    },
+    {
+      id: 'pi', name: 'Upgrade pi', enabled: true,
+      when: <>Watch {code('earendil-works/pi')} · release published</>,
+      onlyIf: [<>not a prerelease</>],
+      then: <>Start a workspace in <strong className="font-semibold">Code</strong>: upgrade the {code('@earendil-works')} packages, run the tests, open a pull request</>,
+      delivery: 'Checked every hour · a public repository your GitHub App is not installed on',
+      modes: ['Code'], last: { at: '9 d ago', status: 'finished' },
+    },
+    {
+      id: 'deployments', name: 'Failed preview deployments', enabled: true,
+      when: <>Watch {code(source === 'upstream' ? UPSTREAM : FORK)} · deployment status</>,
+      onlyIf: [<>environment is {code('preview')}</>, <>state is {code('failure')} or {code('error')}</>],
+      then: <>Send to the linked workspace of its branch · <strong className="font-semibold">wakes the agent</strong></>,
+      delivery: 'Checked every hour. Accept the Deployments permission on your GitHub App for instant delivery.',
+      modes: [], last: { at: '5 h ago', status: 'finished' },
+    },
+  ];
+}
+
+/** Versions launched from GitSpace workspaces: trials that never change the default release. */
+const TRIALS: readonly { workspace: string; version: string; targets: string; at: string }[] = [
+  { workspace: 'automations-watch-ui', version: 'a1b2c3d + 4 uncommitted', targets: 'frontend', at: '3 h ago' },
+  { workspace: 'machine-installs', version: '7d41e08', targets: 'worker, machines', at: 'yesterday' },
 ];
 
 type LinkSource = 'started' | 'agent' | 'person' | 'branch' | 'closes';
@@ -213,15 +259,50 @@ const RUNS: readonly Run[] = [
 
 const OTHER_RUNS: readonly Run[] = [
   {
-    id: 'g2', project: 'GitSpace', status: 'running', by: 'Failed checks to its workspace', event: 'check_suite.completed · failure', subject: 'PR #212 · Extension 5.13.0',
+    id: 'g2', project: GITSPACE, status: 'running', by: 'Failed checks to its workspace', event: 'check_suite.completed · failure', subject: 'PR #212 · Extension 5.13.0',
     workspace: 'cross-machine-browser-relay', outcome: 'Failed checks: woke its agent', at: '6 min ago', checks: [],
     timeline: [{ at: '13:56:10', label: 'Delivery received' }, { at: '13:56:10', label: 'Linked to cross-machine-browser-relay (same branch)' }, { at: '13:56:11', label: 'Failed checks: wakes the agent' }],
   },
 ];
 
+function gitspaceRuns(source: GitSpaceSource): readonly Run[] {
+  const release: Run = source === 'upstream' ? {
+    id: 'g5', project: GITSPACE, status: 'finished', by: 'GitSpace releases', event: 'release · v0.2.0-rc.41', subject: `${UPSTREAM} v0.2.0-rc.41`,
+    workspace: GITSPACE, outcome: 'You launched it: v0.2.0-rc.41 is the default release', at: '2 d ago', checks: [{ label: 'tag is v*', passed: true }],
+    timeline: [
+      { at: '09:00:02', label: `Checked ${UPSTREAM} releases (every hour)` }, { at: '09:00:02', label: 'New release v0.2.0-rc.41; its notes name build 3e1f2c9…:9a0c41…' },
+      { at: '09:00:03', label: 'Sent to the project agent' }, { at: '09:01:10', label: 'Project agent offered to launch it: built by GitHub, nothing to build here' },
+      { at: '09:14:52', label: 'You chose Launch' }, { at: '09:16:30', label: 'Worker, frontend and 2 machines on v0.2.0-rc.41; it is the default release' },
+    ],
+  } : {
+    id: 'g5', project: GITSPACE, status: 'finished', by: 'GitSpace releases', event: 'release · v0.2.0-rc.41', subject: `${UPSTREAM} v0.2.0-rc.41`,
+    workspace: 'merge-v0-2-0-rc-41', outcome: `Merged into ui-experiments in merge-v0-2-0-rc-41; PR #18 on ${FORK}`, at: '2 d ago', checks: [{ label: 'tag is v*', passed: true }],
+    timeline: [
+      { at: '09:00:02', label: `Checked ${UPSTREAM} releases (the upstream of ${FORK}, every hour)` }, { at: '09:00:02', label: 'New release v0.2.0-rc.41' },
+      { at: '09:00:03', label: 'Sent to the project agent' }, { at: '09:01:30', label: 'Project agent offered to bring it into ui-experiments' },
+      { at: '09:12:04', label: 'You chose Merge' }, { at: '09:12:05', label: 'Project agent started merge-v0-2-0-rc-41 in Code' },
+      { at: '09:31:40', label: `PR #18 opened on ${FORK}: v0.2.0-rc.41 into ui-experiments, 2 conflicts resolved` },
+    ],
+  };
+  return [
+    {
+      id: 'g4', project: GITSPACE, status: 'finished', by: 'Failed preview deployments', event: 'deployment_status · failure · preview', subject: 'Deployment of automations-watch-ui @ a1b2c3d',
+      workspace: 'automations-watch-ui', outcome: 'Sent to its linked workspace (same branch): woke its agent', at: '5 h ago', checks: [{ label: 'environment is preview', passed: true }, { label: 'state is failure or error', passed: true }],
+      timeline: [{ at: '08:41:00', label: `Checked ${source === 'upstream' ? UPSTREAM : FORK} deployments (every hour)` }, { at: '08:41:01', label: 'preview deployment of automations-watch-ui ended failure' }, { at: '08:41:01', label: 'Linked to automations-watch-ui (same branch)' }, { at: '08:41:02', label: 'Sent; agent working' }],
+    },
+    ...OTHER_RUNS,
+    release,
+    {
+      id: 'g3', project: GITSPACE, status: 'finished', by: 'Upgrade pi', event: 'release · v1.4.0', subject: 'earendil-works/pi v1.4.0',
+      workspace: 'upgrade-pi-v1-4-0', outcome: 'Started in Code; PR #224 upgrades @earendil-works/* from 1.3.0 to 1.4.0', at: '9 d ago', checks: [{ label: 'not a prerelease', passed: true }],
+      timeline: [{ at: '23:00:01', label: 'Checked earendil-works/pi releases (every hour)' }, { at: '23:00:01', label: 'New release v1.4.0' }, { at: '23:00:02', label: 'Started workspace upgrade-pi-v1-4-0 in Code' }, { at: '23:41:17', label: 'PR #224 opened and linked' }],
+    },
+  ];
+}
+
 const PROJECTS: readonly { name: string; on: string; failed: number }[] = [
   { name: 'inkibra core', on: '8 of 10 on · 1 proposed', failed: 1 },
-  { name: 'GitSpace', on: '4 defaults on · 1 linked pull request', failed: 0 },
+  { name: GITSPACE, on: '7 on · watches 2 repositories · 1 linked pull request', failed: 0 },
   { name: 'Golconda IDF Data Vault', on: 'No automations · GitHub App not installed', failed: 0 },
   { name: 'Golconda PPVA Enrollment', on: 'No automations · GitHub App not installed', failed: 0 },
 ];
@@ -310,6 +391,7 @@ function AutomationCard({ automation, index, onEdit }: { automation: Automation;
         <Row label="Only if">{automation.onlyIf.length === 0 ? <span className="text-muted-foreground">Always</span>
           : <span className="flex flex-wrap gap-x-1.5">{automation.onlyIf.map((condition, at) => <span key={at}>{at > 0 ? '· ' : ''}{condition}</span>)}</span>}</Row>
         <Row label="Then">{automation.then}</Row>
+        {automation.delivery ? <Row label="Arrives">{automation.delivery}</Row> : null}
       </dl>
     </CardContent>
     {automation.proposed ? <CardFooter><div className="flex w-full flex-col gap-3">
@@ -474,26 +556,30 @@ function TestWithPastEvent(): ReactElement {
   </section>;
 }
 
-type FilterKind = 'linked' | 'mentions' | 'base' | 'head' | 'branch' | 'author' | 'draft' | 'labels' | 'paths' | 'conclusion' | 'review';
+type FilterKind = 'linked' | 'mentions' | 'base' | 'head' | 'branch' | 'author' | 'draft' | 'labels' | 'paths' | 'conclusion' | 'review' | 'tag' | 'prerelease' | 'environment' | 'state';
 interface Filter { kind: FilterKind; mode: string; values: readonly string[] }
 const FILTER_LABEL: Record<FilterKind, string> = {
   linked: 'Linked', mentions: 'Mentions',
   base: 'Base branch', head: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', labels: 'Labels', paths: 'Changed files', conclusion: 'Conclusion', review: 'Review',
+  tag: 'Tag', prerelease: 'Prerelease', environment: 'Environment', state: 'State',
 };
 const FILTER_MODES: Record<FilterKind, readonly string[]> = {
   linked: ['Is linked', 'Is not linked'], mentions: [`Mentions ${BOT}`],
   base: ['is one of', 'is not one of'], head: ['is one of', 'is not one of'], branch: ['is one of', 'is not one of'], author: ['is one of', 'is not one of'],
   draft: ['Not a draft', 'Only drafts'], labels: ['has any of', 'has none of'], paths: ['touch any of', 'touch none of'], conclusion: ['is one of'], review: ['is one of'],
+  tag: ['is one of', 'is not one of'], prerelease: ['Not a prerelease', 'Only prereleases'], environment: ['is one of', 'is not one of'], state: ['is one of'],
 };
 /** In the product these come from the repository through the GitHub App: its branches, labels and recent authors. */
 const FILTER_SUGGESTIONS: Record<FilterKind, readonly string[]> = {
   linked: [], mentions: [],
   base: ['main', 'develop', 'release/*'], head: ['dependabot/*', 'renovate/*', 'gitspace/*'], branch: ['main', 'develop'], author: ['dependabot[bot]', 'renovate[bot]', 'bradleat', 'dana'],
   draft: [], labels: ['bug', 'wontfix', 'needs-design', 'gitspace:plan'], paths: ['**/package.json', 'docs/**', 'packages/account-web/**'], conclusion: ['failure', 'timed_out', 'cancelled'], review: ['approved', 'changes_requested', 'commented'],
+  tag: ['v*', 'v1.*', '*-rc.*'], prerelease: [], environment: ['preview', 'staging', 'production'], state: ['failure', 'error', 'success', 'inactive'],
 };
 const FILTERS_BY_EVENT: Record<string, readonly FilterKind[]> = {
   'Pull request': ['linked', 'base', 'head', 'author', 'draft', 'labels', 'paths'], 'Pull request review': ['linked', 'mentions', 'base', 'author', 'review'], 'Issue': ['linked', 'author', 'labels'],
   'Issue comment': ['linked', 'mentions', 'author', 'labels'], 'Push': ['linked', 'branch', 'author', 'paths'], 'Check suite': ['linked', 'branch', 'conclusion'],
+  'Release': ['tag', 'prerelease', 'author'], 'Tag': ['tag'], 'Deployment': ['linked', 'environment', 'state'],
 };
 /** Filters chosen from a list, with no values to enter. */
 /** Fields an instruction can insert, per event; in the product they come from the event's schema. */
@@ -508,11 +594,18 @@ const EVENT_FIELDS: Record<string, readonly { path: string; label: string }[]> =
   'Issue comment': [{ path: 'comment.html_url', label: 'Link' }, { path: 'comment.user.login', label: 'Commenter' }, { path: 'comment.body', label: 'Comment' }, { path: 'issue.title', label: 'Issue title' }],
   'Push': [{ path: 'ref', label: 'Branch' }, { path: 'head_commit.message', label: 'Commit message' }, { path: 'compare', label: 'Compare link' }],
   'Check suite': [{ path: 'check_suite.head_branch', label: 'Branch' }, { path: 'check_suite.conclusion', label: 'Conclusion' }, { path: 'check_suite.head_sha', label: 'Commit' }],
+  'Release': [{ path: 'release.tag', label: 'Tag' }, { path: 'release.name', label: 'Name' }, { path: 'release.url', label: 'Link' }, { path: 'release.notes', label: 'Notes' }, { path: 'release.published_at', label: 'Published' }],
+  'Tag': [{ path: 'tag.name', label: 'Tag' }, { path: 'tag.commit', label: 'Commit' }, { path: 'tag.url', label: 'Link' }],
+  'Deployment': [
+    { path: 'deployment.environment', label: 'Environment' }, { path: 'deployment.state', label: 'State' }, { path: 'deployment.ref', label: 'Branch' },
+    { path: 'deployment.sha', label: 'Commit' }, { path: 'deployment.url', label: 'Link' }, { path: 'deployment.creator', label: 'Created by' },
+  ],
 };
 
-const CHOICE_ONLY: Partial<Record<FilterKind, true>> = { linked: true, mentions: true, draft: true };
+const CHOICE_ONLY: Partial<Record<FilterKind, true>> = { linked: true, mentions: true, draft: true, prerelease: true };
 const EVENT_NOUN: Record<string, string> = {
   'Pull request': 'pull requests', 'Pull request review': 'reviews', 'Issue': 'issues', 'Issue comment': 'comments', 'Push': 'pushes', 'Check suite': 'check suites',
+  'Release': 'releases', 'Tag': 'tags', 'Deployment': 'deployment statuses',
 };
 
 function filterPhrase(filter: Filter): string {
@@ -530,6 +623,10 @@ function filterPhrase(filter: Filter): string {
     case 'paths': return negative ? `not touching ${values}` : `touching ${values}`;
     case 'conclusion': return `that ended ${values}`;
     case 'review': return `that are ${values.replaceAll('_', ' ')}`;
+    case 'tag': return negative ? `not tagged ${values}` : `tagged ${values}`;
+    case 'prerelease': return filter.mode === 'Not a prerelease' ? 'not prereleases' : 'only prereleases';
+    case 'environment': return negative ? `not in ${values}` : `in ${values}`;
+    case 'state': return `that ended ${values}`;
   }
 }
 
@@ -549,12 +646,9 @@ function ChipsInput({ kind, values, onChange }: { kind: FilterKind; values: read
   </div>;
 }
 
-function Filters({ event }: { event: string }): ReactElement {
-  const [filters, setFilters] = useState<readonly Filter[]>([
-    { kind: 'base', mode: 'is one of', values: ['main'] },
-    { kind: 'draft', mode: 'Not a draft', values: [] },
-    { kind: 'author', mode: 'is not one of', values: ['dependabot[bot]'] },
-  ]);
+/** `note` replaces the closing note for a watch: its patterns and its trust differ from GitHub events'. */
+function Filters({ event, initial, note }: { event: string; initial: readonly Filter[]; note?: ReactNode }): ReactElement {
+  const [filters, setFilters] = useState<readonly Filter[]>(initial);
   const offered = FILTERS_BY_EVENT[event] ?? [];
   const shown = filters.filter(filter => offered.includes(filter.kind));
   const unused = offered.filter(kind => !filters.some(filter => filter.kind === kind));
@@ -581,25 +675,126 @@ function Filters({ event }: { event: string }): ReactElement {
         {unused.map((kind, index) => <MenuItem key={kind} index={index} label={FILTER_LABEL[kind]} onSelect={() => setFilters(current => [...current, { kind, mode: FILTER_MODES[kind][0] ?? '', values: [] }])} />)}
       </DropdownContent>
     </DropdownMenu></div> : null}
-    <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">release/*</span>, <span className="font-mono">docs/**</span>. Events from authors without write access who are not on the trust list never match.</p>
+    <p className="text-caption text-muted-foreground">{note ?? <>Values can be patterns: <span className="font-mono">release/*</span>, <span className="font-mono">docs/**</span>. Events from authors without write access who are not on the trust list never match.</>}</p>
   </section>;
 }
 
-function Editor({ onClose }: { onClose(): void }): ReactElement {
+/** What the editor opens with: an automation's settings, or the pull request review example for a new one. */
+interface EditorPreset {
+  name: string;
+  trigger: string;
+  event: string;
+  repository: string;
+  prereleases: boolean;
+  then: string;
+  mode: string;
+  prompt: string;
+  filters: readonly Filter[];
+}
+const REVIEW_PRESET: EditorPreset = {
+  name: 'Review pull requests', trigger: 'GitHub event', event: 'Pull request', repository: '', prereleases: false,
+  then: 'Start a workspace for the subject', mode: 'Review',
+  prompt: 'Review {{pull_request.html_url}} against {{pull_request.base.ref}}. Leave one review with inline comments; request changes only for correctness or security problems.',
+  filters: [{ kind: 'base', mode: 'is one of', values: ['main'] }, { kind: 'draft', mode: 'Not a draft', values: [] }, { kind: 'author', mode: 'is not one of', values: ['dependabot[bot]'] }],
+};
+const PRESETS: Record<string, EditorPreset> = {
+  'gitspace-release': {
+    name: 'GitSpace releases', trigger: 'Watch a repository', event: 'Release', repository: UPSTREAM, prereleases: true,
+    then: 'Message the project agent', mode: 'Code',
+    prompt: 'GitSpace {{release.tag}} is out: {{release.url}}. Its notes name the build. Say what changes from this account\'s default release. If this project tracks upstream, offer to launch the build; if it tracks a fork, offer to merge {{release.tag}} into the fork\'s branch in a workspace and open a pull request.',
+    filters: [{ kind: 'tag', mode: 'is one of', values: ['v*'] }],
+  },
+  pi: {
+    name: 'Upgrade pi', trigger: 'Watch a repository', event: 'Release', repository: 'earendil-works/pi', prereleases: false,
+    then: 'Start a workspace', mode: 'Code',
+    prompt: 'earendil-works/pi {{release.tag}} is out: {{release.url}}. Upgrade the @earendil-works packages to it, check its notes for breaking changes ({{release.notes}}), run the tests and open a pull request.',
+    filters: [{ kind: 'prerelease', mode: 'Not a prerelease', values: [] }],
+  },
+  deployments: {
+    name: 'Failed preview deployments', trigger: 'Watch a repository', event: 'Deployment', repository: '', prereleases: false,
+    then: 'Send to the linked workspace', mode: 'Code',
+    prompt: 'The {{deployment.environment}} deployment of {{deployment.ref}} ended {{deployment.state}}: {{deployment.url}}. Find out why and fix it.',
+    filters: [{ kind: 'environment', mode: 'is one of', values: ['preview'] }, { kind: 'state', mode: 'is one of', values: ['failure', 'error'] }],
+  },
+};
+
+/** How a watch reaches the account, or null when it arrives instantly. In the product the account knows which
+ * repositories its GitHub App covers and which events the App receives. */
+function watchCheck(repository: string, watching: string): string | null {
+  const covered = repository === '' || repository === UPSTREAM;
+  if (covered && watching === 'Tag') return null;
+  if (covered && watching === 'Release') return 'Your GitHub App covers this repository but does not receive releases yet. Turn on Release in its settings on GitHub for instant delivery; until then GitSpace checks';
+  if (covered) return 'Your GitHub App covers this repository but has no Deployments permission yet. Accept it on GitHub for instant delivery; until then GitSpace checks';
+  return 'A public repository your GitHub App is not installed on: GitSpace checks it';
+}
+
+/** A recent release, tag or deployment status as GitHub would answer now, with the fields an instruction can insert. */
+interface WatchSample { label: string; values: Readonly<Record<string, string>> }
+
+function watchSamples(repository: string, watching: string): readonly WatchSample[] {
+  if (watching === 'Deployment') return [{ label: 'preview · failure · automations-watch-ui · 5 h ago', values: { 'deployment.environment': 'preview', 'deployment.ref': 'automations-watch-ui', 'deployment.state': 'failure', 'deployment.url': `https://github.com/${UPSTREAM}/deployments/preview` } }];
+  if (watching === 'Tag') return [{ label: 'v0.2.0-rc.41 · 2 d ago', values: { 'tag.name': 'v0.2.0-rc.41', 'tag.url': `https://github.com/${UPSTREAM}/tree/v0.2.0-rc.41` } }];
+  if (repository === 'earendil-works/pi') return ['v1.4.0 · 21 Oct', 'v1.3.0 · 15 Oct'].map(label => {
+    const tag = label.split(' ')[0] ?? '';
+    return { label, values: { 'release.tag': tag, 'release.url': `https://github.com/earendil-works/pi/releases/tag/${tag}`, 'release.notes': 'the release notes' } };
+  });
+  return ['v0.2.0-rc.41 · 2 d ago', 'v0.2.0-rc.40 · 6 d ago'].map(label => {
+    const tag = label.split(' ')[0] ?? '';
+    return { label, values: { 'release.tag': tag, 'release.url': `https://github.com/${UPSTREAM}/releases/tag/${tag}` } };
+  });
+}
+
+function TestWatch({ samples, noun, then, mode, prompt }: { samples: readonly WatchSample[]; noun: string; then: string; mode: string; prompt: string }): ReactElement {
   const shape = useShape();
-  const [name, setName] = useState('Review pull requests');
-  const [trigger, setTrigger] = useState('GitHub event');
-  const [event, setEvent] = useState('Pull request');
+  const [picked, setPicked] = useState(samples[0]?.label ?? '');
+  const [tested, setTested] = useState(false);
+  const sample = samples.find(entry => entry.label === picked) ?? samples[0];
+  const rendered = prompt.replace(/\{\{([^}]+)\}\}/gu, (field: string, path: string) => sample?.values[path] ?? field);
+  const outcome = then.startsWith('Start a workspace') ? `Would start a workspace in ${mode} on its own branch, named after the release`
+    : then === 'Send to the linked workspace' ? 'Would send it to the workspace linked to its branch and wake its agent'
+      : then === 'Message a workspace' ? 'Would message the chosen workspace' : 'Would message the project agent';
+  return <section className={`${shape.container} flex flex-col gap-3 border border-border p-4`}>
+    <strong className="text-body font-semibold">Test with a recent {noun.replace(/s$/u, '')}</strong>
+    <p className="text-caption text-muted-foreground">Reads it from GitHub now and shows what would happen. Nothing is sent until you choose Run it.</p>
+    <div className="flex items-end gap-2">
+      <Field label="Recent"><Select value={picked} onValueChange={value => { setPicked(value); setTested(false); }}><SelectTrigger aria-label="Recent" />{options(samples.map(entry => entry.label))}</Select></Field>
+      <Button variant="secondary" type="button" leadingIcon={glyph(RefreshCcw01)} onClick={() => setTested(true)}>Test</Button>
+    </div>
+    {tested ? <div className="flex flex-col gap-3 border-t border-border pt-3">
+      <p className="text-body">{outcome}. Its message:</p>
+      <blockquote className={`${shape.input} border border-border bg-surface-2 p-2 text-body`}>{rendered}</blockquote>
+      <div><Button variant="primary" size="compact" type="button" leadingIcon={glyph(Play)}>Run it</Button></div>
+    </div> : null}
+  </section>;
+}
+
+function Editor({ preset, onClose }: { preset: EditorPreset; onClose(): void }): ReactElement {
+  const shape = useShape();
+  const [name, setName] = useState(preset.name);
+  const [trigger, setTrigger] = useState(preset.trigger);
+  const [event, setEvent] = useState(preset.event);
+  const [repository, setRepository] = useState(preset.repository);
+  const [prereleases, setPrereleases] = useState(preset.prereleases);
+  const [cadence, setCadence] = useState('every hour');
   const [actions, setActions] = useState<ReadonlySet<string>>(new Set(['opened', 'ready_for_review']));
-  const [then, setThen] = useState('Start a workspace for the subject');
-  const [mode, setMode] = useState<string>('Review');
+  const [then, setThen] = useState(preset.then);
+  const [mode, setMode] = useState<string>(preset.mode);
   const [delivery, setDelivery] = useState('Wakes the agent');
   const [agent, setAgent] = useState('reviewer');
-  const [prompt, setPrompt] = useState('Review {{pull_request.html_url}} against {{pull_request.base.ref}}. Leave one review with inline comments; request changes only for correctness or security problems.');
+  const [prompt, setPrompt] = useState(preset.prompt);
+  const watching = trigger === 'Watch a repository';
+  const check = watching ? watchCheck(repository, event) : null;
+  const foreign = watching && repository !== '' && repository !== UPSTREAM;
+  const noun = EVENT_NOUN[event] ?? 'events';
+  const actionsOffered = watching
+    ? ['Start a workspace', 'Send to the linked workspace', 'Message a workspace', 'Message the project agent', 'Ask the project agent']
+    : ['Start a workspace for the subject', 'Send to the linked workspace', 'Message a workspace', 'Message the project agent', 'Ask the project agent'];
   return <>
     <DialogHeader>
       <DialogTitle>Edit automation</DialogTitle>
-      <DialogDescription>Automations start new work. Later activity on the pull request or issue reaches the workspace through its link, not through this automation.</DialogDescription>
+      <DialogDescription>{watching
+        ? 'Watching a repository starts work when it publishes a release, a tag or a deployment status: this project\'s repository, or any other you can read.'
+        : 'Automations start new work. Later activity on the pull request or issue reaches the workspace through its link, not through this automation.'}</DialogDescription>
     </DialogHeader>
     <div className="flex flex-col gap-5">
       <Field label="Name"><TextInput label="Name" value={name} onChange={setName} /></Field>
@@ -607,24 +802,41 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
       <section className="flex flex-col gap-3">
         <strong className="text-body font-semibold">When</strong>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Trigger"><Select value={trigger} onValueChange={setTrigger}><SelectTrigger aria-label="Trigger" />{options(['GitHub event', 'Label added', 'Schedule', 'Manual only'])}</Select></Field>
+          <Field label="Trigger"><Select value={trigger} onValueChange={value => { setTrigger(value); setEvent(value === 'Watch a repository' ? 'Release' : 'Pull request'); }}><SelectTrigger aria-label="Trigger" />{options(['GitHub event', 'Label added', 'Watch a repository', 'Schedule', 'Manual only'])}</Select></Field>
           {trigger === 'Label added'
             ? <Field label="Labels"><span className={`${shape.input} border border-border bg-surface-2 px-2 py-1.5 font-mono text-caption`}>gitspace:plan, gitspace:code, gitspace:review</span></Field>
-            : <Field label="Event"><Select value={event} onValueChange={setEvent}><SelectTrigger aria-label="Event" />{options(['Pull request', 'Pull request review', 'Issue', 'Issue comment', 'Push', 'Check suite'])}</Select></Field>}
+            : watching
+              ? <Field label="Watch for"><Select value={event} onValueChange={setEvent}><SelectTrigger aria-label="Watch for" />{options(['Release', 'Tag', 'Deployment'])}</Select></Field>
+              : <Field label="Event"><Select value={event} onValueChange={setEvent}><SelectTrigger aria-label="Event" />{options(['Pull request', 'Pull request review', 'Issue', 'Issue comment', 'Push', 'Check suite'])}</Select></Field>}
         </div>
         {trigger === 'GitHub event' ? <div className="flex flex-wrap gap-1.5">{PR_ACTIONS.map(action => <Button key={action} size="compact" type="button"
           variant={actions.has(action) ? 'primary' : 'secondary'}
           onClick={() => setActions(current => { const next = new Set(current); if (next.has(action)) next.delete(action); else next.add(action); return next; })}>
           <span className="font-mono">{action}</span></Button>)}</div> : null}
         {trigger === 'Label added' ? <p className="text-caption text-muted-foreground">Each label starts its own mode: <span className="font-mono">gitspace:plan</span> in Plan, <span className="font-mono">gitspace:code</span> in Code, <span className="font-mono">gitspace:review</span> in Review.</p> : null}
+        {watching ? <>
+          <Field label="Repository"><TextInput label="Blank: this project's repository" value={repository} onChange={setRepository} mono /></Field>
+          <p className="text-caption text-muted-foreground">Blank watches this project's repository, or its upstream parent when the project tracks a fork. Any other <span className="font-mono">owner/name</span> you can read works too.</p>
+          {event === 'Release' ? <Switch label="Include prereleases" checked={prereleases} onToggle={() => setPrereleases(value => !value)} /> : null}
+          <div className={`${shape.input} flex flex-col gap-2 border border-border bg-surface-2 p-3`}>
+            {check === null
+              ? <p className="text-body">Arrives instantly through your GitHub App: it already receives tag pushes.</p>
+              : <div className="flex flex-wrap items-center gap-2"><span className="text-body">{check}</span>
+                <div className="w-44 max-w-full"><Select value={cadence} onValueChange={setCadence}><SelectTrigger aria-label="How often" />{options(['every 15 minutes', 'every hour', 'every 6 hours', 'every day'])}</Select></div></div>}
+            {foreign ? <p className="text-caption text-muted-foreground">Watching <span className="font-mono">{repository}</span> trusts what its maintainers publish: its {noun} reach the agent as trusted.</p> : null}
+          </div>
+        </> : null}
       </section>
 
-      {trigger === 'GitHub event' ? <Filters event={event} /> : null}
+      {trigger === 'GitHub event' || watching ? <Filters key={event} event={event} initial={preset.filters}
+        note={watching ? <>Values can be patterns: <span className="font-mono">v*</span>, <span className="font-mono">*-rc.*</span>. {foreign
+          ? <>Everything {repository} publishes counts as trusted.</>
+          : <>A release or deployment by someone without write access, and not on the trust list, never matches.</>}</> : undefined} /> : null}
 
       <section className="flex flex-col gap-3">
         <strong className="text-body font-semibold">Then</strong>
-        <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(['Start a workspace for the subject', 'Send to the linked workspace', 'Message a workspace', 'Message the project agent', 'Ask the project agent'])}</Select></Field>
-        {then === 'Start a workspace for the subject' ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Action"><Select value={then} onValueChange={setThen}><SelectTrigger aria-label="Action" />{options(actionsOffered)}</Select></Field>
+        {then.startsWith('Start a workspace') ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Starts in"><Select value={mode} onValueChange={setMode}><SelectTrigger aria-label="Starts in" />{options(['Plan', 'Code', 'Review'])}</Select></Field>
           <Field label="Agent"><Select value={agent} onValueChange={setAgent}><SelectTrigger aria-label="Agent" />{options(['default', 'reviewer', 'scout'])}</Select></Field>
         </div> : null}
@@ -634,19 +846,21 @@ function Editor({ onClose }: { onClose(): void }): ReactElement {
           <textarea rows={4} value={prompt} onChange={e => setPrompt(e.currentTarget.value)}
             className={`${shape.input} w-full resize-y border border-border bg-surface-2 p-2 text-body text-foreground outline-none`} />
         </Field>
-        {trigger === 'GitHub event' ? <div className="flex flex-wrap items-center gap-2">
+        {trigger === 'GitHub event' || watching ? <div className="flex flex-wrap items-center gap-2">
           <DropdownMenu>
             <DropdownTrigger render={<Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Plus)}>Insert a field</Button>} />
             <DropdownContent align="start" className="min-w-[280px] w-[280px]">
               {(EVENT_FIELDS[event] ?? []).map((field, index) => <MenuItem key={field.path} index={index} label={`${field.label} · {{${field.path}}}`} onSelect={() => setPrompt(current => `${current}{{${field.path}}}`)} />)}
             </DropdownContent>
           </DropdownMenu>
-          <span className="text-caption text-muted-foreground">A field in <span className="font-mono">{'{{…}}'}</span> is replaced by the event's value; Test with a past event shows the result.</span>
+          <span className="text-caption text-muted-foreground">A field in <span className="font-mono">{'{{…}}'}</span> is replaced by the event's value; the test below shows the result.</span>
         </div> : null}
-        <p className="text-caption text-muted-foreground">The event arrives with the instruction as the workspace's first message, and the workspace is linked to the pull request.</p>
+        <p className="text-caption text-muted-foreground">{watching
+          ? 'A workspace started for a release works on its own branch named after it, such as upgrade-pi-v1-4-0; a deployment goes to the workspace linked to its branch. Each release, tag or deployment status runs once.'
+          : 'The event arrives with the instruction as the workspace\'s first message, and the workspace is linked to the pull request.'}</p>
       </section>
 
-      <TestWithPastEvent />
+      {watching ? <TestWatch key={`${repository}:${event}`} samples={watchSamples(repository, event)} noun={noun} then={then} mode={mode} prompt={prompt} /> : <TestWithPastEvent />}
     </div>
     <DialogFooter>
       <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
@@ -703,26 +917,56 @@ function AllProjects({ onPick, onOpen }: { onPick(project: string): void; onOpen
   </>;
 }
 
+/** How the GitSpace project plays with releases: what it builds, the account's default release, and trial launches from
+ * its workspaces. */
+function GitSpaceReleases({ source, onSource }: { source: GitSpaceSource; onSource(source: GitSpaceSource): void }): ReactElement {
+  const shape = useShape();
+  return <div className={`${shape.container} flex flex-col gap-4 bg-surface-2 px-5 py-4 shadow-surface-1`}>
+    <div className="max-w-md"><Field label="Builds">
+      <Select value={SOURCE_LABEL[source]} onValueChange={value => onSource(value === SOURCE_LABEL.fork ? 'fork' : 'upstream')}><SelectTrigger aria-label="Builds" />{options([SOURCE_LABEL.upstream, SOURCE_LABEL.fork])}</Select>
+    </Field></div>
+    <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 sm:grid-cols-[8rem_minmax(0,1fr)]">
+      <Row label="Default release">{source === 'upstream'
+        ? <>{code('v0.2.0-rc.41')} · develop @ {code('3e1f2c9')} · built by GitHub, nothing built here</>
+        : <>{code('ui-experiments @ 9b7e0d1')} · built on Darktop</>}</Row>
+      <Row label="Newest upstream">{source === 'upstream'
+        ? <>{code('v0.2.0-rc.41')} · released 2 d ago · this account runs it</>
+        : <>{code('v0.2.0-rc.41')} · released 2 d ago · offered as PR #18 into {code('ui-experiments')}</>}</Row>
+      <Row label="Trials"><ul className="flex flex-col gap-1">{TRIALS.map(trial => <li key={trial.workspace}>
+        <span className="font-mono text-caption underline decoration-dotted underline-offset-2">{trial.workspace}</span>
+        <span className="text-muted-foreground"> · {trial.version} · {trial.targets} · {trial.at}</span>
+      </li>)}</ul></Row>
+    </dl>
+    <div className="flex flex-wrap items-center gap-2">
+      <Button variant="secondary" size="compact" type="button" leadingIcon={glyph(RefreshCcw01)}>Back to default</Button>
+      <span className="text-caption text-muted-foreground">Returns the worker, the frontend and every machine to the default release.</span>
+    </div>
+    <p className="text-caption text-muted-foreground">Launching {source === 'upstream' ? <>develop</> : <>ui-experiments</>} from the project agent makes a release the default. Workspaces can launch their own versions as trials, which never change it. The GitSpace releases automation below tells the project agent when upstream publishes a release{source === 'fork' ? ', and the agent offers to merge it into the fork' : ', and the agent offers to launch it'}.</p>
+  </div>;
+}
+
 function AutomationsMock(): ReactElement {
   const shape = useShape();
   const [project, setProject] = useState('inkibra core');
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<EditorPreset | null>(null);
+  const [source, setSource] = useState<GitSpaceSource>('upstream');
   const [linking, setLinking] = useState(false);
   const [run, setRun] = useState<Run | null>(null);
   const all = project === ALL_PROJECTS;
-  const empty = project !== ALL_PROJECTS && project !== 'inkibra core';
+  const gitspace = project === GITSPACE;
+  const empty = project !== ALL_PROJECTS && project !== 'inkibra core' && !gitspace;
   return <div className="flex h-dvh flex-col bg-background">
     <PageCanvas>
       <PageHeader kicker={<ProjectPicker project={project} onPick={setProject} />} title="Automations"
         description={all ? 'Every project\'s automations and runs. Choose a project to change its automations, links and trusted authors.' : 'When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace.'}
-        actions={all || empty ? undefined : <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>} />
+        actions={all || empty ? undefined : <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(REVIEW_PRESET)}>New automation</Button>} />
 
       {empty ? null : <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
         <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">
-          <Stat value={all ? '12 of 14' : '8 of 10'} label="On · 1 proposed" />
-          <Stat value={all ? '3 / 4' : '2 / 2'} label="Working now" />
-          <Stat value={1} label="Queued" />
-          <Stat value={1} label="Failed today" />
+          <Stat value={all ? '12 of 14' : gitspace ? '7 of 7' : '8 of 10'} label={gitspace ? 'On' : 'On · 1 proposed'} />
+          <Stat value={all ? '3 / 4' : gitspace ? '1 / 2' : '2 / 2'} label="Working now" />
+          <Stat value={gitspace ? 0 : 1} label="Queued" />
+          <Stat value={gitspace ? 0 : 1} label="Failed today" />
         </div>
         <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">{all ? 'Each project runs at most 2 at once.' : 'At most 2 runs work at once.'} A run holds a slot only while its agent works; a workspace waiting for you does not.</p>
       </section>}
@@ -731,18 +975,39 @@ function AutomationsMock(): ReactElement {
         : empty ? <div className={`${shape.container} flex flex-col items-start gap-3 bg-surface-2 px-5 py-6 shadow-surface-1`}>
           <strong className="text-body font-semibold">No automations in {project}</strong>
           <p className="max-w-xl text-body text-muted-foreground">Start work when a pull request opens, an issue is labeled, or on a schedule. Installing the GitSpace GitHub App on its repository adds the default automations that send review feedback, failed checks and mentions to linked workspaces. You can also ask the project agent to set one up; what it proposes waits here until you switch it on.</p>
-          <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(true)}>New automation</Button>
+          <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(REVIEW_PRESET)}>New automation</Button>
         </div>
-        : <>
-          <Section title="Start work">
+        : gitspace ? <>
+          <Section title="This project's releases">
+            <GitSpaceReleases source={source} onSource={setSource} />
+          </Section>
+
+          <Section title="Start work" aside={<span className="text-caption text-muted-foreground">Two watch other repositories: GitSpace upstream and earendil-works/pi</span>}>
             <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-              {AUTOMATIONS.filter(automation => !automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
+              {gitspaceAutomations(source).map((automation, index) => <AutomationCard key={`${automation.id}:${source}`} automation={automation} index={index} onEdit={() => setEditing(PRESETS[automation.id] ?? REVIEW_PRESET)} />)}
             </CardGroup>
           </Section>
 
           <Section title="Sent to linked workspaces" aside={<span className="text-caption text-muted-foreground">Events on a linked pull request or issue that no automation matches are not sent</span>}>
             <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-              {AUTOMATIONS.filter(automation => automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(true)} />)}
+              {AUTOMATIONS.filter(automation => automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(REVIEW_PRESET)} />)}
+            </CardGroup>
+          </Section>
+
+          <Section title="Recent runs" aside={<span className="text-caption text-muted-foreground">Every event seen, skipped ones included</span>}>
+            <RunsTable runs={gitspaceRuns(source)} showProject={false} onOpen={setRun} />
+          </Section>
+        </>
+        : <>
+          <Section title="Start work">
+            <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
+              {AUTOMATIONS.filter(automation => !automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(REVIEW_PRESET)} />)}
+            </CardGroup>
+          </Section>
+
+          <Section title="Sent to linked workspaces" aside={<span className="text-caption text-muted-foreground">Events on a linked pull request or issue that no automation matches are not sent</span>}>
+            <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
+              {AUTOMATIONS.filter(automation => automation.linked).map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} onEdit={() => setEditing(REVIEW_PRESET)} />)}
             </CardGroup>
           </Section>
 
@@ -761,8 +1026,8 @@ function AutomationsMock(): ReactElement {
           </Section>
         </>}
 
-      <Dialog open={editing} onOpenChange={open => { if (!open) setEditing(false); }}>
-        <DialogContent size="lg"><Editor onClose={() => setEditing(false)} /></DialogContent>
+      <Dialog open={editing !== null} onOpenChange={open => { if (!open) setEditing(null); }}>
+        <DialogContent size="lg">{editing ? <Editor preset={editing} onClose={() => setEditing(null)} /> : null}</DialogContent>
       </Dialog>
       <Dialog open={linking} onOpenChange={open => { if (!open) setLinking(false); }}>
         <DialogContent><LinkDialog onClose={() => setLinking(false)} /></DialogContent>

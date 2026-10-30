@@ -11,7 +11,7 @@ Examples: review every pull request into `main`; triage new issues; tell the pul
 ## 2. Scope
 
 In scope (first version):
-- triggers: GitHub events, schedules, manual;
+- triggers: GitHub events, schedules, manual, and watching a repository's releases, tags and deployments (§4a);
 - conditions on the event;
 - actions: start a workspace for the subject, message the subject's workspace, message the project agent, or ask the project agent to decide;
 - trust, loop limits, concurrency, run history;
@@ -49,6 +49,51 @@ Out of scope: automations defined in repository files; non-GitHub event sources;
   - *Ask the project agent*: the event and its provenance (§6) go to the project agent, which decides with its tools to start a workspace, message one, or skip. For judgement calls ("is this release worth a blog post?"); it costs one agent turn per event.
 - **Run:** one event as seen by one automation or by a subject link: the event, which conditions passed, the outcome (started, sent, queued, skipped and why, failed and why) and a timeline. Every event is recorded, skipped ones included.
 - **Replay:** **Test with a past event** runs an automation's trigger and conditions against a recorded delivery and shows the run it would make (rendered instruction, target workspace) without acting; **Run it** acts on that event once.
+
+## 4a. Watching a repository (decided 2026-10-30)
+
+A **watch** trigger runs an automation when a repository publishes something: `{ kind: 'watch', repository, on }`.
+
+- **`repository`**: blank means the project's own repository, or its upstream parent when it is a fork. It can also be
+  any `owner/name` the account can read, which is how a project follows another project (the GitSpace project
+  following `earendil-works/pi`, whose releases publish pi-durable). The automation lives in the project where the work
+  happens.
+- **`on`**:
+
+  | Watch for | Fires on | Conditions | Fields for the instruction |
+  |---|---|---|---|
+  | Release | a GitHub Release published | tag (one of / none of, patterns), prerelease, author | `release.tag`, `release.name`, `release.url`, `release.notes`, `release.published_at` |
+  | Tag | a new tag | tag | `tag.name`, `tag.commit`, `tag.url` |
+  | Deployment | a deployment status | environment, state (`success`, `failure`, `error`, …) | `deployment.environment`, `deployment.state`, `deployment.sha`, `deployment.ref`, `deployment.url`, `deployment.creator` |
+
+- **How it arrives** depends on the repository. It is the same automation either way, and the editor names the path:
+
+  | Repository | Path | Editor says |
+  |---|---|---|
+  | Covered by the account's GitHub App, which receives the event | Webhook: `release`, `push` for `refs/tags/*` (already received), `deployment_status` | "Arrives instantly through your GitHub App" |
+  | Covered, but the App does not receive the event yet (every App made before 2026-10-30 lacks `release` and the `deployments: read` permission) | Check | "Checked every hour. Turn on Release in your GitHub App's settings for instant delivery." GitHub has no API to change an App's events, and its owner accepts a new permission on each installation. |
+  | Public, not covered | Check: the Releases API, tag refs (`git/matching-refs/tags`), or deployments with their statuses | "Checked every hour" |
+  | Private, not covered | None | Refused when saved: install the App on it, or choose a public repository. |
+
+- **Check interval:** hourly by default and adjustable per automation, from 15 minutes to daily. A check uses a token of
+  one of the account's App installations, which can read any public repository; an unchanged answer (ETag) costs no rate
+  limit. An account with no App checks anonymously, under GitHub's limit per address, and the editor says so.
+- **Seen:** the automations object keeps, per automation and repository, the releases, tags (a bounded set of names: tag
+  refs are not ordered by time) and deployment statuses it has seen. Creating or switching on a watch records what
+  exists then, so it fires only on what comes after; **Run it** acts on the latest once. A release that arrives by both
+  paths fires once.
+- **Trust:** a watch on another repository runs as trusted: choosing to watch it is trusting what its maintainers
+  publish, and the editor says so ("Releases of earendil-works/pi reach the agent as trusted"). An agent's watch
+  automation is Proposed like any other (§5a), so a person makes that choice. A watch on the project's own repository
+  follows §5: the author or deployment creator must have write access or be on the trust list.
+- **Loops** (§6): a release, tag or deployment of a commit a run pushed is caused by that run.
+- **The GitSpace project** starts with one watch automation: Release of `inKibra/gitspace.sh` (its upstream parent
+  when the project tracks a fork) → message the project agent. The instruction depends on what the project tracks:
+  - **Upstream:** offer to launch the release's build, which the release names.
+  - **A fork:** offer to merge the tag into the fork's branch in a workspace and open a pull request, then launch it once
+    merged.
+
+  `docs/TENANT-RELEASES-DESIGN.md` §5 has the release side.
 
 ## 5. Trust
 
@@ -114,6 +159,7 @@ A top-level page that replaces Crons in the sidebar, with the project chosen in 
 | **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch); Send to the linked workspace and the four default automations; mentions of the tenant's bot; trust; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped as not trusted; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
 | **A2** | Loops and decisions | Provenance; round and daily caps; *ask the project agent*. Golden test: CI fails on a run's PR, the workspace is told, the fix pushes, CI passes; a release produced by a run does not start a new run. |
 | **A3** | Lifecycle | Subject-closed notices; 7-day auto-close and checkout release. |
+| **A4** | Watching repositories | Watch trigger for releases, tags and deployments; webhook where the App receives the event, otherwise a check (hourly by default, adjustable); seen records; trust for other repositories; the GitSpace project's release automation. Golden test: a release of a watched public repository starts one run within the interval and never a second; a release on a covered repository arrives by webhook; a fork's GitSpace project is offered the upstream tag as a pull request. |
 
 ## 13. Open questions
 
