@@ -1,6 +1,8 @@
 # Account releases: the platform builds, the account decides
 
-Status: agreed (2026-10-30), not built.
+Status: agreed (2026-10-30), not built. Mock: `packages/account-web/mock-gitspace-project.html`
+(`src/GitSpaceProjectMock.tsx`): the sidebar, the GitSpace project page and its agent, and Settings → Releases, for an
+upstream or a forked project with a new upstream release, a workspace trial, or nothing new.
 
 ## Already in place
 

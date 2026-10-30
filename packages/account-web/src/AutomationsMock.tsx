@@ -139,8 +139,8 @@ function gitspaceAutomations(source: GitSpaceSource): readonly Automation[] {
       when: <>Watch {code(UPSTREAM)}{source === 'fork' ? <>, the upstream of {code(FORK)},</> : null} · release published</>,
       onlyIf: [<>tag is {code('v*')}</>],
       then: source === 'upstream'
-        ? <>Message the project agent · it offers to launch the release's build, which GitHub already built</>
-        : <>Message the project agent · it offers to merge the tag into {code('ui-experiments')} in a workspace and open a pull request, then to build and launch it once merged</>,
+        ? <>Message the project agent · it offers to launch the release's build, which GitHub already built. Launching it makes it this account's default release (Settings → Releases).</>
+        : <>Message the project agent · it offers to merge the tag into {code('ui-experiments')} in a workspace and open a pull request. Once merged, launching {code('ui-experiments')} makes it the default release (Settings → Releases).</>,
       delivery: 'Checked every hour. Turn on Release in your GitHub App for instant delivery.',
       modes: [], last: { at: '2 d ago', status: 'finished' },
     },
@@ -162,12 +162,6 @@ function gitspaceAutomations(source: GitSpaceSource): readonly Automation[] {
     },
   ];
 }
-
-/** Versions launched from GitSpace workspaces: trials that never change the default release. */
-const TRIALS: readonly { workspace: string; version: string; targets: string; at: string }[] = [
-  { workspace: 'automations-watch-ui', version: 'a1b2c3d + 4 uncommitted', targets: 'frontend', at: '3 h ago' },
-  { workspace: 'machine-installs', version: '7d41e08', targets: 'worker, machines', at: 'yesterday' },
-];
 
 type LinkSource = 'started' | 'agent' | 'person' | 'branch' | 'closes';
 const LINK_LABEL: Record<LinkSource, string> = {
@@ -917,34 +911,6 @@ function AllProjects({ onPick, onOpen }: { onPick(project: string): void; onOpen
   </>;
 }
 
-/** How the GitSpace project plays with releases: what it builds, the account's default release, and trial launches from
- * its workspaces. */
-function GitSpaceReleases({ source, onSource }: { source: GitSpaceSource; onSource(source: GitSpaceSource): void }): ReactElement {
-  const shape = useShape();
-  return <div className={`${shape.container} flex flex-col gap-4 bg-surface-2 px-5 py-4 shadow-surface-1`}>
-    <div className="max-w-md"><Field label="Builds">
-      <Select value={SOURCE_LABEL[source]} onValueChange={value => onSource(value === SOURCE_LABEL.fork ? 'fork' : 'upstream')}><SelectTrigger aria-label="Builds" />{options([SOURCE_LABEL.upstream, SOURCE_LABEL.fork])}</Select>
-    </Field></div>
-    <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 sm:grid-cols-[8rem_minmax(0,1fr)]">
-      <Row label="Default release">{source === 'upstream'
-        ? <>{code('v0.2.0-rc.41')} · develop @ {code('3e1f2c9')} · built by GitHub, nothing built here</>
-        : <>{code('ui-experiments @ 9b7e0d1')} · built on Darktop</>}</Row>
-      <Row label="Newest upstream">{source === 'upstream'
-        ? <>{code('v0.2.0-rc.41')} · released 2 d ago · this account runs it</>
-        : <>{code('v0.2.0-rc.41')} · released 2 d ago · offered as PR #18 into {code('ui-experiments')}</>}</Row>
-      <Row label="Trials"><ul className="flex flex-col gap-1">{TRIALS.map(trial => <li key={trial.workspace}>
-        <span className="font-mono text-caption underline decoration-dotted underline-offset-2">{trial.workspace}</span>
-        <span className="text-muted-foreground"> · {trial.version} · {trial.targets} · {trial.at}</span>
-      </li>)}</ul></Row>
-    </dl>
-    <div className="flex flex-wrap items-center gap-2">
-      <Button variant="secondary" size="compact" type="button" leadingIcon={glyph(RefreshCcw01)}>Back to default</Button>
-      <span className="text-caption text-muted-foreground">Returns the worker, the frontend and every machine to the default release.</span>
-    </div>
-    <p className="text-caption text-muted-foreground">Launching {source === 'upstream' ? <>develop</> : <>ui-experiments</>} from the project agent makes a release the default. Workspaces can launch their own versions as trials, which never change it. The GitSpace releases automation below tells the project agent when upstream publishes a release{source === 'fork' ? ', and the agent offers to merge it into the fork' : ', and the agent offers to launch it'}.</p>
-  </div>;
-}
-
 function AutomationsMock(): ReactElement {
   const shape = useShape();
   const [project, setProject] = useState('inkibra core');
@@ -959,7 +925,10 @@ function AutomationsMock(): ReactElement {
     <PageCanvas>
       <PageHeader kicker={<ProjectPicker project={project} onPick={setProject} />} title="Automations"
         description={all ? 'Every project\'s automations and runs. Choose a project to change its automations, links and trusted authors.' : 'When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace.'}
-        actions={all || empty ? undefined : <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(REVIEW_PRESET)}>New automation</Button>} />
+        actions={all || empty ? undefined : <div className="flex flex-wrap items-center gap-2">
+          {gitspace ? <div className="w-72 max-w-full"><Select value={SOURCE_LABEL[source]} onValueChange={value => setSource(value === SOURCE_LABEL.fork ? 'fork' : 'upstream')}><SelectTrigger aria-label="What this project builds (mock)" />{options([SOURCE_LABEL.upstream, SOURCE_LABEL.fork])}</Select></div> : null}
+          <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(REVIEW_PRESET)}>New automation</Button>
+        </div>} />
 
       {empty ? null : <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
         <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">
@@ -978,10 +947,6 @@ function AutomationsMock(): ReactElement {
           <Button variant="primary" type="button" leadingIcon={glyph(Plus)} onClick={() => setEditing(REVIEW_PRESET)}>New automation</Button>
         </div>
         : gitspace ? <>
-          <Section title="This project's releases">
-            <GitSpaceReleases source={source} onSource={setSource} />
-          </Section>
-
           <Section title="Start work" aside={<span className="text-caption text-muted-foreground">Two watch other repositories: GitSpace upstream and earendil-works/pi</span>}>
             <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
               {gitspaceAutomations(source).map((automation, index) => <AutomationCard key={`${automation.id}:${source}`} automation={automation} index={index} onEdit={() => setEditing(PRESETS[automation.id] ?? REVIEW_PRESET)} />)}
