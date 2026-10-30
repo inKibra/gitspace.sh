@@ -125,7 +125,9 @@ project points:
 
 ### 8. Pointing the GitSpace project at a fork
 
-The GitSpace project uses the settings dialog every project has. Two changes there apply to every project:
+The GitSpace project uses the settings dialog every project has. The dialog becomes one row per setting (Repository,
+Base branch, Origin, Check the origin, Inference, Browsers): name, current value and actions, with explanations in
+tooltips; Change opens a field in place. Two changes there apply to every project:
 
 - **Repository**, new: change the project's origin to another address (the same field as creating a project). Use it to
   move to a fork or a moved repository. Workspaces keep their branches; the base space fetches from the new origin.

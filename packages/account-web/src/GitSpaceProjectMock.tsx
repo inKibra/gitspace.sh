@@ -163,61 +163,56 @@ function ProjectAgent({ source, branch, event, answer, running, onAnswer }: { so
   </div>;
 }
 
-/** A section of the project settings dialog, styled as the app's (`AccountWorkPages.tsx`). */
-function SettingsSection({ title, lead, isNew, children }: { title: string; lead: ReactNode; isNew?: boolean; children?: ReactNode }): ReactElement {
-  return <section className="flex flex-col gap-3">
-    <div className="flex flex-col gap-1">
-      <h3 className="flex items-center gap-2 text-body font-medium text-foreground">{title}{isNew ? <Badge size="compact" color="blue">New · every project</Badge> : null}</h3>
-      <p className="text-caption text-muted-foreground">{lead}</p>
-    </div>
-    {children}
-  </section>;
+/** One setting: its name, its current value with at most one short line under it, and its actions. Editing opens the
+ * field and its explanation in place of the value. */
+function SettingRow({ label, hint, value, note, actions }: { label: string; hint?: string; value: ReactNode; note?: ReactNode; actions?: ReactNode }): ReactElement {
+  const name = <span className="text-caption font-medium text-muted-foreground">{label}</span>;
+  return <div className="grid grid-cols-[8.5rem_minmax(0,1fr)_auto] items-center gap-x-4 border-b border-border py-3 last:border-b-0">
+    {hint ? <Tooltip content={hint} side="top"><span className="cursor-help underline decoration-dotted underline-offset-4">{name}</span></Tooltip> : name}
+    <div className="flex min-w-0 flex-col gap-0.5 text-body">{value}{note ? <span className="text-caption text-muted-foreground">{note}</span> : null}</div>
+    <div className="flex items-center gap-1">{actions}</div>
+  </div>;
 }
 
-/** The app's project settings dialog with this design's additions; `source` only decides the one GitSpace line. */
+/** The field that replaces a row's value while it is being changed. */
+function SettingEditor({ label, placeholder, help, valid, onSave, onCancel }: { label: string; placeholder: string; help: string; valid(value: string): boolean; onSave(value: string): void; onCancel(): void }): ReactElement {
+  const [value, setValue] = useState('');
+  return <form className="flex flex-col gap-2" onSubmit={event => { event.preventDefault(); if (valid(value.trim())) onSave(value.trim()); }}>
+    <InputGroup><InputField index={0} label={label} placeholder={placeholder} value={value} onChange={setValue} autoFocus /></InputGroup>
+    <p className="text-caption text-muted-foreground">{help}</p>
+    <div className="flex gap-2"><Button type="submit" variant="secondary" size="compact" disabled={!valid(value.trim())}>Save</Button><Button type="button" variant="ghost" size="compact" onClick={onCancel}>Cancel</Button></div>
+  </form>;
+}
+
+/** The app's project settings dialog with this design's additions; `source` only decides the GitSpace note. */
 function ProjectSettingsDialog({ open, project, source, onClose, onRepository, onBaseBranch, onUpdateBase }: { open: boolean; project: Project; source: Source; onClose(): void; onRepository(repository: string): void; onBaseBranch(branch: string): void; onUpdateBase(): void }): ReactElement {
-  const [repository, setRepository] = useState('');
-  const [branch, setBranch] = useState('');
+  const [editing, setEditing] = useState<'repository' | 'branch' | null>(null);
   const [cadence, setCadence] = useState('Once a day');
   const [profile, setProfile] = useState('Account default');
-  return <Dialog open={open} onOpenChange={next => { if (!next) onClose(); }}><DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto">
+  const change = (setting: 'repository' | 'branch') => editing === setting ? null : <Button variant="ghost" size="compact" onClick={() => setEditing(setting)}>Change</Button>;
+  return <Dialog open={open} onOpenChange={next => { if (!next) { setEditing(null); onClose(); } }}><DialogContent className="max-w-2xl max-h-[90dvh] overflow-y-auto">
     <DialogHeader><DialogTitle>GitSpace settings</DialogTitle><DialogDescription>Settings shared by every workspace in this project.</DialogDescription></DialogHeader>
-    <SettingsSection title="Repository" isNew lead={<>Current repository: <span className="font-mono text-foreground">{project.repository}</span></>}>
-      <form className="flex flex-col gap-3" onSubmit={event => { event.preventDefault(); if (repository.trim()) { onRepository(repository.trim()); setRepository(''); } }}>
-        <InputGroup><InputField index={0} label="New repository address" placeholder="https://github.com/owner/repository" value={repository} onChange={setRepository} /></InputGroup>
-        <p className="text-caption text-muted-foreground">Use it for a fork or a moved repository. Workspaces keep their branches; the base space fetches from the new origin. Use the repository’s root URL, an SSH address, or owner/repository for GitHub.</p>
-        <p className="text-caption text-muted-foreground">GitSpace: {source === 'upstream'
-          ? <>on {UPSTREAM}, published GitSpace releases launch as they are, with nothing built here.</>
-          : <>on a repository other than {UPSTREAM}, GitSpace releases arrive as merges and launching builds on one of your machines.</>}</p>
-        <div><Button type="submit" variant="secondary" size="compact" disabled={!repository.trim()}>Change repository</Button></div>
-      </form>
-    </SettingsSection>
-    <SettingsSection title="Base branch" lead={<>Current base branch: <span className="font-mono text-foreground">{project.baseBranch}</span></>}>
-      <form className="flex flex-col gap-3" onSubmit={event => { event.preventDefault(); if (branch.trim() && branch.trim() !== project.baseBranch) { onBaseBranch(branch.trim()); setBranch(''); } }}>
-        <InputGroup><InputField index={0} label="New base branch" placeholder={project.baseBranch} value={branch} onChange={setBranch} /></InputGroup>
-        <p className="text-caption text-muted-foreground">Existing workspaces keep their branches; stack status will compare against the new base. The project’s base space must be open and have no uncommitted changes.</p>
-        <div><Button type="submit" variant="secondary" size="compact" disabled={!branch.trim() || branch.trim() === project.baseBranch}>Change base branch</Button></div>
-      </form>
-    </SettingsSection>
-    <SettingsSection title="Origin" lead={<>Whether this project’s copy of {project.baseBranch} is behind its origin.</>}>
-      <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
-        {project.behind ? <Badge size="compact" color="amber">Behind origin</Badge> : null}
-        <span>origin/{project.baseBranch} checked {project.behind ? 'today, 07:02' : 'just now'}</span>
-        {project.behind ? <Button variant="secondary" size="compact" onClick={onUpdateBase}>Update base</Button> : null}
-        <Button variant="ghost" size="compact" leadingIcon={glyph(RefreshCcw01)}>Check origin</Button>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="flex items-center gap-2 text-caption font-medium text-foreground">Check the origin <Badge size="compact" color="blue">New · every project</Badge></span>
-        <div className="w-48"><Select size="compact" value={cadence} onValueChange={setCadence}><SelectTrigger aria-label="Check the origin" /><SelectContent>{['Once a day', 'Every 6 hours', 'Every hour', 'Only when I ask'].map((value, index) => <SelectItem key={value} value={value} index={index}>{value}</SelectItem>)}</SelectContent></Select></div>
-      </div>
-      <p className="text-caption text-muted-foreground">Repositories your GitHub App is installed on report pushes at once; this check covers the rest.</p>
-    </SettingsSection>
-    <SettingsSection title="Inference" lead="Choose the canonical inference profile for every workspace in this project. Running work keeps its admitted profile; new work uses the new assignment.">
-      <div className="w-64"><Select value={profile} onValueChange={setProfile}><SelectTrigger aria-label="Inference profile for GitSpace" /><SelectContent>{['Account default', 'Opus', 'Codex'].map((value, index) => <SelectItem key={value} value={value} index={index}>{value}</SelectItem>)}</SelectContent></Select></div>
-      <p className="text-caption text-muted-foreground">Manage models, agents, and credentials under Navigate → Inference.</p>
-    </SettingsSection>
-    <p className="text-caption text-muted-foreground">Choose which of your Chromes agents here may use in <span className="text-foreground underline">Plugins → Browsers</span>.</p>
-    <DialogFooter><Button variant="secondary" onClick={onClose}>Done</Button></DialogFooter>
+    <div className="flex flex-col">
+      <SettingRow label="Repository" actions={change('repository')}
+        value={editing === 'repository'
+          ? <SettingEditor label="New repository address" placeholder="https://github.com/owner/repository" help="For a fork or a moved repository. Workspaces keep their branches; the base space fetches from the new origin." valid={value => value !== ''} onSave={value => { onRepository(value); setEditing(null); }} onCancel={() => setEditing(null)} />
+          : <span className="truncate font-mono text-caption">{project.repository}</span>}
+        note={editing === 'repository' ? undefined : source === 'upstream' ? 'Published GitSpace releases launch as they are.' : 'GitSpace releases arrive as merges; launching builds on a machine.'} />
+      <SettingRow label="Base branch" actions={change('branch')}
+        value={editing === 'branch'
+          ? <SettingEditor label="New base branch" placeholder={project.baseBranch} help="Existing workspaces keep their branches; stack status will compare against the new base. The project’s base space must be open and have no uncommitted changes." valid={value => value !== '' && value !== project.baseBranch} onSave={value => { onBaseBranch(value); setEditing(null); }} onCancel={() => setEditing(null)} />
+          : <span className="font-mono text-caption">{project.baseBranch}</span>} />
+      <SettingRow label="Origin" hint={`Whether this project's copy of ${project.baseBranch} is behind origin/${project.baseBranch}.`}
+        value={<span className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">{project.behind ? <Badge size="compact" color="amber">Behind</Badge> : <span>Up to date</span>}<span>checked {project.behind ? 'today, 07:02' : 'just now'}</span></span>}
+        actions={<>{project.behind ? <Button variant="secondary" size="compact" onClick={onUpdateBase}>Update base</Button> : null}<Tooltip content="Check origin" side="top"><Button variant="ghost" size="icon-compact" aria-label="Check origin"><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip></>} />
+      <SettingRow label="Check the origin" hint="Repositories your GitHub App is installed on report pushes at once; this check covers the rest."
+        value={<div className="w-44"><Select size="compact" value={cadence} onValueChange={setCadence}><SelectTrigger aria-label="Check the origin" /><SelectContent>{['Once a day', 'Every 6 hours', 'Every hour', 'Only when I ask'].map((value, index) => <SelectItem key={value} value={value} index={index}>{value}</SelectItem>)}</SelectContent></Select></div>} />
+      <SettingRow label="Inference" hint="The canonical inference profile for every workspace in this project. Running work keeps its admitted profile; new work uses the new assignment. Manage profiles under Navigate → Inference."
+        value={<div className="w-44"><Select size="compact" value={profile} onValueChange={setProfile}><SelectTrigger aria-label="Inference profile for GitSpace" /><SelectContent>{['Account default', 'Opus', 'Codex'].map((value, index) => <SelectItem key={value} value={value} index={index}>{value}</SelectItem>)}</SelectContent></Select></div>} />
+      <SettingRow label="Browsers" value={<span className="text-caption text-muted-foreground">Which of your Chromes agents here may use</span>}
+        actions={<Button variant="ghost" size="compact">Plugins → Browsers</Button>} />
+    </div>
+    <DialogFooter><Button variant="secondary" onClick={() => { setEditing(null); onClose(); }}>Done</Button></DialogFooter>
   </DialogContent></Dialog>;
 }
 
