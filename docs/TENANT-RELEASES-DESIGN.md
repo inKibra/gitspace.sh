@@ -1,120 +1,96 @@
-# Tenant releases: the platform publishes, the account decides
+# Account releases: the platform builds, the account decides
 
-Status: proposal for review (2026-10-30). Nothing here is built.
+Status: agreed (2026-10-30), not built.
 
-## Today
+## Already in place
 
-- **The channel** is the platform's default release: `defaults/account.json` in the platform's `RELEASES` bucket points
-  at a manifest (`defaultReleaseSchema`) naming a worker manifest and modules, frontend files, a cloud image, native
-  machine artifacts and the portable release, all under `defaults/releases/<commit>/`. `publish-default.yml` writes it.
-- **A new account** gets the channel's worker, uploaded by the platform with a `DEFAULT_ACCOUNT_RELEASE` pin
-  (`<commit>:<manifest sha256>`) among its bindings. The platform injects that pin again on every later swap.
-- **Its frontend**, until the account launches one of its own, is fetched from the platform: the tenant proxies
-  `/v1/default-releases/<pin>/frontend/*` to the platform route `defaultFrontendResponse`.
-- **Back to stable** asks the platform to `revert { to: 'channel' }`: the platform swaps the tenant script to whatever
-  the channel pointer names at that moment (`loadChannel`). The frontend selection is cleared, so the platform-served
-  default frontend returns. Machines already decide inside the account (`stableMachineRelease`, since `fbd0e978`).
-- **The inference check** before Back to stable asks which worker the platform runs, because the channel's capability is
-  only known on the platform side.
-- **Cloud machine images** come from the channel's `image` through the platform's compute provider.
+- Every account has a GitSpace project (`ensureAccountGitSpaceProject`, role `gitspace-source`). Its repository is a
+  normal project repository.
+- Its agent has the release tools:
+  - `deployment.status`;
+  - `deployment.checkCanonical`, which reads the head of `develop`;
+  - `deployment.launch`, which builds a workspace checkout or a canonical commit on an attached machine;
+  - `deployment.revert` (Back to stable).
+- Building means attaching a machine. A launch of a commit the account already built reuses that release.
+- Release records keep their source (canonical commit or workspace) and a selection per target (worker, frontend,
+  machine).
+- Project automations run on a schedule, manually, on GitHub events or on labels.
 
-So "stable" for the worker and frontend means "whatever the platform's pointer says when you click", and the account
-serves a frontend it does not hold.
+## Changes
 
-## Design
+### 1. Canonical is the GitSpace project's own source
 
-### 1. The channel is published, not served
+`GITSPACE_SOURCE_REPOSITORY` and `GITSPACE_CANONICAL_BRANCH` are constants today, used by `checkCanonical` and the
+launcher. They become the GitSpace project's repository and base branch. Upstream `inKibra/gitspace.sh` on `develop` is
+what a new project starts with. A project pointed at a fork or another branch launches that, built on an attached
+machine.
 
-`publish-default.yml` writes each channel release, unchanged in format, and a channel pointer to a **public** R2 bucket
-on its own domain (for example `channel.gitspace.sh`). Objects are immutable and named by commit and digest, and the
-manifest's SHA-256 is the pin. No platform Worker route serves the channel. The platform Worker reads the same objects
-only to create a new account's first script, and for cloud images until those move too (out of scope here).
+### 2. The account's default release
 
-### 2. An account adopts a channel release into its own storage
+The default is the release the GitSpace project runs: launching its canonical commit to every target makes that
+release the default. Workspace launches are trials and never change it. **Back to default** replaces Back to stable. It
+launches the default release to the worker, the frontend and the machines through the normal launch path, with no
+platform `revert { to: 'channel' }`. Machines with no selection, and new computers, follow the default, which replaces
+`stableMachineRelease`.
 
-`release.adopt(pin)` in the account's releases object:
+### 3. Platform builds are used by reference
 
-1. reads the manifest from the channel and checks it against the pin;
-2. copies the worker manifest and modules, the frontend files and the portable manifest to
-   `releases/<commit>/…` in account storage. Each object is a streamed R2 put carrying its SHA-256, so R2 refuses wrong
-   bytes and the Worker hashes nothing (the CPU limit that broke native mirroring). The copy runs in batches across alarm
-   turns, which keeps each turn under its subrequest and CPU limits and lets an interrupted copy resume;
-3. mirrors the natives the portable release pins, as staging already does;
-4. records an ordinary release: source `{ kind: 'channel', commit, pin }`, with `inferenceVersion` from the manifest.
+The platform builds upstream release tags and publishes them, unchanged in format, as the **channel** (the name moves
+from "default release" to the platform side). Launching a commit the channel has built uses that build, with no
+machine build and no copy:
 
-After that an adopted release is like any launched one. Launching it is the existing stage, then the platform's
-`/deploy` reading the worker manifest from account storage, and the frontend and machines follow the account's
-selection.
+- the platform uploads the worker from the channel build named by its pin;
+- the account serves the frontend from the build's files;
+- machines build their generation from the build's portable files, and the account mirrors the natives it pins, as now.
 
-### 3. The account decides what stable is
+Channel builds are immutable and kept, so a release record that names one stays launchable.
 
-`stable` is one release record per account, stored by its releases object and shown in Settings → Releases. A release
-becomes stable when it has (proposed; see the decisions below):
+### 4. The frontend is always the selected release's
 
-- applied on the worker and served the frontend,
-- been applied by every machine that was online for it, and
-- run for a soak period (24 h) without a Back to stable.
+The account serves the frontend of its selected release: from account storage, or from a channel build. The proxy to
+the platform's `/v1/default-releases/*` goes away. A new account is created from a channel build, and its default
+release record names that build.
 
-You can also mark any applied release stable yourself. **Back to stable** launches the stable release to the worker,
-the frontend and every machine through the normal launch path; the platform only deploys a manifest from account
-storage, as it does for any launch. Machines with no selection, and new computers, follow the same stable release, which
-replaces `stableMachineRelease`. The inference check reads `inferenceVersion` from the release record, with no platform
-call.
+### 5. Upstream releases arrive as an automation trigger
 
-### 4. Updates from the channel are the account's choice
+A new automation trigger, `{ kind: 'gitspace-release' }`, fires on the GitSpace project when the platform has published
+a build of a new upstream tag. The platform tells each account after it publishes, because reaching every account is
+cross-tenant work; an account's GitHub App never sees upstream's events. The GitSpace project starts with one
+automation on that trigger, and its instruction depends on what the project tracks:
 
-Settings → Releases → Updates: **Automatic**, **Notify** or **Off**.
+- **Upstream `develop`:** offer to launch the new build by reference. Editing the automation can make it launch without
+  asking.
+- **A fork or another branch:** offer to merge the tag into the branch in a workspace and open a pull request; once
+  that is merged, launch with a build on an attached machine.
 
-- **Automatic:** a new channel release is adopted and launched to every target. If the platform's health probe fails, its
-  existing automatic revert returns the worker to the previous active release; the account marks the release failed and
-  stays where it was. Machines apply it as they apply any selection, each reporting its own failure.
-- **Notify:** a notice in the account offers the update with one button (adopt and launch).
-- **Off:** the channel is listed and nothing else happens.
-
-### 5. The frontend is always the account's
-
-The tenant serves only frontends held in account storage. A new account adopts the release it was created from, named
-by its `DEFAULT_ACCOUNT_RELEASE` binding, as the last step of creation, before its hostname routes. An existing account
-adopts its pinned release once, the first time the new tenant release starts. Its frontend selection then names that
-release, and the proxy is gone.
+There is no separate updates setting: accounts change what happens by editing the automation.
 
 ## What leaves the platform
 
-- `defaultFrontendResponse` and the `/v1/default-releases/*` route.
-- `revert { to: 'channel' }` and the channel fallback in `loadFallback`. A failed swap reverts to the previous active
-  release only.
+- Reverting a tenant to the channel (`revert { to: 'channel' }`) and the channel fallback in `loadFallback`. A failed
+  swap reverts to the previous active release only.
 - Injecting `DEFAULT_ACCOUNT_RELEASE` on every swap. It is set once, at creation.
-- The platform worker version in the inference check.
+- `/v1/default-releases/*`, if the channel moves to a public bucket (decision 1).
+- The platform worker version in the Back to stable inference check. The release record's `inferenceVersion` answers it.
 
-The platform keeps uploading scripts with their bindings, probing health and reverting a failed swap, and creating
-accounts from the channel, which needs no tenant to exist.
+## What the platform gains (needs your approval, per `AGENTS.md`)
+
+- After publishing a build, a notice to every account.
+- `/deploy` accepting a channel pin as well as a manifest in account storage. The platform already loads channel worker
+  manifests to create accounts.
 
 ## Order of work
 
-1. Channel bucket and domain; `publish-default.yml` writes there as well as to `RELEASES` (operator).
-2. Adoption and `channel` release sources; frontend served from account storage only; existing accounts adopt their pin.
-3. Stable selection; Back to stable through launch; machines and installs follow stable.
-4. Updates setting and the channel check.
-5. Platform cleanup (the list above), once every tenant runs a release from step 2.
-
-Cloud machine images installing from the account's release is the same principle and comes after this.
+1. Canonical from the GitSpace project's source.
+2. The default release and Back to default; machines and installs follow the default.
+3. Channel builds by reference, including the frontend; tags publish to the channel.
+4. The `gitspace-release` trigger, the GitSpace project's default automation, and the platform's notice.
+5. The platform cleanup above, once every tenant runs a release from step 3.
 
 ## Decisions for you
 
-1. **How an account learns of a new channel release.**
-   - (a) When Settings → Releases opens, and when a new tenant release starts. Nothing scheduled.
-   - (b) Also a daily check by the releases object.
-   - (c) The platform tells every account when a release is published. That needs platform fan-out code.
-   - Recommended: (a) + (b). An account on Automatic otherwise waits until someone opens Releases.
-2. **What makes a release stable.**
-   - (a) Automatic after the 24 h soak above, plus marking it yourself.
-   - (b) Only when you mark it.
-   - (c) The newest release that applied everywhere, with no soak.
-   - Recommended: (a).
-3. **Updates setting for new accounts.**
-   - Notify, or Automatic.
-   - Recommended: Notify until the automatic path has run on a few accounts.
-4. **Where the channel lives.**
+1. **Where accounts read channel builds.**
    - (a) A public bucket on its own domain, with no platform code.
-   - (b) The current `RELEASES` bucket behind a platform route.
+   - (b) The existing platform route.
    - Recommended: (a).
+2. **Approval of the two platform additions above.**
