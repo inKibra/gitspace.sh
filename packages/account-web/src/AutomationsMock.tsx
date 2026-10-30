@@ -141,7 +141,7 @@ function gitspaceAutomations(source: GitSpaceSource): readonly Automation[] {
       then: source === 'upstream'
         ? <>Message the project agent · it offers to launch the release's build, which GitHub already built. Launching it makes it this account's default release (Settings → Releases).</>
         : <>Message the project agent · it offers to merge the tag into {code('ui-experiments')} in a workspace and open a pull request. Once merged, launching {code('ui-experiments')} makes it the default release (Settings → Releases).</>,
-      delivery: 'Checked every hour. Turn on Release in your GitHub App for instant delivery.',
+      delivery: 'Checked once a day. Turn on Release in your GitHub App for instant delivery.',
       modes: [], last: { at: '2 d ago', status: 'finished' },
     },
     {
@@ -149,7 +149,7 @@ function gitspaceAutomations(source: GitSpaceSource): readonly Automation[] {
       when: <>Watch {code('earendil-works/pi')} · release published</>,
       onlyIf: [<>not a prerelease</>],
       then: <>Start a workspace in <strong className="font-semibold">Code</strong>: upgrade the {code('@earendil-works')} packages, run the tests, open a pull request</>,
-      delivery: 'Checked every hour · a public repository your GitHub App is not installed on',
+      delivery: 'Checked once a day · a public repository your GitHub App is not installed on',
       modes: ['Code'], last: { at: '9 d ago', status: 'finished' },
     },
     {
@@ -157,7 +157,7 @@ function gitspaceAutomations(source: GitSpaceSource): readonly Automation[] {
       when: <>Watch {code(source === 'upstream' ? UPSTREAM : FORK)} · deployment status</>,
       onlyIf: [<>environment is {code('preview')}</>, <>state is {code('failure')} or {code('error')}</>],
       then: <>Send to the linked workspace of its branch · <strong className="font-semibold">wakes the agent</strong></>,
-      delivery: 'Checked every hour. Accept the Deployments permission on your GitHub App for instant delivery.',
+      delivery: 'Checked once a day. Accept the Deployments permission on your GitHub App for instant delivery.',
       modes: [], last: { at: '5 h ago', status: 'finished' },
     },
   ];
@@ -264,7 +264,7 @@ function gitspaceRuns(source: GitSpaceSource): readonly Run[] {
     id: 'g5', project: GITSPACE, status: 'finished', by: 'GitSpace releases', event: 'release · v0.2.0-rc.41', subject: `${UPSTREAM} v0.2.0-rc.41`,
     workspace: GITSPACE, outcome: 'You launched it: v0.2.0-rc.41 is the default release', at: '2 d ago', checks: [{ label: 'tag is v*', passed: true }],
     timeline: [
-      { at: '09:00:02', label: `Checked ${UPSTREAM} releases (every hour)` }, { at: '09:00:02', label: 'New release v0.2.0-rc.41; its notes name build 3e1f2c9…:9a0c41…' },
+      { at: '09:00:02', label: `Checked ${UPSTREAM} releases (daily)` }, { at: '09:00:02', label: 'New release v0.2.0-rc.41; the channel catalog names its build 3e1f2c9…:9a0c41…' },
       { at: '09:00:03', label: 'Sent to the project agent' }, { at: '09:01:10', label: 'Project agent offered to launch it: built by GitHub, nothing to build here' },
       { at: '09:14:52', label: 'You chose Launch' }, { at: '09:16:30', label: 'Worker, frontend and 2 machines on v0.2.0-rc.41; it is the default release' },
     ],
@@ -272,7 +272,7 @@ function gitspaceRuns(source: GitSpaceSource): readonly Run[] {
     id: 'g5', project: GITSPACE, status: 'finished', by: 'GitSpace releases', event: 'release · v0.2.0-rc.41', subject: `${UPSTREAM} v0.2.0-rc.41`,
     workspace: 'merge-v0-2-0-rc-41', outcome: `Merged into ui-experiments in merge-v0-2-0-rc-41; PR #18 on ${FORK}`, at: '2 d ago', checks: [{ label: 'tag is v*', passed: true }],
     timeline: [
-      { at: '09:00:02', label: `Checked ${UPSTREAM} releases (the upstream of ${FORK}, every hour)` }, { at: '09:00:02', label: 'New release v0.2.0-rc.41' },
+      { at: '09:00:02', label: `Checked ${UPSTREAM} releases (the upstream of ${FORK}, daily)` }, { at: '09:00:02', label: 'New release v0.2.0-rc.41' },
       { at: '09:00:03', label: 'Sent to the project agent' }, { at: '09:01:30', label: 'Project agent offered to bring it into ui-experiments' },
       { at: '09:12:04', label: 'You chose Merge' }, { at: '09:12:05', label: 'Project agent started merge-v0-2-0-rc-41 in Code' },
       { at: '09:31:40', label: `PR #18 opened on ${FORK}: v0.2.0-rc.41 into ui-experiments, 2 conflicts resolved` },
@@ -282,14 +282,14 @@ function gitspaceRuns(source: GitSpaceSource): readonly Run[] {
     {
       id: 'g4', project: GITSPACE, status: 'finished', by: 'Failed preview deployments', event: 'deployment_status · failure · preview', subject: 'Deployment of automations-watch-ui @ a1b2c3d',
       workspace: 'automations-watch-ui', outcome: 'Sent to its linked workspace (same branch): woke its agent', at: '5 h ago', checks: [{ label: 'environment is preview', passed: true }, { label: 'state is failure or error', passed: true }],
-      timeline: [{ at: '08:41:00', label: `Checked ${source === 'upstream' ? UPSTREAM : FORK} deployments (every hour)` }, { at: '08:41:01', label: 'preview deployment of automations-watch-ui ended failure' }, { at: '08:41:01', label: 'Linked to automations-watch-ui (same branch)' }, { at: '08:41:02', label: 'Sent; agent working' }],
+      timeline: [{ at: '08:41:00', label: `Checked ${source === 'upstream' ? UPSTREAM : FORK} deployments (daily)` }, { at: '08:41:01', label: 'preview deployment of automations-watch-ui ended failure' }, { at: '08:41:01', label: 'Linked to automations-watch-ui (same branch)' }, { at: '08:41:02', label: 'Sent; agent working' }],
     },
     ...OTHER_RUNS,
     release,
     {
       id: 'g3', project: GITSPACE, status: 'finished', by: 'Upgrade pi', event: 'release · v1.4.0', subject: 'earendil-works/pi v1.4.0',
       workspace: 'upgrade-pi-v1-4-0', outcome: 'Started in Code; PR #224 upgrades @earendil-works/* from 1.3.0 to 1.4.0', at: '9 d ago', checks: [{ label: 'not a prerelease', passed: true }],
-      timeline: [{ at: '23:00:01', label: 'Checked earendil-works/pi releases (every hour)' }, { at: '23:00:01', label: 'New release v1.4.0' }, { at: '23:00:02', label: 'Started workspace upgrade-pi-v1-4-0 in Code' }, { at: '23:41:17', label: 'PR #224 opened and linked' }],
+      timeline: [{ at: '23:00:01', label: 'Checked earendil-works/pi releases (daily)' }, { at: '23:00:01', label: 'New release v1.4.0' }, { at: '23:00:02', label: 'Started workspace upgrade-pi-v1-4-0 in Code' }, { at: '23:41:17', label: 'PR #224 opened and linked' }],
     },
   ];
 }
@@ -695,7 +695,7 @@ const PRESETS: Record<string, EditorPreset> = {
   'gitspace-release': {
     name: 'GitSpace releases', trigger: 'Watch a repository', event: 'Release', repository: UPSTREAM, prereleases: true,
     then: 'Message the project agent', mode: 'Code',
-    prompt: 'GitSpace {{release.tag}} is out: {{release.url}}. Its notes name the build. Say what changes from this account\'s default release. If this project tracks upstream, offer to launch the build; if it tracks a fork, offer to merge {{release.tag}} into the fork\'s branch in a workspace and open a pull request.',
+    prompt: 'GitSpace {{release.tag}} is out: {{release.url}}. The GitSpace channel catalog names its build. Say what changes from this account\'s default release. If this project tracks upstream, ask whether to launch it; if it tracks a fork, ask whether to merge {{release.tag}} into the fork\'s branch in a workspace and open a pull request.',
     filters: [{ kind: 'tag', mode: 'is one of', values: ['v*'] }],
   },
   pi: {
@@ -769,7 +769,7 @@ function Editor({ preset, onClose }: { preset: EditorPreset; onClose(): void }):
   const [event, setEvent] = useState(preset.event);
   const [repository, setRepository] = useState(preset.repository);
   const [prereleases, setPrereleases] = useState(preset.prereleases);
-  const [cadence, setCadence] = useState('every hour');
+  const [cadence, setCadence] = useState('every day');
   const [actions, setActions] = useState<ReadonlySet<string>>(new Set(['opened', 'ready_for_review']));
   const [then, setThen] = useState(preset.then);
   const [mode, setMode] = useState<string>(preset.mode);

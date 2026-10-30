@@ -71,13 +71,14 @@ A **watch** trigger runs an automation when a repository publishes something: `{
   | Repository | Path | Editor says |
   |---|---|---|
   | Covered by the account's GitHub App, which receives the event | Webhook: `release`, `push` for `refs/tags/*` (already received), `deployment_status` | "Arrives instantly through your GitHub App" |
-  | Covered, but the App does not receive the event yet (every App made before 2026-10-30 lacks `release` and the `deployments: read` permission) | Check | "Checked every hour. Turn on Release in your GitHub App's settings for instant delivery." GitHub has no API to change an App's events, and its owner accepts a new permission on each installation. |
-  | Public, not covered | Check: the Releases API, tag refs (`git/matching-refs/tags`), or deployments with their statuses | "Checked every hour" |
+  | Covered, but the App does not receive the event yet (every App made before 2026-10-30 lacks `release` and the `deployments: read` permission) | Check | "Checked once a day. Turn on Release in your GitHub App's settings for instant delivery." GitHub has no API to change an App's events, and its owner accepts a new permission on each installation. |
+  | Public, not covered | Check: the Releases API, tag refs (`git/matching-refs/tags`), or deployments with their statuses | "Checked once a day" |
   | Private, not covered | None | Refused when saved: install the App on it, or choose a public repository. |
 
-- **Check interval:** hourly by default and adjustable per automation, from 15 minutes to daily. A check uses a token of
-  one of the account's App installations, which can read any public repository; an unchanged answer (ETag) costs no rate
-  limit. An account with no App checks anonymously, under GitHub's limit per address, and the editor says so.
+- **Check interval:** once a day by default, like every check GitSpace makes on its own, and adjustable per automation
+  from 15 minutes to daily. A check uses a token of one of the account's App installations, which can read any public
+  repository; an unchanged answer (ETag) costs no rate limit. An account with no App checks anonymously, under GitHub's
+  limit per address, and the editor says so.
 - **Seen:** the automations object keeps, per automation and repository, the releases, tags (a bounded set of names: tag
   refs are not ordered by time) and deployment statuses it has seen. Creating or switching on a watch records what
   exists then, so it fires only on what comes after; **Run it** acts on the latest once. A release that arrives by both
@@ -159,7 +160,7 @@ A top-level page that replaces Crons in the sidebar, with the project chosen in 
 | **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch); Send to the linked workspace and the four default automations; mentions of the tenant's bot; trust; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped as not trusted; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
 | **A2** | Loops and decisions | Provenance; round and daily caps; *ask the project agent*. Golden test: CI fails on a run's PR, the workspace is told, the fix pushes, CI passes; a release produced by a run does not start a new run. |
 | **A3** | Lifecycle | Subject-closed notices; 7-day auto-close and checkout release. |
-| **A4** | Watching repositories | Watch trigger for releases, tags and deployments; webhook where the App receives the event, otherwise a check (hourly by default, adjustable); seen records; trust for other repositories; the GitSpace project's release automation. Golden test: a release of a watched public repository starts one run within the interval and never a second; a release on a covered repository arrives by webhook; a fork's GitSpace project is offered the upstream tag as a pull request. |
+| **A4** | Watching repositories | Watch trigger for releases, tags and deployments; webhook where the App receives the event, otherwise a check (daily by default, adjustable); seen records; trust for other repositories; the GitSpace project's release automation. Golden test: a release of a watched public repository starts one run within the interval and never a second; a release on a covered repository arrives by webhook; a fork's GitSpace project is offered the upstream tag as a pull request. |
 
 ## 13. Open questions
 
