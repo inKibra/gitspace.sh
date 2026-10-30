@@ -4,19 +4,37 @@ import type { StoredOAuthCredential, WorkerOAuthProvider } from './schemas';
 
 import { oauthClient } from './catalog';
 export class ProviderRefreshError extends Error {
-  constructor(readonly provider: WorkerOAuthProvider, readonly kind: 'network' | 'rejected' | 'invalid-response', message: string, readonly status?: number) {
+  /** `reason`: the provider's error type for a rejected request (`permission_error`, `invalid_grant`), when it sent one. */
+  constructor(readonly provider: WorkerOAuthProvider, readonly kind: 'network' | 'rejected' | 'invalid-response', message: string, readonly status?: number, readonly reason: string | null = null) {
     super(message); this.name = 'ProviderRefreshError';
   }
 }
 const objectSchema = z.record(z.string(), z.unknown());
+const errorTypeSchema = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/u);
+// Anthropic sends `{ error: { type, message } }`; OAuth token endpoints send `{ error: "invalid_grant" }`.
+const rejectionSchema = z.object({ error: z.union([errorTypeSchema, z.object({ type: errorTypeSchema, message: z.string().max(512).optional() })]) });
+/** Anthropic's refusal of a token that lacks a scope the endpoint needs (its usage read needs `user:profile`). */
+const MISSING_SCOPE = /^OAuth token does not meet scope requirement ([a-z][a-z_:]{0,63})$/u;
+/** The error type a refusal names, and a missing scope it names: identifiers only, never the provider's free text. */
+async function rejectionReason(response: Response): Promise<string | null> {
+  if (Number(response.headers.get('content-length')) > 4096) { await response.body?.cancel(); return null; }
+  let body: unknown;
+  try { body = JSON.parse(await response.text()); } catch { return null; }
+  const parsed = rejectionSchema.safeParse(body);
+  if (!parsed.success) return null;
+  const { error } = parsed.data;
+  if (typeof error === 'string') return error;
+  const scope = MISSING_SCOPE.exec(error.message ?? '')?.[1];
+  return scope ? `${error.type}: needs scope ${scope}` : error.type;
+}
 export const tokenSchema = z.object({ access_token: z.string().min(1), refresh_token: z.string().optional(), expires_in: z.number().positive().finite(), id_token: z.string().optional(), account: z.object({ uuid: z.string().optional(), email_address: z.string().optional() }).optional(), organization: z.object({ uuid: z.string().optional() }).optional() });
-/** Never includes provider response bodies, tokens or request URLs in errors. */
+/** Never includes provider response bodies, tokens or request URLs in errors; a refusal keeps only its error type. */
 export async function request(provider: WorkerOAuthProvider, url: string, init: RequestInit, fetcher: typeof fetch, pendingStatuses: readonly number[] = []): Promise<Record<string, unknown> | null> {
   let response: Response;
   try { response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(15_000) }); }
   catch { throw new ProviderRefreshError(provider, 'network', 'Provider request outcome is uncertain'); }
   if (pendingStatuses.includes(response.status)) { await response.body?.cancel(); return null; }
-  if (!response.ok) { await response.body?.cancel(); throw new ProviderRefreshError(provider, 'rejected', 'Provider rejected request', response.status); }
+  if (!response.ok) throw new ProviderRefreshError(provider, 'rejected', 'Provider rejected request', response.status, await rejectionReason(response));
   if (Number(response.headers.get('content-length')) > 65_536) { await response.body?.cancel(); throw new ProviderRefreshError(provider, 'invalid-response', 'Provider response too large', response.status); }
   const reader = response.body?.getReader();
   if (!reader) throw new ProviderRefreshError(provider, 'invalid-response', 'Provider response is empty', response.status);

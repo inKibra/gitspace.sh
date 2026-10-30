@@ -1,13 +1,15 @@
 import { z } from 'zod';
 import { workerOAuthProviderSchema, type StoredOAuthCredential, type WorkerOAuthProvider } from './schemas';
 import { request, ProviderRefreshError } from './refresh';
+import { CLAUDE_CODE_USER_AGENT } from './claude-code';
 
 export const providerUsageLimitSchema = z.object({ id: z.string(), label: z.string(), scope: z.string(), window: z.string().nullable(), unit: z.string(), used: z.number().nullable(), limit: z.number().nullable(), remaining: z.number().nullable(), remainingFraction: z.number().nullable(), resetsAt: z.string().nullable(), status: z.string().nullable() });
 export type ProviderUsageLimit = z.infer<typeof providerUsageLimitSchema>;
 export const providerUsageReportSchema = z.object({ provider: workerOAuthProviderSchema, account: z.string().nullable(), fetchedAt: z.iso.datetime(), limits: z.array(providerUsageLimitSchema), notes: z.array(z.string()) });
 export type ProviderUsageReport = z.infer<typeof providerUsageReportSchema>;
 export class ProviderUsageError extends Error {
-  constructor(readonly provider: WorkerOAuthProvider, readonly kind: 'unsupported' | 'network' | 'rejected' | 'invalid-response', readonly status?: number) { super(`Provider usage ${kind}`); this.name = 'ProviderUsageError'; }
+  /** `reason`: the provider's error type for a rejected read, and a scope it says the token lacks. */
+  constructor(readonly provider: WorkerOAuthProvider, readonly kind: 'unsupported' | 'network' | 'rejected' | 'invalid-response', readonly status?: number, readonly reason: string | null = null) { super(`Provider usage ${kind}`); this.name = 'ProviderUsageError'; }
 }
 const numeric = z.union([z.number().finite(), z.string().regex(/^-?\d+(?:\.\d+)?$/).transform(Number)]);
 function timestamp(value: string | number | undefined | null): string | null {
@@ -22,7 +24,7 @@ function percent(id: string, label: string, scope: string, used: number, resetsA
 async function payload<S extends z.ZodType>(credential: StoredOAuthCredential, url: string, schema: S, fetcher: typeof fetch, init: RequestInit = {}): Promise<z.output<S>> {
   let raw: Record<string, unknown> | null;
   try { raw = await request(credential.provider, url, { headers: { Authorization: `Bearer ${credential.access}`, Accept: 'application/json' }, ...init }, fetcher); }
-  catch (error) { if (error instanceof ProviderRefreshError) throw new ProviderUsageError(credential.provider, error.kind, error.status); throw error; }
+  catch (error) { if (error instanceof ProviderRefreshError) throw new ProviderUsageError(credential.provider, error.kind, error.status, error.reason); throw error; }
   const parsed = schema.safeParse(raw);
   if (!parsed.success) throw new ProviderUsageError(credential.provider, 'invalid-response');
   return parsed.data;
@@ -32,7 +34,7 @@ export async function collectUsage(credential: StoredOAuthCredential, fetcher: t
   const report: ProviderUsageReport = { provider: credential.provider, account: credential.email ?? credential.accountId ?? null, fetchedAt: new Date().toISOString(), limits: [], notes: [] };
   if (credential.provider === 'anthropic') {
     const bucket = z.object({ utilization: numeric.optional(), resets_at: z.string().nullable().optional() });
-    const data = await payload(credential, 'https://api.anthropic.com/api/oauth/usage', z.object({ five_hour: bucket.nullable().optional(), seven_day: bucket.nullable().optional(), seven_day_opus: bucket.nullable().optional(), seven_day_sonnet: bucket.nullable().optional(), limits: z.array(z.object({ kind: z.string(), percent: numeric.optional(), resets_at: z.string().nullable().optional(), scope: z.object({ model: z.object({ display_name: z.string().nullable().optional() }).nullable().optional() }).nullable().optional() })).optional() }), fetcher, { headers: { Authorization: `Bearer ${credential.access}`, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-cli/2.1.280 (external, cli)', Accept: 'application/json' } });
+    const data = await payload(credential, 'https://api.anthropic.com/api/oauth/usage', z.object({ five_hour: bucket.nullable().optional(), seven_day: bucket.nullable().optional(), seven_day_opus: bucket.nullable().optional(), seven_day_sonnet: bucket.nullable().optional(), limits: z.array(z.object({ kind: z.string(), percent: numeric.optional(), resets_at: z.string().nullable().optional(), scope: z.object({ model: z.object({ display_name: z.string().nullable().optional() }).nullable().optional() }).nullable().optional() })).optional() }), fetcher, { headers: { Authorization: `Bearer ${credential.access}`, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': CLAUDE_CODE_USER_AGENT, Accept: 'application/json' } });
     for (const [id, label, scope, value] of [ ['five_hour', '5 hours', 'account', data.five_hour], ['seven_day', '7 days', 'account', data.seven_day], ['seven_day_opus', 'Opus weekly', 'opus', data.seven_day_opus], ['seven_day_sonnet', 'Sonnet weekly', 'sonnet', data.seven_day_sonnet] ] as const) {
       if (value?.utilization !== undefined) report.limits.push(percent(id, label, scope, value.utilization, timestamp(value.resets_at), label));
     }

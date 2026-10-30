@@ -14,6 +14,13 @@ it('reports collector refusal without refreshing or rewriting credential health'
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(credential.refresh).toBe('refresh-secret');
 });
+it("names an Anthropic refusal's error type and the scope it says the token lacks, and nothing else it said", async () => {
+  const anthropic: StoredOAuthCredential = { ...credential, provider: 'anthropic' };
+  const refusal = (message: string) => vi.fn<typeof fetch>().mockResolvedValue(Response.json({ type: 'error', error: { type: 'permission_error', message } }, { status: 403 }));
+  await expect(collectUsage(anthropic, refusal('OAuth token does not meet scope requirement user:profile'))).rejects.toMatchObject({ kind: 'rejected', status: 403, reason: 'permission_error: needs scope user:profile' });
+  await expect(collectUsage(anthropic, refusal('Token sk-ant-oat01-secret is not allowed'))).rejects.toMatchObject({ reason: 'permission_error' });
+  await expect(collectUsage(anthropic, vi.fn<typeof fetch>().mockResolvedValue(new Response('<html>blocked</html>', { status: 403 })))).rejects.toMatchObject({ reason: null });
+});
 it('does not turn an unrelated successful JSON document into zero usage', async () => {
   const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ status: 'ok' }));
   await expect(collectUsage({ ...credential, provider: 'anthropic' }, fetcher)).rejects.toMatchObject({ kind: 'invalid-response' });

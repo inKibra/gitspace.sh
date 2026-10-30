@@ -1612,7 +1612,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         result.reports.push(report);
       } catch (error) {
         // Which way the provider's usage read failed, so the screen says what is wrong; inference is unaffected.
-        const reason = error instanceof ProviderUsageError ? `the provider's usage read was ${error.kind}${error.status ? ` (HTTP ${error.status})` : ''}` : error instanceof Error ? error.message : String(error);
+        const reason = error instanceof ProviderUsageError ? `the provider's usage read was ${error.kind}${error.status ? ` (HTTP ${error.status}${error.reason ? `, ${error.reason}` : ''})` : ''}` : error instanceof Error ? error.message : String(error);
         const message = `Usage reporting is unavailable: ${reason}; inference remains enabled`;
         this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, NULL, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = NULL, error = excluded.error', profileId, account.id, Date.now(), message);
         result.accountsWithoutUsage.push(account.identity ?? `${account.provider}:${account.id}`);
