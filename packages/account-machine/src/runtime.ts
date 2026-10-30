@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   CloudDataCheckpointBlobStore,
   CloudSpaceCheckpointAuthority,
@@ -35,6 +35,7 @@ import { z } from 'zod';
 import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
 import { driveTransferOperation } from './drive-transfer.js';
+import { machineImageStore } from './machine-images.js';
 import { createGitHubCredentialHelper } from './github-credential-helper.js';
 import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
@@ -54,7 +55,8 @@ function signingKey(): Uint8Array {
 
 export async function startMachineRuntime() {
   const processStartedAt = new Date().toISOString();
-  const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? import.meta.dir;
+  // A bundle runs from its generation's directory; the CommonJS bundle has import.meta.dir fixed at the build's source.
+  const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? (import.meta.main ? dirname(Bun.main) : import.meta.dir);
   const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
   process.env.GITSPACE_SUPERVISOR_WORKER_ENTRY = packaged ? join(nativeRoot, 'machine-worker.js') : join(import.meta.dir, 'terminal-worker.ts');
   const native = packaged
@@ -361,6 +363,7 @@ export async function startMachineRuntime() {
       ...machineOperationalTools({ environments, services: serviceManager, reportProcessExit: async input => { await cloudRuntime.call('runtime.process.exited', input, z.null()); }, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
       drive_transfer: driveTransferOperation({ blobs: checkpointBlobs, accountId: controlOptions.userId }),
     },
+    storeImage: machineImageStore({ blobs: checkpointBlobs, accountId: controlOptions.userId }),
     originEnvironment: checkout => gitIdentity.originEnvironment(checkout),
     commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
@@ -433,4 +436,9 @@ export async function startMachineRuntime() {
   return { environmentRoot, settings, http, stop };
 }
 
-if (import.meta.main) await startMachineRuntime();
+// No top-level await: the bundle is CommonJS so that it can carry bytecode. A failed start ends the process, as an
+// awaited one did.
+if (import.meta.main) startMachineRuntime().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

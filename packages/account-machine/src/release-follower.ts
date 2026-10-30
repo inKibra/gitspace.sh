@@ -1,13 +1,17 @@
-import { lstat, mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { hashArtifactPath } from '@gitspace/deployment';
 import {
   executableManifestPath,
+  IncompatibleExecutable,
   parseExecutableArtifactManifest,
   sha256,
   validateExecutableArtifact,
+  validateExecutableCompatibility,
   type ExecutableArtifactManifest,
 } from '@gitspace/deployment/manifest';
+import { assembleMachineGeneration } from '@gitspace/deployment/machine-assembly';
+import { nativeMirrorKey, portableFileKey, portableManifestSchema } from '@gitspace/protocol/machine-release';
 import type { DeploymentStatus, ReleaseArtifact, ReleaseRecord } from '@gitspace/protocol';
 import { MACHINE_EXECUTION_PROTOCOL_VERSION, machineNativePlatformSchema, type MachineExecutionAdmission, type machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
@@ -121,16 +125,16 @@ export class ReleaseFollower {
     }
     if (desired.frontend === null && host.frontendReleaseSha !== null) await this.launchChannel('frontend');
     if (desired.machine === null && (host.machineReleaseSha !== null || protocol.state === 'updating')) await this.launchChannel('machine');
-    const wantsMachine = machineRecord?.artifacts.machine
+    const wantsMachine = machineRecord && (machineRecord.artifacts.machine || machineRecord.artifacts.portable)
       && machineRecord.status.machines[this.options.machineId] !== 'failed'
       && !this.reportedFailures.has(`machine:${machineRecord.sha}`)
       && machineRecord.sha !== this.options.runningMachineSha && host.machineReleaseSha !== machineRecord.sha;
     const wantsFrontend = frontendRecord?.artifacts.frontend
       && host.frontendReleaseSha !== frontendRecord.sha && host.frontendHash !== frontendRecord.artifacts.frontend.hash;
     if (wantsFrontend && frontendRecord?.artifacts.frontend) await this.launchFrontend(frontendRecord, frontendRecord.artifacts.frontend);
-    if (wantsMachine && machineRecord?.artifacts.machine) {
+    if (wantsMachine && machineRecord) {
       try {
-        const { path, manifest } = await this.downloadExecutable(machineRecord.artifacts.machine, 'machine');
+        const { path, manifest } = await this.machineGeneration(machineRecord);
         await this.launch(machineRecord.sha, 'machine', {
           entrypoint: 'machine-daemon', target: 'machine', applies: ['machine'], path, hash: manifest.treeHash, sha: machineRecord.sha,
         });
@@ -154,12 +158,72 @@ export class ReleaseFollower {
     this.reportedMachine = true;
   }
 
+  /** This machine's generation of `record`: the release's built one when it was built for this platform and Bun, else
+   * one this machine builds from the release's portable files (`assembleMachineGeneration`). */
+  private async machineGeneration(record: ReleaseRecord): Promise<{ path: string; manifest: ExecutableArtifactManifest }> {
+    const built = record.artifacts.machine;
+    let unfit = 'The release has no machine generation';
+    if (built) {
+      const bytes = await this.options.blobs.get(built.key, built.hash);
+      if (!bytes) throw new Error(`Executable manifest ${built.key} is missing`);
+      try {
+        validateExecutableCompatibility(parseExecutableArtifactManifest(bytes, { target: 'machine', manifestHash: built.hash, size: built.size }));
+        return await this.downloadExecutable(built, 'machine', bytes);
+      } catch (error) {
+        if (!(error instanceof IncompatibleExecutable)) throw error;
+        unfit = error.message;
+      }
+    }
+    if (!record.artifacts.portable) throw new Error(unfit);
+    return this.assemblePortable(record.artifacts.portable);
+  }
+
+  /** Builds this machine's generation from a portable release, once per release, Bun and platform. */
+  private async assemblePortable(artifact: ReleaseArtifact): Promise<{ path: string; manifest: ExecutableArtifactManifest }> {
+    const candidate = join(this.options.environmentRoot, 'candidates', `machine-portable-${artifact.hash.slice(7)}-${process.platform}-${process.arch}-${Bun.version}`);
+    const recorded = await readFile(executableManifestPath(candidate)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (recorded) {
+      const manifest = parseExecutableArtifactManifest(recorded, { target: 'machine', manifestHash: sha256(recorded), size: recorded.byteLength });
+      return { path: candidate, manifest: await validateExecutableArtifact(candidate, { target: 'machine', hash: manifest.treeHash, manifestHash: sha256(recorded) }) };
+    }
+    const bytes = await this.options.blobs.get(artifact.key, artifact.hash);
+    if (!bytes) throw new Error(`Portable release manifest ${artifact.key} is missing`);
+    const portable = portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+    const staging = `${candidate}.assemble-${crypto.randomUUID()}`;
+    await mkdir(staging, { recursive: true });
+    try {
+      const built = await assembleMachineGeneration({
+        manifest: portable, output: staging,
+        file: async file => {
+          const content = await this.options.blobs.get(portableFileKey(artifact.key, file.path), `sha256:${file.sha256}`);
+          if (!content) throw new Error(`Portable file ${file.path} is missing`);
+          return content;
+        },
+        archive: async pin => {
+          const content = await this.options.blobs.get(nativeMirrorKey(pin.sha256), `sha256:${pin.sha256}`);
+          if (!content) throw new Error(`The account holds no copy of ${pin.url}`);
+          return new Response(content.slice());
+        },
+      });
+      await validateExecutableArtifact(staging, { target: 'machine', hash: built.manifest.treeHash, manifestHash: built.manifestHash });
+      await rename(executableManifestPath(staging), executableManifestPath(candidate));
+      await rename(staging, candidate);
+      return { path: candidate, manifest: built.manifest };
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+      await rm(executableManifestPath(staging), { force: true });
+    }
+  }
+
+  /** Downloads the generation `bytes` (its manifest, fetched as `artifact`) names. */
   private async downloadExecutable(
     artifact: ReleaseArtifact,
     target: 'machine',
+    bytes: Uint8Array,
   ): Promise<{ path: string; manifest: ExecutableArtifactManifest }> {
-    const bytes = await this.options.blobs.get(artifact.key, artifact.hash);
-    if (!bytes) throw new Error(`Executable manifest ${artifact.key} is missing`);
     const manifest = parseExecutableArtifactManifest(bytes, { target, manifestHash: artifact.hash, size: artifact.size });
     const expected = { target, hash: manifest.treeHash, manifestHash: artifact.hash };
     const candidate = join(this.options.environmentRoot, 'candidates', `${target}-${artifact.hash.slice(7)}`);

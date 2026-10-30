@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
-import { parseImageReference } from '@gitspace/runtime-core/image-requests';
+import { parseImageReference } from '@gitspace/protocol-runtime/image-reference';
 import { DriveFiles } from './drive-files.js';
 import { tenantStore } from './tenant-store.js';
 

@@ -8,6 +8,7 @@ import { hashArtifactPath } from '@gitspace/deployment';
 import { createExecutableArtifactManifest, executableManifestPath, sha256 } from '@gitspace/deployment/manifest';
 import type { DeploymentStatus, ReleaseRecord } from '@gitspace/protocol';
 import { EXECUTABLE_CHUNK_BYTES } from '@gitspace/protocol/deployment';
+import { NATIVE_UPSTREAMS, nativeMirrorKey, portableFileKey } from '@gitspace/protocol/machine-release';
 import { ReleaseFollower } from '../src/release-follower.js';
 import { releaseObjectKeys } from '../src/release-objects.js';
 import type { EnvironmentLaunchRequest, EnvironmentStatus } from '../src/replacement-environment.js';
@@ -394,6 +395,73 @@ describe('release follower', () => {
     follower.stop();
     expect(fetched).toEqual([artifact.key]);
     expect(authority.reports[0]).toMatchObject({ target: 'machine', status: 'failed', error: expect.stringContaining('incompatible') });
+  });
+
+  it('builds its own generation from the portable release when the built one is for another platform, and launches it', async () => {
+    if (process.platform !== 'linux') return;
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-portable-'));
+    roots.push(root);
+    process.env.GITSPACE_NATIVE_CACHE = join(root, 'native-cache');
+    const sha = 'portable-only';
+    const built = await executable(sha, 'machine', { 'machine.js': 'console.log("built elsewhere")' });
+    built.manifest.compatibility.platform = 'darwin';
+    const builtBytes = new TextEncoder().encode(JSON.stringify(built.manifest));
+    const objects: Record<string, Uint8Array> = { ...built.objects, [built.artifact.key]: builtBytes };
+    const machine = { ...built.artifact, hash: sha256(builtBytes), size: builtBytes.byteLength };
+    // The portable release: ESM bundles with their maps, and this platform's tools as pinned upstream archives.
+    const portableKey = `releases/${sha}/portable.manifest.json`;
+    const files: Record<string, string> = {
+      'machine/machine.js': '// @bun\nconsole.log(import.meta.main ? "main" : "imported");\n',
+      'machine/machine-worker.js': '// @bun\nconsole.log("worker");\n',
+      'machine/machine.js.map': JSON.stringify({ version: 3, sources: ['../src/runtime.ts'], names: [], mappings: 'AAAA' }),
+      'machine/machine-worker.js.map': JSON.stringify({ version: 3, sources: ['../src/terminal-worker.ts'], names: [], mappings: 'AAAA' }),
+      'machine/host-runtime.js': 'export {};\n',
+      'machine/machine-update.js': 'export {};\n',
+      'machine/machine-bootstrap.js': 'export {};\n',
+      'cli/gitspace.js': 'console.log("cli");\n',
+    };
+    const portableFiles = Object.entries(files).map(([path, content]) => {
+      const bytes = new TextEncoder().encode(content);
+      objects[portableFileKey(portableKey, path)] = bytes;
+      return { path, sha256: hashOf(bytes).slice(7), size: bytes.byteLength };
+    });
+    const tool = async (name: 'rg' | 'git-lfs', version: string, answer: string) => {
+      const scratch = join(root, `archive-${name}`);
+      await mkdir(join(scratch, 'tool'), { recursive: true });
+      const script = new TextEncoder().encode(`#!/bin/sh\necho "${answer}"\n`);
+      await writeFile(join(scratch, 'tool', name), script, { mode: 0o755 });
+      await Bun.$`tar -czf ${join(scratch, 'asset.tar.gz')} -C ${scratch} tool/${name}`.quiet();
+      const asset = new Uint8Array(await readFile(join(scratch, 'asset.tar.gz')));
+      objects[nativeMirrorKey(hashOf(asset).slice(7))] = asset;
+      return { version, url: `${NATIVE_UPSTREAMS[name]}v${version}/${name}.tar.gz`, sha256: hashOf(asset).slice(7), size: asset.byteLength, member: `tool/${name}`, executable: { sha256: hashOf(script).slice(7), size: script.byteLength }, abi: { os: 'linux' as const, glibc: null } };
+    };
+    const pins = { bun: { version: Bun.version, url: `${NATIVE_UPSTREAMS.bun}v/bun.zip`, sha256: 'a'.repeat(64), size: 1, member: 'bun', executable: { sha256: 'b'.repeat(64), size: 1 }, abi: { os: 'linux' as const, glibc: '2.17' } }, rg: await tool('rg', '14.1.1', 'ripgrep 14.1.1'), 'git-lfs': await tool('git-lfs', '3.8.0', 'git-lfs/3.8.0 (test)') };
+    const darwin = Object.fromEntries(Object.entries(pins).map(([name, pin]) => [name, { ...pin, abi: { os: 'darwin' as const, macos: '13.0' } }]));
+    const portableBytes = new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, bunVersion: Bun.version, files: portableFiles, natives: { 'darwin-arm64': darwin, 'darwin-x64': darwin, 'linux-arm64': pins, 'linux-x64': pins } }));
+    objects[portableKey] = portableBytes;
+    const record = release(sha, machine, null);
+    record.artifacts.portable = { key: portableKey, hash: hashOf(portableBytes), size: portableBytes.byteLength };
+    const status: DeploymentStatus = {
+      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} }, releases: [record],
+    };
+    const authority = fakeAuthority(status);
+    const host = fakeHost('applied');
+    const follower = new ReleaseFollower({
+      authority, blobs: { get: async (key, expectedHash) => { const bytes = objects[key] ?? null; if (bytes && expectedHash && hashOf(bytes) !== expectedHash) throw new Error('integrity'); return bytes; } },
+      machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
+      runningMachineSha: null, generation: 'sha256:' + 'a'.repeat(64), onError: error => { throw error; },
+    });
+    await follower.nudge();
+    follower.stop();
+    expect(host.launches).toHaveLength(1);
+    const launch = host.launches[0]!;
+    expect(launch).toMatchObject({ entrypoint: 'machine-daemon', target: 'machine', sha });
+    expect(launch.path).toBe(join(root, 'candidates', `machine-portable-${record.artifacts.portable.hash.slice(7)}-${process.platform}-${process.arch}-${Bun.version}`));
+    expect(launch.hash).toBe(await hashArtifactPath(launch.path));
+    expect((await Bun.$`${process.execPath} ${join(launch.path, 'machine.js')}`.text()).trim()).toBe('main');
+    expect(await Bun.file(join(launch.path, 'machine.js.jsc')).exists()).toBe(true);
+    expect(authority.reports).toEqual([]);
   });
 
   it('reports a rolled-back swap as failed once and stops retrying', async () => {

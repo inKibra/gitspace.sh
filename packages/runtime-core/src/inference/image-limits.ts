@@ -1,6 +1,7 @@
 import { DEFAULT_IMAGE_LIMITS } from '@earendil-works/pi-durable/tools';
 import type { Api, Context, ImageContent, Model, TextContent } from '@earendil-works/pi-ai';
-import { imageDataBytes, parseImageReference } from './image-requests.js';
+import { parseImageReference } from '@gitspace/protocol-runtime/image-reference';
+import { imageDataBytes } from './image-requests.js';
 
 /**
  * What a model accepts of images, from pi-ai's per-model `inputLimits` (Opus 5.5: 2000x2000 px, 4.5 MB of base64, 600

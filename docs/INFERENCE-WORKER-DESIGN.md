@@ -78,20 +78,24 @@ One model request attempt is one RPC call, `run(attempt)`, on the loaded worker'
 - **Cursor** was removed (2026-10-29): its own provider, sign-in, token refresh and usage. Its protobuf requests carried
   images inside content-addressed history blobs, which the streaming transport cannot reach, and nobody used it.
 
-## Ingest (second phase)
+## Ingest
 
-Images also enter a workspace inline today; each path changes to upload first and hand the workspace a reference
-(with size and dimensions read where the bytes are):
+Built (2026-10-29). A client stores an image itself and hands the workspace its reference; the reference format is
+`@gitspace/protocol-runtime/image-reference`, and a client may name a width and height of 0.
 
-| Path | Change |
+| Path | How it arrives |
 | --- | --- |
-| Images attached to a message | The browser uploads through the existing upload link; the prompt carries references |
-| Machine tool results (screenshots, reading an image file) | The machine uploads to the drive and returns a reference |
-| Browser relay captures | The relay or extension uploads and returns a reference |
-| Codemode scripts that need image bytes | The script's isolate reads through the `ImageReader` |
+| Images attached to a message | `runtime.imageUpload` returns an upload link for the declared SHA-256, size and type; the browser `PUT`s the bytes to `<link>/parts/1`, the account stores them and answers the reference; the prompt carries references (`account-web/src/prompt-images.ts`) |
+| Machine tool results (screenshots, image files read) | `MachineExecutor` stores each image of a result in the attached workspace's drive scope through the machine's blob store and returns references (`account-machine/src/machine-images.ts`) |
+| Browser captures (cloud browser and your Chrome) | The browser session object already writes the capture to the workspace drive; the run's result names it by reference |
+| Drive images read by `read` or `space_artifacts` | Named by reference without being read; an image in the project's drive or streamed before its digest was known is copied into the workspace's scope first |
+| Codemode | A child's images reach the script as references; `images.read(image)` returns bytes through the workspace's `ImageReader`, passed to the sandbox as an argument so its `env` stays empty |
 
-Until then a workspace object briefly holds an incoming image while it stores it; that is bounded and was not what
-reset workspaces.
+The workspace admits a reference only once it finds the bytes in its own scope with the stated size, and measures the
+width and height from the first 256 KiB itself (`storedImages` in `runtime-images.ts`). It still stores an inline image
+on arrival: from a machine or extension that has not updated, a cloud file read from Git, or `generate_image`'s output.
+Your Chrome needed no extension change: its captures go through the browser session object.
+
 
 ## Probe results (2026-10-29)
 

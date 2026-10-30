@@ -1,11 +1,13 @@
 import { z } from 'zod';
 import { TENANT_OBJECT_PART_BYTES } from '@gitspace/protocol';
+import { IMAGE_UPLOAD_MAX_BYTES, IMAGE_UPLOAD_TYPES } from '@gitspace/protocol-runtime/session-controls';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { InspectorCloudArtifacts, InspectorGenerationConflict, InspectorWorkspaceMissing, readInspectorContext } from './account-inspector-data.js';
 import { BrowserUploadPartSchema, type BrowserUploadReply, type BrowserUploadStep } from './browser-upload.js';
 import { openToken, sealToken, type SealedTokenKind } from './sealed-token.js';
 import type { DriveUpload } from './drive-files.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
+import type { StoredImages } from './runtime-images.js';
 
 /**
  * Upload links: how bytes reach a drive upload once an authenticated caller began it (an Inspector upload over RPC, a
@@ -16,6 +18,7 @@ import type { WorkspaceDrive } from './workspace-drive.js';
  *
  * A link is a bearer capability for that upload only: it writes nothing else, publishes only at the path reserved when
  * it began, within its declared size (and digest, when declared), and stops working when it expires or the upload ends.
+ * An image link takes one part, the whole image, and answers the image's reference.
  */
 export const UPLOAD_LINK_MS = 24 * 60 * 60_000;
 const UPLOAD_LINK: SealedTokenKind = { scope: 'upload-url:v1', context: 'gitspace-upload-url-v1' };
@@ -26,6 +29,8 @@ const UploadLinkTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('drive'), spaceId: z.string().min(1), generation: z.number().int().nonnegative(), uploadId: z.string().uuid() }),
   /** A download or capture file from a paired Chrome, its session kept by the relay. */
   z.object({ kind: z.literal('browser'), pairingId: z.string().uuid(), uploadId: z.string().uuid() }),
+  /** One image a prompt will name, stored in `workspaceId`'s images (`runtime.imageUpload`). */
+  z.object({ kind: z.literal('image'), workspaceId: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/u), size: z.number().int().min(1).max(IMAGE_UPLOAD_MAX_BYTES), mimeType: z.enum(IMAGE_UPLOAD_TYPES) }),
 ]);
 export type UploadLinkTarget = z.infer<typeof UploadLinkTargetSchema>;
 const UploadGrantSchema = z.object({ version: z.literal(1), target: UploadLinkTargetSchema, expiresAt: z.number().int() });
@@ -36,10 +41,11 @@ export async function mintUploadLink(env: Env, target: UploadLinkTarget): Promis
   return new URL(`${UPLOAD_LINK_PATH}/${token}`, env.ACCOUNT_URL).href;
 }
 
-/** What `serveUploadLink` needs besides the link: the relay for Chrome uploads and a workspace's drive. */
+/** What `serveUploadLink` needs besides the link: the relay for Chrome uploads, a workspace's drive and its images. */
 export interface UploadLinkDependencies {
   relay: { browserRelayUpload(step: BrowserUploadStep): Promise<BrowserUploadReply> };
   drive(identity: { projectId: string; workspaceId: string }): Pick<WorkspaceDrive, 'append'>;
+  images(workspaceId: string): Pick<StoredImages, 'upload'>;
 }
 
 const linkPath = new RegExp(`^${UPLOAD_LINK_PATH}/([A-Za-z0-9_-]{40,2048})(?:/parts/([1-9][0-9]{0,4})|/(complete))?$`, 'u');
@@ -75,6 +81,13 @@ export async function serveUploadLink(request: Request, env: Env, dependencies: 
   } else action = { route };
 
   const target = grant.target;
+  if (target.kind === 'image') {
+    if (action.route === 'abort') return reply(200, { status: 'ok', value: null });
+    if (action.route !== 'part' || action.number !== 1) return refused(400, 'UPLOAD_INVALID', 'An image is sent whole, as part 1');
+    if (action.size !== target.size) return refused(413, 'UPLOAD_PART_SIZE', `This image is ${target.size} bytes, not ${action.size}`);
+    try { return reply(200, { status: 'ok', value: { reference: await dependencies.images(target.workspaceId).upload(target, await new Response(action.stream).bytes()) } }); }
+    catch (error) { return refused(409, 'UPLOAD_REJECTED', error instanceof Error ? error.message : 'The image was refused'); }
+  }
   if (target.kind === 'browser') {
     const { uploadId, pairingId } = target;
     if (action.route === 'complete') return browserReply(await dependencies.relay.browserRelayUpload({ op: 'complete', pairingId, uploadId, body: action.body }));

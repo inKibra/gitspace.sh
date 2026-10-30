@@ -192,6 +192,21 @@ describe('tenant releases', () => {
     expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ launchId: launching.launchId, phase: 'launched', status: 'succeeded', message: 'worker=applied machine=skipped frontend=applied' });
   });
 
+  it('keeps each machine\'s reason it failed a release, which the Worker applying it does not clear, until that machine applies it', async () => {
+    const { userId, control } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const input = stageInput('machine-errors');
+    await control('deploy.stage', input);
+    await releases.machineApplied('machine-a', { sha: input.sha, target: 'machine', generation: 'generation-a', status: 'failed', error: 'Executable platform linux is incompatible with host darwin' });
+    await releases.machineApplied('machine-b', { sha: input.sha, target: 'machine', generation: 'generation-b', status: 'failed', error: 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
+    await releases.launch({ sha: input.sha, targets: ['worker'] });
+    await releases.certifyOwnLaunch(input.sha);
+    const record = async () => deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null })).releases.find(release => release.sha === input.sha);
+    expect((await record())?.machineErrors).toEqual({ 'machine-a': 'Executable platform linux is incompatible with host darwin', 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
+    await releases.machineApplied('machine-a', { sha: input.sha, target: 'machine', generation: 'generation-a2', status: 'applied' });
+    expect((await record())?.machineErrors).toEqual({ 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
+  });
+
   it('a launch left running is ended by its building machine restarting, and only by that', async () => {
     const { userId, control } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);

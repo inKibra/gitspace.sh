@@ -330,9 +330,11 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const record = this.findRelease(input.sha);
     if (!record) return null;
     record.status.machines[machineId] = input.status;
-    if (input.status === 'failed') {
-      record.error = input.error ?? `Machine ${machineId} failed to apply ${input.sha}`;
-    } else {
+    const machineErrors = { ...record.machineErrors };
+    delete machineErrors[machineId];
+    if (input.status === 'failed') machineErrors[machineId] = input.error ?? `Machine ${machineId} failed to apply ${input.sha}`;
+    record.machineErrors = machineErrors;
+    if (input.status !== 'failed') {
       this.ctx.storage.sql.exec(
         'INSERT INTO machines(machine_id, sha, generation, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET sha = excluded.sha, generation = excluded.generation, updated_at = excluded.updated_at',
         machineId, input.sha, input.generation, new Date().toISOString(),
@@ -391,7 +393,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const record = releaseSha === null ? null : this.findRelease(releaseSha);
     const updateError = this.desired().machine === null ? await this.ctx.storage.get(`machine-default-error:${machineId}`) : undefined;
     const error = protocol.blocker ?? (updateError !== undefined ? z.string().parse(updateError)
-      : record?.status.machines[machineId] === 'failed' ? record.error ?? 'Machine update failed; select a repaired release to retry.'
+      : record?.status.machines[machineId] === 'failed' ? record.machineErrors?.[machineId] ?? 'Machine update failed; select a repaired release to retry.'
       : !record?.artifacts.machine ? 'Waiting for the authenticated machine to negotiate its native update target.'
       : null);
     return { version: protocol.version, required: MACHINE_EXECUTION_PROTOCOL_VERSION, state: error ? 'blocked' : 'updating', releaseSha, error };

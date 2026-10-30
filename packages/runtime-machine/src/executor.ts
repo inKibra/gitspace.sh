@@ -1,10 +1,14 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { RuntimeToolDispatchSchema, type RuntimeToolDispatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { ExecutorJournal, LocalAttachment } from './journal.js';
-import { executeMachineTool, type MachineToolOptions } from './tools.js';
+import { executeMachineTool, type ExecutorContent, type MachineToolOptions } from './tools.js';
 
-/** `activeChanged` fires when a command starts or ends on an attachment, so its observation can be reported. */
-export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; activeChanged?: (attachmentId: string) => void };
+/** An image a tool returned, as the result carries it. */
+export type ExecutorImage = Extract<ExecutorContent[number], { type: 'image' }>;
+/** `activeChanged` fires when a command starts or ends on an attachment, so its observation can be reported.
+ * `storeImage` stores an image a tool returned in the dispatch's workspace and answers it named by reference: a result
+ * leaves this machine without image bytes. */
+export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; activeChanged?: (attachmentId: string) => void; storeImage?: (dispatch: RuntimeToolDispatch, image: ExecutorImage) => Promise<ExecutorImage> };
 type Run = { attachmentId: string; tool: string; controller: AbortController; done: Promise<RuntimeToolResult> };
 
 /** Runs a signed dispatch on its attachment's checkout and returns the result. The same dispatch sent again (its reply
@@ -82,7 +86,10 @@ export class MachineExecutor {
     if (remaining <= 0) return { ...identity, status: 'failed', content: [], error: { code: 'deadline', message: 'Execution deadline expired' } };
     const controller = new AbortController();
     const aborted = AbortSignal.any([controller.signal, AbortSignal.timeout(Math.min(remaining, 2_147_483_647)), ...(signal ? [signal] : [])]);
-    const done = executeMachineTool(dispatch, local, aborted, this.options).then(
+    const storeImage = this.options.storeImage;
+    const done = executeMachineTool(dispatch, local, aborted, this.options).then(content => storeImage
+      ? Promise.all(content.map(item => item.type === 'image' ? storeImage(dispatch, item) : item))
+      : content).then(
       (content): RuntimeToolResult => ({ ...identity, status: 'completed', content }),
       (error: unknown): RuntimeToolResult => {
         const message = error instanceof Error ? error.message : String(error);

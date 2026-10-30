@@ -1,3 +1,5 @@
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
+import { storedImages } from '../src/runtime-images.js';
 import { env, exports } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
@@ -87,7 +89,7 @@ async function runAuthorization(root: Identity, placement: RuntimeAccountBrowser
   return signRuntimeAccountBrowserAuthorization({ scope: { projectId, workspaceId, placement, conversationId: 'conversation', conversationKind: 'main', taskId: attemptId, requestId: attemptId, attemptId }, issuedAt, expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'run', source: 'relay', pairingId: placement.pairingId, script }, grant } }, signer.key.privateKey, authority);
 }
 
-test('capture() on your Chrome saves a capture of the tab in the workspace drive, and the run’s result shows its image', async () => {
+test('capture() on your Chrome saves a capture of the tab in the workspace drive, and the run’s result names its image there', async () => {
   const { projectId, workspaceId, drive } = await workspace();
   const image = jpeg(800, 600), thumbnail = jpeg(240, 180);
   await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
@@ -109,7 +111,12 @@ test('capture() on your Chrome saves a capture of the tab in the workspace drive
       const { value } = z.object({ value: z.object({ captureId: z.string().uuid(), url: z.string() }) }).parse(answered);
       const folder = `browser/captures/${value.captureId}/`;
       expect(value.url).toBe(`drive://workspace/${folder}image.jpg`);
-      expect(shown).toEqual([{ type: 'text', text: `Capture saved to drive://workspace/${folder}image.jpg` }, { type: 'image', data: browserBase64(image), mimeType: 'image/jpeg' }]);
+      const reference = imageReference({ workspaceId, size: image.byteLength, width: 800, height: 600, sha256: Buffer.from(await crypto.subtle.digest('SHA-256', new Uint8Array(image))).toString('hex') });
+      expect(shown).toEqual([{ type: 'text', text: `Capture saved to drive://workspace/${folder}image.jpg` }, { type: 'image', data: reference, mimeType: 'image/jpeg' }]);
+      // The workspace admits the reference as it is, and reads the capture's bytes through it.
+      const images = storedImages(env, workspaceId);
+      expect(await images.store({ type: 'image', data: reference, mimeType: 'image/jpeg' })).toEqual({ type: 'image', data: reference, mimeType: 'image/jpeg' });
+      expect((await images.load({ type: 'image', data: reference, mimeType: 'image/jpeg' })).data).toBe(browserBase64(image));
       expect((await drive.list(folder)).map(entry => entry.path).sort()).toEqual([`${folder}capture.json`, `${folder}image.jpg`, `${folder}thumbnail.jpg`]);
       expect(await drive.read(`${folder}image.jpg`)).toEqual(image);
       expect(await drive.read(`${folder}thumbnail.jpg`)).toEqual(thumbnail);
@@ -153,7 +160,7 @@ test('on the cloud browser upload() gets the drive file’s bytes, and a run sav
   const { drive } = await workspace();
   const bytes = encoder.encode('quarter,total\nq3,42\n');
   await drive.write('reports/q3.csv', 'text/csv', bytes);
-  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() });
+  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() }, 'ws-files');
   expect(await files.uploadFiles(['drive://workspace/reports/q3.csv'])).toEqual({ kind: 'bytes', files: [{ name: 'q3.csv', mediaType: 'text/csv', bytes }] });
   await expect(files.uploadFiles(['drive://workspace/reports/q3.csv:1-2'])).rejects.toThrow("is not a file of this workspace's drive");
   const shot = { name: null, targetId: 'page', page: { url: 'https://example.com/', title: 'Example' }, image: browserBase64(jpeg(1280, 720)), thumbnail: browserBase64(jpeg(480, 270)) };
@@ -181,7 +188,7 @@ test('a cloud download is saved to the day’s downloads folder in the drive and
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     async close() {},
   };
-  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() });
+  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() }, 'ws-files');
   await CloudDownloads.open(await CdpBrowserShim.open(upstream), drive, download => files.downloaded(download));
   await expect.poll(() => sent.find(command => command.method === 'Fetch.enable')).toEqual({ method: 'Fetch.enable', params: { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Response' }] }, sessionId: 'downloads-session' });
   const respond = (requestId: string, url: string, headers: Record<string, string>) => {

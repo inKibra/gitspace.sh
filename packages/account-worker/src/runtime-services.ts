@@ -1,3 +1,4 @@
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { z } from 'zod';
 import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
@@ -70,12 +71,13 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: JSON.stringify(value) }] });
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
-/** A cloud artifact as tool content: raster images as images, documents as pages of Markdown, text as pages of text
- * (after any line selector in the URL), anything else as its metadata. */
-async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifact: { bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }, documentMarkdown: DocumentMarkdown, range: { offset?: number; limit?: number } = {}): Promise<RuntimeToolResult> {
-  const { bytes, mediaType } = artifact;
+/** A cloud artifact as tool content: raster images as images, named by reference without being read here, documents as
+ * pages of Markdown, text as pages of text (after any line selector in the URL), anything else as its metadata. */
+async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifacts: InspectorCloudArtifacts, workspaceId: string, documentMarkdown: DocumentMarkdown, range: { offset?: number; limit?: number } = {}): Promise<RuntimeToolResult> {
+  const image = await artifacts.conversationImage(url, workspaceId);
+  if (image) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'image', mimeType: image.mimeType, data: imageReference({ workspaceId, size: image.size, width: 0, height: 0, sha256: image.sha256 }) }] };
+  const { bytes, mediaType } = await artifacts.bytes(url);
   const page = (text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: textPage(text, range.offset, range.limit) }] });
-  if (mediaType?.startsWith('image/') && mediaType !== 'image/svg+xml') return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'image', mimeType: mediaType, data: Buffer.from(bytes).toString('base64') }] };
   const resource = parseResourceUri(url);
   const document = await documentMarkdown(decodeURIComponent(resource?.kind === 'drive' ? resource.path.split('/').at(-1) ?? url : url), bytes);
   if (document !== null) return page(document);
@@ -203,7 +205,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   const { ctx, env, identity } = options;
   const baseWorkspaceId: string = identity.projectId;
   const mcp = createCloudRuntimeMcp(env, identity);
-  const codemode = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: options.model });
+  const codemode = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: options.model, images: ctx.exports.ImageReader({ props: { workspaceId: identity.workspaceId } }) });
   // A stub per call: one that saw an error, such as the project object resetting for a release, stays broken.
   const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
@@ -746,7 +748,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           case 'list': return completed(input, await artifacts.list());
           case 'listScopes': return completed(input, await authority().listArtifactScopes());
           case 'listPromotions': return completed(input, await authority().listArtifactPromotions());
-          case 'read': return artifactContent(input, args.url, await artifacts.bytes(args.url), options.documentMarkdown);
+          case 'read': return artifactContent(input, args.url, artifacts, identity.workspaceId, options.documentMarkdown);
           case 'readCode': {
             const request = args;
             const blob = await new ArtifactsCodeStore(env.ARTIFACTS).readFile(artifactsWorkspaceRepository(identity.workspaceId), request.commit, request.path);
@@ -775,7 +777,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args) && typeof input.args.path === 'string' && input.args.path.startsWith('drive://')) {
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
-        if (input.tool === 'read') return artifactContent(input, input.args.path, await artifacts.bytes(input.args.path), options.documentMarkdown, RuntimeReadArgumentsSchema.parse(input.args));
+        if (input.tool === 'read') return artifactContent(input, input.args.path, artifacts, identity.workspaceId, options.documentMarkdown, RuntimeReadArgumentsSchema.parse(input.args));
         if (!conversation.root) throw new Error('Only the main workspace conversation can write artifacts');
         const change = input.tool === 'write' ? { bytes: new TextEncoder().encode(RuntimeWriteArgumentsSchema.parse(input.args).content) } : RuntimeEditArgumentsSchema.parse(input.args);
         return completed(input, await artifacts.write(input.args.path, change));

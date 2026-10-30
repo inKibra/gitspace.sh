@@ -2,28 +2,17 @@
  * Images in conversation history are references to stored bytes, not the bytes:
  * `gs-image:v1:<workspace>:<size>:<width>x<height>:<sha256>` in an image block's `data`. A model request carrying references is serialized as usual and sent through the inference
  * Worker, which writes each image's base64 in place of its reference as it streams the request out, so the workspace
- * object never holds the images. This module is shared by both sides and has no dependencies.
+ * object never holds the images. This module is shared by both sides; the reference format is
+ * `@gitspace/protocol-runtime/image-reference`.
  */
+import { parseImageReference } from '@gitspace/protocol-runtime/image-reference';
 
-const REFERENCE = /^gs-image:v1:([A-Za-z0-9._-]{1,128}):(0|[1-9][0-9]{0,11}):(0|[1-9][0-9]{0,5})x(0|[1-9][0-9]{0,5}):([a-f0-9]{64})$/u;
 /** A reference where a serialized request carries image data: a whole JSON string value (Anthropic, Google), or the
  * end of a JSON string after `;base64,` (a data URL: OpenAI). Text that merely mentions a reference is neither. */
 const IN_REQUEST = /(?<="|;base64,)gs-image:v1:[A-Za-z0-9._-]{1,128}:(?:0|[1-9][0-9]{0,11}):(?:0|[1-9][0-9]{0,5})x(?:0|[1-9][0-9]{0,5}):[a-f0-9]{64}(?=")/gu;
 
-/** `width` and `height` are the image's as its header declared them when it was stored, 0 when it declared none: every
- * request checks them against its model's limits, as it checks an inline image's header. */
-export interface ImageReference { workspaceId: string; size: number; width: number; height: number; sha256: string }
 /** One reference in a serialized request: where it is (UTF-16 offsets) and the stored image's size in bytes. */
 export interface RequestImage { reference: string; start: number; end: number; size: number }
-
-export function imageReference(image: ImageReference): string {
-  return `gs-image:v1:${image.workspaceId}:${image.size}:${image.width}x${image.height}:${image.sha256}`;
-}
-
-export function parseImageReference(data: string): ImageReference | null {
-  const match = REFERENCE.exec(data);
-  return match ? { workspaceId: match[1]!, size: Number(match[2]), width: Number(match[3]), height: Number(match[4]), sha256: match[5]! } : null;
-}
 
 /** Base64 characters (and UTF-8 bytes) of `size` bytes. */
 export function base64Length(size: number): number {

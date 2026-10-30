@@ -1,7 +1,7 @@
 import { deviceCanAdminister, type DeviceCapability, type GitSpaceRpcContext } from '@gitspace/protocol';
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
-  runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
+  runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract, runtimeImageUploadContract,
   runtimeQaContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
   runtimeBrowserTrustContract, runtimeDraftContract,
   runtimeServicesContract, runtimeSyncContract,
@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { requireWorkspaceAccess } from './runtime-access.js';
 import { observeRuntimeRequest } from './account-runtime-control.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority } from './device-authority.js';
+import { mintUploadLink } from './upload-link.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -86,6 +87,12 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { deviceId, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
   }));
+  const imageUpload = server.implement(runtimeImageUploadContract).handler(observed('runtime.imageUpload', async ({ input, errors }) => {
+    try {
+      await requireRuntimeAccess(env, userId, deviceId, input, 'session.prompt');
+      return ok({ link: await mintUploadLink(env, { kind: 'image', workspaceId: input.workspaceId, sha256: input.sha256, size: input.size, mimeType: input.mimeType }) });
+    } catch (error) { return err(errors.OperationFailed({ operation: 'begin an image upload', message: message(error) })); }
+  }));
   const services = server.implement(runtimeServicesContract).handler(observed('runtime.services', async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, input.command.op === 'list' || input.command.op === 'logs' ? 'rpc.read' : 'rpc.write');
@@ -123,5 +130,5 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(RuntimeWatchEventsSchema.parse(await (await authority.runtimeEvents(input)).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'read cloud runtime events', message: message(error) })); }
   }));
-  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, sync, qa, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
+  return { snapshot, draft, submit, cancel, answer, browserTrust, session, imageUpload, services, sync, qa, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
 }

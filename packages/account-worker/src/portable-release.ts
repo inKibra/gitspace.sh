@@ -1,11 +1,36 @@
 import type { ReleaseArtifact } from '@gitspace/protocol/deployment';
-import { PORTABLE_MANIFEST_FILE, portableFileKey, portableManifestSchema, verifyPortableFiles } from '@gitspace/protocol/machine-release';
-import { tenantPlatformJson } from './tenant-platform.js';
+import { mirrorNatives, nativeMirrorKey, PORTABLE_MANIFEST_FILE, portableFileKey, portableManifestSchema, verifyPortableFiles, type NativeMirror } from '@gitspace/protocol/machine-release';
+
+/** Upstream native files in the account's own storage at `users/<account>/natives/sha256/<sha256>`, where its machines
+ * read them through the data endpoint. R2 checks each object's SHA-256 again as it stores it. */
+function accountNativeMirror(bucket: R2Bucket, userId: string): NativeMirror {
+  const key = (sha256: string) => `users/${userId}/${nativeMirrorKey(sha256)}`;
+  return {
+    async has(sha256) {
+      return await bucket.head(key(sha256)) !== null;
+    },
+    async put(native, body) {
+      const fixed = new FixedLengthStream(native.size);
+      const piping = new AbortController();
+      const [stored, piped] = await Promise.allSettled([
+        bucket.put(key(native.sha256), fixed.readable, { sha256: native.sha256, customMetadata: { sha256: `sha256:${native.sha256}` } }).catch((error: unknown) => {
+          // A put that fails without draining the body would leave the pipe waiting on it.
+          piping.abort(error);
+          throw error;
+        }),
+        body.pipeTo(fixed.writable, { signal: piping.signal }),
+      ]);
+      // A failed body (bytes that differ from the pin) is the cause of the failed put it aborts.
+      if (piped.status === 'rejected') throw piped.reason;
+      if (stored.status === 'rejected') throw stored.reason;
+    },
+  };
+}
 
 /**
  * A launch's portable release, checked before it is staged: its manifest and every file the manifest names are in DATA
- * under the release as the building machine uploaded them (R2 checked each upload's SHA-256), and the platform holds
- * every native the manifest names in its mirror, copying any it lacks.
+ * under the release as the building machine uploaded them (R2 checked each upload's SHA-256), and the account holds
+ * every native the manifest names (`accountNativeMirror`), copying any it lacks from its upstream release.
  */
 export async function admitPortableRelease(env: Env, userId: string, sha: string, artifact: ReleaseArtifact): Promise<void> {
   if (artifact.key !== `releases/${sha}/${PORTABLE_MANIFEST_FILE}`) throw new Error(`Portable release manifest ${artifact.key} is not part of release ${sha}`);
@@ -20,5 +45,5 @@ export async function admitPortableRelease(env: Env, userId: string, sha: string
     const recorded = stored?.customMetadata?.sha256;
     return stored && recorded?.startsWith('sha256:') ? { sha256: recorded.slice('sha256:'.length), size: stored.size } : null;
   });
-  await tenantPlatformJson<unknown>(env, '/machine-release/natives', { method: 'POST', body: JSON.stringify({ natives: manifest.natives }) });
+  await mirrorNatives(manifest.natives, accountNativeMirror(env.DATA, userId), url => fetch(url, { signal: AbortSignal.timeout(5 * 60_000) }));
 }

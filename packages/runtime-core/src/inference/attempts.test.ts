@@ -3,7 +3,7 @@ import { createAssistantMessageEventStream, InMemoryModelsStore, type Api, type 
 import { createRequestGate } from './request-gate';
 import { createVaultModels } from './index';
 import { attemptEvents, attemptEventStream, createAttemptRunner, restoreStandIns, type AttemptRunner } from './attempts';
-import { imageReference } from './image-requests';
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 
 const providerId = 'attempt-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };

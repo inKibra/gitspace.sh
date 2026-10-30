@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { nativeHostAbi, validateNativeAbi } from './executable-manifest.js';
 import type { NativeAbi } from '@gitspace/protocol/deployment';
+import type { PortableNatives } from '@gitspace/protocol/machine-release';
 import { currentDistributionPlatform, versionAtLeast } from './distribution.js';
 import { NATIVE_PINS } from './native-pins.js';
 import {
@@ -18,6 +19,14 @@ async function command(argv: string[], cwd: string, environment: Record<string, 
   if (code !== 0) throw new Error(`Native build command failed (${code}): ${argv.join(' ')}\n${stdout}`);
   return stdout.trim();
 }
+
+/** One platform's pinned natives (`NATIVE_PINS`, or a portable release's `natives`). */
+export type PlatformNatives = PortableNatives['linux-x64'];
+/** Where a host's pinned natives come from: their pins, and each pinned upstream archive's bytes (checked against the
+ * pin here either way). A release build and a source run download them upstream; a machine assembling a generation
+ * reads its account's mirror. */
+export interface NativeSource { pins: PlatformNatives; archive(pin: { url: string; sha256: string; size: number }): Promise<Response> }
+const upstreamNatives = (): NativeSource => ({ pins: NATIVE_PINS[currentDistributionPlatform()], archive: pin => fetch(pin.url) });
 
 function nativeCacheRoot(): string {
   return resolve(process.env.GITSPACE_NATIVE_CACHE ?? join(homedir(), '.cache/gitspace/native'));
@@ -46,8 +55,8 @@ export async function machineNativeAbi(root: string, selected?: NativeAbi): Prom
 
 
 /** Official Git LFS for this host, unpacked only from the hash-pinned upstream archive and cached by its digest. */
-export async function pinnedGitLfs(): Promise<{ path: string; runtime: GitLfsRuntime }> {
-  const pin = NATIVE_PINS[currentDistributionPlatform()]['git-lfs'];
+export async function pinnedGitLfs(source: NativeSource = upstreamNatives()): Promise<{ path: string; runtime: GitLfsRuntime }> {
+  const pin = source.pins['git-lfs'];
   const asset = basename(pin.url);
   const upstream = gitLfsRuntimeSchema.shape.upstream.parse({ version: pin.version, url: pin.url, sha256: pin.sha256, size: pin.size });
   const cacheRoot = nativeCacheRoot();
@@ -57,7 +66,7 @@ export async function pinnedGitLfs(): Promise<{ path: string; runtime: GitLfsRun
     const scratch = await mkdtemp(join(cacheRoot, '.git-lfs-'));
     try {
       const archive = join(scratch, asset);
-      const response = await fetch(upstream.url);
+      const response = await source.archive(upstream);
       // Not `response.body`: after touching it, Bun 1.4.0's Bun.write(path, response) spins without reading the socket.
       if (!response.ok) throw new Error(`Cannot fetch pinned Git LFS ${asset}: HTTP ${response.status}`);
       await Bun.write(archive, response);
@@ -87,8 +96,8 @@ export async function pinnedGitLfs(): Promise<{ path: string; runtime: GitLfsRun
 }
 
 /** Source runs and packaged generations use the same authenticated upstream binary. */
-export async function pinnedRipgrep(): Promise<{ path: string; runtime: RipgrepRuntime }> {
-  const pin = NATIVE_PINS[currentDistributionPlatform()].rg;
+export async function pinnedRipgrep(source: NativeSource = upstreamNatives()): Promise<{ path: string; runtime: RipgrepRuntime }> {
+  const pin = source.pins.rg;
   const asset = basename(pin.url);
   const upstream = ripgrepRuntimeSchema.shape.upstream.parse({ version: pin.version, url: pin.url, sha256: pin.sha256, size: pin.size });
   const cacheRoot = nativeCacheRoot();
@@ -98,7 +107,7 @@ export async function pinnedRipgrep(): Promise<{ path: string; runtime: RipgrepR
     const scratch = await mkdtemp(join(cacheRoot, '.ripgrep-'));
     try {
       const archive = join(scratch, asset);
-      const response = await fetch(upstream.url);
+      const response = await source.archive(upstream);
       if (!response.ok) throw new Error(`Cannot fetch pinned ripgrep ${asset}: HTTP ${response.status}`);
       await Bun.write(archive, response);
       const archived = await nativeFileDigest(archive);
@@ -125,19 +134,20 @@ export async function pinnedRipgrep(): Promise<{ path: string; runtime: RipgrepR
   return { path: join(cached, runtime.path), runtime };
 }
 
-/** Package the authenticated tools used by machine effects. */
-export async function packageMachineNativeRuntime(_root: string, output: string): Promise<MachineNativeRuntime> {
+/** Package the authenticated tools used by machine effects. `abi` is the generation's native ABI when the caller knows
+ * it (a machine assembling its own); otherwise it is read from the packed files. */
+export async function packageMachineNativeRuntime(output: string, source: NativeSource = upstreamNatives(), abi?: NativeAbi): Promise<MachineNativeRuntime> {
   // Every generation carries the same official Git LFS; the running machine puts its directory first on PATH.
-  const gitLfs = await pinnedGitLfs();
+  const gitLfs = await pinnedGitLfs(source);
   await mkdir(join(output, dirname(GIT_LFS_PATH)), { recursive: true });
   await cp(gitLfs.path, join(output, GIT_LFS_PATH));
   await verifyNativeFile(join(output, GIT_LFS_PATH), gitLfs.runtime);
   await writeFile(join(output, GIT_LFS_DECLARATION), JSON.stringify(gitLfs.runtime));
-  const ripgrep = await pinnedRipgrep();
+  const ripgrep = await pinnedRipgrep(source);
   await cp(ripgrep.path, join(output, RIPGREP_PATH));
   await verifyNativeFile(join(output, RIPGREP_PATH), ripgrep.runtime);
   await writeFile(join(output, RIPGREP_DECLARATION), JSON.stringify(ripgrep.runtime));
-  const runtime = machineNativeRuntimeSchema.parse({ version: 2, bunVersion: Bun.version, abi: await machineNativeAbi(output) });
+  const runtime = machineNativeRuntimeSchema.parse({ version: 2, bunVersion: Bun.version, abi: abi ?? await machineNativeAbi(output) });
   await writeFile(join(output, 'machine-native.json'), JSON.stringify(runtime));
   await prepareMachineNativeRuntime(output);
   return runtime;

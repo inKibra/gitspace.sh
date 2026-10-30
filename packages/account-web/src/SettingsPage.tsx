@@ -837,6 +837,7 @@ function ReleaseRow({ release, desired, index }: { release: ReleaseRecordView; d
       <CardTitle>{release.label}{desired ? <Badge color="blue">Desired</Badge> : null}</CardTitle>
       <CardDescription><span className="font-mono">{shortSha(release.sha)}</span> · built {new Date(release.createdAt).toLocaleString()} · {releaseSourceText(release.source)}</CardDescription>
       {release.error ? <p role="alert" className="text-caption text-destructive">{release.error}</p> : null}
+      {Object.entries(release.machineErrors ?? {}).map(([machineId, error]) => <p key={machineId} role="alert" className="text-caption text-destructive">Machine <span className="font-mono">{machineId.slice(0, 10)}</span>: {error}</p>)}
     </CardHeader>
     <CardFooter>
       {release.artifacts.worker ? <Badge variant="dot" color={RELEASE_STATUS_COLOR[release.status.worker]}>{RELEASE_TARGET_LABEL.worker} · {release.status.worker}</Badge> : null}

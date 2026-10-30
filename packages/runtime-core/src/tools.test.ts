@@ -528,7 +528,7 @@ test('a codemode child gets the whole output the transcript cut, and one past 25
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 15_000);
 
-test('a codemode child\'s image enters history stored, and the script receives its bytes', async () => {
+test('a codemode child\'s image enters history stored, and the script receives it by reference, never its bytes', async () => {
   storedImages.length = 0;
   const header = new Uint8Array(33);
   header.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 2, 128, 0, 0, 1, 224]);
@@ -545,7 +545,7 @@ test('a codemode child\'s image enters history stored, and the script receives i
     await root.submit({ type: 'input', content: 'Take a screenshot in a script.' }, BACKGROUND_CONTEXT);
     await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
     expect(storedImages).toEqual([screenshot.data]);
-    expect(outcomes).toEqual([{ status: 'completed', value: [screenshot] }]);
+    expect(outcomes).toEqual([{ status: 'completed', value: [{ ...screenshot, data: `stored:${screenshot.data}` }] }]);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 15_000);
 

@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import type { Context, ImageContent, Message } from '@earendil-works/pi-ai';
 import { fitRequestImages, imageLimits, type ImageLimits } from './image-limits.js';
-import { imageReference } from './image-requests.js';
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 
 /** A PNG that declares `width`x`height` in its IHDR; nothing after the header is needed to read its size. */
 function png(width: number, height: number, padding = 0): ImageContent {

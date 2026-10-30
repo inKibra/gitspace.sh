@@ -192,6 +192,20 @@ export class InspectorCloudArtifacts {
     return { scope: resolved.scope, path: resolved.path, entry, mediaType: entry.mediaType ?? resourceMediaType(resource.path) };
   }
 
+  /** A raster image file as one of `workspaceId`'s conversation images, without reading it: the stored object itself
+   * when it is in the workspace's scope under its digest, else a copy there (a project file, or one streamed before
+   * its digest was known). Null for any other file. */
+  async conversationImage(url: string, workspaceId: string): Promise<{ sha256: string; size: number; mimeType: string } | null> {
+    const { scope, entry, mediaType } = await this.version(url);
+    if (!mediaType?.startsWith('image/') || mediaType === 'image/svg+xml') return null;
+    const target = `space:${workspaceId}`;
+    const object = 'object' in entry ? entry.object : undefined;
+    const size = entry.size ?? (await this.files.head(scope.id, entry))?.size;
+    if (size === undefined) throw new Error('Artifact object is unavailable');
+    const stored = scope.id === target && !object ? { blobHash: entry.blobHash, size } : await this.files.copy({ scopeId: scope.id, file: { ...entry, size } }, target);
+    return { sha256: stored.blobHash.slice('sha256:'.length), size: stored.size, mimeType: mediaType };
+  }
+
   /** A drive file's stored bytes, at most 16 MiB, and its media type. */
   async bytes(url: string, hash?: string | null): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
     const { scope, entry, mediaType } = await this.version(url, hash);

@@ -3,7 +3,8 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createModels, type Api, type Model } from '@earendil-works/pi-ai';
 import { claudeCode, XxHash64 } from './claude-code-request.js';
 import { createHash } from 'node:crypto';
-import { ENCODE_UNITS, expandedRequest, imageReference, type ImageReader, type ImageRequestTransport } from './image-requests.js';
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
+import { ENCODE_UNITS, expandedRequest, type ImageReader, type ImageRequestTransport } from './image-requests.js';
 
 const MASK = 0xffffffffffffffffn;
 const PRIME1 = 0x9e3779b185ebca87n;

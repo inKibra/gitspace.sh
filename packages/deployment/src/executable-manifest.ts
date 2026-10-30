@@ -30,6 +30,9 @@ export function nativeHostAbi(): NativeAbi {
   return nativeAbiSchema.parse({ platform: process.platform, arch: process.arch, minimumVersion });
 }
 
+/** An executable built for another platform, architecture, Bun or native ABI than this host's. */
+export class IncompatibleExecutable extends Error {}
+
 export function validateNativeAbi(abi: NativeAbi): void {
   const host = nativeHostAbi();
   const actual = host.minimumVersion.split('.').map(Number);
@@ -41,7 +44,7 @@ export function validateNativeAbi(abi: NativeAbi): void {
     break;
   }
   if (host.platform !== abi.platform || host.arch !== abi.arch || !compatible) {
-    throw new Error(`Native ABI ${abi.platform}-${abi.arch} >=${abi.minimumVersion} is incompatible with ${host.platform}-${host.arch} ${host.minimumVersion}`);
+    throw new IncompatibleExecutable(`Native ABI ${abi.platform}-${abi.arch} >=${abi.minimumVersion} is incompatible with ${host.platform}-${host.arch} ${host.minimumVersion}`);
   }
 }
 
@@ -59,7 +62,7 @@ export function validateExecutableCompatibility(manifest: ExecutableArtifactMani
   const host = executableArtifactCompatibility();
   for (const field of ['platform', 'arch', 'bunVersion', 'protocolVersion'] as const) {
     if (manifest.compatibility[field] !== host[field]) {
-      throw new Error(`Executable ${field} ${manifest.compatibility[field]} is incompatible with host ${host[field]}`);
+      throw new IncompatibleExecutable(`Executable ${field} ${manifest.compatibility[field]} is incompatible with host ${host[field]}`);
     }
   }
   if (manifest.compatibility.nativeAbi) validateNativeAbi(manifest.compatibility.nativeAbi);

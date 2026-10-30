@@ -2641,7 +2641,7 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   const authorized = await authorizeControl(env, signed, 'storage.access', DATA_UPLOAD_OPERATIONS[signed.operation] ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
   if (authorized.status === 'error') return accountAccessResponse(authorized)!;
   if (diagnostics) diagnostics.stage = 'validate';
-  if (keyFromPath.startsWith('releases/') || keyFromPath.startsWith('distribution/v1/releases/') || /^objects\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
+  if (keyFromPath.startsWith('releases/') || keyFromPath.startsWith('distribution/v1/releases/') || /^(?:objects|natives)\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
     return releaseDataObjectResponse(request, env, signed, keyFromPath, objectKey, diagnostics);
   }
   const namespace = tenantNamespace(keyFromPath);
@@ -2774,9 +2774,12 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
 }
 
 /** Release objects machines publish and read in plain text (release trees, executable chunks, platform fallbacks): not
- * tenant storage, so neither scoped nor encrypted at rest, and written whole. */
+ * tenant storage, so neither scoped nor encrypted at rest, and written whole. Upstream native files (`natives/sha256/`) are
+ * read here and written by the account alone. */
 async function releaseDataObjectResponse(request: Request, env: Env, signed: SignedControlRequest, keyFromPath: string, objectKey: string, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
   const operation = signed.operation;
+  // The account mirrors native files itself (`portable-release.ts`); machines only read them.
+  if (operation === 'data.put' && keyFromPath.startsWith('natives/')) return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Native files are mirrored by the account');
   if (operation === 'data.put') {
     const declared = dataObjectWriteSchema.safeParse(signed.payload);
     if (!declared.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'Application object metadata requires a SHA-256 hash and a non-negative safe integer size in bytes');

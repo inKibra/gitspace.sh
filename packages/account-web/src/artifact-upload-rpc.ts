@@ -9,7 +9,7 @@ const ErrorReplySchema = z.object({ status: z.literal('error'), error: z.object(
 
 /** Sends one request through an upload link. A lost connection or a server/gateway failure leaves the upload where it
  * was (retryable); a refusal is final. */
-async function linkRequest<T>(send: typeof globalThis.fetch, url: string, init: RequestInit, value: z.ZodType<T>, refusal: string): Promise<T> {
+export async function linkRequest<T>(send: typeof globalThis.fetch, url: string, init: RequestInit, value: z.ZodType<T>, refusal: string): Promise<T> {
   let response: Response;
   try {
     response = await send(url, { ...init, credentials: 'omit' });

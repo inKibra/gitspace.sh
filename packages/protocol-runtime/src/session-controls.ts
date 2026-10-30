@@ -105,6 +105,18 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('saveAgentDefinition'), path: z.string(), expectedRevision: z.string().nullable(), content: z.string() }),
 ]);
 export const RuntimeSessionInputSchema = RuntimeIdentitySchema.extend({ conversationId: z.string().optional(), command: RuntimeSessionCommandSchema });
+/** The largest image a client stores through an image upload link: one upload part. */
+export const IMAGE_UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
+/** Image types a conversation takes. */
+export const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
+/** Begins storing one image in a workspace before a prompt names it: the client declares the bytes it will send. */
+export const RuntimeImageUploadInputSchema = RuntimeIdentitySchema.extend({
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u), size: z.number().int().min(1).max(IMAGE_UPLOAD_MAX_BYTES), mimeType: z.enum(IMAGE_UPLOAD_TYPES),
+});
+/** `PUT <link>/parts/1` with exactly the declared bytes answers `{ status: 'ok', value: { reference } }`, the image's
+ * reference (`@gitspace/protocol-runtime/image-reference`) to send in the prompt's image block in place of its base64. */
+export const RuntimeImageUploadResultSchema = z.object({ link: z.url() });
+export const RuntimeImageUploadReplySchema = z.object({ reference: z.string() });
 export const RuntimeSessionResultSchema = z.object({ control: SessionControlSchema, browserStatus: RuntimeBrowserStatusSchema.optional(), browserArtifact: RuntimeBrowserArtifactPageSchema.optional(), browserOverview: RuntimeBrowserOverviewSchema.optional(), browserPreview: RuntimeBrowserPreviewSchema.optional(), browserCaptures: z.array(RuntimeBrowserCaptureViewSchema).max(500).optional(), browserCapture: RuntimeBrowserCaptureViewSchema.optional(),
   browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(),
   browserComments: z.array(RuntimeBrowserCommentThreadViewSchema).max(500).optional(), browserComment: RuntimeBrowserCommentThreadSchema.optional(),

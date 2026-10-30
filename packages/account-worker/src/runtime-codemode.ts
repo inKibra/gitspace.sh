@@ -1,3 +1,4 @@
+import type { ImageReader } from './image-reader.js';
 import { RpcTarget, type WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
 import { canonicalJson, RuntimeCodemodeArgumentsSchema, RuntimeContentSchema, RuntimeJsonSchema, RuntimeToolResultSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
@@ -6,7 +7,8 @@ import { invokeMcpNamespace } from './runtime-mcp.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
 
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
-type Options = { loader: WorkerLoader; storage: DurableObjectStorage; model: RuntimeModelHelper };
+/** `images` reads the workspace's stored images (`ImageReader`), for a script's `images.read`. */
+type Options = { loader: WorkerLoader; storage: DurableObjectStorage; model: RuntimeModelHelper; images: Fetcher<ImageReader> };
 const MAX_BYTES = 65_536;
 /** A value crosses into the isolate as UTF-8 JSON in one Workers RPC message, at most 32 MiB: room for a tool's whole
  * output, which is kept up to `TOOL_RESULT_MAX_BYTES` of text. */
@@ -102,22 +104,24 @@ export function createCloudCodemode(options: Options) {
       const capabilities = new Capabilities();
       try {
         const worker = options.loader.load({ compatibilityDate: '2026-08-27', compatibilityFlags: ['no_nodejs_compat', 'no_nodejs_compat_v2'], mainModule: 'sandbox.js', modules: {
-          'user.js': `export default async function(tools, completion, judge, mcp, display) {\n${args.code}\n}`,
+          'user.js': `export default async function(tools, completion, judge, mcp, display, images) {\n${args.code}\n}`,
           'sandbox.js': `import run from './user.js';
 import { WorkerEntrypoint } from 'cloudflare:workers';
-export default class Sandbox extends WorkerEntrypoint { async execute(capability) {
+export default class Sandbox extends WorkerEntrypoint { async execute(capability, reader) {
   const output = []; let bytes = 0;
+  const images = Object.freeze({ read: async image => new Uint8Array(await new Response(await reader.read(typeof image === 'string' ? image : image?.data)).arrayBuffer()) });
   const display = value => { const text = JSON.stringify(value) ?? 'null'; bytes += new TextEncoder().encode(text).length; if (bytes > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); output.push(text); };
   const unwrap = async pending => { const result = await pending; if (!result.ok) throw new Error(result.error); return JSON.parse(new TextDecoder().decode(result.value)); };
   const tools = new Proxy(Object.create(null), { get: (_, name) => typeof name === 'string' ? args => unwrap(capability.tool(name, args ?? {})) : undefined });
   const mcp = Object.freeze(Object.fromEntries(['list','search','describe','call'].map(method => [method, args => unwrap(capability.mcp(method, args ?? {}))])));
   const cancelled = capability.cancelled().then(reason => { throw new Error(reason); });
-  try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
-  catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge and display; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }).' : text).slice(0, 4096) }); }
+  try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display, images), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
+  catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge, display and images; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }).' : text).slice(0, 4096) }); }
 } }`,
         }, globalOutbound: null, limits: { cpuMs: 1000, subRequests: MAX_CALLS } });
-        type SandboxEntrypoint = WorkerEntrypoint & { execute(capability: Capabilities): Promise<string> };
-        const body = await Promise.race([worker.getEntrypoint<SandboxEntrypoint>().execute(capabilities), cancelled.promise]);
+        // The reader reaches the script only through images.read: the isolate's env stays empty.
+        type SandboxEntrypoint = WorkerEntrypoint & { execute(capability: Capabilities, reader: Fetcher<ImageReader>): Promise<string> };
+        const body = await Promise.race([worker.getEntrypoint<SandboxEntrypoint>().execute(capabilities, options.images), cancelled.promise]);
         revoked = true;
         await Promise.race([Promise.allSettled([...pending]), cancelled.promise]);
         if (uncertain) throw new Error('Codemode child effect requires reconciliation');

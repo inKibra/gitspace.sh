@@ -134,7 +134,7 @@ async function cloudBrowser(drive: WorkspaceDrive, started: (download: BrowserDo
 
 test('a running script follows the cloud browser’s downloads with their tab and address: downloads() answers at once when the list changed, else at the next start, settle or the run’s end', async () => {
   const { drive } = await workspace();
-  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() });
+  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() }, 'ws-files');
   const browser = await cloudBrowser(drive, download => files.downloaded(download));
   const first = files.downloads(0), firstAnswered = answered(first);
   // A page is no download: the wait goes on.
@@ -165,7 +165,7 @@ test('saveDownload() copies a run’s download in the drive without reading its 
   const { drive } = await workspace();
   const bytes = encoder.encode('quarter,total\nq3,42\n');
   const source = await drive.write('browser/downloads/2026-10-27/Q3 report.csv', 'text/csv', bytes);
-  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() });
+  const files = new ScriptRunFiles(drive, { source: 'headless', groupId: crypto.randomUUID() }, 'ws-files');
   const saving = Promise.withResolvers<DownloadOutcome>();
   files.downloaded({ id: 'csv', targetId: 'tab-1', url: 'https://example.com/q3', name: 'Q3 report.csv', outcome: saving.promise });
   files.downloaded({ id: 'broken', targetId: 'tab-1', url: 'https://example.com/q4', name: 'Q4 report.csv', outcome: Promise.resolve({ error: 'The connection reset' }) });
@@ -201,7 +201,7 @@ test('your Chrome’s download uploads reach the running script: begin with the 
       const { signed, groupId, attemptId } = await authorization(root, browser.placement, projectId, workspaceId, 'run');
       const { token } = await relay.browserRelayScriptBegin(signed);
       // The browser session's files for the run ask the relay.
-      const files = new ScriptRunFiles(drive, { source: 'relay', groupId, chrome: async () => ({ name: 'Chrome' }), downloads: version => relay.browserRelayScriptDownloads(token, version) });
+      const files = new ScriptRunFiles(drive, { source: 'relay', groupId, chrome: async () => ({ name: 'Chrome' }), downloads: version => relay.browserRelayScriptDownloads(token, version) }, workspaceId);
       const first = files.downloads(0);
       const report = await begin(browser, { kind: 'download', groupId, attemptId, name: 'Q3 report.csv', mediaType: 'text/csv', targetId: 'your-tab', url: 'https://example.com/export?id=7' });
       const started = { id: expect.any(String), targetId: 'your-tab', url: 'https://example.com/export?id=7', name: 'Q3 report.csv' };

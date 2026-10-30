@@ -3,7 +3,7 @@ import { mkdir, chmod } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, type MachineBrowserOptions } from '@gitspace/runtime-machine';
+import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, type MachineBrowserOptions, type MachineExecutorOptions } from '@gitspace/runtime-machine';
 import { RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, RuntimeJsonSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema, type RuntimeToolDispatch, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
@@ -60,6 +60,7 @@ export async function createMachineExecutor(options: {
   gitRemote: ArtifactsGitRemote;
   lfs?: MachineGitLfsAccess;
   operations?: Record<string, ExecutorOperationHandler>;
+  storeImage?: MachineExecutorOptions['storeImage'];
   browser?: Pick<MachineBrowserOptions, 'enabled' | 'services'>;
   commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null): Promise<GitIntermediateCheckpoint>;
   prepareAttachment(local: LocalAttachment, signal: AbortSignal, progress: (step: RuntimeCacheObservation['setup'][number]) => Promise<void>): Promise<void>;
@@ -445,6 +446,7 @@ export async function createMachineExecutor(options: {
   };
   const executor = new MachineExecutor({
     machineId: options.machineId, journal, runCommand: runSupervisorCommand,
+    ...(options.storeImage ? { storeImage: options.storeImage } : {}),
     activeChanged: attachmentId => {
       const local = journal.attachment(attachmentId);
       if (local) observe(local);

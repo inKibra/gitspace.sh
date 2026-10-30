@@ -1,3 +1,4 @@
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { z } from 'zod';
 import { parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import { browserUnbase64, type RuntimeToolResult } from '@gitspace/protocol-runtime';
@@ -58,6 +59,7 @@ function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
  * binding for this run, so its input is untrusted and checked here.
  */
 export class ScriptRunFiles {
+  /** Each capture's address and its image's reference: the image is in the workspace's drive already. */
   private readonly captures: { url: string; image: string }[] = [];
   private capturing = 0;
   /** The cloud browser's downloads while the run was live. */
@@ -70,7 +72,7 @@ export class ScriptRunFiles {
   private relayed: ScriptDownloads = { version: 0, ended: false, downloads: [] };
   private chrome: Promise<{ name: string }> | undefined;
 
-  constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url' | 'copy'>, readonly browser: ScriptRunBrowser) {}
+  constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url' | 'copy'>, readonly browser: ScriptRunBrowser, private readonly workspaceId: string) {}
 
   /** Whether the run is still live: the cloud browser's downloads go to live runs only. */
   get running(): boolean { return !this.ended; }
@@ -91,7 +93,7 @@ export class ScriptRunFiles {
     if (size.width > IMAGE_PIXELS || size.height > IMAGE_PIXELS) throw new Error(`The screenshot is ${size.width}×${size.height} pixels, over the ${IMAGE_PIXELS} a side models take`);
     const captureId = crypto.randomUUID(), folder = captureFolder(captureId), at = new Date().toISOString();
     const browser = this.browser.source === 'relay' ? (await this.chromeInfo(this.browser)).name : 'Cloud browser';
-    await this.drive.write(`${folder}image.jpg`, 'image/jpeg', image);
+    const written = await this.drive.write(`${folder}image.jpg`, 'image/jpeg', image);
     if (jpegSize(thumbnail)) await this.drive.write(`${folder}thumbnail.jpg`, 'image/jpeg', thumbnail);
     await writeCapture(this.drive, {
       version: 2, captureId, name: shot.name?.trim().slice(0, 200) || captureName(shot.page.title, at), by: 'agent', source: this.browser.source, browser,
@@ -99,7 +101,7 @@ export class ScriptRunFiles {
       startedAt: at, endedAt: at, state: 'saved', reason: null, tracks: { image: { path: 'image.jpg', ...size } },
     });
     const url = `drive://workspace/${folder}image.jpg`;
-    this.captures.push({ url, image: shot.image });
+    this.captures.push({ url, image: imageReference({ workspaceId: this.workspaceId, size: written.size, ...size, sha256: written.blobHash.slice('sha256:'.length) }) });
     return { captureId, url };
   }
 

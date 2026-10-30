@@ -371,7 +371,7 @@ export class BrowserSessionDO extends BudgetedDurableObject {
         const pairing = (await relay.browserRelayStatus()).pairings.find(item => item.pairingId === placement.pairingId);
         return { name: pairing?.name ?? 'Your Chrome', protocol: pairing?.extension?.protocol ?? 0 };
       }, downloads: version => relay.browserRelayScriptDownloads(relayToken, version) }
-      : { source: 'headless', groupId });
+      : { source: 'headless', groupId }, scope.workspaceId);
     this.runFiles.set(run, files);
     const sandbox = this.env.CODEMODE_LOADER.load({
       compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], mainModule: 'runner.js',

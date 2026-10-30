@@ -1,3 +1,4 @@
+import { storedImages } from '../src/runtime-images.js';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { z } from 'zod';
 import { ed25519 } from '@noble/curves/ed25519.js';
@@ -214,6 +215,25 @@ describe('user artifact flows', () => {
     expect(await artifacts.locate('drive://workspace/uploads/font.zip')).toEqual({ scopeId: target.scopeId, ...stored });
     const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/uploads/font.zip', hash: null }));
     expect(bytes).toEqual(Buffer.from(zip));
+  });
+
+  it('reads a drive image as a reference to the workspace\'s images, copying a project image into them, never its bytes', async () => {
+    const { workspaceId, projectId, publish } = await fixture();
+    // `publish` stores text as UTF-8, so every byte stays under 0x80 (the signature's first byte, 0x89, is not read).
+    const png = (width: number, height: number) => String.fromCharCode(0x58, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, width, 0, 0, 0, height, 8, 6, 0, 0, 0);
+    const shot = png(5, 7), logo = png(9, 4);
+    await publish(workspaceId, 1, [{ path: 'shot.png', content: shot, mediaType: 'image/png' }, { path: 'notes.txt', content: 'notes' }]);
+    await publish(projectId, 1, [{ path: 'logo.png', content: logo, mediaType: 'image/png' }]);
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const digest = (content: string) => createHash('sha256').update(content).digest('hex');
+    expect(await artifacts.conversationImage('drive://workspace/shot.png', workspaceId)).toEqual({ sha256: digest(shot), size: shot.length, mimeType: 'image/png' });
+    expect(await artifacts.conversationImage('drive://base/logo.png', workspaceId)).toEqual({ sha256: digest(logo), size: logo.length, mimeType: 'image/png' });
+    expect(await artifacts.conversationImage('drive://workspace/notes.txt', workspaceId)).toBeNull();
+    // The project image now has a copy in the workspace's scope, which the workspace admits and measures.
+    const stored = await env.DATA.head(tenantObjectKey(env.ACCOUNT_ID, artifactObjectKey(env.ACCOUNT_ID, `space:${workspaceId}`, `sha256:${digest(logo)}`)));
+    expect(stored?.size).toBe(logo.length);
+    expect(await storedImages(env, workspaceId).store({ type: 'image', mimeType: 'image/png', data: `gs-image:v1:${workspaceId}:${logo.length}:0x0:${digest(logo)}` }))
+      .toEqual({ type: 'image', mimeType: 'image/png', data: `gs-image:v1:${workspaceId}:${logo.length}:9x4:${digest(logo)}` });
   });
 
   it('stores every drive file in its scope under its plaintext digest and size', async () => {

@@ -533,4 +533,9 @@ export async function runMachineUpdate(): Promise<void> {
     release();
   }
 }
-if (import.meta.main) await runMachineUpdate();
+// No top-level await: the machine bundle that imports this module is CommonJS so that it can carry bytecode. A failed
+// update ends the process, as an awaited one did.
+if (import.meta.main) runMachineUpdate().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

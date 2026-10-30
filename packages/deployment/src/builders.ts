@@ -6,6 +6,7 @@ import { WORKER_MANIFEST_FILE, resourceSourceSchema, workerReleaseMetadataSchema
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { packageMachineNativeRuntime } from './native-build.js';
+import { compileMachineBundles } from './machine-compile.js';
 import { nativeFileDigest } from './native-runtime.js';
 import { BUN_VERSION, NATIVE_PINS } from './native-pins.js';
 import { PORTABLE_MANIFEST_FILE, portableManifestSchema, type PortableFile } from '@gitspace/protocol/machine-release';
@@ -164,11 +165,13 @@ async function buildMachineJavaScript(root: string, outDir: string): Promise<voi
   }
 }
 
-/** Independently complete machine generation, including authenticated migrations and native runtime. */
+/** Independently complete machine generation for this platform, including authenticated migrations and native runtime,
+ * its machine process and worker compiled to bytecode for this Bun (`compileMachineBundles`). */
 export async function buildMachineBundle(root: string, outDir: string): Promise<BuiltExecutableArtifact> {
   await prepareExecutableOutput(outDir);
   await buildMachineJavaScript(root, outDir);
-  const native = await packageMachineNativeRuntime(root, outDir);
+  await compileMachineBundles(outDir);
+  const native = await packageMachineNativeRuntime(outDir);
   const envelope = await createExecutableArtifactManifest(outDir, 'machine', native.abi);
   return { path: outDir, hash: envelope.manifest.treeHash, ...envelope };
 }

@@ -56,6 +56,7 @@ import { serveBrowserCaptureShare } from './browser-capture-share.js';
 import { BROWSER_CAPTURE_SHARE_PATH, type RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
 import { BROWSER_WATCH_PATH } from '@gitspace/protocol-runtime';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
+import { storedImages } from './runtime-images.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
 import { RuntimeBrowserNameSchema, RuntimeBrowserNoteSchema, RuntimeIdentitySchema, RuntimeProjectBrowserPreferencesSchema, type RuntimeProjectBrowserPreferences, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
@@ -1218,7 +1219,7 @@ export default {
     }
     // Upload bytes (Inspector files, your Chrome's downloads and captures) go through upload links, outside RPC's base64
     // chunks and the relay WebSocket; your Chrome begins its uploads signed by its pairing key.
-    if (url.pathname.startsWith(`${UPLOAD_LINK_PATH}/`)) return serveUploadLink(request, env, { relay: env.RELAY.getByName(env.RELAY_NAME), drive: identity => workspaceDrive(env, identity) });
+    if (url.pathname.startsWith(`${UPLOAD_LINK_PATH}/`)) return serveUploadLink(request, env, { relay: env.RELAY.getByName(env.RELAY_NAME), drive: identity => workspaceDrive(env, identity), images: workspaceId => storedImages(env, workspaceId) });
     if (url.pathname === BROWSER_UPLOAD_PATH) return serveBrowserUpload(request, { relay: env.RELAY.getByName(env.RELAY_NAME), link: target => mintUploadLink(env, { kind: 'browser', ...target }) });
     // Share links: public, before device authority (a join signed by one of the account's devices is checked there).
     if (url.pathname === BROWSER_SHARE_PATH || url.pathname.startsWith('/api/shares/')) return serveBrowserShare(request, env);

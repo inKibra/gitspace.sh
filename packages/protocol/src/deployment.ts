@@ -240,7 +240,10 @@ export const releaseRecordSchema = z.object({
     machines: z.record(idSchema, releaseStatusSchema),
     omps: z.record(idSchema, releaseStatusSchema).optional(),
   }),
+  /** Why the release itself failed (staging, the Worker); a machine's failure is its own, in `machineErrors`. */
   error: z.string().max(4_096).nullable(),
+  /** Each machine's reason it failed to apply the release, until it applies it. */
+  machineErrors: z.record(idSchema, z.string().max(4_096)).optional(),
 });
 export type ReleaseRecord = z.infer<typeof releaseRecordSchema>;
 

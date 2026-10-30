@@ -43,11 +43,12 @@ async function uploaded(userId: string, sha: string) {
     await env.DATA.put(`users/${userId}/${portableFileKey(key, path)}`, bytes, { customMetadata: { sha256: `sha256:${sha256}` } });
     files.push({ path, sha256, size: bytes.byteLength });
   }
-  const native = (name: MachineNativeName, abi: MachineNativeFile['abi']): MachineNativeFile => ({
-    version: name === 'bun' ? '1.4.0' : '1.0.0', url: `${NATIVE_UPSTREAMS[name]}v1/${name}.zip`, sha256: 'a'.repeat(64), size: 1, member: name, executable: { sha256: 'b'.repeat(64), size: 1 }, abi,
+  // One byte per tool: the same asset serves each OS's platforms, and its pin is that byte's digest.
+  const native = async (name: MachineNativeName, abi: MachineNativeFile['abi']): Promise<MachineNativeFile> => ({
+    version: name === 'bun' ? '1.4.0' : '1.0.0', url: `${NATIVE_UPSTREAMS[name]}v1/${abi.os}-${name}.zip`, sha256: await hex(asset(`${abi.os}-${name}`)), size: 1, member: name, executable: { sha256: 'b'.repeat(64), size: 1 }, abi,
   });
-  const darwin = { bun: native('bun', { os: 'darwin', macos: '13.0' }), rg: native('rg', { os: 'darwin', macos: '13.0' }), 'git-lfs': native('git-lfs', { os: 'darwin', macos: '13.0' }) };
-  const linux = { bun: native('bun', { os: 'linux', glibc: '2.17' }), rg: native('rg', { os: 'linux', glibc: null }), 'git-lfs': native('git-lfs', { os: 'linux', glibc: null }) };
+  const darwin = { bun: await native('bun', { os: 'darwin', macos: '13.0' }), rg: await native('rg', { os: 'darwin', macos: '13.0' }), 'git-lfs': await native('git-lfs', { os: 'darwin', macos: '13.0' }) };
+  const linux = { bun: await native('bun', { os: 'linux', glibc: '2.17' }), rg: await native('rg', { os: 'linux', glibc: null }), 'git-lfs': await native('git-lfs', { os: 'linux', glibc: null }) };
   const manifest: PortableManifest = { schemaVersion: 1, bunVersion: '1.4.0', files, natives: { 'darwin-arm64': darwin, 'darwin-x64': darwin, 'linux-arm64': linux, 'linux-x64': linux } };
   const bytes = new TextEncoder().encode(JSON.stringify(manifest));
   await env.DATA.put(`users/${userId}/${key}`, bytes, { customMetadata: { sha256: `sha256:${await hex(bytes)}` } });
@@ -59,30 +60,54 @@ async function uploaded(userId: string, sha: string) {
   return { manifest, input };
 }
 
-function platformMirror() {
-  const requests: unknown[] = [];
-  network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/machine-release/natives`, async ({ request }) => {
-    requests.push(await request.json());
-    return HttpResponse.json({ copied: [] });
-  }));
-  return requests;
+/** The upstream asset `<os>-<tool>`: one byte, different for each. */
+function asset(name: string): Uint8Array {
+  return Uint8Array.of([...name].reduce((sum, character) => sum + character.charCodeAt(0), 0) % 256);
 }
 
-it('stages a portable release the account holds as built, after the platform mirrors its natives', async () => {
+/** The upstream releases the natives come from; `changed` serves other bytes for that asset. Counts the downloads. */
+function upstream(changed?: string) {
+  const downloads: string[] = [];
+  for (const [name, prefix] of Object.entries(NATIVE_UPSTREAMS)) network.use(http.get(`${prefix}v1/:asset`, ({ params }) => {
+    const file = String(params.asset).replace(/\.zip$/u, '');
+    if (!file.endsWith(`-${name}`)) return undefined;
+    downloads.push(file);
+    return HttpResponse.arrayBuffer((file === changed ? Uint8Array.of(0) : asset(file)).slice().buffer);
+  }));
+  return downloads;
+}
+
+it('stages a portable release the account holds as built, after copying its natives into the account\'s own storage once', async () => {
   const { userId, control } = await account();
   const { manifest, input } = await uploaded(userId, 'portable-held');
-  const requests = platformMirror();
+  const downloads = upstream();
   const record = releaseRecordSchema.parse(await control('deploy.stage', input));
   expect(record.artifacts.portable).toEqual(input.artifacts.portable);
-  expect(requests).toEqual([{ natives: manifest.natives }]);
+  expect(downloads.sort()).toEqual(['darwin-bun', 'darwin-git-lfs', 'darwin-rg', 'linux-bun', 'linux-git-lfs', 'linux-rg']);
+  for (const native of Object.values(manifest.natives['darwin-arm64'])) {
+    const stored = await env.DATA.get(`users/${userId}/natives/sha256/${native.sha256}`);
+    expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(asset(native.url.split('/').at(-1)!.replace(/\.zip$/u, '')));
+  }
+  // A later release naming the same natives downloads nothing.
+  releaseRecordSchema.parse(await control('deploy.stage', (await uploaded(userId, 'portable-again')).input));
+  expect(downloads).toHaveLength(6);
+});
+
+it('refuses a portable release whose native downloads with other bytes than its pin, storing nothing for it', async () => {
+  const { userId, control } = await account();
+  const { manifest, input } = await uploaded(userId, 'portable-tampered');
+  upstream('linux-rg');
+  await expect(control('deploy.stage', input)).rejects.toThrow();
+  expect(await env.DATA.head(`users/${userId}/natives/sha256/${manifest.natives['linux-x64'].rg.sha256}`)).toBeNull();
+  expect(deploymentStatusSchema.parse(await control('deploy.status', {})).releases.some(release => release.sha === 'portable-tampered')).toBe(false);
 });
 
 it('refuses a portable release naming a file the account holds with other bytes, staging nothing', async () => {
   const { userId, control } = await account();
   const { input } = await uploaded(userId, 'portable-changed');
   await env.DATA.put(`users/${userId}/${portableFileKey(input.artifacts.portable!.key, 'machine/machine.js')}`, 'changed', { customMetadata: { sha256: `sha256:${'d'.repeat(64)}` } });
-  const requests = platformMirror();
+  const downloads = upstream();
   await expect(control('deploy.stage', input)).rejects.toThrow();
-  expect(requests).toEqual([]);
+  expect(downloads).toEqual([]);
   expect(deploymentStatusSchema.parse(await control('deploy.status', {})).releases.some(release => release.sha === 'portable-changed')).toBe(false);
 });

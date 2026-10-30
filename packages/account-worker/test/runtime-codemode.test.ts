@@ -1,6 +1,11 @@
 import { env, runInDurableObject } from 'cloudflare:test';
+import { exports } from 'cloudflare:workers';
 import { expect, test } from 'vitest';
 import { createCloudCodemode } from '../src/runtime-codemode.js';
+import { storedImages } from '../src/runtime-images.js';
+import { tenantRootPrivateKey } from './setup.js';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { createToolResultStore, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earendil-works/pi-durable';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
@@ -17,7 +22,7 @@ function invocation(code: string): Invocation {
 
 test('isolate cancellation revokes captured capabilities and a cold owner cannot replay uncertain effects', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-cancel:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel };
+    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) };
     const sandbox = createCloudCodemode(options);
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();
@@ -43,7 +48,7 @@ test('isolate cancellation revokes captured capabilities and a cold owner cannot
 
 test('unresolved isolate admission never reruns code after owner recovery', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-recovery:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel };
+    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) };
     const first = createCloudCodemode(options);
     const ready = Promise.withResolvers<void>();
     const release = Promise.withResolvers<null>();
@@ -62,7 +67,7 @@ test('unresolved isolate admission never reruns code after owner recovery', asyn
 
 test('completed effects survive a caught definitive denied read without replay', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-denied:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel };
+    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) };
     let effects = 0;
     const input: Invocation = { ...invocation('await tools.write({path:"effect",content:"once"}); let caught = false; try { await tools.read({path:"denied"}); } catch { caught = true; } return {caught};'), codemodeTools: async ({ tool }) => {
       if (tool === 'write') { effects++; return { status: 'completed', value: null }; }
@@ -77,7 +82,7 @@ test('completed effects survive a caught definitive denied read without replay',
 
 test('caught unknown child outcomes remain fenced across recovery', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-unknown:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel };
+    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) };
     let calls = 0;
     const input: Invocation = { ...invocation('try { await tools.write({path:"effect",content:"unknown"}); } catch {} return "caught";'), codemodeTools: async () => { calls++; return { status: 'interrupted', error: 'Durable outcome unknown' }; } };
     const result = await createCloudCodemode(options).execute(input);
@@ -90,7 +95,7 @@ test('caught unknown child outcomes remain fenced across recovery', async () => 
 test('normal capability calls consume one call each and stop at the boundary', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-budget:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const children: string[] = [];
-    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel }).execute({
+    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) }).execute({
       ...invocation('let accepted = 0; for (let i = 0; i < 129; i++) { try { await tools.read({path:"file"}); accepted++; } catch {} } return accepted;'),
       codemodeTools: async ({ callId }) => { children.push(callId); return { status: 'completed', value: null }; },
     });
@@ -103,7 +108,7 @@ test('normal capability calls consume one call each and stop at the boundary', a
 test('one MCP namespace call cannot fan out past the durable child budget', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-mcp-budget:${crypto.randomUUID()}`), async (_instance, ctx) => {
     let children = 0;
-    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel }).execute({
+    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) }).execute({
       ...invocation('try { await mcp.list({}); return "unbounded"; } catch { return "bounded"; }'),
       codemodeTools: async () => {
         children++;
@@ -118,7 +123,7 @@ test('one MCP namespace call cannot fan out past the durable child budget', asyn
 
 test('actual WorkerLoader usercode has empty imported env and rejects raw sockets', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-isolation:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel }).execute(invocation(`
+    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) }).execute(invocation(`
       // Dynamic imports intentionally exercise the usercode module-loading boundary.
       const { env } = await import('cloudflare:workers');
       const { connect } = await import('cloudflare:sockets');
@@ -135,7 +140,7 @@ test('actual WorkerLoader usercode has empty imported env and rejects raw socket
 
 test('real durable authority completes a caught denied read after an effect without replay', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-authority:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel };
+    const options = { loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) };
     const sandbox = createCloudCodemode(options);
     let effects = 0;
     const results: RuntimeToolResult[] = [];
@@ -181,7 +186,7 @@ test('real durable authority completes a caught denied read after an effect with
 
 test('an MCP result past what the transcript keeps reaches mcp.call whole, the script returns only what it filtered, and grep finds its nested fields by line', async () => {
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-mcp-whole:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const sandbox = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel });
+    const sandbox = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) });
     // Every comment of a Figma file in one call: hundreds of KB of one line of JSON, several times what a tool result keeps.
     const comments = Array.from({ length: 3000 }, (_, index) => ({ id: `comment-${index}`, author: index % 1000 === 7 ? { name: 'Ana', handle: 'ana' } : { name: `Person ${index % 13}`, handle: `person-${index % 13}` }, message: `Comment ${index}: ${'detail '.repeat(10)}` }));
     const results: RuntimeToolResult[] = [];
@@ -226,5 +231,23 @@ test('an MCP result past what the transcript keeps reaches mcp.call whole, the s
       const found = await kept.answer(location, RuntimeToolResultRequestSchema.parse({ tool: 'grep', args: { pattern: '"handle": "ana"', path: reference } }));
       expect(found.split('\n')).toEqual([expect.stringMatching(/^\d+: {6}"handle": "ana"$/u), expect.stringMatching(/^\d+: {6}"handle": "ana"$/u), expect.stringMatching(/^\d+: {6}"handle": "ana"$/u)]);
     } finally { await harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a script reads its workspace\'s stored images with images.read, and not another workspace\'s', async () => {
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)), vaultKey: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))) });
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 2, 0, 0, 0, 3, 8, 6, 0, 0, 0]);
+  const stored = await storedImages(env, 'codemode-images').store({ type: 'image', mimeType: 'image/png', data: Buffer.from(png).toString('base64') });
+  const foreign = stored.data.replace('codemode-images', 'codemode-other');
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-read:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const result = await createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) }).execute(invocation(`
+      const bytes = await images.read({ type: 'image', mimeType: 'image/png', data: ${JSON.stringify(stored.data)} });
+      let refused = null;
+      try { await images.read(${JSON.stringify(foreign)}); } catch (error) { refused = String(error.message); }
+      return { size: bytes.length, signature: [...bytes.slice(0, 4)], refused };
+    `));
+    expect(result).toMatchObject({ status: 'completed' });
+    const content = result.content.at(-1);
+    expect(JSON.parse(content?.type === 'text' ? content.text : '')).toEqual({ size: png.byteLength, signature: [0x89, 0x50, 0x4e, 0x47], refused: expect.stringContaining("is not this workspace's") });
   });
 });

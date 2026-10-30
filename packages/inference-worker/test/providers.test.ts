@@ -5,7 +5,7 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { Miniflare } from 'miniflare';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { profileProviders, XxHash64, type AttemptEvent, type InferenceAttempt } from '@gitspace/runtime-core/inference';
-import { imageReference } from '@gitspace/runtime-core/image-requests';
+import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { buildInferenceWorker } from '../src/build';
 
 const workspaceId = 'ws-test';
