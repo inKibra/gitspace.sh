@@ -1,5 +1,6 @@
 import { Result } from 'better-result';
-import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, hostedServicePointerSchema, hostedServiceUrlKind, isGitSpaceSourceRepository, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type HostedServicePointer, type RemoteBranchState } from '@gitspace/protocol';
+import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_BRANCH, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, hostedServicePointerSchema, hostedServiceUrlKind, isGitSpaceSourceRepository, normalizeRemoteRepositoryUrl, ORIGIN_CHECK_INTERVAL_MS, originCheckIntervalSchema, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type HostedServicePointer, type OriginCheckInterval, type RemoteBranchState } from '@gitspace/protocol';
+import { readOriginHeads } from './project-remote.js';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -673,7 +674,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
         commit: reserved.source?.commit ?? source.commit ?? null,
       };
       if (JSON.stringify(nextSource) === JSON.stringify(reserved.source)) return reserved;
-      return this.put({ ...reserved, baseBranch: nextSource.branch ?? 'HEAD', source: nextSource, revision: reserved.revision + 1 });
+      return this.put({ ...reserved, source: nextSource, revision: reserved.revision + 1 });
     }
     const existing = projects.filter((project) => isGitSpaceSourceRepository(project.repositoryReference))
       .sort((left, right) => Number(right.lifecycle === 'active') - Number(left.lifecycle === 'active') || left.id.localeCompare(right.id))[0];
@@ -684,7 +685,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
       name: existing?.name ?? name,
       lifecycle: existing?.lifecycle === 'active' || existing?.lifecycle === 'archived' ? 'active' : 'cloud-only',
       repositoryReference: existing?.repositoryReference ?? GITSPACE_SOURCE_REPOSITORY,
-      baseBranch: existing?.baseBranch ?? source.branch ?? 'HEAD',
+      baseBranch: existing?.baseBranch ?? GITSPACE_SOURCE_BRANCH,
       role: GITSPACE_SOURCE_PROJECT_ROLE,
       source: existing ? { ...source, branch: existing.baseBranch, commit: null } : source,
       revision: (existing?.revision ?? 0) + 1,
@@ -1018,7 +1019,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
           this.ctx.storage.sql.exec('CREATE TABLE qa_retry_reports_purged(done INTEGER)');
         });
       }
-      if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length && await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS origin_check(id INTEGER PRIMARY KEY CHECK(id=1),interval TEXT NOT NULL,attempted_at INTEGER)');
+      await this.armAlarm();
     });
   }
 
@@ -1064,16 +1066,65 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return project ? { source: 'project', cursor: this.directory.version(), project, workspaces: this.listWorkspaces() } : null;
   }
 
+  /** Check the origin: how often this project reads its origin on its own. */
+  originCheck(): OriginCheckInterval {
+    const stored = this.ctx.storage.sql.exec<{ interval: string }>('SELECT interval FROM origin_check WHERE id=1').toArray()[0]?.interval;
+    return originCheckIntervalSchema.catch('daily').parse(stored);
+  }
+
+  async setOriginCheck(interval: OriginCheckInterval): Promise<OriginCheckInterval> {
+    this.ctx.storage.sql.exec('INSERT INTO origin_check(id,interval) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET interval=excluded.interval', originCheckIntervalSchema.parse(interval));
+    await this.armAlarm();
+    return this.originCheck();
+  }
+
+  /** When this project next reads its origin on its own: its interval after the later of the last read (a push the
+   * GitHub App reported counts) and the last attempt, which may have failed; now when it was never read. Null for a
+   * project with no origin, or one checked only on request. */
+  private nextOriginCheck(): number | null {
+    const project = this.getProject();
+    const interval = ORIGIN_CHECK_INTERVAL_MS[this.originCheck()];
+    if (!project?.repositoryReference || project.lifecycle === 'deleting' || project.lifecycle === 'archived' || interval === null) return null;
+    const attempted = this.ctx.storage.sql.exec<{ attempted_at: number | null }>('SELECT attempted_at FROM origin_check WHERE id=1').toArray()[0]?.attempted_at ?? null;
+    const last = Math.max(project.remote ? Date.parse(project.remote.checkedAt) : 0, attempted ?? 0);
+    return last === 0 ? Date.now() : last + interval;
+  }
+
+  private legacyEventsPending(): boolean {
+    return !this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length;
+  }
+
+  /** The alarm wakes for the earliest of the legacy purge's next batch and the next origin check, or not at all. */
+  private async armAlarm(purgeAt: number | null = null): Promise<void> {
+    const due = Math.min(purgeAt ?? (this.legacyEventsPending() ? Date.now() + 1_000 : Infinity), this.nextOriginCheck() ?? Infinity);
+    if (due === Infinity) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, due));
+  }
+
   async alarm(): Promise<void> {
+    let purgeAt: number | null = null;
     // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
     // log; the cloud runtime reads none of it. Delete it in batches of 1,000 every 10 seconds: each event is about two
     // written rows (with its index), so the purge stays near 720k rows an hour, under the storage breaker (2M per 10
     // minutes) and the watchdog's alert (1M an hour). At 20,000 a second it wrote 14.2M rows in an hour on 2026-10-15.
-    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length) {
+    if (this.legacyEventsPending()) {
       const deleted = this.ctx.storage.sql.exec(`DELETE FROM project_events WHERE offset IN (SELECT offset FROM project_events WHERE entity NOT IN (${CURRENT_EVENT_ENTITIES.map(() => '?').join(',')}) LIMIT 1000)`, ...CURRENT_EVENT_ENTITIES).rowsWritten;
       if (deleted === 0) this.ctx.storage.sql.exec('CREATE TABLE legacy_events_purged(done INTEGER)');
-      else await this.ctx.storage.setAlarm(Date.now() + 10_000);
+      else purgeAt = Date.now() + 10_000;
     }
+    const next = this.nextOriginCheck();
+    if (next !== null && next <= Date.now()) {
+      const project = this.requireProject();
+      this.ctx.storage.sql.exec("INSERT INTO origin_check(id,interval,attempted_at) VALUES(1,'daily',?) ON CONFLICT(id) DO UPDATE SET attempted_at=excluded.attempted_at", Date.now());
+      try {
+        const heads = await readOriginHeads(this.env, project, this.listWorkspaces());
+        if (heads.length > 0) await this.recordRemoteHeads(heads);
+      } catch (error) {
+        // Tried again at the next interval; the project keeps its last known origin state.
+        console.warn(JSON.stringify({ event: 'origin_check_failed', projectId: project.id, message: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    await this.armAlarm(purgeAt);
   }
 
   private committing = false;
@@ -1139,7 +1190,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
 
   async ensureGitSpaceProject(input: CloudProjectSummary): Promise<CloudProjectSummary> {
     const project = this.commit('project', input.id, () => {
-    if (input.role !== GITSPACE_SOURCE_PROJECT_ROLE || !isGitSpaceSourceRepository(input.repositoryReference)) throw new Error('Invalid built-in GitSpace project identity');
+    if (input.role !== GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('Invalid built-in GitSpace project identity');
     const current = this.getProject();
     if (current && current.id !== input.id) throw new Error('Project identity mismatch');
     if (current?.lifecycle === 'deleting') throw new Error('Deleted project identity cannot be restored');
@@ -1167,7 +1218,6 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   setBaseBranch(expectedRevision: number, baseBranch: string, sourceCommit: string): CloudProjectSummary {
     return this.commit('project', null, () => {
       const current = this.requireProject();
-      if (current.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
       if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
       if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
       if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid base branch');
@@ -1180,6 +1230,22 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       }
       this.ctx.storage.sql.exec("UPDATE workspaces SET branch=?,source_ref=CASE WHEN source_kind='base' THEN ? ELSE source_ref END,source_commit=?,revision=revision+1,updated_at=? WHERE workspace_id=? AND kind='base'", baseBranch, baseBranch, sourceCommit, now, current.id);
       this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,revision=revision+1,updated_at=?', baseBranch, now);
+      return this.requireProject();
+    });
+  }
+
+  /** The project's origin moves to another address: a fork, or a repository that moved. Workspaces keep their branches;
+   * what was read from the old origin says nothing about the new one, so every branch is unchecked until read again. */
+  setRepository(expectedRevision: number, repositoryReference: string): CloudProjectSummary {
+    return this.commit('project', null, () => {
+      const current = this.requireProject();
+      if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its repository; it is ${current.lifecycle}`);
+      if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
+      const reference = normalizeRemoteRepositoryUrl(repositoryReference);
+      if (reference === current.repositoryReference) return current;
+      this.ctx.storage.sql.exec('UPDATE project SET remote_head=NULL,remote_checked_at=NULL,remote_behind=NULL');
+      this.ctx.storage.sql.exec('UPDATE workspaces SET remote_head=NULL,remote_checked_at=NULL,remote_behind=NULL');
+      this.ctx.storage.sql.exec('UPDATE project SET repository_reference=?,revision=revision+1,updated_at=?', reference, new Date().toISOString());
       return this.requireProject();
     });
   }

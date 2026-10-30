@@ -18,7 +18,7 @@ import { z } from 'zod';
 import type { CreditLedgerRecord } from './credit-ledger.js';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
 import { defaultReleaseReader } from './default-release.js';
-import { DEFAULT_ACCOUNT_POINTER, resolveDefaultRelease } from '@gitspace/protocol/default-release';
+import { resolveDefaultRelease } from '@gitspace/protocol/default-release';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
 
@@ -373,20 +373,20 @@ export interface Candidate {
   /** RELEASES key: a worker manifest, or a LEGACY single bundle. */
   workerKey: string;
   metadata: WorkerReleaseMetadata;
-  /** Inference capability a default release advertises; tenant-built releases record theirs in the account. */
-  inferenceVersion?: 1;
 }
 
 /** What a swap reads from and records in the tenant's deployment object, which is also the object running it. */
 export type DeploymentRecords = Pick<TenantDeploymentsDO, 'tenantConfig' | 'providerToken' | 'recordDeploy'>;
 
+/** The release an unhealthy swap falls back to: the one that was running. */
 async function loadFallback(env: Env, state: TenantDeploymentState, exclude: string): Promise<Candidate | null> {
   const active: TenantDeployRecord | null = state.active && state.active.sha !== exclude ? state.active : null;
-  if (active && await env.RELEASES.head(active.workerKey)) return { sha: active.sha, workerKey: active.workerKey, metadata: active.metadata };
-  return loadChannel(env);
+  return active && await env.RELEASES.head(active.workerKey) ? { sha: active.sha, workerKey: active.workerKey, metadata: active.metadata } : null;
 }
 
-/** The current default release; resolving it verifies its worker manifest (or LEGACY bundle) against the default manifest. */
+/** The release a new tenant starts on: the current published default, with its pin as `DEFAULT_ACCOUNT_RELEASE`, which
+ * the account takes once as its default release (by reference, from the channel). Resolving it verifies its worker
+ * manifest (or LEGACY bundle) against the default manifest. */
 async function loadChannel(env: Env): Promise<Candidate | null> {
   try {
     const { release: manifest, pin } = await resolveDefaultRelease(defaultReleaseReader(env.RELEASES));
@@ -394,7 +394,7 @@ async function loadChannel(env: Env): Promise<Candidate | null> {
       ...manifest.worker.metadata,
       resources: [...manifest.worker.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'), { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: pin }],
     });
-    return { sha: manifest.worker.version, workerKey: 'manifest' in manifest.worker ? manifest.worker.manifest.key : manifest.worker.bundle.key, metadata, ...(manifest.inferenceVersion ? { inferenceVersion: manifest.inferenceVersion } : {}) };
+    return { sha: manifest.worker.version, workerKey: 'manifest' in manifest.worker ? manifest.worker.manifest.key : manifest.worker.bundle.key, metadata };
   } catch { return null; }
 }
 
@@ -403,21 +403,6 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
   const expectedSha = candidate.sha;
   const tenantConfig = await records.tenantConfig();
   if (!tenantConfig) return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
-  const candidatePin = candidate.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-  const defaultPin = candidatePin ?? state.active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-  try {
-    if (defaultPin && (defaultPin.source !== 'literal' || defaultPin.value === undefined)) throw new Error('Invalid tenant default release pin');
-    const reader = defaultReleaseReader(env.RELEASES);
-    if (defaultPin || await reader.get(DEFAULT_ACCOUNT_POINTER)) {
-      const { pin } = await resolveDefaultRelease(reader, defaultPin?.source === 'literal' ? defaultPin.value : undefined);
-      candidate = { ...candidate, metadata: { ...candidate.metadata, resources: [
-        ...candidate.metadata.resources.filter(resource => resource.name !== 'DEFAULT_ACCOUNT_RELEASE'),
-        { name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: pin },
-      ] } };
-    }
-  } catch (error) {
-    return { status: 'error', error: { status: 409, code: 'DEFAULT_RELEASE_UNAVAILABLE', message: error instanceof Error ? error.message : 'Default release unavailable' } };
-  }
   const delta = migrationDelta(candidate.metadata.migrations, state.appliedMigrationTag);
   const accountKey = Uint8Array.from(atob(tenantConfig.rootPublicKey), character => character.charCodeAt(0));
   const accountHash = new Uint8Array(await crypto.subtle.digest('SHA-256', accountKey));
@@ -479,13 +464,12 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
   return { status: 'ok', value: { sha: candidate.sha, healthy: false, revertedTo, appliedMigrationTag } };
 }
 
-/** One swap the tenant's deployment object runs under its lease: a staged tenant release, a revert, or the channel a
- * new tenant starts on. */
+/** One swap the tenant's deployment object runs under its lease: a staged tenant release, a revert to the previous
+ * release, or the published default a new tenant starts on. */
 export type DeployWork =
   | { kind: 'release'; candidate: Candidate }
   | { kind: 'revert'; request: Omit<PlatformRevertRequest, 'operationId'> }
   | { kind: 'bootstrap' };
-
 /**
  * Runs `work` for the tenant. Called by its deployment object, which holds the lease for the whole call, so the swap
  * and its metering finish whether or not the request that asked for it is still connected. A tenant release and a
@@ -499,7 +483,7 @@ export async function runDeployWork(env: Env, tenant: string, records: Deploymen
   }
   const result = work.kind === 'release'
     ? await swap(env, tenant, records, state, work.candidate, true)
-    : await revertSwap(env, tenant, records, state, work.request);
+    : await revertSwap(env, tenant, records, state);
   // Metering never turns a swap that happened into a failure.
   if (result.status === 'ok') {
     await meterDeploy(env, tenant, result.value.sha).catch((error: unknown) => console.error(JSON.stringify({ event: 'deploy-metering-failed', tenant, message: error instanceof Error ? error.message : String(error) })));
@@ -577,27 +561,9 @@ export async function deployTenantWorker(env: Env, tenant: string, request: Plat
   return env.DEPLOYMENTS.getByName(tenant).deploy(tenant, { kind: 'release', candidate: { sha: request.sha, workerKey: staged.value, metadata: request.metadata } }, null);
 }
 
-/** Restores the previous healthy release or the current default, refusing one without the requested inference support. */
-async function revertSwap(env: Env, tenant: string, records: DeploymentRecords, state: TenantDeploymentState, request: Omit<PlatformRevertRequest, 'operationId'>): Promise<DeployResult> {
-  let candidate: Candidate | null = null;
-  if (request.to === 'previous') {
-    const previous = state.previous;
-    if (previous && await env.RELEASES.head(previous.workerKey)) candidate = { sha: previous.sha, workerKey: previous.workerKey, metadata: previous.metadata };
-  } else {
-    candidate = await loadChannel(env);
-  }
-  if (!candidate) {
-    return {
-      status: 'error',
-      error: {
-        status: 409,
-        code: request.to === 'previous' ? 'NO_PREVIOUS_RELEASE' : 'CHANNEL_UNAVAILABLE',
-        message: request.to === 'previous' ? 'No earlier healthy release to restore' : 'Channel release is not published to RELEASES',
-      },
-    };
-  }
-  if (request.inferenceVersion !== undefined && candidate.inferenceVersion !== request.inferenceVersion) {
-    return { status: 'error', error: { status: 409, code: 'RELEASE_INCOMPATIBLE', message: `Release ${candidate.sha} does not advertise inferenceVersion ${request.inferenceVersion}` } };
-  }
-  return swap(env, tenant, records, state, candidate, false);
+/** Restores the previous healthy release. */
+async function revertSwap(env: Env, tenant: string, records: DeploymentRecords, state: TenantDeploymentState): Promise<DeployResult> {
+  const previous = state.previous;
+  if (!previous || !await env.RELEASES.head(previous.workerKey)) return { status: 'error', error: { status: 409, code: 'NO_PREVIOUS_RELEASE', message: 'No earlier healthy release to restore' } };
+  return swap(env, tenant, records, state, { sha: previous.sha, workerKey: previous.workerKey, metadata: previous.metadata }, false);
 }

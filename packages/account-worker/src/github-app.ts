@@ -5,7 +5,8 @@ import {
   type GitHubAppManifestForm, type GitHubAppOwner, type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
 } from '@gitspace/protocol/github';
 import { accountAccessResponse, activeAccount } from './account-access.js';
-import { AutomationEventSchema, automationEvent, type AutomationEvent } from './automation-events.js';
+import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
+import type { AutomationWatchOn } from '@gitspace/protocol/automations-contract';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
@@ -27,10 +28,11 @@ const REPOSITORY_PAGES = 100;
 /** GitHub caps webhook payloads at 25 MB. */
 const WEBHOOK_MAX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_PERMISSIONS: Record<string, 'read' | 'write'> = {
-  metadata: 'read', contents: 'write', workflows: 'write', pull_requests: 'write', issues: 'write', checks: 'write', statuses: 'write',
+  metadata: 'read', contents: 'write', workflows: 'write', pull_requests: 'write', issues: 'write', checks: 'write', statuses: 'write', deployments: 'read',
 };
-/** Installation events reach every App without subscribing, so they are not listed. */
-const DEFAULT_EVENTS = ['pull_request', 'pull_request_review', 'issue_comment', 'pull_request_review_comment', 'issues', 'push', 'check_suite'];
+/** Installation events reach every App without subscribing, so they are not listed. `release` and `deployment_status`
+ * reach watch automations (docs/AUTOMATIONS-DESIGN.md §4a). */
+const DEFAULT_EVENTS = ['pull_request', 'pull_request_review', 'issue_comment', 'pull_request_review_comment', 'issues', 'push', 'check_suite', 'release', 'deployment_status'];
 /** GitHub remotes as projects record them: https, scp-style SSH and ssh:// URLs, with or without `.git`. */
 
 const GitHubAccountPayloadSchema = z.object({ login: GitHubLoginSchema, type: z.string() });
@@ -497,6 +499,59 @@ export class GitHubAppDO extends BudgetedDurableObject {
     return paths;
   }
 
+  /**
+   * What a watched repository published lately, newest first (docs/AUTOMATIONS-DESIGN.md §4a): its releases, its tags,
+   * or its deployments with each one's latest status. Read with a token of the installation covering it, else of any of
+   * the account's installations (which reads any public repository), else anonymously.
+   */
+  async watchedItems(repository: string, on: AutomationWatchOn): Promise<WatchedItem[]> {
+    const token = await this.readToken(repository);
+    const user = z.object({ login: z.string() }).nullish();
+    switch (on) {
+      case 'release': {
+        const releases = await githubRequest(`/repos/${repository}/releases?per_page=30`, { token, schema: z.array(z.object({ tag_name: z.string(), name: z.string().nullish(), html_url: z.string(), body: z.string().nullish(), published_at: z.string().nullish(), prerelease: z.boolean(), draft: z.boolean(), author: user })) });
+        return releases.filter(release => !release.draft).map(release => ({
+          on: 'release', tag: release.tag_name, name: release.name ?? release.tag_name, url: release.html_url, notes: release.body ?? '',
+          publishedAt: release.published_at ?? '', prerelease: release.prerelease, author: release.author?.login ?? null,
+        }));
+      }
+      case 'tag': {
+        const tags = await githubRequest(`/repos/${repository}/tags?per_page=100`, { token, schema: z.array(z.object({ name: z.string(), commit: z.object({ sha: z.string() }) })) });
+        return tags.map(tag => ({ on: 'tag', name: tag.name, commit: tag.commit.sha, url: `https://github.com/${repository}/releases/tag/${encodeURIComponent(tag.name)}` }));
+      }
+      case 'deployment': {
+        const deployments = await githubRequest(`/repos/${repository}/deployments?per_page=20`, { token, schema: z.array(z.object({ id: z.number().int(), environment: z.string(), sha: z.string(), ref: z.string(), url: z.string(), creator: user })) });
+        const items: WatchedItem[] = [];
+        for (const deployment of deployments) {
+          const [latest] = await githubRequest(`/repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`, { token, schema: z.array(z.object({ state: z.string(), environment_url: z.string().nullish(), target_url: z.string().nullish() })) });
+          if (latest) items.push({ on: 'deployment', id: deployment.id, environment: deployment.environment, state: latest.state, sha: deployment.sha, ref: deployment.ref, url: latest.environment_url ?? latest.target_url ?? deployment.url, creator: deployment.creator?.login ?? null });
+        }
+        return items;
+      }
+    }
+  }
+
+  /** The repository a fork was made from, or null for one that is not a fork. */
+  async upstreamOf(repository: string): Promise<string | null> {
+    const found = await githubRequest(`/repos/${repository}`, { token: await this.readToken(repository), schema: z.object({ fork: z.boolean(), parent: z.object({ full_name: z.string() }).optional() }) });
+    return found.fork && found.parent ? found.parent.full_name : null;
+  }
+
+  /** A token that reads `repository`: the covering installation's, else any installation's (any public repository),
+   * else none (anonymous, under GitHub's limit per address). */
+  private async readToken(repository: string): Promise<string | undefined> {
+    if (this.coverage(repository) !== null) return (await this.installationToken(repository, { metadata: 'read', contents: 'read' })).token;
+    const installationId = this.ctx.storage.sql.exec<{ id: number }>('SELECT id FROM installations ORDER BY installed_at, id LIMIT 1').toArray()[0]?.id;
+    if (installationId === undefined || !this.app()) return undefined;
+    const key = `${installationId}:*`;
+    const held = this.issued.get(key);
+    if (held && Date.parse(held.expiresAt) - Date.now() > TOKEN_REUSE_MARGIN_MS) return held.token;
+    const jwt = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
+    const issued = await githubRequest(`/app/installations/${installationId}/access_tokens`, { method: 'POST', token: jwt, body: { permissions: { metadata: 'read' } }, schema: z.object({ token: z.string().min(1), expires_at: z.string().datetime() }) });
+    this.issued.set(key, { token: issued.token, expiresAt: issued.expires_at });
+    return issued.token;
+  }
+
   /** The repository's recorded deliveries as automations read them, newest first: Test with a past event replays them. */
   recordedEvents(repository: string, limit: number): AutomationEvent[] {
     return this.ctx.storage.sql.exec<DeliveryRow>('SELECT * FROM deliveries WHERE event_json IS NOT NULL AND lower(repository) = lower(?) ORDER BY received_at DESC, rowid DESC LIMIT ?', repository, limit).toArray()
@@ -580,14 +635,17 @@ export class GitHubAppDO extends BudgetedDurableObject {
   }
 
   /** An event automations start on is kept trimmed (Test with a past event replays it) and sent to the automations of
-   * every project whose remote is its repository (several may share one). Null for other events. */
+   * every project whose remote is its repository (several may share one); a release, tag or deployment goes to every
+   * project, whose watches may name any repository. Null for other events. */
   private async routeToAutomations(event: string, deliveryId: string, raw: unknown): Promise<string | null> {
     const app = this.app();
     const normalized = automationEvent({ event, deliveryId, payload: raw, slug: app?.slug ?? null, receivedAt: Date.now() });
     if (!normalized) return null;
     this.ctx.storage.sql.exec('UPDATE deliveries SET event_json = ? WHERE id = ?', JSON.stringify(normalized), deliveryId);
     const repository = normalized.repository.toLowerCase();
-    const projects = (await this.repositoryProjects()).filter((project) => project.repository === repository);
+    const projects = normalized.watchKey !== null
+      ? (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list()).filter((project) => project.lifecycle !== 'deleting').map((project) => ({ id: project.id }))
+      : (await this.repositoryProjects()).filter((project) => project.repository === repository);
     const bot = app ? `@${app.slug}` : null;
     const results = await Promise.allSettled(projects.map((project) =>
       this.env.PROJECT_AUTOMATIONS.getByName(`${this.env.ACCOUNT_ID}:${project.id}`).receive({ projectId: project.id, event: normalized, bot })));

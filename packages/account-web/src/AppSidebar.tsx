@@ -58,10 +58,12 @@ export interface SidebarDeploymentProps {
   isGitSpaceProject: boolean;
   /** Launch every target from the workspace, or from the project's base space by its project id. */
   onLaunch(workspaceId: string): void | Promise<void>;
-  /** Check the canonical branch head, then launch every target from that commit. */
-  onLaunchCanonical(): void | Promise<void>;
-  /** Point the account back at the channel build. */
-  onRevert(): void | Promise<void>;
+  /** The GitSpace project's base branch, which Launch reads from its repository. */
+  branch: string;
+  /** Read the head of the GitSpace project's branch, then launch every target from that commit. */
+  onLaunchBranch(): void | Promise<void>;
+  /** Every target returns to the default release. */
+  onBackToDefault(): void | Promise<void>;
 }
 
 export interface SidebarSpaceSummary {
@@ -195,8 +197,8 @@ function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releas
       {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
       {canDelete ? <MenuItem index={index++} icon={DeleteGlyph} label="Delete workspace" onSelect={() => void onDelete?.(space.id)} /> : null}
       {launchable && deployment ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch GitSpace from here" disabled={launching} onSelect={() => void deployment.onLaunch(space.id)} /> : null}
-      {kind === 'project' && deployment?.isGitSpaceProject ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch canonical develop" disabled={launching} onSelect={() => void deployment.onLaunchCanonical()} /> : null}
-      {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={index++} icon={ReopenGlyph} label="Back to stable" disabled={launching} onSelect={() => void deployment.onRevert()} /> : null}
+      {kind === 'project' && deployment?.isGitSpaceProject ? <MenuItem index={index++} icon={LaunchGlyph} label={`Launch ${deployment.branch}`} disabled={launching} onSelect={() => void deployment.onLaunchBranch()} /> : null}
+      {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={index++} icon={ReopenGlyph} label="Back to default" disabled={launching} onSelect={() => void deployment.onBackToDefault()} /> : null}
     </DropdownContent>
   </DropdownMenu>;
 }

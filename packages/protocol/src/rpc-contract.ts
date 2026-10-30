@@ -653,7 +653,28 @@ export const setProjectBaseBranchContract = gitspaceRpc
   .output(ProjectLifecycleViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** Point the project at another repository address (a fork, a moved repository); workspaces keep their branches. */
+export const setProjectRepositoryContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, expectedRevision: wire.number, repositoryUrl: wire.string }))
+  .output(ProjectLifecycleViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 
+const OriginCheckIntervalWireCodec = wire.enum(['daily', 'every-6-hours', 'hourly', 'manual']);
+/** Check the origin: how often GitSpace reads the project's origin on its own (daily unless the project chooses). */
+export const projectOriginCheckContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string }))
+  .output(wire.object({ interval: OriginCheckIntervalWireCodec }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+export const setProjectOriginCheckContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, interval: OriginCheckIntervalWireCodec }))
+  .output(wire.object({ interval: OriginCheckIntervalWireCodec }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 /** Read the project's base branch and its workspaces' branches on the origin now, as a push webhook would report them. */
 export const refreshProjectRemoteContract = gitspaceRpc
   .procedure()
@@ -2085,10 +2106,12 @@ export const OmpReleaseMetadataWireCodec = wire.object({
 export const ReleaseSourceWireCodec = wire.union([
   wire.object({ kind: wire.literal('workspace'), workspaceId: wire.string, commit: wire.string, uncommittedFiles: wire.nullable(wire.number) }),
   wire.object({ kind: wire.literal('canonical'), repository: wire.string, branch: wire.nullable(wire.string), commit: wire.string }),
+  wire.object({ kind: wire.literal('release'), tag: wire.nullable(wire.string), pin: wire.string }),
 ]);
 export const LaunchSourceWireCodec = wire.union([
   wire.object({ kind: wire.literal('workspace'), workspaceId: wire.string }),
-  wire.object({ kind: wire.literal('canonical'), commit: wire.string }),
+  wire.object({ kind: wire.literal('canonical'), repository: wire.string, branch: wire.string, commit: wire.string }),
+  wire.object({ kind: wire.literal('release'), sha: wire.string }),
 ]);
 export type LaunchSourceView = InputOf<typeof LaunchSourceWireCodec>;
 export const CanonicalHeadWireCodec = wire.object({ repository: wire.string, branch: wire.string, commit: wire.string, checkedAt: wire.string });
@@ -2105,7 +2128,8 @@ export const ReleaseRecordWireCodec = wire.object({
   error: wire.nullable(wire.string),
   machineErrors: wire.optional(wire.record(wire.string)),
 });
-/** The account's latest launch, as the building machine reported it; phases also arrive as `deployment` fact events. */
+/** The account's latest launch, as the building machine (or, for a release it holds, the account) reported it; phases
+ * also arrive as `deployment` fact events. */
 export const LaunchProgressWireCodec = wire.object({
   launchId: wire.string,
   source: LaunchSourceWireCodec,
@@ -2119,17 +2143,10 @@ export const LaunchProgressWireCodec = wire.object({
   updatedAt: wire.string,
 });
 export type LaunchProgressView = InputOf<typeof LaunchProgressWireCodec>;
-/** The account's latest Back to stable; the account runs it to its end whether or not a browser follows it. */
-export const RevertProgressWireCodec = wire.object({
-  revertId: wire.string,
-  status: wire.enum(['running', 'succeeded', 'failed']),
-  error: wire.nullable(wire.string),
-  startedAt: wire.string,
-  updatedAt: wire.string,
-});
-export type RevertProgressView = InputOf<typeof RevertProgressWireCodec>;
 export const DeploymentStatusWireCodec = wire.object({
   desired: wire.object({ worker: wire.nullable(wire.string), machine: wire.nullable(wire.string), frontend: wire.nullable(wire.string), updatedAt: wire.string }),
+  /** The release the GitSpace project runs; a target with no selection follows it. */
+  defaultRelease: wire.nullable(wire.string),
   current: wire.object({
     worker: wire.object({ sha: wire.nullable(wire.string), version: wire.nullable(wire.string) }),
     platformWorker: wire.optional(wire.object({ sha: wire.nullable(wire.string), version: wire.nullable(wire.string) })),
@@ -2143,7 +2160,6 @@ export const DeploymentStatusWireCodec = wire.object({
   }))),
   launch: wire.nullable(LaunchProgressWireCodec),
   canonical: wire.nullable(CanonicalHeadWireCodec),
-  revert: wire.nullable(RevertProgressWireCodec),
 });
 export type DeploymentStatusView = InputOf<typeof DeploymentStatusWireCodec>;
 export const deploymentStatusContract = gitspaceRpc
@@ -2152,14 +2168,14 @@ export const deploymentStatusContract = gitspaceRpc
   .output(DeploymentStatusWireCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
-/** Build a workspace checkout, or a clean commit of the canonical repository, into a release on `machineId`, an online enrolled machine; returns at once, progress streams as `deployment` fact events and `deployment.status.launch`. */
+/** Build a workspace checkout, or a commit of the GitSpace project's repository and branch, into a release on `machineId`, an online enrolled machine; returns at once, progress streams as `deployment` fact events and `deployment.status.launch`. */
 export const deploymentLaunchContract = gitspaceRpc
   .procedure()
   .input(wire.object({ source: LaunchSourceWireCodec, machineId: wire.string, targets: wire.array(ReleaseTargetWireCodec) }))
   .output(LaunchProgressWireCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
-/** Read the canonical branch head from the canonical repository now and store it; status serves the stored head. */
+/** Read the head of the GitSpace project's base branch from its repository now and store it; status serves the stored head. */
 export const deploymentCheckCanonicalContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
@@ -2174,12 +2190,20 @@ export const deploymentDiscardLaunchContract = gitspaceRpc
   .output(DeploymentStatusWireCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
-/** Start Back to stable and return at once with `revert` running: the account swaps the Worker to the default release
- * through the platform and, only when that swap succeeded, returns every selection to the channel. The outcome is
- * `deployment.status.revert`. */
-export const deploymentRevertContract = gitspaceRpc
+/** Back to default: every target returns to the default release, applied by the account with no machine. Returns at
+ * once; the outcome is `deployment.status.launch`. */
+export const deploymentBackToDefaultContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
+  .output(DeploymentStatusWireCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+/** Launch the published GitSpace release `tag` to every target by reference: nothing is built; the account records it
+ * from the channel and the platform swaps the Worker. Once its Worker runs it is the default release. Returns at once;
+ * the outcome is `deployment.status.launch`. */
+export const deploymentLaunchPublishedContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ tag: wire.string }))
   .output(DeploymentStatusWireCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
@@ -2292,7 +2316,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     models: listAvailableModelsContract,
   },
   devices: { list: listDevicesContract, revoke: revokeDeviceContract },
-  deployment: { status: deploymentStatusContract, launch: deploymentLaunchContract, checkCanonical: deploymentCheckCanonicalContract, discardLaunch: deploymentDiscardLaunchContract, revert: deploymentRevertContract },
+  deployment: { status: deploymentStatusContract, launch: deploymentLaunchContract, checkCanonical: deploymentCheckCanonicalContract, discardLaunch: deploymentDiscardLaunchContract, backToDefault: deploymentBackToDefaultContract, launchPublished: deploymentLaunchPublishedContract },
   secrets: {
     list: listProjectSecretsContract,
     put: putProjectSecretContract,
@@ -2431,8 +2455,9 @@ export const gitspaceContract = gitspaceRpc.contract({
     archive: archiveProjectContract,
     restore: restoreProjectContract,
     setBaseBranch: setProjectBaseBranchContract,
+    setRepository: setProjectRepositoryContract,
     updateBase: updateProjectBaseContract,
-    remote: { refresh: refreshProjectRemoteContract },
+    remote: { refresh: refreshProjectRemoteContract, checkInterval: projectOriginCheckContract, setCheckInterval: setProjectOriginCheckContract },
     delete: deleteProjectContract,
   },
   space: {

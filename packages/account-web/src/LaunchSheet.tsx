@@ -46,9 +46,10 @@ export function LaunchMachineDialog({ projectId, workspaceId, machines, onClose,
   </Dialog>;
 }
 
-/** A canonical commit builds in a fresh checkout, so any online account machine can build it; no workspace is attached. */
-export function CanonicalLaunchDialog({ commit, machines, onClose, onLaunch }: {
-  commit: string;
+/** A commit of the GitSpace project's branch builds in a fresh checkout, so any online account machine can build it; no
+ * workspace is attached. */
+export function CanonicalLaunchDialog({ canonical, machines, onClose, onLaunch }: {
+  canonical: { repository: string; branch: string; commit: string };
   machines: InspectorView['machines'];
   onClose(): void;
   onLaunch(machineId: string): Promise<void>;
@@ -59,7 +60,7 @@ export function CanonicalLaunchDialog({ commit, machines, onClose, onLaunch }: {
   const [error, setError] = useState<string | null>(null);
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose(); }}>
     <DialogContent size="sm">
-      <DialogHeader><DialogTitle>Launch develop @ {shortSha(commit)}</DialogTitle><DialogDescription>The machine fetches this commit of github.com/inKibra/gitspace.sh into a clean checkout, builds it, and records the release under the commit.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Launch {canonical.branch} @ {shortSha(canonical.commit)}</DialogTitle><DialogDescription>The machine fetches this commit of {canonical.repository} into a clean checkout, builds it, and records the release under the commit. Launched to every target, it becomes this account's default release.</DialogDescription></DialogHeader>
       <label className="flex flex-col gap-2 text-caption">Build machine<select aria-label="Build machine" className="min-h-10 rounded-md bg-surface-3 px-3 text-body" value={machineId} disabled={busy} onChange={event => setMachineId(event.target.value)}>
         <option value="">Choose a machine</option>
         {online.map(machine => <option key={machine.id} value={machine.id}>{machine.label}</option>)}
@@ -70,7 +71,7 @@ export function CanonicalLaunchDialog({ commit, machines, onClose, onLaunch }: {
         <Button variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
         <Button variant="primary" disabled={busy || !machineId} onClick={() => void (async () => {
           setBusy(true); setError(null);
-          try { await onLaunch(machineId); } catch (cause) { setError(rpcErrorMessage(cause, 'Launch develop')); } finally { setBusy(false); }
+          try { await onLaunch(machineId); } catch (cause) { setError(rpcErrorMessage(cause, `Launch ${canonical.branch}`)); } finally { setBusy(false); }
         })()}>Launch</Button>
       </DialogFooter>
     </DialogContent>
@@ -204,29 +205,6 @@ export function LaunchSheet({ launch, open, onOpenChange, onRetry, onDiscard }: 
   </Elevated>;
 }
 
-/** This page's view of the account's Back to stable while it runs, or how it failed. */
-export interface RevertProgress {
-  status: 'running' | 'failed';
-  error: string | null;
-}
-
-export function RevertSheet({ progress, open, onOpenChange, onRetry }: { progress: RevertProgress; open: boolean; onOpenChange(open: boolean): void; onRetry(): void | Promise<void> }) {
-  const shape = useShape();
-  if (!open) return null;
-  const failed = progress.status === 'failed';
-  return <Elevated offset={4} role="dialog" aria-label="Back to stable progress" className={`${shape.container} fixed bottom-4 left-4 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-3 p-4`}>
-    <header className="flex items-start gap-2">
-      <span className="min-w-0 flex-1 text-body font-semibold text-foreground">{failed ? 'Back to stable failed' : 'Going back to stable'}</span>
-      <Button variant="ghost" size="icon-compact" aria-label="Close revert progress" onClick={() => onOpenChange(false)}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
-    </header>
-    {failed ? <p role="alert" className="text-caption text-destructive">{progress.error}</p> : <span className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color="blue" pulse />Swapping the worker to the stable build</span>}
-    {failed ? <footer className="flex justify-end gap-2">
-      <Button variant="ghost" size="compact" onClick={() => onOpenChange(false)}>Close</Button>
-      <Button variant="primary" size="compact" onClick={() => void onRetry()}>Retry</Button>
-    </footer> : null}
-  </Elevated>;
-}
-
 export const LAUNCHED_STORAGE_KEY = 'gitspace.launched';
 /** How long after the reload the `Now running` strip is still worth showing. */
 export const LAUNCHED_BANNER_MAX_AGE_MS = 60_000;
@@ -249,13 +227,13 @@ export function readLaunchedMark(storage: Pick<Storage, 'getItem' | 'removeItem'
 }
 
 /** Post-reload strip at the top of the agent canvas: what this page now runs, and the way back. */
-export function LaunchedBanner({ mark, onRevert, onDismiss }: { mark: LaunchedMark; onRevert(): void | Promise<void>; onDismiss(): void }) {
+export function LaunchedBanner({ mark, onBackToDefault, onDismiss }: { mark: LaunchedMark; onBackToDefault(): void | Promise<void>; onDismiss(): void }) {
   const shape = useShape();
   return <Elevated offset={2} role="status" className={`${shape.container} flex items-center gap-2 px-3 py-2 text-caption`}>
     <span className="text-muted-foreground"><Rocket02 width={14} height={14} strokeWidth={1.5} /></span>
     <span className="text-foreground">Now running <strong>{mark.label}</strong></span>
     <span className="text-muted-foreground">·</span>
-    <Button variant="ghost" size="compact" onClick={() => { void onRevert(); }}>Back to stable</Button>
+    <Button variant="ghost" size="compact" onClick={() => { void onBackToDefault(); }}>Back to default</Button>
     <Button variant="ghost" size="icon-compact" aria-label="Dismiss" onClick={onDismiss}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
   </Elevated>;
 }

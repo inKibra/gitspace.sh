@@ -1,4 +1,4 @@
-import { createExecutionContext, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, runInDurableObject } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { env } from 'cloudflare:workers';
 import { createRelayAuthorization } from '@gitspace/protocol/relay';
@@ -128,8 +128,8 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
   };
 }
 
-/** Publishes a default release; `legacy` publishes its worker the way defaults were published before module releases. */
-async function publishDefault(commit: string, tags: string[], { legacy = false, inferenceVersion }: { legacy?: boolean; inferenceVersion?: 1 } = {}) {
+/** Publishes a default release to RELEASES and points the default pointer at it. */
+async function publishDefault(commit: string, tags: string[]) {
   const prefix = `defaults/releases/${commit}/`;
   async function object(name: string, content: string | Uint8Array<ArrayBuffer>) {
     const key = prefix + name;
@@ -137,13 +137,11 @@ async function publishDefault(commit: string, tags: string[], { legacy = false, 
     return { key, size: typeof content === 'string' ? new TextEncoder().encode(content).byteLength : content.byteLength, sha256: (await sha256(content)).slice(7) };
   }
   for (const module of releaseModules(commit)) await object(`worker/${module.name}`, module.content);
-  const worker = legacy
-    ? { bundle: await object('worker.bundle.json', await legacyBundle(commit)) }
-    : { manifest: await object('worker.manifest.json', JSON.stringify(createWorkerManifest('worker.mjs', releaseModules(commit)))) };
+  const worker = { manifest: await object('worker.manifest.json', JSON.stringify(createWorkerManifest('worker.mjs', releaseModules(commit)))) };
   const frontend = await object('frontend/index.html', `<html>${commit}</html>`);
   const provenance = await object('image-provenance.json', JSON.stringify({ commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` }));
   const manifest = await object('manifest.json', JSON.stringify({
-    schemaVersion: 1, commit, ...(inferenceVersion ? { inferenceVersion } : {}),
+    schemaVersion: 1, commit,
     worker: { commit, version: commit, ...worker, metadata: metadata(tags) },
     frontend: { commit, files: [{ ...frontend, path: 'index.html', contentType: 'text/html' }] },
     image: { commit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance },
@@ -151,24 +149,6 @@ async function publishDefault(commit: string, tags: string[], { legacy = false, 
   await env.RELEASES.put(DEFAULT_ACCOUNT_POINTER, JSON.stringify({ schemaVersion: 1, current: manifest, previous: null }));
   return `${commit}:${manifest.sha256}`;
 }
-
-it('serves immutable default UI by explicit hash-anchored pin and rejects missing or corrupt assets', async () => {
-  const commit = 'f'.repeat(40);
-  const pin = await publishDefault(commit, ['v1']);
-  await publishDefault('e'.repeat(40), ['v1']);
-  async function get(path: string, method = 'GET') {
-    const ctx = createExecutionContext();
-    const response = await worker.fetch(new Request(`https://platform.test/v1/default-releases/${pin}/frontend/${path}`, { method }), testEnv, ctx);
-    await waitOnExecutionContext(ctx);
-    return response;
-  }
-  expect(await (await get('')).text()).toBe(`<html>${commit}</html>`);
-  expect((await get('', 'HEAD')).status).toBe(200);
-  expect(await (await get('', 'HEAD')).text()).toBe('');
-  expect((await get('missing.js')).status).toBe(404);
-  await env.RELEASES.put(`defaults/releases/${commit}/frontend/index.html`, 'corrupt');
-  expect((await get('')).status).toBe(503);
-});
 
 async function adminPost(tenant: string, body?: unknown): Promise<Response> {
   const path = `/__platform/admin/tenants/${tenant}/token`;
@@ -370,21 +350,6 @@ describe('tenant deployment token', () => {
 });
 
 describe('POST /__platform/tenants/:tenant/deploy', () => {
-  it('next deploy records a hash-anchored default pin for a pre-pin tenant', async () => {
-    const token = await mintToken('pre-pin-deploy');
-    await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
-    await deploy('pre-pin-deploy', token, 'old', ['v1']);
-    const commit = 'd'.repeat(40);
-    await publishDefault(commit, ['v1']);
-    const manifest = await env.RELEASES.get(`defaults/releases/${commit}/manifest.json`);
-    if (!manifest) throw new Error('Fixture manifest missing');
-    const digest = (await sha256(await manifest.text())).slice(7);
-    await deploy('pre-pin-deploy', token, 'next', ['v1']);
-    const active = (await env.DEPLOYMENTS.getByName('pre-pin-deploy').getState()).active;
-    expect(active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE')).toEqual({
-      name: 'DEFAULT_ACCOUNT_RELEASE', source: 'literal', value: `${commit}:${digest}`,
-    });
-  });
   it('binds distinct account roots to isolated namespaces across releases', async () => {
     const first = await mintToken('artifacts-first');
     const otherRoot = ed25519.keygen().publicKey;
@@ -577,81 +542,16 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     ]);
   });
 
-  it.each([['module', false], ['legacy bundle', true]])('falls back to a channel published as a %s when a first deploy is unhealthy', async (_format, legacy) => {
-    const commit = 'a'.repeat(40);
-    await publishDefault(commit, ['v1'], { legacy });
-    const tenant = `golf-${legacy ? 'legacy' : 'modules'}`;
-    const token = await mintToken(tenant);
-    const result = await deploy(tenant, token, 'unhealthy', ['v1'], 'nope');
-    expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: commit, appliedMigrationTag: 'v1' });
-    expect(uploads[1]).toMatchObject({ module: bundleSource(commit), wasm: WASM, metadata: { tags: [tenant, commit] } });
-    const fallback = (await env.DEPLOYMENTS.getByName(tenant).getState()).active;
-    expect(fallback?.workerKey).toBe(`defaults/releases/${commit}/${legacy ? 'worker.bundle.json' : 'worker.manifest.json'}`);
+  it('reports an unhealthy first deploy with nothing to restore, never falling back to the published default', async () => {
+    await publishDefault('a'.repeat(40), ['v1']);
+    const token = await mintToken('golf');
+    const result = await deploy('golf', token, 'unhealthy', ['v1'], 'nope');
+    expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(uploads).toHaveLength(1);
   });
 });
 
 describe('POST /__platform/tenants/:tenant/revert', () => {
-  it('refuses legacy split channel objects without a coherent default pointer', async () => {
-    await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
-    await env.RELEASES.put('channel/worker.bundle.json', await legacyBundle('channel:split'));
-    await env.RELEASES.put('channel/metadata.json', JSON.stringify(metadata(['v1'])));
-    const token = await mintToken('split-default');
-    const response = await tenantPost('split-default', 'revert', token, { to: 'channel' });
-    expect(response.status).toBe(409);
-    expect(uploads).toHaveLength(0);
-  });
-  it('reverts to the complete channel module graph and its metadata', async () => {
-    const commit = 'b'.repeat(40);
-    const expectedPin = await publishDefault(commit, ['v1', 'v2']);
-    const token = await mintToken('hotel', 'v2');
-    await deploy('hotel', token, 'h1', ['v1', 'v2']);
-    probeVersions.set(`${env.DISPATCH_NAMESPACE}-tenant-hotel`, ['h1']);
-
-    const response = await tenantPost('hotel', 'revert', token, { to: 'channel' });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v2' });
-
-    const upload = uploads[1]!;
-    expect(upload.module).toBe(bundleSource(commit));
-    expect(upload.metadata.tags).toEqual(['hotel', commit]);
-    expect(upload.metadata.migrations).toBeUndefined();
-    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-hotel`)).toBe(bundleSource(commit));
-    const state = await env.DEPLOYMENTS.getByName('hotel').getState();
-    expect(state.active?.sha).toBe(commit);
-    await publishDefault('e'.repeat(40), ['v1', 'v2']);
-    await deploy('hotel', token, 'hot-worker', ['v1', 'v2']);
-    const defaultImage = await env.DEPLOYMENTS.getByName('hotel').compute('hotel', `u-${'f'.repeat(32)}`, new Request('https://compute.internal/v1/images/default', { method: 'POST' }));
-    expect(defaultImage.status).toBe(200);
-    expect(await defaultImage.json()).toMatchObject({ value: { image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` } });
-    const pin = (await env.DEPLOYMENTS.getByName('hotel').getState()).active?.metadata.resources.find(resource => resource.name === 'DEFAULT_ACCOUNT_RELEASE');
-    expect(pin).toMatchObject({ source: 'literal', value: expectedPin });
-  });
-
-  it('restores the channel under an inference requirement only when the default advertises it', async () => {
-    const commit = '7'.repeat(40);
-    await publishDefault(commit, ['v1']);
-    const token = await mintToken('kilo');
-    await deploy('kilo', token, 'k1', ['v1']);
-
-    const refused = await tenantPost('kilo', 'revert', token, { to: 'channel', inferenceVersion: 1 });
-    expect(refused.status).toBe(409);
-    expect(await refused.json()).toMatchObject({ error: { code: 'RELEASE_INCOMPATIBLE' } });
-    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-kilo`)).toBe(bundleSource('k1'));
-
-    await publishDefault(commit, ['v1'], { inferenceVersion: 1 });
-    const restored = await tenantPost('kilo', 'revert', token, { to: 'channel', inferenceVersion: 1 });
-    expect(restored.status).toBe(200);
-    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-kilo`)).toBe(bundleSource(commit));
-  });
-
-  it('refuses a channel revert when the channel bundle is not published', async () => {
-    await env.RELEASES.delete(DEFAULT_ACCOUNT_POINTER);
-    const token = await mintToken('india');
-    const response = await tenantPost('india', 'revert', token, { to: 'channel' });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: 'CHANNEL_UNAVAILABLE' } });
-  });
-
   it('reverts to the previous healthy release from RELEASES', async () => {
     const token = await mintToken('juliet');
     await deploy('juliet', token, 'one', ['v1']);
@@ -666,14 +566,13 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
   });
 
   it('finishes a revert whose caller left mid-swap, keeps its outcome under the operation id, and frees the lease when it ends', async () => {
-    const commit = '5'.repeat(40);
-    await publishDefault(commit, ['v1']);
     const token = await mintToken('lima');
     await deploy('lima', token, 'l1', ['v1']);
+    await deploy('lima', token, 'l2', ['v1']);
     const operationId = crypto.randomUUID();
     const upload = holdNextUpload();
     // Nobody reads this answer: the caller is gone once the upload is under way.
-    void tenantPost('lima', 'revert', token, { to: 'channel', operationId });
+    void tenantPost('lima', 'revert', token, { to: 'previous', operationId });
     await upload.started;
 
     const concurrent = await tenantPost('lima', 'revert', token, { to: 'previous' });
@@ -684,21 +583,21 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     // Calls on one stub arrive in order: once this answers, the object holds the request above on the running swap.
     await deployments.getState();
     upload.release();
-    expect(await outcome).toEqual({ status: 'ok', value: { sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' } });
+    expect(await outcome).toEqual({ status: 'ok', value: { sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' } });
     const answered = await operationGet('lima', token, operationId);
     expect(answered.status).toBe(200);
-    expect(await answered.json()).toEqual({ sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
-    expect((await deployments.getState()).active?.sha).toBe(commit);
+    expect(await answered.json()).toEqual({ sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect((await deployments.getState()).active?.sha).toBe('l1');
 
     // The same id answers from the record and never swaps twice.
-    const repeated = await tenantPost('lima', 'revert', token, { to: 'channel', operationId });
-    expect(await repeated.json()).toEqual({ sha: commit, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
-    expect(uploads).toHaveLength(2);
+    const repeated = await tenantPost('lima', 'revert', token, { to: 'previous', operationId });
+    expect(await repeated.json()).toEqual({ sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(uploads).toHaveLength(3);
     expect((await operationGet('lima', token, crypto.randomUUID())).status).toBe(404);
 
     const next = await tenantPost('lima', 'revert', token, { to: 'previous' });
     expect(next.status).toBe(200);
-    expect(await next.json()).toMatchObject({ sha: 'l1', healthy: true });
+    expect(await next.json()).toMatchObject({ sha: 'l2', healthy: true });
   });
 
   it('reports a swap that ended with an earlier instance of the deployment object as interrupted', async () => {
@@ -732,25 +631,25 @@ describe('operator account-bound deployment', () => {
     expect((await post(a, 'deploy', aRequest)).status).toBe(200);
     const aState = await env.DEPLOYMENTS.getByName(a).getState();
     expect((await post(a, 'deploy', bRequest)).status).toBe(403);
-    expect((await post(a, 'revert', { accountId: bId, to: 'channel' })).status).toBe(403);
+    expect((await post(a, 'revert', { accountId: bId, to: 'previous' })).status).toBe(403);
     expect((await post(b, 'deploy', { ...bRequest, ...aBundle })).status).toBe(403);
     expect((await post(b, 'deploy', bRequest, 'not-operator')).status).toBe(401);
-    expect((await post(b, 'revert', { accountId: aId, to: 'channel' })).status).toBe(403);
+    expect((await post(b, 'revert', { accountId: aId, to: 'previous' })).status).toBe(403);
 
     await env.TENANT_CONTROL.getByName(a).set({ status: 'suspended', reason: 'operator hold' });
     expect((await post(a, 'deploy', aRequest)).status).toBe(423);
-    expect((await post(a, 'revert', { accountId: aId, to: 'channel' })).status).toBe(423);
+    expect((await post(a, 'revert', { accountId: aId, to: 'previous' })).status).toBe(423);
     expect((await post(b, 'deploy', bRequest)).status).toBe(200);
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('account-b'));
 
-    const commit = 'd'.repeat(40);
-    await publishDefault(commit, ['v1']);
-    expect((await post(b, 'revert', { accountId: bId, to: 'channel' })).status).toBe(200);
-    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource(commit));
+    const bNext = await stageRelease(b, 'account-b2');
+    expect((await post(b, 'deploy', { accountId: bId, sha: 'account-b2', ...bNext, metadata: metadata(['v1']) })).status).toBe(200);
+    expect((await post(b, 'revert', { accountId: bId, to: 'previous' })).status).toBe(200);
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('account-b'));
     expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
     expect(await env.DEPLOYMENTS.getByName(a).getState()).toEqual(aState);
-    expect((await env.DEPLOYMENTS.getByName(b).getState()).active?.sha).toBe(commit);
+    expect((await env.DEPLOYMENTS.getByName(b).getState()).active?.sha).toBe('account-b');
   });
 
   it('preserves the account-owned release on bootstrap retry and never reopens a quarantined tenant', async () => {

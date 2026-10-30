@@ -71,5 +71,10 @@
   {
     "name": "STORAGE_BUCKET",
     "source": "object-storage-name"
+  },
+  {
+    "name": "GITSPACE_CHANNEL_URL",
+    "source": "literal",
+    "value": "https://releases.gitspace.sh"
   }
 ]

@@ -8,8 +8,8 @@ const encoder = new TextEncoder();
 const get = (path: string) => worker.fetch(new Request(`${env.ACCOUNT_URL}${path}`), env);
 const hex = async (bytes: Uint8Array<ArrayBuffer>) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
 
-/** A launched release as the account holds it: its portable files and manifest in DATA, its natives in the account's
- * copy, and its record staged. Every tool of every platform is one byte, `<os>-<tool>`. */
+/** The account's default release as the account holds it: its portable files and manifest in DATA, its natives in the
+ * account's copy, and its record staged. Every tool of every platform is one byte, `<os>-<tool>`. */
 async function launched(sha: string) {
   const key = `releases/${sha}/portable.manifest.json`;
   const files = [];
@@ -34,6 +34,7 @@ async function launched(sha: string) {
     sha, label: `build ${sha}`, source: { kind: 'canonical', repository: 'inKibra/gitspace.sh', branch: 'develop', commit: 'a'.repeat(40) }, inferenceVersion: 1,
     artifacts: { worker: null, machine: null, frontend: null, portable: { key, hash: `sha256:${await hex(manifest)}`, size: manifest.byteLength } }, worker: null,
   }, 'machine-a');
+  await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).adoptDefault(sha);
   const client = files.find(file => file.path === 'cli/gitspace.js')!;
   return { manifestSha256: await hex(manifest), darwin, linux, client, assets };
 }

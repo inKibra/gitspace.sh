@@ -10,6 +10,7 @@ import { withCloudCheckout } from '../src/cloud-repository.js';
 import { createGuideShare } from '../src/guide-shares.js';
 import { refreshProjectRemote } from '../src/project-remote.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
+import type { ProjectAuthorityDO } from '../src/project-authority.js';
 import { network } from './network.js';
 
 const API = 'https://api.github.com';
@@ -426,6 +427,37 @@ describe('GitHub App', () => {
     await refreshProjectRemote(env, env.ACCOUNT_ID, localId);
     expect((await local.getProject())?.remote).toBeNull();
     expect(authorizations).toHaveLength(1);
+  });
+
+  it('checks a project origin on its own once per interval from its last read, and never when checked only on request', async () => {
+    const pantry = await project('Pantry', 'https://github.com/inKibra/Pantry.git');
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${pantry.id}`);
+    artifactsHistory();
+    const main = 'c'.repeat(40);
+    const packet = (line: string) => (line.length + 4).toString(16).padStart(4, '0') + line;
+    let reads = 0;
+    network.use(http.get('https://github.com/inKibra/Pantry.git/info/refs', () => {
+      reads += 1;
+      return new HttpResponse(packet('# service=git-upload-pack\n') + '0000' + packet(`${main} refs/heads/main\n`) + '0000');
+    }));
+    const alarm = () => runInDurableObject(authority, (_instance, state) => state.storage.getAlarm());
+    const hour = 60 * 60_000;
+
+    // Never read: due now.
+    expect(await alarm()).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(await runDurableObjectAlarm(authority)).toBe(true);
+    expect(reads).toBe(1);
+    expect((await authority.getProject())?.remote).toMatchObject({ head: main });
+    expect(await alarm()).toBeGreaterThan(Date.now() + 23 * hour);
+    // Woken before it is due, it reads nothing.
+    await runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.alarm());
+    expect(reads).toBe(1);
+
+    expect(await authority.setOriginCheck('hourly')).toBe('hourly');
+    expect(await alarm()).toBeLessThanOrEqual(Date.now() + hour);
+    expect(await alarm()).toBeGreaterThan(Date.now() + hour - 60_000);
+    expect(await authority.setOriginCheck('manual')).toBe('manual');
+    expect(await alarm()).toBeNull();
   });
 
   it('reuses an installation token per repository and access until shortly before it expires, and mints afresh after a delivery', async () => {

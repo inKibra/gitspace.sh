@@ -11,14 +11,12 @@ import {
   tenantDesiredSchema,
   MACHINE_EXECUTION_PROTOCOL_VERSION,
   machineProtocolInputSchema,
-  revertProgressSchema,
   type LaunchProgress,
   type MachineExecutionAdmission,
   type CanonicalHead,
   type DeploymentStatus,
   type ReleaseArtifact,
   type ReleaseRecord,
-  type RevertProgress,
   type ReleaseStatus,
   type ReleaseTarget,
   type StageReleaseInput,
@@ -27,9 +25,9 @@ import {
 import { z } from 'zod';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
-import { platformSwap, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
+import { deployReleaseWorker, restartSpacesForRelease } from './release-worker.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
@@ -37,12 +35,9 @@ declare const GITSPACE_WORKER_SHA: string | undefined;
 /** Build stamp injected by `Bun.build({ define })`; channel/dev builds carry none. */
 export const WORKER_VERSION: string | undefined = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : undefined;
 
-/** A running Back to stable wakes its object this often, so one whose instance ended (the Worker swap it asked for
- * restarts this object) is picked up even when nothing else calls the object. */
-const REVERT_HEARTBEAT_MS = 60_000;
-/** A Back to stable still running this long after it started is reported failed; the platform ends its swap and
- * releases its lease well within it. */
-const REVERT_DEADLINE_MS = 15 * 60_000;
+/** The builder name of a launch the account runs itself (Back to default, a published release): no machine builds it. */
+export const ACCOUNT_LAUNCHER = 'account';
+const ALL_TARGETS: readonly ReleaseTarget[] = ['worker', 'machine', 'frontend'];
 
 export const launchReleaseInputSchema = z.object({
   sha: z.string().min(1).max(160),
@@ -123,8 +118,6 @@ function migrateReleaseSources(storage: DurableObjectStorage): void {
 }
 
 export class TenantReleasesDO extends BudgetedDurableObject {
-  /** The revert this instance runs or reads back from the platform. */
-  #followingRevert: string | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Keep legacy OMP columns as history; active selection and acknowledgements never read or write them.
@@ -158,17 +151,40 @@ export class TenantReleasesDO extends BudgetedDurableObject {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         record_json TEXT NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS latest_revert (
+      CREATE TABLE IF NOT EXISTS default_release (
         id INTEGER PRIMARY KEY CHECK (id = 1),
-        record_json TEXT NOT NULL
+        sha TEXT NOT NULL
       );
+      DROP TABLE IF EXISTS latest_revert;
     `);
     migrateReleaseSources(ctx.storage);
     this.certifyOwnLaunch(WORKER_VERSION ?? null);
-    // An earlier instance ended under a running revert (the Worker swap restarts this object): the platform kept the
-    // swap's outcome under the revert's id.
-    const revert = this.latestRevert();
-    if (revert?.status === 'running') this.followRevert(revert.revertId, () => platformSwap(this.env, `/operations/${revert.revertId}`));
+  }
+
+  /** The release the GitSpace project runs; a target with no selection, and every new computer, follows it. */
+  defaultRelease(): string | null {
+    return this.ctx.storage.sql.exec<{ sha: string }>('SELECT sha FROM default_release WHERE id = 1').toArray()[0]?.sha ?? null;
+  }
+
+  /** An account with no default yet takes `sha`, the published release it was created from; one with a default keeps it. */
+  adoptDefault(sha: string): void {
+    if (this.defaultRelease() !== null) return;
+    if (!this.findRelease(sha)) throw new ReleaseNotFoundError(sha);
+    this.ctx.storage.sql.exec('INSERT INTO default_release(id, sha) VALUES (1, ?) ON CONFLICT(id) DO NOTHING', sha);
+    this.ctx.waitUntil(notifyMachines(this.env, 'all', ['release']));
+  }
+
+  /** A commit of the GitSpace project or a published release, selected for every target and with its Worker applied,
+   * becomes the default. A workspace's release is a trial and never does. */
+  private promoteDefault(record: ReleaseRecord): void {
+    const desired = this.desired();
+    if (record.source?.kind !== 'canonical' && record.source?.kind !== 'release') return;
+    if (record.status.worker !== 'applied' || ALL_TARGETS.some(target => desired[target] !== record.sha)) return;
+    this.ctx.storage.sql.exec('INSERT INTO default_release(id, sha) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET sha = excluded.sha', record.sha);
+  }
+
+  hasRelease(sha: string): boolean {
+    return this.findRelease(sha) !== null;
   }
 
   /** The canonical branch head this account last read; status serves it and never reaches the canonical repository. */
@@ -214,6 +230,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const record = this.findRelease(version);
     if (!record) return;
     if (record.status.worker === 'pending') { record.status.worker = 'applied'; record.error = null; this.saveRecord(record); }
+    this.promoteDefault(record);
     this.finishLaunch(record, launch.targets);
   }
 
@@ -256,7 +273,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const input = stageReleaseInputSchema.parse(inputValue);
     const previous = this.findRelease(input.sha);
     // A partial rebuild cannot certify legacy sibling artifacts it retained.
-    const retainsArtifacts = previous && (['worker', 'machine', 'frontend'] as const)
+    const retainsArtifacts = previous && ALL_TARGETS
       .some((target) => input.artifacts[target] === null && previous.artifacts[target] !== null);
     // The running Worker's own sha fingerprints the whole source tree that contains this check.
     const inferenceVersion = input.sha === WORKER_VERSION || (input.inferenceVersion === 1 && (!retainsArtifacts || previous?.inferenceVersion === 1)) ? 1 : undefined;
@@ -297,7 +314,9 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     if (input.targets.includes('worker')) this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
     const targets: ReleaseTarget[] = [...new Set(input.targets)];
     for (const target of targets) {
-      if (record.artifacts[target] === null || (target === 'worker' && record.worker === null)) {
+      // Machines follow a release through its portable files when it has no single-platform machine build.
+      const missing = target === 'machine' ? record.artifacts.machine === null && !record.artifacts.portable : record.artifacts[target] === null;
+      if (missing || (target === 'worker' && record.worker === null)) {
         throw new Error(`Release ${record.sha} has no ${target} artifact`);
       }
     }
@@ -311,6 +330,8 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     for (const target of targets) desired[target] = record.sha;
     desired.updatedAt = new Date().toISOString();
     this.saveDesired(desired);
+    // Its Worker may have been applied by an earlier launch; selecting its last target makes it the default.
+    if (record.status.worker === 'applied') this.promoteDefault(record);
     return { record, desired };
   }
 
@@ -322,7 +343,41 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     record.status.worker = releaseStatusSchema.parse(status);
     record.error = error;
     this.saveRecord(record);
+    if (record.status.worker === 'applied') this.promoteDefault(record);
     return record;
+  }
+
+  /**
+   * Applies a release the account already holds to `targets` — the default (Back to default) or a published release —
+   * with no machine: the selections change now and the platform swaps the Worker. Recorded as the latest launch, which
+   * the new Worker finishes when the swap replaces this object before the platform answers.
+   */
+  async startHeldLaunch(sha: string, targets: ReleaseTarget[]): Promise<LaunchProgress> {
+    if (this.latestLaunch()?.status === 'running') throw new Error('A launch is already running; wait for it or discard it');
+    if (!this.findRelease(sha)) throw new ReleaseNotFoundError(sha);
+    const now = new Date().toISOString();
+    const progress = launchProgressSchema.parse({ launchId: crypto.randomUUID(), source: { kind: 'release', sha }, targets, sha, phase: 'launch', message: `launching into ${targets.join(', ')}`, status: 'running', error: null, startedAt: now, updatedAt: now });
+    this.recordLaunchProgress(ACCOUNT_LAUNCHER, progress);
+    const launched = await this.launch({ sha, targets });
+    if (!launched) throw new ReleaseNotFoundError(sha);
+    if (launched.record.status.worker !== 'pending') { this.finishLaunch(launched.record, targets); return this.latestLaunch() ?? progress; }
+    this.ctx.waitUntil((async () => {
+      const outcome = await deployReleaseWorker(this.env, this.env.ACCOUNT_ID, launched.record);
+      const record = await this.setWorkerStatus(sha, outcome.status, outcome.error) ?? launched.record;
+      if (outcome.status === 'applied') await restartSpacesForRelease(this.env, this.env.ACCOUNT_ID, sha);
+      this.finishLaunch(record, targets);
+    })().catch((error: unknown) => {
+      // Storage refuses an instance the swap replaced; the new Worker certifies the launch (`certifyOwnLaunch`).
+      console.warn(JSON.stringify({ event: 'held_launch_ended', sha, message: error instanceof Error ? error.message : String(error) }));
+    }));
+    return progress;
+  }
+
+  /** Back to default: every target returns to the default release. */
+  backToDefault(): Promise<LaunchProgress> {
+    const sha = this.defaultRelease();
+    if (sha === null) throw new Error('This account has no default release yet: launch the GitSpace project\'s branch or a published release first');
+    return this.startHeldLaunch(sha, [...ALL_TARGETS]);
   }
 
   async machineApplied(machineId: string, inputValue: MachineAppliedInput): Promise<ReleaseRecord | null> {
@@ -360,33 +415,30 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     return this.machineExecutionAdmission(machineId);
   }
 
-  /** The release a machine follows while the account selects none (after Back to stable): the account's newest machine
-   * release a machine applied, which every platform follows through its portable files; else its newest one. */
-  private stableMachineRelease(): ReleaseRecord | null {
-    const followable = this.ctx.storage.sql.exec<ReleaseRow>('SELECT record_json FROM releases ORDER BY created_at DESC, sha').toArray()
-      .map((row) => releaseRecordSchema.parse(JSON.parse(row.record_json)))
-      .filter((record) => record.artifacts.portable || record.artifacts.machine);
-    return followable.find((record) => record.artifacts.portable && Object.values(record.status.machines).includes('applied'))
-      ?? followable.find((record) => record.artifacts.portable) ?? followable[0] ?? null;
+  /** The default release, when machines can follow it (a machine build or portable files). */
+  private defaultMachineRelease(): ReleaseRecord | null {
+    const sha = this.defaultRelease();
+    const record = sha === null ? null : this.findRelease(sha);
+    return record && (record.artifacts.portable || record.artifacts.machine) ? record : null;
   }
 
   /** The release a new computer installs from (`/install`): the selected machine release when every platform can follow
-   * it, else the account's stable one. */
+   * it, else the default. */
   installRelease(): { sha: string; portable: ReleaseArtifact } | null {
     const desired = this.desired().machine;
     const selected = desired === null ? null : this.findRelease(desired);
-    const record = selected?.artifacts.portable ? selected : this.stableMachineRelease();
+    const record = selected?.artifacts.portable ? selected : this.defaultMachineRelease();
     return record?.artifacts.portable ? { sha: record.sha, portable: record.artifacts.portable } : null;
   }
 
   private async resolveMachineDefault(machineId: string): Promise<void> {
     if (this.desired().machine !== null) return;
-    const stable = this.stableMachineRelease();
-    if (!stable) {
-      await this.ctx.storage.put(`machine-default-error:${machineId}`, 'The account has no machine release yet: launch one with the machine target.');
+    const followed = this.defaultMachineRelease();
+    if (!followed) {
+      await this.ctx.storage.put(`machine-default-error:${machineId}`, 'The account has no default release machines can follow yet: launch the GitSpace project\'s branch or a published release.');
       return;
     }
-    await this.ctx.storage.put(`machine-default:${machineId}`, stable.sha);
+    await this.ctx.storage.put(`machine-default:${machineId}`, followed.sha);
     await this.ctx.storage.delete(`machine-default-error:${machineId}`);
   }
 
@@ -403,84 +455,6 @@ export class TenantReleasesDO extends BudgetedDurableObject {
       : !record?.artifacts.machine && !record?.artifacts.portable ? 'Waiting for the authenticated machine to negotiate its native update target.'
       : null);
     return { version: protocol.version, required: MACHINE_EXECUTION_PROTOCOL_VERSION, state: error ? 'blocked' : 'updating', releaseSha, error };
-  }
-
-  /**
-   * Starts Back to stable unless one is running, and returns it. This object runs it to its end whether or not anyone
-   * follows it: the platform swaps the Worker to the default release, and only a swap that succeeded returns every
-   * selection to the channel.
-   */
-  startRevert(userId: string): RevertProgress {
-    const running = this.latestRevert();
-    if (running?.status === 'running') return running;
-    const now = new Date().toISOString();
-    const revert: RevertProgress = { revertId: crypto.randomUUID(), status: 'running', error: null, startedAt: now, updatedAt: now };
-    this.saveRevert(revert);
-    this.followRevert(revert.revertId, () => this.swapToChannel(userId, revert.revertId));
-    return revert;
-  }
-
-  /** The heartbeat of a running revert: an instance not running it (an earlier one ended) reads its outcome back from
-   * the platform, and one past REVERT_DEADLINE_MS is reported failed. An object with no running revert holds no alarm. */
-  async alarm(): Promise<void> {
-    const revert = this.latestRevert();
-    if (revert?.status !== 'running') return;
-    if (Date.parse(revert.startedAt) + REVERT_DEADLINE_MS <= Date.now()) {
-      await this.settleRevert(revert.revertId, { status: 'failed', error: `Back to stable did not finish within ${REVERT_DEADLINE_MS / 60_000} minutes. Check which Worker runs, then retry.` });
-      return;
-    }
-    if (this.#followingRevert === revert.revertId) await this.ctx.storage.setAlarm(Date.now() + REVERT_HEARTBEAT_MS);
-    else this.followRevert(revert.revertId, () => platformSwap(this.env, `/operations/${revert.revertId}`));
-  }
-
-  /** The swap a revert asks of the platform under the revert's id; none when the platform already runs the channel. */
-  private async swapToChannel(userId: string, revertId: string): Promise<WorkerSwap> {
-    const cutover = await this.inferenceCutover();
-    if ((await tenantWorkerVersion(this.env, userId)).sha !== null) {
-      return platformSwap(this.env, '/revert', { to: 'channel', operationId: revertId, accountId: userId, ...(cutover ? { inferenceVersion: 1 } : {}) });
-    }
-    if (cutover) return { status: 'failed', error: 'Without a platform worker the channel\'s inference-profile support cannot be verified. Select a source release advertising inferenceVersion 1 instead.' };
-    return { status: 'applied', error: null };
-  }
-
-  /** Runs `swap` for the running revert in this instance and records how it ended. The alarm beats meanwhile, so the
-   * next instance picks the revert up when this one ends first. */
-  private followRevert(revertId: string, swap: () => Promise<WorkerSwap>): void {
-    if (this.#followingRevert === revertId) return;
-    this.#followingRevert = revertId;
-    this.ctx.waitUntil((async () => {
-      try {
-        await this.ctx.storage.setAlarm(Date.now() + REVERT_HEARTBEAT_MS);
-        const outcome = await swap().catch((error: unknown): WorkerSwap => ({ status: 'failed', error: error instanceof Error ? error.message : 'Back to stable failed' }));
-        await this.settleRevert(revertId, outcome);
-      } catch (error) {
-        // Storage refuses an instance that was replaced; the next instance reads the outcome back from the platform.
-        console.warn(JSON.stringify({ event: 'revert_follow_ended', revertId, message: error instanceof Error ? error.message : String(error) }));
-      } finally {
-        if (this.#followingRevert === revertId) this.#followingRevert = null;
-      }
-    })());
-  }
-
-  /** Records how the running revert `revertId` ended; only an applied swap returns every selection to the channel. */
-  private async settleRevert(revertId: string, outcome: WorkerSwap): Promise<void> {
-    const revert = this.latestRevert();
-    if (revert?.revertId !== revertId || revert.status !== 'running') return;
-    const updatedAt = new Date().toISOString();
-    if (outcome.status === 'applied') this.saveDesired({ worker: null, machine: null, frontend: null, updatedAt });
-    this.saveRevert(outcome.status === 'applied'
-      ? { ...revert, status: 'succeeded', error: null, updatedAt }
-      : { ...revert, status: 'failed', error: outcome.error ?? 'Back to stable failed', updatedAt });
-    await this.ctx.storage.deleteAlarm();
-  }
-
-  private latestRevert(): RevertProgress | null {
-    const row = this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM latest_revert WHERE id = 1').toArray()[0];
-    return row ? revertProgressSchema.parse(JSON.parse(row.record_json)) : null;
-  }
-
-  private saveRevert(revert: RevertProgress): void {
-    this.ctx.storage.sql.exec('INSERT INTO latest_revert(id, record_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET record_json = excluded.record_json', JSON.stringify(revertProgressSchema.parse(revert)));
   }
 
   inferenceCutover(): Promise<boolean> {
@@ -515,6 +489,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
       if (record?.status.worker === 'pending' && (!cutover || record.inferenceVersion === 1)) {
         record.status.worker = 'applied';
         this.saveRecord(record);
+        this.promoteDefault(record);
       }
     }
     const machines: DeploymentStatus['current']['machines'] = {};
@@ -529,13 +504,13 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const version = WORKER_VERSION ?? null;
     const worker = { sha: version === 'channel' || version?.startsWith('channel:') ? null : version, version };
     return deploymentStatusSchema.parse({
-      desired, current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(), canonical: this.canonicalHead(), revert: this.latestRevert(),
+      desired, defaultRelease: this.defaultRelease(), current: { worker, machines, ...(platformWorker.version !== version ? { platformWorker } : {}) }, releases, machineExecution, launch: this.latestLaunch(), canonical: this.canonicalHead(),
     });
   }
 
-  /** The frontend tree to serve, or null when the tenant runs our channel build. */
+  /** The frontend tree to serve: the selected release's, else the default's; null when the account has neither. */
   frontend(): FrontendRelease | null {
-    const sha = this.desired().frontend;
+    const sha = this.desired().frontend ?? this.defaultRelease();
     if (!sha) return null;
     const record = this.findRelease(sha);
     if (!record || record.artifacts.frontend === null) return null;

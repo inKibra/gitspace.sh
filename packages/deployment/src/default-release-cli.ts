@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { buildPortableRelease, buildWorkerRelease, buildFrontendTree, workerMetadataFromWrangler, workspaceRevision } from './builders.js';
 import { releaseStorageClient } from './release.js';
-import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
+import { buildDefaultRelease, publishDefaultRelease, publishToChannel, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
 import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
 import { workerManifestSchema } from '@gitspace/protocol/deployment';
 import { mirrorNatives, nativeMirrorKey, portableManifestSchema, verifiedNative, type NativeMirror } from '@gitspace/protocol/machine-release';
@@ -68,7 +68,7 @@ async function files(root: string, prefix = ''): Promise<{ path: string; bytes: 
 export async function runDefaultRelease(args: string[]): Promise<void> {
   if (args[0] === 'publish' || args.some(arg => arg === '--from' || arg.startsWith('--from='))) throw new Error('Saved-directory publication and --from are not supported; use build --publish to build and publish in one invocation');
   if (args.includes('--help') || args.length === 0) {
-    console.log('Usage: bun packages/deployment/src/default-release-cli.ts build --commit <40hex> --image <registry/repository> --native <native-builds-directory> [--root <checkout>] [--out <directory>] [--publish --bucket <R2 bucket>]\n       bun packages/deployment/src/default-release-cli.ts rollback --bucket <R2 bucket>\n       bun packages/deployment/src/default-release-cli.ts --fake\nBuild requires a clean checkout at --commit. --native contains darwin-arm64, darwin-x64, linux-arm64 and linux-x64 directories produced by release.ts build on native runners and published with release.ts publish. All four must match --commit. Docker buildx pushes the same-commit OCI image; immutable R2 objects publish only with build --publish in the same invocation. Saved output is for inspection, not later publication. --fake is a local no-network build/publish/rollback smoke.');
+    console.log('Usage: bun packages/deployment/src/default-release-cli.ts build --commit <40hex> --image <registry/repository> --native <native-builds-directory> [--root <checkout>] [--out <directory>] [--publish --bucket <R2 bucket> [--channel-bucket <public R2 bucket> --tag <tag>]]\n       bun packages/deployment/src/default-release-cli.ts channel --commit <40hex> --tag <tag> --bucket <R2 bucket> --channel-bucket <public R2 bucket>\n       bun packages/deployment/src/default-release-cli.ts rollback --bucket <R2 bucket>\n       bun packages/deployment/src/default-release-cli.ts --fake\nBuild requires a clean checkout at --commit. --native contains darwin-arm64, darwin-x64, linux-arm64 and linux-x64 directories produced by release.ts build on native runners and published with release.ts publish. All four must match --commit. Docker buildx pushes the same-commit OCI image; immutable R2 objects publish only with build --publish in the same invocation. With --channel-bucket and --tag, the published release is also copied, unchanged, to the public channel and listed in its catalog.json under the tag; channel does that for a release already published to --bucket. Saved output is for inspection, not later publication. --fake is a local no-network build/publish/rollback smoke.');
     return;
   }
   const option = (name: string) => { const index = args.indexOf(name); return index === -1 ? undefined : args[index + 1]; };
@@ -91,10 +91,21 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
     return;
   }
   const bucket = option('--bucket');
+  const channelBucket = option('--channel-bucket');
+  const tag = option('--tag');
+  if ((channelBucket === undefined) !== (tag === undefined)) throw new Error('--channel-bucket and --tag go together');
   if (args[0] === 'rollback') {
     if (!bucket) throw new Error('--bucket is required');
     const storage = defaultReleaseStorage(bucket);
     try { await rollbackDefaultRelease(storage); } finally { storage.close(); }
+    return;
+  }
+  if (args[0] === 'channel') {
+    const commit = option('--commit');
+    if (!bucket || !channelBucket || !tag || !commit) throw new Error('channel requires --commit, --tag, --bucket and --channel-bucket');
+    const [source, channel] = [defaultReleaseStorage(bucket), defaultReleaseStorage(channelBucket)];
+    try { console.log(JSON.stringify({ commit, tag, pin: await publishToChannel(source, channel, commit, tag, new Date().toISOString()) })); }
+    finally { source.close(); channel.close(); }
     return;
   }
   if (args[0] !== 'build') throw new Error('Expected build, rollback or --fake');
@@ -152,6 +163,11 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
       } finally { client.destroy(); }
       const storage = defaultReleaseStorage(bucket);
       try { await publishDefaultRelease(built, storage); } finally { storage.close(); }
+      if (channelBucket && tag) {
+        const [source, channel] = [defaultReleaseStorage(bucket), defaultReleaseStorage(channelBucket)];
+        try { console.log(JSON.stringify({ channel: channelBucket, tag, pin: await publishToChannel(source, channel, commit, tag, new Date().toISOString()) })); }
+        finally { source.close(); channel.close(); }
+      }
     }
     console.log(JSON.stringify({ commit, out, image: built.manifest.image.image, published: args.includes('--publish') }));
   } finally { await rm(temporary, { recursive: true, force: true }); }

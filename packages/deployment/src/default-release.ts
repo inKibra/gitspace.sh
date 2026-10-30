@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultPortable, verifyDefaultReleaseContents, verifyDefaultWorker, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
-import { WORKER_MANIFEST_FILE, workerModuleKey, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleasePin, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultPortable, verifyDefaultReleaseContents, verifyDefaultWorker, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
+import { CHANNEL_CATALOG, channelCatalogSchema, WORKER_MANIFEST_FILE, workerModuleKey, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { PORTABLE_MANIFEST_FILE, portableFileKey } from '@gitspace/protocol/machine-release';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 
@@ -96,4 +96,37 @@ export async function rollbackDefaultRelease(storage: DefaultReleaseStorage): Pr
   if (!pointer.previous) throw new Error('No previous complete default release');
   await verifyRelease(storage, pointer.previous);
   await storage.put(DEFAULT_ACCOUNT_POINTER, new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, current: pointer.previous, previous: pointer.current })), before.etag);
+}
+
+/**
+ * Publishes the release of `commit`, as `source` holds it, to the public channel under `tag`: its manifest and every
+ * file it names, unchanged and each checked against its digest, then its catalog entry, last, so the catalog only ever
+ * names a complete release. A tag already in the catalog must name this release.
+ */
+export async function publishToChannel(source: DefaultReleaseReader, channel: DefaultReleaseStorage, commit: string, tag: string, publishedAt: string): Promise<string> {
+  const manifestKey = `defaults/releases/${defaultCommitSchema.parse(commit)}/manifest.json`;
+  const manifestObject = await source.get(manifestKey);
+  if (!manifestObject) throw new Error(`Release ${commit} is not published: ${manifestKey} is missing`);
+  const reference = defaultObject(manifestKey, manifestObject.bytes);
+  const manifest = await readDefaultManifest(source, reference);
+  const portable = manifest.portable ? await verifyDefaultPortable(source, manifest.portable, 'manifests') : [];
+  for (const object of [...await verifyDefaultWorker(source, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, ...portable, reference]) {
+    if (!await channel.get(object.key)) {
+      const bytes = await verifyDefaultObject(source, object);
+      try { await channel.put(object.key, bytes, null); }
+      catch (error) { if (!await channel.get(object.key)) throw error; }
+    }
+    await verifyDefaultObject(channel, object);
+  }
+  const pin = defaultReleasePin(reference);
+  const before = await channel.get(CHANNEL_CATALOG);
+  const catalog = channelCatalogSchema.parse(before ? JSON.parse(new TextDecoder().decode(before.bytes)) : { schemaVersion: 1, releases: [] });
+  const listed = catalog.releases.find(release => release.tag === tag);
+  if (listed) {
+    if (listed.pin !== pin) throw new Error(`Tag ${tag} is already published as ${listed.pin}`);
+    return pin;
+  }
+  const next = channelCatalogSchema.parse({ schemaVersion: 1, releases: [{ tag, commit, pin, publishedAt }, ...catalog.releases] });
+  await channel.put(CHANNEL_CATALOG, new TextEncoder().encode(JSON.stringify(next)), before?.etag ?? null);
+  return pin;
 }

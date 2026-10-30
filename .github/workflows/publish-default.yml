@@ -1,13 +1,20 @@
 name: Publish Default Release
 
-# Promotes one canonical commit to the release every new GitSpace account starts on: native machine builds for all
-# four platforms, then the same-commit cloud image, worker and frontend, published as one coherent default. Existing
-# accounts keep the default they were created with until they launch another release.
+# Publishes one commit as a GitSpace release: native machine builds for all four platforms, then the same-commit cloud
+# image, worker, frontend and portable release. A release tag (`v*`) also copies it, unchanged, to the public channel
+# with a catalog entry, which accounts use by reference, and creates the GitHub Release accounts' release automations
+# watch. New accounts start on the newest published default; existing accounts move only when they launch a release.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       commit:
-        description: 'Full 40-character commit of develop to promote; empty promotes the commit this run checks out'
+        description: 'Full 40-character commit to publish; empty publishes the commit this run checks out'
+        required: false
+        type: string
+      tag:
+        description: 'Release tag naming this commit (for example v0.2.0-rc.42); empty publishes without the channel or a GitHub Release'
         required: false
         type: string
 
@@ -16,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -25,20 +32,31 @@ jobs:
     outputs:
       commit: ${{ steps.commit.outputs.commit }}
       release: ${{ steps.commit.outputs.release }}
+      tag: ${{ steps.commit.outputs.tag }}
     steps:
-      - name: Resolve the commit to promote
+      - name: Resolve the commit and tag to publish
         id: commit
         env:
           REQUESTED: ${{ inputs.commit }}
+          REQUESTED_TAG: ${{ inputs.tag }}
           RUN_SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           commit="${REQUESTED:-$RUN_SHA}"
+          tag="$REQUESTED_TAG"
+          if [[ "$REF_TYPE" == tag ]]; then tag="$REF_NAME"; fi
           if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::commit must be a full 40-character commit"
             exit 1
           fi
+          if [[ -n "$tag" && ! "$tag" =~ ^v[0-9A-Za-z.+-]+$ ]]; then
+            echo "::error::tag must start with v and use only letters, digits, '.', '+' and '-'"
+            exit 1
+          fi
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "release=develop-${commit:0:12}" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=${tag:-develop-${commit:0:12}}" >> "$GITHUB_OUTPUT"
 
   native:
     needs: resolve
@@ -104,12 +122,14 @@ jobs:
     env:
       COMMIT: ${{ needs.resolve.outputs.commit }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      # The default and the native machine objects it names live in the platform's releases bucket, reached with a key
-      # scoped to that bucket's objects.
+      # The default and the native machine objects it names live in the platform's releases bucket; a tagged release is
+      # also copied to the public channel bucket. The key is scoped to those two buckets' objects.
       R2_ACCESS_KEY_ID: ${{ secrets.RELEASES_R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ vars.GITSPACE_RELEASES_BUCKET || 'gitspace-releases-rebuild-20260913' }}
       RELEASES_BUCKET: ${{ vars.GITSPACE_RELEASES_BUCKET || 'gitspace-releases-rebuild-20260913' }}
+      CHANNEL_BUCKET: ${{ vars.GITSPACE_CHANNEL_BUCKET || 'gitspace-channel' }}
+      TAG: ${{ needs.resolve.outputs.tag }}
       # A detached checkout has no branch for the frontend's source metadata.
       GITSPACE_SOURCE_BRANCH: develop
       GITSPACE_SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
@@ -148,12 +168,24 @@ jobs:
           printf '%s' "$password" | docker login registry.cloudflare.com --username "$username" --password-stdin
       - name: Build the image, worker and frontend and publish the default
         run: |
+          channel=()
+          if [[ -n "$TAG" ]]; then channel=(--channel-bucket "$CHANNEL_BUCKET" --tag "$TAG"); fi
           bun packages/deployment/src/default-release-cli.ts build \
             --commit "$COMMIT" \
             --image "registry.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/gitspace-onboarding" \
             --native "$RUNNER_TEMP/native" \
             --out "$RUNNER_TEMP/default-release" \
-            --publish --bucket "$RELEASES_BUCKET"
+            --publish --bucket "$RELEASES_BUCKET" "${channel[@]}"
       - name: Remove registry login
         if: always()
         run: docker logout registry.cloudflare.com
+      # Last, once the channel lists the release: accounts' release automations watch GitHub Releases.
+      - name: Create the GitHub Release
+        if: needs.resolve.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exit 0; fi
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "GitSpace $TAG" --generate-notes "${prerelease[@]}"

@@ -2,12 +2,12 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { DeploymentStatusView } from '@gitspace/protocol';
+import type { DeploymentStatusView, LaunchProgressView } from '@gitspace/protocol';
 import { deploymentStatusFixture } from './App.js';
-import { LaunchSheet, LaunchedBanner, RevertSheet, LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
+import { LaunchSheet, LaunchedBanner, LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
 import { useRuntimeLaunch, type RuntimeLaunch } from './useRuntimeLaunch.js';
 
-const rpc = vi.hoisted(() => ({ launch: vi.fn(), revert: vi.fn() }));
+const rpc = vi.hoisted(() => ({ launch: vi.fn(), backToDefault: vi.fn() }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: rpc } }));
 let root: Root;
 let container: HTMLDivElement;
@@ -16,7 +16,7 @@ const refresh = vi.fn();
 const reload = vi.fn();
 function View({ status }: { status: DeploymentStatusView }) {
   state = useRuntimeLaunch(status, refresh, reload);
-  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.start(state.launch!.source, 'builder', state.launch!.targets)} onDiscard={() => state.discard(state.launch!.launchId)} /> : null}{state.revertProgress ? <RevertSheet progress={state.revertProgress} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.revert().catch(() => {})} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onRevert={() => state.revert().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
+  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.launch!.source.kind === 'release' ? state.backToDefault().catch(() => {}) : state.start(state.launch!.source, 'builder', state.launch!.targets)} onDiscard={() => state.discard(state.launch!.launchId)} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onBackToDefault={() => state.backToDefault().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
 }
 function initial(): DeploymentStatusView {
   const value = structuredClone(deploymentStatusFixture);
@@ -25,20 +25,16 @@ function initial(): DeploymentStatusView {
     launch: { ...value.launch!, launchId: 'attempt-1', status: 'running', phase: 'build', message: 'building tenant worker', sha: value.releases[0]!.sha },
   };
 }
-/** `status` with the account's latest Back to stable in the given state. */
-function withRevert(status: DeploymentStatusView, revertStatus: 'running' | 'succeeded' | 'failed', error: string | null = null, revertId = 'revert-1'): DeploymentStatusView {
-  return { ...status, revert: { revertId, status: revertStatus, error, startedAt: '2026-08-30T10:06:00.000Z', updatedAt: '2026-08-30T10:06:30.000Z' } };
-}
-function button(label: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll('button')].find(candidate => candidate.textContent === label);
-  if (!found) throw new Error(`No ${label} button`);
-  return found;
+const DEFAULT_SHA = deploymentStatusFixture.defaultRelease ?? '';
+/** The account's Back to default, as status reports it: the launch of the default release to every target. */
+function backToDefaultLaunch(status: LaunchProgressView['status'], error: string | null = null): LaunchProgressView {
+  return { launchId: 'back-to-default', source: { kind: 'release', sha: DEFAULT_SHA }, targets: ['worker', 'machine', 'frontend'], sha: DEFAULT_SHA, phase: status === 'running' ? 'launch' : status === 'failed' ? 'failed' : 'launched', message: 'launching into worker, machine, frontend', status, error, startedAt: '2026-08-30T10:06:00.000Z', updatedAt: '2026-08-30T10:06:30.000Z' };
 }
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.useFakeTimers();
   sessionStorage.clear();
-  refresh.mockReset(); reload.mockReset(); rpc.launch.mockReset(); rpc.revert.mockReset();
+  refresh.mockReset(); reload.mockReset(); rpc.launch.mockReset(); rpc.backToDefault.mockReset();
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(() => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -91,47 +87,43 @@ it('does not reload an old completed launch merely by visiting the workspace', a
   expect(reload).not.toHaveBeenCalled();
   expect(refresh).not.toHaveBeenCalled();
 });
-it('propagates rejected launch and revert actions without reloading', async () => {
+it('propagates rejected launch and Back to default actions without reloading', async () => {
   await act(() => root.render(<View status={initial()} />));
   rpc.launch.mockResolvedValue({ status: 'error', error: new Error('launch denied') });
-  rpc.revert.mockResolvedValue({ status: 'error', error: new Error('revert denied') });
+  rpc.backToDefault.mockResolvedValue({ status: 'error', error: new Error('no default release') });
   await act(async () => { await expect(state.start({ kind: 'workspace', workspaceId: 'workspace' }, 'builder', ['frontend'])).rejects.toThrow('launch denied'); });
-  await act(async () => { await expect(state.revert()).rejects.toThrow('revert denied'); });
+  await act(async () => { await expect(state.backToDefault()).rejects.toThrow('no default release'); });
   expect(reload).not.toHaveBeenCalled();
 });
-
-it('follows the account\'s revert in status and reloads into stable only once the account records it succeeded', async () => {
+it('follows Back to default as the launch the account returns, and reloads once every target runs the default', async () => {
   sessionStorage.setItem(LAUNCHED_STORAGE_KEY, JSON.stringify({ sha: 'launched', label: 'Launched', at: Date.now() }));
-  const status: DeploymentStatusView = { ...initial(), launch: null };
+  let status: DeploymentStatusView = { ...initial(), launch: null, releases: [...deploymentStatusFixture.releases, { ...deploymentStatusFixture.releases[0]!, sha: DEFAULT_SHA, label: 'v0.2.0-rc.41', status: { worker: 'applied', frontend: 'applied', machines: {} } }] };
   await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValue({ status: 'ok', value: withRevert(status, 'running') });
-  await act(async () => { await state.revert(); });
-  expect(state.revertProgress).toEqual({ status: 'running', error: null });
-  expect(container.textContent).toContain('Swapping the worker to the stable build');
-  expect(refresh).toHaveBeenCalledTimes(1);
-  await act(() => root.render(<View status={withRevert(status, 'running')} />));
+  rpc.backToDefault.mockResolvedValue({ status: 'ok', value: { ...status, launch: backToDefaultLaunch('running') } });
+  await act(async () => { await state.backToDefault(); });
+  expect(rpc.backToDefault).toHaveBeenCalledWith({});
+  expect(state.launch).toMatchObject({ source: { kind: 'release', sha: DEFAULT_SHA }, status: 'running' });
+  expect(container.querySelector('[aria-label="Launch progress"]')).not.toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(refresh).toHaveBeenCalled();
+  // The swap is done, but a machine still runs the trial: no reload yet.
+  status = { ...status, launch: backToDefaultLaunch('succeeded'), desired: { worker: DEFAULT_SHA, machine: DEFAULT_SHA, frontend: DEFAULT_SHA, updatedAt: '2026-08-30T10:07:00.000Z' }, current: { ...status.current, worker: { sha: DEFAULT_SHA, version: DEFAULT_SHA } } };
+  await act(() => root.render(<View status={status} />));
   expect(reload).not.toHaveBeenCalled();
-  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
+  status = { ...status, current: { ...status.current, machines: Object.fromEntries(Object.keys(status.current.machines).map(machineId => [machineId, { sha: DEFAULT_SHA, generation: 'default' }])) } };
+  await act(() => root.render(<View status={status} />));
   expect(reload).toHaveBeenCalledTimes(1);
-  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBeNull();
-  expect(state.revertProgress).toBeNull();
-  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)!)).toMatchObject({ sha: DEFAULT_SHA, label: 'v0.2.0-rc.41' });
 });
-it('follows a Back to stable already running when the page opens, but not one that already ended', async () => {
-  const status: DeploymentStatusView = { ...initial(), launch: null };
-  await act(() => root.render(<View status={withRevert(status, 'failed', 'Platform reported channel:1 unhealthy', 'revert-0')} />));
-  expect(container.querySelector('[aria-label="Back to stable progress"]')).toBeNull();
-  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-  expect(refresh).not.toHaveBeenCalled();
-  await act(() => root.render(<View status={withRevert(status, 'running')} />));
-  expect(container.querySelector('[aria-label="Back to stable progress"]')).not.toBeNull();
-  await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-  expect(refresh).toHaveBeenCalledTimes(1);
-  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
-  expect(reload).toHaveBeenCalledTimes(1);
+it('shows a refused Back to default in the launch sheet, and Retry asks the account again', async () => {
+  await act(() => root.render(<View status={{ ...initial(), launch: null }} />));
+  rpc.backToDefault.mockRejectedValueOnce(new Error('This account has no default release yet'));
+  await act(async () => { await expect(state.backToDefault()).rejects.toThrow('no default release'); });
+  expect(container.querySelector('[aria-label="Launch progress"]')?.textContent).toContain('This account has no default release yet');
+  rpc.backToDefault.mockResolvedValueOnce({ status: 'ok', value: { ...initial(), launch: backToDefaultLaunch('running') } });
+  await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click(); });
+  expect(rpc.backToDefault).toHaveBeenCalledTimes(2);
+  expect(state.launch).toMatchObject({ launchId: 'back-to-default', status: 'running' });
 });
 it.each(['Launch denied', 'Launch busy', 'Workspace not found'])('opens a retryable failure sheet for %s before a launch track exists', async message => {
   const status = { ...initial(), launch: null };
@@ -146,122 +138,6 @@ it.each(['Launch denied', 'Launch busy', 'Workspace not found'])('opens a retrya
   expect(rpc.launch).toHaveBeenLastCalledWith({ source: { kind: 'workspace', workspaceId: 'requested-workspace' }, machineId: 'builder', targets: ['frontend'] });
   expect(state.launch?.status).toBe('running');
 });
-it('stops following Back to stable when a launch takes the page over', async () => {
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
-  await act(async () => { await state.revert(); });
-  rpc.launch.mockRejectedValueOnce(new Error('busy'));
-  await act(async () => { await expect(state.start({ kind: 'workspace', workspaceId: 'workspace' }, 'builder', ['frontend'])).rejects.toThrow('busy'); });
-  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
-  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-  expect(refresh).toHaveBeenCalledTimes(1);
-  expect(reload).not.toHaveBeenCalled();
-  expect(state.revertProgress).toBeNull();
-});
-it('does not resume polling or reload after unmount while revert is in flight', async () => {
-  await act(() => root.render(<View status={{ ...initial(), launch: null }} />));
-  const reply = Promise.withResolvers<{ status: 'ok'; value: DeploymentStatusView }>();
-  rpc.revert.mockReturnValueOnce(reply.promise);
-  let pending: Promise<void>;
-  await act(() => { pending = state.revert(); });
-  await act(() => root.render(null));
-  await act(async () => { reply.resolve({ status: 'ok', value: withRevert(initial(), 'running') }); await pending!; await vi.advanceTimersByTimeAsync(3000); });
-  expect(refresh).not.toHaveBeenCalled();
-  expect(reload).not.toHaveBeenCalled();
-});
-it('stops polling on unmount while following a revert', async () => {
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
-  await act(async () => { await state.revert(); await vi.advanceTimersByTimeAsync(1500); });
-  const beforeUnmount = refresh.mock.calls.length;
-  await act(() => root.render(null));
-  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
-  expect(refresh).toHaveBeenCalledTimes(beforeUnmount);
-  expect(reload).not.toHaveBeenCalled();
-});
-
-it('shows the failure the account recorded, keeps the banner, and Retry follows a new revert to success', async () => {
-  const mark = JSON.stringify({ sha: 'launched', label: 'Launched', at: Date.now() });
-  sessionStorage.setItem(LAUNCHED_STORAGE_KEY, mark);
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
-  await act(async () => { button('Back to stable').click(); });
-  expect(state.revertProgress?.status).toBe('running');
-  await act(() => root.render(<View status={withRevert(status, 'failed', 'Platform reported channel:1 unhealthy')} />));
-  expect(state.revertProgress).toEqual({ status: 'failed', error: 'Platform reported channel:1 unhealthy' });
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('unhealthy');
-  expect(container.textContent).toContain('Now running');
-  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBe(mark);
-  const polls = refresh.mock.calls.length;
-  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-  expect(refresh).toHaveBeenCalledTimes(polls);
-  expect(reload).not.toHaveBeenCalled();
-
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running', null, 'revert-2') });
-  await act(async () => { button('Retry').click(); });
-  expect(rpc.revert).toHaveBeenCalledTimes(2);
-  expect(rpc.launch).not.toHaveBeenCalled();
-  expect(state.revertProgress?.status).toBe('running');
-  // The earlier revert's record settles nothing about this one.
-  await act(() => root.render(<View status={withRevert(status, 'failed', 'Platform reported channel:1 unhealthy')} />));
-  expect(state.revertProgress?.status).toBe('running');
-  await act(() => root.render(<View status={withRevert(status, 'succeeded', null, 'revert-2')} />));
-  expect(reload).toHaveBeenCalledTimes(1);
-  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBeNull();
-  expect(container.textContent).not.toContain('Now running');
-});
-
-it('keeps the banner on RPC rejection and exposes a functional revert Retry', async () => {
-  const mark = JSON.stringify({ sha: 'launched', label: 'Launched', at: Date.now() });
-  sessionStorage.setItem(LAUNCHED_STORAGE_KEY, mark);
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockRejectedValueOnce(new Error('Revert denied'));
-  await act(async () => { button('Back to stable').click(); });
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Revert denied');
-  expect(container.textContent).toContain('Now running');
-  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBe(mark);
-  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
-  expect(refresh).not.toHaveBeenCalled();
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
-  await act(async () => { button('Retry').click(); });
-  expect(rpc.revert).toHaveBeenCalledTimes(2);
-  expect(rpc.launch).not.toHaveBeenCalled();
-  expect(state.revertProgress?.status).toBe('running');
-});
-
-it('ignores a superseded revert RPC reply when a launch takes the page over', async () => {
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  const reply = Promise.withResolvers<{ status: 'ok'; value: DeploymentStatusView }>();
-  rpc.revert.mockReturnValueOnce(reply.promise);
-  let pending: Promise<void>;
-  await act(() => { pending = state.revert(); });
-  rpc.launch.mockRejectedValueOnce(new Error('Launch denied'));
-  await act(async () => { await expect(state.start({ kind: 'workspace', workspaceId: 'workspace' }, 'builder', ['frontend'])).rejects.toThrow('Launch denied'); });
-  await act(async () => { reply.resolve({ status: 'ok', value: withRevert(status, 'running') }); await pending!; await vi.advanceTimersByTimeAsync(15_000); });
-  expect(state.revertProgress).toBeNull();
-  expect(state.launch?.error).toContain('Launch denied');
-  expect(refresh).not.toHaveBeenCalled();
-  expect(reload).not.toHaveBeenCalled();
-});
-
-it('keeps following through status reads that fail, without an unhandled rejection', async () => {
-  const status = { ...initial(), launch: null };
-  await act(() => root.render(<View status={status} />));
-  rpc.revert.mockResolvedValueOnce({ status: 'ok', value: withRevert(status, 'running') });
-  refresh.mockRejectedValue(new Error('Disconnected during the swap'));
-  await act(async () => { await state.revert(); });
-  await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
-  expect(refresh).toHaveBeenCalledTimes(4);
-  expect(state.revertProgress?.status).toBe('running');
-  await act(() => root.render(<View status={withRevert(status, 'succeeded')} />));
-  expect(reload).toHaveBeenCalledTimes(1);
-});
-
 it('refuses an empty machine before dispatch and exposes the failure in the launch sheet', async () => {
   await act(() => root.render(<View status={{ ...initial(), launch: null }} />));
   await act(async () => { await expect(state.start({ kind: 'workspace', workspaceId: 'workspace' }, '', ['frontend'])).rejects.toThrow('choose a machine'); });

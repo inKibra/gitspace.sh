@@ -114,9 +114,9 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   runtimeSync: { status: 'connecting' | 'synced' | 'offline' | 'conflict' | 'error'; message: string | null };
   /** What GitSpace runs here and across the fleet; null until the home machine answers. */
   deployment: DeploymentStatusView | null;
-  /** Point the account back at our channel build; every target converges on it. */
-  onRevertDeployment: () => Promise<void>;
-  /** Read the canonical branch head now; status otherwise shows the stored one. */
+  /** Every target returns to the default release. */
+  onBackToDefault: () => Promise<void>;
+  /** Read the head of the GitSpace project's branch now; status otherwise shows the stored one. */
   onCheckCanonical: () => Promise<void>;
   /** The tenant's GitHub App, its installations and latest deliveries; null until read. */
   github: GitHubState | null;
@@ -847,44 +847,49 @@ function ReleaseRow({ release, desired, index }: { release: ReleaseRecordView; d
     </CardFooter>
   </Card>;
 }
-export function SourceSettings({ deployment, onRevertDeployment, onCheckCanonical, saving }: Pick<SettingsPageProps, 'deployment' | 'onRevertDeployment' | 'onCheckCanonical' | 'saving'>) {
+export function SourceSettings({ deployment, onBackToDefault, onCheckCanonical, saving }: Pick<SettingsPageProps, 'deployment' | 'onBackToDefault' | 'onCheckCanonical' | 'saving'>) {
   if (!deployment) return <Group title="Running"><EmptyState icon={icon(Rocket02, 20)} title="Loading source status…" description="Asking GitSpace Cloud what your account runs." /></Group>;
   const releases = [...deployment.releases].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  const channel = RELEASE_TARGETS.every((target) => deployment.desired[target] === null);
+  const defaultRelease = deployment.defaultRelease;
+  const onDefault = RELEASE_TARGETS.every((target) => deployment.desired[target] === null || deployment.desired[target] === defaultRelease);
   const head = deployment.canonical;
-  // The sources of the releases this account selected, target by target; none means the stable channel.
+  // The sources of the releases each target runs, its selection or the default.
   const selected = RELEASE_TARGETS.flatMap((target) => {
-    const source = deployment.releases.find((release) => release.sha === deployment.desired[target])?.source;
+    const source = deployment.releases.find((release) => release.sha === (deployment.desired[target] ?? defaultRelease))?.source;
     return source ? [source] : [];
   });
   const runsHead = !!head && selected.length > 0 && selected.every((source) => source.kind === 'canonical' && source.commit === head.commit);
-  const canonicalDescription = !head ? 'Not checked yet. Check reads the branch head from GitHub; launch a commit from the GitSpace project\'s menu.'
+  const canonicalDescription = !head ? 'Not checked yet. Check reads the head of the GitSpace project\'s branch; launch it from the project\'s menu.'
     : `${head.branch} is at ${shortSha(head.commit)} (checked ${new Date(head.checkedAt).toLocaleString()}). ${runsHead ? 'You run it.'
-      : selected.length === 0 ? 'You run the stable channel.'
-      : selected.some((source) => source.kind === 'canonical') ? `You run an older ${head.branch} commit; launch canonical develop from the GitSpace project's menu.`
-      : 'You run a workspace build.'}`;
-  // The latest Back to stable while it runs, and its failure until the selections change again.
-  const reverting = deployment.revert?.status === 'running';
-  const revertFailure = deployment.revert?.status === 'failed' && deployment.revert.updatedAt >= deployment.desired.updatedAt ? deployment.revert.error ?? 'Back to stable failed.' : null;
+      : selected.some((source) => source.kind === 'canonical') ? `You run an older ${head.branch} commit; Launch ${head.branch} from the GitSpace project's menu builds this one.`
+      : selected.some((source) => source.kind === 'workspace') ? 'You run a workspace build.'
+      : `You run a published release. ${head.branch} moving is not a release: launching it builds on a machine.`}`;
+  // Back to default runs as a launch of the default release; it is followed here while it runs, and its failure is
+  // shown until the selections change again.
+  const backToDefault = deployment.launch?.source.kind === 'release' && deployment.launch.source.sha === defaultRelease ? deployment.launch : null;
+  const returning = backToDefault?.status === 'running';
+  const returnFailure = backToDefault?.status === 'failed' && backToDefault.updatedAt >= deployment.desired.updatedAt ? backToDefault.error ?? 'Back to default failed.' : null;
+  const defaultLabel = defaultRelease === null ? null : deployment.releases.find((release) => release.sha === defaultRelease)?.label ?? shortSha(defaultRelease);
   return <>
     <Group title="Running"><SettingRows>
       <SettingRow title="Worker" description="The tenant worker answering this account, by its own version stamp."><Badge color={deployment.current.worker.sha === null ? 'gray' : 'blue'}><span className="font-mono">{deployment.current.worker.version ?? 'unknown'}</span></Badge></SettingRow>
       {deployment.current.platformWorker && deployment.current.platformWorker.version !== deployment.current.worker.version ? <SettingRow title="Platform record" description="The platform’s last recorded deployment differs from the Worker answering this request."><Badge color="gray"><span className="font-mono">{deployment.current.platformWorker.version ?? 'Not recorded'}</span></Badge></SettingRow> : null}
-      {Object.entries(deployment.current.machines).map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'stable'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
+      {Object.entries(deployment.current.machines).map(([machineId, running]) => <SettingRow key={machineId} title={machineId} description={`Machine ${running.sha ? shortSha(running.sha) : 'installed build'}`}><RunningBadge sha={running.sha} generation={running.generation} /></SettingRow>)}
     </SettingRows></Group>
     {Object.entries(deployment.machineExecution ?? {}).filter(([, execution]) => execution.state !== 'ready').map(([machineId, execution]) => <Group key={machineId} title={execution.state === 'blocked' ? 'Machine update blocked' : 'Updating machine'}><SettingRows>
-      <SettingRow title={machineId} description={execution.error ?? `Updating to ${execution.releaseSha ? shortSha(execution.releaseSha) : 'the current channel release'} before agent execution. Workspaces, builds, and Launch remain available.`}><Badge color={execution.state === 'blocked' ? 'red' : 'blue'}>{execution.state === 'blocked' ? 'Needs attention' : 'Updating'}</Badge></SettingRow>
+      <SettingRow title={machineId} description={execution.error ?? `Updating to ${execution.releaseSha ? shortSha(execution.releaseSha) : 'the default release'} before agent execution. Workspaces, builds, and Launch remain available.`}><Badge color={execution.state === 'blocked' ? 'red' : 'blue'}>{execution.state === 'blocked' ? 'Needs attention' : 'Updating'}</Badge></SettingRow>
     </SettingRows></Group>)}
     <Group title="Desired"><SettingRows>
-      {RELEASE_TARGETS.map((target) => <SettingRow key={target} title={RELEASE_TARGET_LABEL[target]} description={desiredLabel(deployment, target)}><Badge color={deployment.desired[target] === null ? 'gray' : 'blue'}>{deployment.desired[target] === null ? 'Channel' : 'Release'}</Badge></SettingRow>)}
-      <SettingRow title="All targets" description={reverting ? 'Going back to stable: the worker swaps first, then machines and the frontend follow.'
-        : revertFailure ? <span role="alert" className="text-destructive">Back to stable failed: {revertFailure}</span>
+      <SettingRow title="Default release" description={defaultLabel === null ? 'None yet: launching the GitSpace project\'s branch or a published release to every target makes it the default.' : 'What the GitSpace project runs. A target with no selection, and every new computer, follows it; a workspace launch is a trial in front of it.'}>{defaultLabel === null ? null : <Badge color="blue">{defaultLabel}</Badge>}</SettingRow>
+      {RELEASE_TARGETS.map((target) => <SettingRow key={target} title={RELEASE_TARGET_LABEL[target]} description={desiredLabel(deployment, target)}><Badge color={deployment.desired[target] === null || deployment.desired[target] === defaultRelease ? 'gray' : 'blue'}>{deployment.desired[target] === null || deployment.desired[target] === defaultRelease ? 'Default' : 'Trial'}</Badge></SettingRow>)}
+      <SettingRow title="All targets" description={returning ? 'Going back to default: the worker swaps first, then machines and the frontend follow.'
+        : returnFailure ? <span role="alert" className="text-destructive">Back to default failed: {returnFailure}</span>
         : `Selections updated ${new Date(deployment.desired.updatedAt).toLocaleString()}`}>
-        <Button variant="secondary" size="compact" disabled={channel || saving || reverting} onClick={() => { if (window.confirm('Go back to the stable GitSpace build? The worker swaps now; machines and the frontend follow.')) settle(onRevertDeployment()); }}>Back to stable</Button>
+        <Button variant="secondary" size="compact" disabled={onDefault || defaultRelease === null || saving || returning} onClick={() => { if (window.confirm('Go back to the default release? The worker swaps now; machines and the frontend follow.')) settle(onBackToDefault()); }}>Back to default</Button>
       </SettingRow>
     </SettingRows></Group>
-    <Group title="Canonical source"><SettingRows>
-      <SettingRow title={head ? `${head.branch} · github.com/inKibra/gitspace.sh` : 'develop · github.com/inKibra/gitspace.sh'} description={canonicalDescription}>
+    <Group title="GitSpace project"><SettingRows>
+      <SettingRow title={head ? `${head.branch} · ${head.repository}` : 'The GitSpace project\'s branch'} description={canonicalDescription}>
         {head ? <Badge color={runsHead ? 'green' : 'gray'}><span className="font-mono">{shortSha(head.commit)}</span></Badge> : null}
         <Button variant="secondary" size="compact" disabled={saving} onClick={() => settle(onCheckCanonical())}>Check</Button>
       </SettingRow>

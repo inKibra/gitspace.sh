@@ -11,7 +11,6 @@ import { CloudflareR2PlatformClient } from './storage-provider.js';
 import { CreditLedgerDO, isCreditLedgerRecord } from './credit-ledger.js';
 import { deployTenantWorker, type DeployResult } from './deployer.js';
 import { TenantControlDO } from './tenant-control.js';
-import { defaultFrontendResponse } from './default-release.js';
 import { invokeCompute } from './compute-provider.js';
 import { fetchUsageReport, usageReportKey, usageReportSchema, usageReportScripts, usageSpikes, utcDate, utcDayWindow, HOURLY_SPIKE_FLOORS, SPIKE_FLOORS, SPIKE_RATIO, type UsageReport } from './usage-report.js';
 
@@ -454,8 +453,6 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/__platform/health') return Response.json({ status: 'ok' });
     if (url.pathname === '/__platform/admin/storage' && request.method === 'POST') return handleStorageAdmin(request, env);
-    const defaultFrontend = await defaultFrontendResponse(request, env.RELEASES);
-    if (defaultFrontend) return defaultFrontend;
 
     const resource = /^\/__platform\/tenants\/([a-z0-9-]+)(\/(?:state|storage|provider|machine-release|operations)(?:\/.*)?)$/u.exec(url.pathname);
     if (resource && tenantIdSchema.safeParse(resource[1]).success) return handleTenantResource(request, env, resource[1]!, resource[2]!);

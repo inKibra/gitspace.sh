@@ -10,7 +10,7 @@ import { releaseRecordSchema, releaseTargetSchema, type DeploymentStatus, type L
 
 /** The account's deployment status, holding `releases`. */
 function accountStatus(releases: ReleaseRecord[]): DeploymentStatus {
-  return { launch: null, canonical: null, revert: null, desired: { worker: null, machine: null, frontend: null, updatedAt: new Date(0).toISOString() }, current: { worker: { sha: null, version: null }, machines: {} }, releases };
+  return { launch: null, canonical: null, defaultRelease: null, desired: { worker: null, machine: null, frontend: null, updatedAt: new Date(0).toISOString() }, current: { worker: { sha: null, version: null }, machines: {} }, releases };
 }
 import type { BuiltArtifact } from '@gitspace/deployment';
 

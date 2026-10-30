@@ -1,15 +1,13 @@
+import type { CloudProjectSummary, CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { GitDiscoveryError, readAdvertisedRefs } from '@gitspace/runtime-workspace-do';
 import { originAccess } from './origin-access.js';
 
 /**
  * Reads the origin's branches now, as a push webhook would report them: the project's base branch and every workspace
- * branch, one the origin lacks recorded as absent. A project without a remote has nothing to read.
+ * branch, one the origin lacks reported as absent. A project without a remote has nothing to read.
  */
-export async function refreshProjectRemote(env: Env, userId: string, projectId: string): Promise<void> {
-  const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const [project, workspaces] = await Promise.all([authority.getProject(), authority.listWorkspaces()]);
-  if (!project) throw new Error(`Project ${projectId} is unavailable`);
-  if (project.repositoryReference === null) return;
+export async function readOriginHeads(env: Env, project: CloudProjectSummary, workspaces: CloudWorkspaceDefinition[]): Promise<Array<{ branch: string; head: string | null }>> {
+  if (project.repositoryReference === null) return [];
   const access = await originAccess(env, project.repositoryReference);
   // Only a machine holding the account SSH key reaches an SSH origin off GitHub.
   if (!/^https?:\/\//iu.test(access.remote)) throw new Error(`GitSpace reads origins over HTTPS; ${project.repositoryReference} is reachable only from a machine with the account SSH key`);
@@ -21,5 +19,14 @@ export async function refreshProjectRemote(env: Env, userId: string, projectId: 
     throw error;
   });
   const branches = new Set([project.baseBranch, ...workspaces.filter((workspace) => workspace.lifecycle !== 'deleting').map((workspace) => workspace.branch)]);
-  await authority.recordRemoteHeads([...branches].map((branch) => ({ branch, head: refs.get(`refs/heads/${branch}`) ?? null })));
+  return [...branches].map((branch) => ({ branch, head: refs.get(`refs/heads/${branch}`) ?? null }));
+}
+
+/** Check origin: the origin's branches, read now and recorded on the project. */
+export async function refreshProjectRemote(env: Env, userId: string, projectId: string): Promise<void> {
+  const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
+  const [project, workspaces] = await Promise.all([authority.getProject(), authority.listWorkspaces()]);
+  if (!project) throw new Error(`Project ${projectId} is unavailable`);
+  const heads = await readOriginHeads(env, project, workspaces);
+  if (heads.length > 0) await authority.recordRemoteHeads(heads);
 }

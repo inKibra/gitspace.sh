@@ -39,7 +39,7 @@ import { useOriginCheck } from './useOriginCheck.js';
 import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useRepositoryTree } from './useRepositoryTree.js';
-import { useBackToStable } from './useBackToStable.js';
+import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadDriveArtifact, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
@@ -639,10 +639,10 @@ function GitSpaceProduct() {
   useEffect(() => { void currentDevice().then(setBrowserDevice); }, []);
   const currentBrowserView = devicesValue?.find(device => device.current);
   const canManageMcp = Boolean(browserDevice && currentBrowserView?.current && currentBrowserView.deviceId === browserDevice.deviceId && currentBrowserView.kind === 'browser' && currentBrowserView.active && currentBrowserView.scope === 'user' && currentBrowserView.capabilities.includes('devices.manage'));
-  // Settings → Source reads the same status entry LiveWorkspace polls, and follows Back to stable in it.
+  // Settings → Source reads the same status entry LiveWorkspace polls, and follows Back to default in it.
   const settingsDeploymentQuery = useResultQuery(rpcClient.deployment.status, {}, { enabled: runtimeMetadataEnabled });
   const settingsDeploymentValue = useRetainedQueryValue(settingsDeploymentQuery, 'deployment');
-  const backToStable = useBackToStable(settingsDeploymentValue, settingsDeploymentQuery.refetch);
+  const settingsLaunch = useRuntimeLaunch(settingsDeploymentValue, settingsDeploymentQuery.refetch);
   const checkCanonicalSource = useResultMutation(rpcClient.deployment.checkCanonical);
   const composioSetupQuery = useResultQuery(rpcClient.mcp.composio.setup.get, {});
   const composioSetupValue = useRetainedQueryValue(composioSetupQuery, 'composio-setup');
@@ -825,12 +825,12 @@ function GitSpaceProduct() {
     }
     await machinesQuery.refetch();
   };
-  const revertToChannel = async (): Promise<void> => {
+  const backToDefault = async (): Promise<void> => {
     setSettingsError(null);
     try {
-      await backToStable.revert();
+      await settingsLaunch.backToDefault();
     } catch (error) {
-      setSettingsError(rpcErrorMessage(error, 'Back to stable'));
+      setSettingsError(rpcErrorMessage(error, 'Back to default'));
       throw error;
     }
   };
@@ -838,7 +838,7 @@ function GitSpaceProduct() {
     setSettingsError(null);
     const result = await checkCanonicalSource.mutateAsync({});
     if (result.status === 'error') {
-      setSettingsError(rpcErrorMessage(result.error, 'Check canonical source'));
+      setSettingsError(rpcErrorMessage(result.error, 'Check the GitSpace project\'s branch'));
       throw result.error;
     }
     await settingsDeploymentQuery.refetch();
@@ -1062,7 +1062,7 @@ function GitSpaceProduct() {
     onControlMachine={controlMachine}
     onDestroyMachine={removeMachine}
     deployment={settingsDeploymentValue ?? null}
-    onRevertDeployment={revertToChannel}
+    onBackToDefault={backToDefault}
     onCheckCanonical={checkCanonical}
     github={githubValue ?? null}
     onStartGitHubApp={createGitHubApp}

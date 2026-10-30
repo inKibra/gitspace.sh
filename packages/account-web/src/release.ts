@@ -13,16 +13,19 @@ export function shortSha(sha: string): string {
   return sha.startsWith('channel:') ? sha.slice('channel:'.length) : sha.slice(0, 10);
 }
 
-/** The release selected for one account-owned target; null follows the channel. */
+/** The release selected for one account-owned target; null follows the default release. */
 export function desiredLabel(status: DeploymentStatusView, target: ReleaseTarget): string {
-  const sha = status.desired[target];
-  if (sha === null) return 'Channel build';
-  return status.releases.find((release) => release.sha === sha)?.label ?? shortSha(sha);
+  const sha = status.desired[target] ?? status.defaultRelease;
+  if (sha === null) return 'No release yet';
+  const label = status.releases.find((release) => release.sha === sha)?.label ?? shortSha(sha);
+  return status.desired[target] === null ? `${label} (default)` : label;
 }
 
-/** Where a release came from, in words: its workspace commit and uncommitted files, or its canonical commit. */
+/** Where a release came from, in words: its workspace commit and uncommitted files, the GitSpace project's branch and
+ * commit, or the published release by its tag. */
 export function releaseSourceText(source: ReleaseRecordView['source']): string {
   if (!source) return 'source not recorded';
+  if (source.kind === 'release') return `published ${source.tag ?? shortSha(source.pin)}, built by GitHub`;
   if (source.kind === 'canonical') return `${source.branch ?? 'canonical'} @ ${shortSha(source.commit)}`;
   const changes = source.uncommittedFiles === null ? '' : source.uncommittedFiles === 0 ? ', no uncommitted changes' : ` + ${source.uncommittedFiles} uncommitted`;
   return `workspace ${source.workspaceId} @ ${shortSha(source.commit)}${changes}`;
@@ -154,9 +157,9 @@ export function machineConvergence(status: DeploymentStatusView): { applied: num
   return { applied: machines.filter((machine) => machine.sha === status.desired.machine).length, total: machines.length };
 }
 
-/** Label of the release the account's Worker runs, or `stable` on the channel build. */
+/** Label of the release the account's Worker runs, or `published default` for a Worker with no release record. */
 export function runningLabel(status: DeploymentStatusView): string {
   const sha = status.current.worker.sha;
-  if (sha === null) return 'stable';
+  if (sha === null) return 'published default';
   return status.releases.find((release) => release.sha === sha)?.label ?? shortSha(sha);
 }

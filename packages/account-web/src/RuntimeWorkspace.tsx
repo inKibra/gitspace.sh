@@ -20,7 +20,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
 import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './workspace-status.js';
 import { RELEASE_TARGETS } from './release.js';
-import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet, LaunchedBanner, RevertSheet } from './LaunchSheet.js';
+import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet, LaunchedBanner } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
@@ -197,18 +197,19 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
-      onUpdateBase={inspection.project.role === 'gitspace-source' ? undefined : () => perform(async () => {
+      onUpdateBase={() => perform(async () => {
         const result = await rpcClient.project.updateBase({ projectId: inspection.project.id });
         if (result.status === 'error') throw result.error;
       })}
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}
-      deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', onLaunch: workspaceId => setLaunchRequest({ source: { kind: 'workspace', workspaceId }, targets: RELEASE_TARGETS }), onLaunchCanonical: () => perform(async () => {
+      deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', branch: inspection.project.baseBranch, onLaunch: workspaceId => setLaunchRequest({ source: { kind: 'workspace', workspaceId }, targets: RELEASE_TARGETS }), onLaunchBranch: () => perform(async () => {
         const checked = await rpcClient.deployment.checkCanonical({});
         if (checked.status === 'error') throw checked.error;
-        if (!checked.value.canonical) throw new Error('The canonical branch head is unavailable');
-        setLaunchRequest({ source: { kind: 'canonical', commit: checked.value.canonical.commit }, targets: RELEASE_TARGETS });
-      }), onRevert: () => perform(launch.revert) } : null}
-      launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onRevert={() => perform(launch.revert)} onDismiss={launch.dismiss} /> : undefined}
+        if (!checked.value.canonical) throw new Error(`${inspection.project.baseBranch} has no head to launch`);
+        const { repository, branch, commit } = checked.value.canonical;
+        setLaunchRequest({ source: { kind: 'canonical', repository, branch, commit }, targets: RELEASE_TARGETS });
+      }), onBackToDefault: () => perform(launch.backToDefault) } : null}
+      launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onBackToDefault={() => perform(launch.backToDefault)} onDismiss={launch.dismiss} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
       sessionCommand={sessionCommand}
@@ -226,8 +227,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     />
     </TakeoverCardsContext.Provider>
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
-    {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog commit={launchRequest.source.commit} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
-    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} onDiscard={() => launch.discard(launch.launch!.launchId)} /> : null}
-    {launch.revertProgress ? <RevertSheet progress={launch.revertProgress} open={launch.open} onOpenChange={launch.setOpen} onRetry={() => perform(launch.revert)} /> : null}
+    {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog canonical={launchRequest.source} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
+    {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => launch.launch!.source.kind === 'release' ? perform(launch.backToDefault) : setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} onDiscard={() => launch.discard(launch.launch!.launchId)} /> : null}
   </>;
 }

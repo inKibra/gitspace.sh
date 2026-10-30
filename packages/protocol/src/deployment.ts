@@ -14,7 +14,7 @@ const idSchema = z.string().min(1).max(160);
 const hashSchema = z.templateLiteral(['sha256:', z.string().regex(/^[a-f0-9]{64}$/u)]);
 
 export const tenantIdSchema = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
-  .refine((name) => name !== 'api' && name !== 'platform', 'Tenant name is reserved for provider routing');
+  .refine((name) => name !== 'api' && name !== 'platform' && name !== 'releases', 'Tenant name is reserved for provider routing or the release channel');
 
 export const releaseTargetSchema = z.enum(['worker', 'machine', 'frontend']);
 export type ReleaseTarget = z.infer<typeof releaseTargetSchema>;
@@ -192,27 +192,33 @@ export const releaseStatusSchema = z.enum(['pending', 'applied', 'failed', 'skip
 export type ReleaseStatus = z.infer<typeof releaseStatusSchema>;
 
 const commitSchema = z.string().regex(/^[a-f0-9]{40}$/u);
-/** The branch GitSpace's canonical repository (`GITSPACE_SOURCE_REPOSITORY`) releases from. */
-export const GITSPACE_CANONICAL_BRANCH = 'develop';
-/** Where a release was built from: a workspace checkout at its branch commit plus uncommitted files (unknown for
- * releases recorded before counts were kept), or a clean commit of the canonical repository (no branch for defaults). */
+/** A published release: `<commit>:<SHA-256 of that commit's manifest.json>`. The commit locates the manifest in the
+ * channel, the hash proves its bytes, and the manifest pins every file. */
+export const releasePinSchema = z.string().regex(/^[a-f0-9]{40}:[a-f0-9]{64}$/u);
+/** Where a release came from: a workspace checkout at its branch commit plus uncommitted files (unknown for releases
+ * recorded before counts were kept), a clean commit of the GitSpace project's repository (no branch for releases
+ * recorded before branches were kept), or a release GitHub published to the channel, used by reference. */
 export const releaseSourceSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('workspace'), workspaceId: idSchema, commit: commitSchema, uncommittedFiles: z.number().int().nonnegative().nullable() }).strict(),
   z.object({ kind: z.literal('canonical'), repository: z.string().min(1), branch: z.string().min(1).nullable(), commit: commitSchema }).strict(),
+  /** `tag` is null for a release published before tags named releases. */
+  z.object({ kind: z.literal('release'), tag: z.string().min(1).max(160).nullable(), pin: releasePinSchema }).strict(),
 ]);
 export type ReleaseSource = z.infer<typeof releaseSourceSchema>;
-/** What a launch builds: a workspace checkout, or one commit of the canonical repository. */
+/** What a launch applies: a workspace checkout or a commit of the GitSpace project's repository and branch, built on a
+ * machine; or a release the account already holds (Back to default, a published release), applied by the account. */
 export const launchSourceSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('workspace'), workspaceId: idSchema }).strict(),
-  z.object({ kind: z.literal('canonical'), commit: commitSchema }).strict(),
+  z.object({ kind: z.literal('canonical'), repository: z.string().min(1), branch: z.string().min(1), commit: commitSchema }).strict(),
+  z.object({ kind: z.literal('release'), sha: idSchema }).strict(),
 ]);
 export type LaunchSource = z.infer<typeof launchSourceSchema>;
-/** The canonical branch head the account last read from the canonical repository. */
+/** The head of the GitSpace project's base branch, as the account last read it from the project's repository. */
 export const canonicalHeadSchema = z.object({ repository: z.string().min(1), branch: z.string().min(1), commit: commitSchema, checkedAt: z.string().datetime() }).strict();
 export type CanonicalHead = z.infer<typeof canonicalHeadSchema>;
-
 export const releaseRecordSchema = z.object({
-  /** The release key: a canonical commit, or a workspace commit with `-dirty.<fingerprint>` for uncommitted changes. */
+  /** The release key: a commit (canonical or published), or a workspace commit with `-dirty.<fingerprint>` for
+   * uncommitted changes. */
   sha: z.string().min(1).max(160),
   label: z.string().min(1).max(160),
   /** Null only for releases recorded before sources were kept whose origin cannot be derived. */
@@ -252,7 +258,7 @@ export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, lab
 }).strict();
 export type StageReleaseInput = z.infer<typeof stageReleaseInputSchema>;
 
-/** Independently selected release for each target; null follows that target's channel build. */
+/** Independently selected release for each target; null follows the account's default release. */
 export const tenantDesiredSchema = z.object({
   worker: idSchema.nullable(),
   machine: idSchema.nullable(),
@@ -297,20 +303,17 @@ export const launchProgressSchema = z.object({
 });
 export type LaunchProgress = z.infer<typeof launchProgressSchema>;
 
-/** The account's latest Back to stable. The account runs it to its end whether or not a browser follows it: the
- * platform swaps the Worker to the default release, and only a swap that succeeded returns every selection to the
- * channel. */
-export const revertProgressSchema = z.object({
-  revertId: z.string().uuid(),
-  status: z.enum(['running', 'succeeded', 'failed']),
-  error: z.string().max(4_096).nullable(),
-  startedAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
-export type RevertProgress = z.infer<typeof revertProgressSchema>;
+/** A published GitSpace release in the channel's catalog (`CHANNEL_CATALOG`), newest first. */
+export const channelReleaseSchema = z.object({ tag: z.string().min(1).max(160), commit: commitSchema, pin: releasePinSchema, publishedAt: z.string().datetime() }).strict();
+export type ChannelRelease = z.infer<typeof channelReleaseSchema>;
+export const CHANNEL_CATALOG = 'catalog.json';
+export const channelCatalogSchema = z.object({ schemaVersion: z.literal(1), releases: z.array(channelReleaseSchema) }).strict();
+export type ChannelCatalog = z.infer<typeof channelCatalogSchema>;
 
 export const deploymentStatusSchema = z.object({
   desired: tenantDesiredSchema,
+  /** The release the GitSpace project runs: what a target with no selection, and every new computer, follows. */
+  defaultRelease: idSchema.nullable(),
   current: z.object({
     /** Worker version string as reported by the tenant's own `/healthz`. */
     worker: z.object({ sha: z.string().nullable(), version: z.string().nullable() }),
@@ -323,7 +326,6 @@ export const deploymentStatusSchema = z.object({
   machineExecution: z.record(idSchema, machineExecutionAdmissionSchema).optional(),
   launch: launchProgressSchema.nullable(),
   canonical: canonicalHeadSchema.nullable(),
-  revert: revertProgressSchema.nullable(),
 });
 export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 
@@ -360,11 +362,9 @@ export const platformDeployResponseSchema = z.object({
 export type PlatformDeployResponse = z.infer<typeof platformDeployResponseSchema>;
 
 export const platformRevertRequestSchema = z.object({
-  to: z.enum(['previous', 'channel']),
-  /** The restored release must advertise this inference capability; the platform refuses one that does not. */
-  inferenceVersion: z.literal(1).optional(),
+  to: z.literal('previous'),
   /** Names the swap: the platform keeps its outcome under this id, at `GET /__platform/tenants/<tenant>/operations/<id>`,
-   * for a caller that did not get the answer. The same id never starts a second swap. */
+  * for a caller that did not get the answer. The same id never starts a second swap. */
   operationId: z.string().uuid().optional(),
 });
 export type PlatformRevertRequest = z.infer<typeof platformRevertRequestSchema>;

@@ -442,7 +442,6 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const authority = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`);
     const project = await authority.getProject();
     if (!project) throw new Error('Project is unavailable');
-    if (project.role === 'gitspace-source') throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
     const code = new ArtifactsCodeStore(this.env.ARTIFACTS);
     const repository = artifactsWorkspaceRepository(identity.workspaceId);
     const source = artifactsProjectRepository(project.id);

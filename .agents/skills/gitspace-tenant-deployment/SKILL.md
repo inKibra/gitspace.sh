@@ -39,7 +39,8 @@ Use the existing product client or an available, authorized integration. These a
 - `deployment.status({})`: current selections, release records, running machine state, and the latest launch on the answering machine.
 - `deployment.launch({ workspaceId, machineId, targets })`: start the source build and launch on exactly the named, online, enrolled build machine. No available-machine fallback exists. Ensure that machine has the source workspace checkout and resume a paused cache before calling. It returns progress immediately, not proof of activation.
 - Progress arrives through `deployment` fact events and `deployment.status({}).launch`.
-- `deployment.revert({})`: return account selections to the stable/channel build. The browser labels this **Back to stable**; it is not a rollback to an arbitrary previous source release.
+- `deployment.backToDefault({})`: launch the account's default release to every target, ending any trial. The account runs it with no machine and reports it as the latest launch; the browser labels this **Back to default**.
+- `deployment.launchPublished({ tag })`: launch a published GitSpace release from the channel by reference to every target, with no machine; it becomes the default once its Worker runs.
 
 Use the authenticated browser if no suitable API integration is available. Do not scrape credentials, edit deployment pointers or databases, or invent a `gitspace deploy` command.
 

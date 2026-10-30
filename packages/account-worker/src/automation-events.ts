@@ -7,7 +7,13 @@ import {
   type AutomationGitHubEvent,
   type AutomationSubject,
   type AutomationTrigger,
+  type AutomationWatchOn,
 } from '@gitspace/protocol/automations-contract';
+
+/** Events a watch trigger starts on: a published release, a new tag (by check; a webhook delivers a tag `push`), a
+ * deployment status. */
+const WatchEventSchema = z.enum(['release', 'tag', 'deployment_status']);
+const WATCH_EVENT: Record<AutomationWatchOn, z.infer<typeof WatchEventSchema>> = { release: 'release', tag: 'tag', deployment: 'deployment_status' };
 
 /** Text fields (descriptions, comments, reviews) are kept up to this many characters. */
 const MAX_TEXT = 4_000;
@@ -18,7 +24,7 @@ const CLOSES = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b/giu;
 export const AutomationEventSchema = z.object({
   deliveryId: z.string(),
   receivedAt: z.number(),
-  event: z.enum(AUTOMATION_GITHUB_EVENTS),
+  event: z.union([z.enum(AUTOMATION_GITHUB_EVENTS), WatchEventSchema]),
   action: z.string().nullable(),
   repository: z.string(),
   /** Whose trust decides whether it runs (docs/AUTOMATIONS-DESIGN.md §5): the author of a pull request or issue, the
@@ -48,6 +54,13 @@ export const AutomationEventSchema = z.object({
   closes: z.array(z.number().int().positive()),
   /** Values instructions name in `{{…}}`. */
   fields: z.record(z.string(), z.string()),
+  /** A release's tag, a new tag's name, or the tag a push created. Absent on events recorded before watches. */
+  tag: z.string().nullable().default(null),
+  prerelease: z.boolean().nullable().default(null),
+  environment: z.string().nullable().default(null),
+  deploymentState: z.string().nullable().default(null),
+  /** What a watch remembers it has seen: `release:<tag>`, `tag:<name>`, `deployment:<id>:<state>`. */
+  watchKey: z.string().nullable().default(null),
 });
 export type AutomationEvent = z.infer<typeof AutomationEventSchema>;
 
@@ -122,6 +135,7 @@ function pullRequestFields(pull: z.infer<typeof PullRequestSchema>): Record<stri
  * is the App's: its bot is `@<slug>` in text and `<slug>[bot]` as a sender. */
 export function automationEvent(input: { event: string; deliveryId: string; payload: unknown; slug: string | null; receivedAt: number }): AutomationEvent | null {
   const { event, slug } = input;
+  if (event === 'release' || event === 'deployment_status') return watchedDelivery({ ...input, event });
   if (!isAutomationEvent(event)) return null;
   const base = CommonSchema.safeParse(input.payload);
   if (!base.success) return null;
@@ -133,6 +147,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
     fromApp: slug !== null && sender !== null && sender.toLowerCase() === `${slug.toLowerCase()}[bot]`,
     baseBranch: null, headBranch: null, branch: null, draft: null, labels: null, label: common.label?.name ?? null, changedFiles: null,
     conclusion: null, reviewState: null, mentionsBot: false, merged: null, closes: [],
+    tag: null, prerelease: null, environment: null, deploymentState: null, watchKey: null,
   };
   const fieldsOf = (subject: AutomationSubject | undefined, specific: Record<string, string>): Record<string, string> => ({
     action: action ?? '', 'sender.login': sender ?? '', 'repository.full_name': common.repository.full_name,
@@ -208,11 +223,16 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       if (!parsed.success) return null;
       const push = parsed.data;
       const branch = push.ref.startsWith('refs/heads/') ? push.ref.slice('refs/heads/'.length) : null;
+      // A new tag: a tag watch on this repository starts on it, as a check would find it.
+      const tag = push.ref.startsWith('refs/tags/') && !push.deleted ? push.ref.slice('refs/tags/'.length) : null;
       const subject: AutomationSubject | undefined = branch === null ? undefined : { kind: 'branch', number: null, branch, title: branch, url: `${common.repository.html_url}/tree/${branch}` };
       const changed = push.commits ? [...new Set(push.commits.flatMap(commit => [...commit.added ?? [], ...commit.modified ?? [], ...commit.removed ?? []]))] : null;
       return {
-        ...shared, actor: sender, author: sender, subjects: subject ? [subject] : [], branch, changedFiles: changed,
-        fields: fieldsOf(subject, { ref: push.ref, after: push.after, compare: push.compare ?? '', 'head_commit.message': text(push.head_commit?.message) }),
+        ...shared, actor: sender, author: sender, subjects: subject ? [subject] : [], branch, changedFiles: changed, tag, watchKey: tag === null ? null : `tag:${tag}`,
+        fields: fieldsOf(subject, {
+          ref: push.ref, after: push.after, compare: push.compare ?? '', 'head_commit.message': text(push.head_commit?.message),
+          ...(tag === null ? {} : { 'tag.name': tag, 'tag.commit': push.after, 'tag.url': `${common.repository.html_url}/releases/tag/${tag}` }),
+        }),
       };
     }
     case 'check_suite': {
@@ -235,9 +255,14 @@ export function automationEventName(event: Pick<AutomationEvent, 'event' | 'acti
   return event.action === null ? event.event : `${event.event}.${event.action}`;
 }
 
-/** Whether a trigger starts on the event. A label trigger starts when a `gitspace:` mode label is added. */
-export function triggerMatches(trigger: AutomationTrigger, event: AutomationEvent): boolean {
+/** Whether a trigger starts on the event. A label trigger starts when a `gitspace:` mode label is added. A watch starts
+ * on its kind from its repository, `watched` (resolved: the project's repository, its upstream parent, or another). */
+export function triggerMatches(trigger: AutomationTrigger, event: AutomationEvent, watched: string | null = null): boolean {
   if (trigger.kind === 'label') return (event.event === 'issues' || event.event === 'pull_request') && event.action === 'labeled' && event.label !== null && AUTOMATION_START_LABELS[event.label] !== undefined;
+  if (trigger.kind === 'watch') {
+    if (watched === null || event.repository.toLowerCase() !== watched.toLowerCase() || event.watchKey === null) return false;
+    return trigger.on === 'tag' ? event.tag !== null && (event.event === 'tag' || event.event === 'push') : event.event === WATCH_EVENT[trigger.on];
+  }
   if (trigger.kind !== 'github') return false;
   return trigger.events.some(entry => entry.event === event.event && (entry.actions.length === 0 || (event.action !== null && entry.actions.includes(event.action))));
 }
@@ -258,6 +283,9 @@ export function describeAutomationEvent(event: AutomationEvent): string {
     case 'issue_comment': return `Comment from @${event.author ?? 'someone'} on ${named}`;
     case 'push': return `Push to ${event.branch ?? event.fields.ref ?? 'a ref'}${by(event.author)}`;
     case 'check_suite': return `Checks ${event.conclusion ?? event.action ?? 'changed'} on ${event.branch ?? named}`;
+    case 'release': return `${event.repository} published ${event.tag ?? 'a release'}${event.prerelease ? ' (prerelease)' : ''}${by(event.author)}`;
+    case 'tag': return `${event.repository} tagged ${event.tag ?? 'a commit'}`;
+    case 'deployment_status': return `${event.repository} deployment to ${event.environment ?? 'an environment'} ${event.deploymentState ?? 'changed'}${by(event.author)}`;
   }
 }
 
@@ -274,4 +302,74 @@ export function globMatches(pattern: string, value: string, caseless: boolean): 
     else source += character.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   }
   return new RegExp(`^${source}$`, caseless ? 'iu' : 'u').test(value);
+}
+
+/** A release, tag or deployment status a watched repository published, as a check reads it from GitHub or a webhook
+ * delivers it. */
+export const WatchedItemSchema = z.discriminatedUnion('on', [
+  z.object({ on: z.literal('release'), tag: z.string(), name: z.string(), url: z.string(), notes: z.string(), publishedAt: z.string(), prerelease: z.boolean(), author: z.string().nullable() }),
+  z.object({ on: z.literal('tag'), name: z.string(), commit: z.string(), url: z.string() }),
+  z.object({ on: z.literal('deployment'), id: z.number().int(), environment: z.string(), state: z.string(), sha: z.string(), ref: z.string(), url: z.string(), creator: z.string().nullable() }),
+]);
+export type WatchedItem = z.infer<typeof WatchedItemSchema>;
+
+/** A watched item as automations read it. `deliveryId` names a webhook delivery, or a check (`watch:<repository>:<key>`). */
+export function watchedEvent(input: { repository: string; item: WatchedItem; deliveryId: string; receivedAt: number; fromApp: boolean }): AutomationEvent {
+  const { item } = input;
+  const shared = {
+    deliveryId: input.deliveryId, receivedAt: input.receivedAt, repository: input.repository, fromApp: input.fromApp, subjects: [],
+    baseBranch: null, headBranch: null, branch: null, draft: null, labels: null, label: null, changedFiles: null,
+    conclusion: null, reviewState: null, mentionsBot: false, merged: null, closes: [],
+    tag: null, prerelease: null, environment: null, deploymentState: null,
+  };
+  const common = { 'repository.full_name': input.repository };
+  switch (item.on) {
+    case 'release': return {
+      ...shared, event: 'release', action: 'published', actor: item.author, author: item.author, tag: item.tag, prerelease: item.prerelease, watchKey: `release:${item.tag}`,
+      fields: { ...common, 'release.tag': item.tag, 'release.name': item.name, 'release.url': item.url, 'release.notes': text(item.notes), 'release.published_at': item.publishedAt },
+    };
+    case 'tag': return {
+      ...shared, event: 'tag', action: null, actor: null, author: null, tag: item.name, watchKey: `tag:${item.name}`,
+      fields: { ...common, 'tag.name': item.name, 'tag.commit': item.commit, 'tag.url': item.url },
+    };
+    case 'deployment': return {
+      ...shared, event: 'deployment_status', action: item.state, actor: item.creator, author: item.creator, environment: item.environment, deploymentState: item.state,
+      watchKey: `deployment:${item.id}:${item.state}`,
+      fields: { ...common, 'deployment.environment': item.environment, 'deployment.state': item.state, 'deployment.sha': item.sha, 'deployment.ref': item.ref, 'deployment.url': item.url, 'deployment.creator': item.creator ?? '' },
+    };
+  }
+}
+
+const ReleaseDeliverySchema = z.object({
+  action: z.string(),
+  repository: z.object({ full_name: z.string() }),
+  sender: UserSchema,
+  release: z.object({ tag_name: z.string(), name: z.string().nullish(), html_url: z.string(), body: z.string().nullish(), published_at: z.string().nullish(), prerelease: z.boolean(), draft: z.boolean(), author: UserSchema }),
+});
+const DeploymentDeliverySchema = z.object({
+  repository: z.object({ full_name: z.string() }),
+  sender: UserSchema,
+  deployment_status: z.object({ state: z.string(), target_url: z.string().nullish(), environment_url: z.string().nullish() }),
+  deployment: z.object({ id: z.number().int(), environment: z.string(), sha: z.string(), ref: z.string(), url: z.string(), creator: UserSchema }),
+});
+
+/** A `release` (published) or `deployment_status` webhook delivery as a watch reads it; null for any other action. */
+function watchedDelivery(input: { event: 'release' | 'deployment_status'; deliveryId: string; payload: unknown; slug: string | null; receivedAt: number }): AutomationEvent | null {
+  const sentByApp = (login: string | null | undefined) => input.slug !== null && login?.toLowerCase() === `${input.slug.toLowerCase()}[bot]`;
+  if (input.event === 'release') {
+    const parsed = ReleaseDeliverySchema.safeParse(input.payload);
+    if (!parsed.success || parsed.data.action !== 'published' || parsed.data.release.draft) return null;
+    const { release } = parsed.data;
+    return watchedEvent({
+      repository: parsed.data.repository.full_name, deliveryId: input.deliveryId, receivedAt: input.receivedAt, fromApp: sentByApp(parsed.data.sender?.login),
+      item: { on: 'release', tag: release.tag_name, name: release.name ?? release.tag_name, url: release.html_url, notes: release.body ?? '', publishedAt: release.published_at ?? new Date(input.receivedAt).toISOString(), prerelease: release.prerelease, author: release.author?.login ?? null },
+    });
+  }
+  const parsed = DeploymentDeliverySchema.safeParse(input.payload);
+  if (!parsed.success) return null;
+  const { deployment, deployment_status: status } = parsed.data;
+  return watchedEvent({
+    repository: parsed.data.repository.full_name, deliveryId: input.deliveryId, receivedAt: input.receivedAt, fromApp: sentByApp(parsed.data.sender?.login),
+    item: { on: 'deployment', id: deployment.id, environment: deployment.environment, state: status.state, sha: deployment.sha, ref: deployment.ref, url: status.environment_url ?? status.target_url ?? deployment.url, creator: deployment.creator?.login ?? null },
+  });
 }

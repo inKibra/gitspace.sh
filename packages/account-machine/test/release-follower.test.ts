@@ -441,7 +441,7 @@ describe('release follower', () => {
     const record = release(sha, machine, null);
     record.artifacts.portable = { key: portableKey, hash: hashOf(portableBytes), size: portableBytes.byteLength };
     const status: DeploymentStatus = {
-      launch: null, canonical: null, revert: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, canonical: null, defaultRelease: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} }, releases: [record],
     };
     const authority = fakeAuthority(status);

@@ -17,8 +17,8 @@ import {
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract,
-  spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentDiscardLaunchContract, deploymentRevertContract, deploymentCheckCanonicalContract,
-  environmentStateContract, recordIncidentContract, refreshProjectRemoteContract,
+  spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentDiscardLaunchContract, deploymentBackToDefaultContract, deploymentLaunchPublishedContract, deploymentCheckCanonicalContract,
+  environmentStateContract, recordIncidentContract, refreshProjectRemoteContract, projectOriginCheckContract, setProjectOriginCheckContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract } from '@gitspace/protocol/rpc-contract';
 import { stackStatusContract } from '@gitspace/protocol/rpc-contract';
@@ -28,7 +28,7 @@ import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
-import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, revertTenantRelease, checkCanonicalHead, discardTenantLaunch, type CredentialVaultDO } from './application.js';
+import { controlFleetMachine, provisionManagedSandbox, readTenantDeployment, backToDefault, launchPublishedRelease, checkCanonicalHead, discardTenantLaunch, type CredentialVaultDO } from './application.js';
 import type { DeploymentStatus } from '@gitspace/protocol/deployment';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { UserSettingsDO } from './user-settings.js';
@@ -261,7 +261,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   };
   // The wire view omits each release's worker upload metadata.
   const deploymentView = (status: DeploymentStatus) => ({
-    desired: status.desired, current: status.current, machineExecution: status.machineExecution, launch: status.launch, canonical: status.canonical, revert: status.revert,
+    desired: status.desired, defaultRelease: status.defaultRelease, current: status.current, machineExecution: status.machineExecution, launch: status.launch, canonical: status.canonical,
     releases: status.releases.map(({ sha, label, source, builtBy, createdAt, artifacts, omp, status: outcome, error }) => ({ sha, label, source, builtBy, createdAt, artifacts, omp, status: outcome, error })),
   });
   const deploymentStatus = server.implement(deploymentStatusContract).handler(async ({ errors }) => {
@@ -270,15 +270,19 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   });
   const deploymentCheckCanonical = server.implement(deploymentCheckCanonicalContract).handler(async ({ errors }) => {
     try { return ok(deploymentView(await checkCanonicalHead(env, userId))); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'check canonical source', message: message(error) })); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'check the GitSpace project\'s branch', message: message(error) })); }
   });
   const deploymentDiscardLaunch = server.implement(deploymentDiscardLaunchContract).handler(async ({ input, errors }) => {
     try { return ok(deploymentView(await discardTenantLaunch(env, userId, input.launchId))); }
     catch (error) { return err(errors.OperationFailed({ operation: 'discard launch', message: message(error) })); }
   });
-  const deploymentRevert = server.implement(deploymentRevertContract).handler(async ({ errors }) => {
-    try { return ok(deploymentView(await revertTenantRelease(env, userId))); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'revert release', message: message(error) })); }
+  const deploymentBackToDefault = server.implement(deploymentBackToDefaultContract).handler(async ({ errors }) => {
+    try { return ok(deploymentView(await backToDefault(env, userId))); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'go back to the default release', message: message(error) })); }
+  });
+  const deploymentLaunchPublished = server.implement(deploymentLaunchPublishedContract).handler(async ({ input, errors }) => {
+    try { return ok(deploymentView(await launchPublishedRelease(env, userId, input.tag))); }
+    catch (error) { return err(errors.OperationFailed({ operation: `launch GitSpace ${input.tag}`, message: message(error) })); }
   });
   const createProject = server.implement(createProjectContract).handler(async ({ input, errors }) => {
     try {
@@ -299,6 +303,14 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       await refreshProjectRemote(env, userId, input.projectId);
       return ok({});
     } catch (error) { return err(errors.OperationFailed({ operation: 'check the origin', message: message(error) })); }
+  });
+  const checkInterval = server.implement(projectOriginCheckContract).handler(async ({ input, errors }) => {
+    try { return ok({ interval: await (await authorityFor(input.projectId)).originCheck() }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read when the origin is checked', message: message(error) })); }
+  });
+  const setCheckInterval = server.implement(setProjectOriginCheckContract).handler(async ({ input, errors }) => {
+    try { return ok({ interval: await (await authorityFor(input.projectId)).setOriginCheck(input.interval) }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'set when the origin is checked', message: message(error) })); }
   });
   const spaceView = server.implement(spaceViewContract).handler(async ({ input, errors }) => {
     try {
@@ -432,9 +444,9 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, automations: configuration.automations,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
-    machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote }, ...lifecycle.project },
+    machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote, checkInterval, setCheckInterval }, ...lifecycle.project },
     space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
-    devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, discardLaunch: deploymentDiscardLaunch, revert: deploymentRevert }, providers: providerCloudProcedures(env, userId, requireAdministration),
+    devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, discardLaunch: deploymentDiscardLaunch, backToDefault: deploymentBackToDefault, launchPublished: deploymentLaunchPublished }, providers: providerCloudProcedures(env, userId, requireAdministration),
     storageIncidents: storageIncidentProcedures(env, requireAdministration),
     github: githubCloudProcedures(env, requireAdministration),
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },

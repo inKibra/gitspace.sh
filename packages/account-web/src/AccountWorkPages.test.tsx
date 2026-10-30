@@ -9,8 +9,8 @@ import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
 import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
-const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn() }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh } } } }));
+const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn(), checkInterval: vi.fn(async () => ({ status: 'ok', value: { interval: 'daily' } })) }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh, checkInterval: rpc.checkInterval } } } }));
 
 const stamp = '2026-09-12T00:00:00.000Z';
 const projects: ProjectLifecycleView[] = [
@@ -158,24 +158,26 @@ it('offers Update base only for a project behind its origin and reports the refu
   await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe('Commit or discard the base workspace changes first'));
 });
 
-it('changes a project base branch from Settings at its current revision and keeps the built-in source read-only', async () => {
+it('changes a project base branch from Settings at its current revision, the GitSpace project\'s like any other, and says what its repository means for releases', async () => {
   const setBaseBranch = vi.fn();
-  const source: ProjectLifecycleView = { ...projects[0]!, id: 'source', name: 'GitSpace', role: 'gitspace-source', baseBranch: 'release/one' };
+  const source: ProjectLifecycleView = { ...projects[0]!, id: 'source', name: 'GitSpace', role: 'gitspace-source', baseBranch: 'develop', repositoryReference: 'https://github.com/inKibra/gitspace.sh.git' };
   const onSettingsProjectChange = vi.fn();
-  await act(() => root.render(<AccountWorkPages view="projects" projects={[...projects, source]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId="source" onSettingsProjectChange={onSettingsProjectChange} />));
-  expect(document.body.textContent).toContain('Managed by GitSpace releases');
-  expect(document.body.querySelector('#project-base-branch-form')).toBeNull();
-  await act(() => [...document.body.querySelectorAll('button')].find((button) => button.textContent === 'Done')!.click());
-  expect(onSettingsProjectChange).toHaveBeenCalledWith(null);
-
-  await render('projects', { onSetProjectBaseBranch: setBaseBranch }, [...projects, source]);
-  await click('Settings for Beta');
-  const form = document.body.querySelector<HTMLFormElement>('#project-base-branch-form')!;
+  const open = (project: ProjectLifecycleView) => act(() => root.render(<AccountWorkPages view="projects" projects={[...projects, project]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId={project.id} onSettingsProjectChange={onSettingsProjectChange} />));
+  await open(source);
+  expect(document.body.textContent).toContain('Published GitSpace releases launch as they are.');
+  const row = [...document.body.querySelectorAll('span')].find((span) => span.textContent === 'Base branch')!.closest('div')!;
+  await act(() => [...row.querySelectorAll('button')].find((button) => button.textContent === 'Change')!.click());
+  const form = row.querySelector('form')!;
   await act(() => {
     const input = form.querySelector<HTMLInputElement>('input')!;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, ' release ');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   await act(() => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
-  expect(setBaseBranch).toHaveBeenCalledWith('beta', 7, 'release');
+  expect(setBaseBranch).toHaveBeenCalledWith('source', source.revision, 'release');
+  // A fork of GitSpace gets releases as merges.
+  await open({ ...source, repositoryReference: 'https://github.com/someone/gitspace.sh.git' });
+  expect(document.body.textContent).toContain('GitSpace releases arrive as merges; launching builds on a machine.');
+  await act(() => [...document.body.querySelectorAll('button')].find((button) => button.textContent === 'Done')!.click());
+  expect(onSettingsProjectChange).toHaveBeenCalledWith(null);
 });

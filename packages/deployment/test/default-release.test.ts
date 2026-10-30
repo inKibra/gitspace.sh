@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from '../src/default-release.js';
-import { loadDefaultRelease } from '@gitspace/protocol/default-release';
+import { buildDefaultRelease, publishDefaultRelease, publishToChannel, rollbackDefaultRelease, type DefaultReleaseStorage } from '../src/default-release.js';
+import { DEFAULT_ACCOUNT_POINTER, loadDefaultRelease, loadPinnedDefaultRelease } from '@gitspace/protocol/default-release';
+import { CHANNEL_CATALOG, channelCatalogSchema } from '@gitspace/protocol/deployment';
 
 const sha = 'a'.repeat(40);
 const nextSha = 'b'.repeat(40);
@@ -103,5 +104,41 @@ describe('coherent default account releases', () => {
     };
     await expect(publishDefaultRelease(next, racing)).rejects.toThrow('publication conflict');
     expect((await loadDefaultRelease(f.api)).commit).toBe(sha);
+  });
+});
+
+describe('the public channel', () => {
+  const catalog = (objects: Map<string, { bytes: Uint8Array }>) => channelCatalogSchema.parse(JSON.parse(new TextDecoder().decode(objects.get(CHANNEL_CATALOG)?.bytes ?? bytes('{"schemaVersion":1,"releases":[]}'))));
+
+  test('publishes each release as its source holds it, lists the newest first, and keeps a tag bound to the release it named', async () => {
+    const source = storage();
+    await publishDefaultRelease(await build(), source.api);
+    await publishDefaultRelease(await build(nextSha), source.api);
+    const channel = storage();
+    const first = await publishToChannel(source.api, channel.api, sha, 'v1.0.0', '2026-10-01T00:00:00.000Z');
+    const next = await publishToChannel(source.api, channel.api, nextSha, 'v1.1.0', '2026-10-02T00:00:00.000Z');
+    expect(catalog(channel.objects).releases).toEqual([
+      { tag: 'v1.1.0', commit: nextSha, pin: next, publishedAt: '2026-10-02T00:00:00.000Z' },
+      { tag: 'v1.0.0', commit: sha, pin: first, publishedAt: '2026-10-01T00:00:00.000Z' },
+    ]);
+    expect((await loadPinnedDefaultRelease(channel.api, first)).commit).toBe(sha);
+    expect(channel.objects.get(workerModule(sha))?.bytes).toEqual(source.objects.get(workerModule(sha))?.bytes);
+    // The channel lists releases; it has no default of its own.
+    expect(channel.objects.has(DEFAULT_ACCOUNT_POINTER)).toBe(false);
+
+    expect(await publishToChannel(source.api, channel.api, sha, 'v1.0.0', '2026-10-03T00:00:00.000Z')).toBe(first);
+    await expect(publishToChannel(source.api, channel.api, nextSha, 'v1.0.0', '2026-10-03T00:00:00.000Z')).rejects.toThrow('already published');
+    expect(catalog(channel.objects).releases.map(release => release.tag)).toEqual(['v1.1.0', 'v1.0.0']);
+  });
+
+  test('refuses a release whose source bytes changed, listing nothing', async () => {
+    const source = storage();
+    await publishDefaultRelease(await build(), source.api);
+    source.objects.set(workerModule(sha), { bytes: bytes('tampered'), etag: 'tampered' });
+    const channel = storage();
+    await expect(publishToChannel(source.api, channel.api, sha, 'v1.0.0', '2026-10-01T00:00:00.000Z')).rejects.toThrow();
+    expect(channel.objects.has(CHANNEL_CATALOG)).toBe(false);
+    // Channel keys are immutable: bytes written there would block publishing the true release under them.
+    expect(channel.objects.has(workerModule(sha))).toBe(false);
   });
 });

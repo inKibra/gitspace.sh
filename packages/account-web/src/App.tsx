@@ -45,6 +45,7 @@ export const verticalSliceFixture: GitSpaceShellProps = {
  */
 export const deploymentStatusFixture: DeploymentStatusView = {
   desired: { worker: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', machine: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', frontend: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', updatedAt: '2026-08-30T10:00:00.000Z' },
+  defaultRelease: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00',
   current: {
     worker: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', version: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' },
     machines: { darktop: { sha: null, generation: 'gen-0f3a9c' }, studio: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', generation: 'gen-77ab21' } },
@@ -78,7 +79,6 @@ export const deploymentStatusFixture: DeploymentStatusView = {
     updatedAt: '2026-08-30T10:05:10.000Z',
   },
   canonical: { repository: 'https://github.com/inKibra/gitspace.sh.git', branch: 'develop', commit: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00', checkedAt: '2026-08-30T10:01:00.000Z' },
-  revert: null,
 };
 
 /** The running launch above as this browser followed it: install done, worker built and uploaded, machine building. */
@@ -97,7 +97,8 @@ export const sidebarDeploymentFixture: SidebarDeploymentProps = {
   launch: launchTrackFixture,
   isGitSpaceProject: true,
   onLaunch: () => undefined,
-  onLaunchCanonical: () => undefined,
-  onRevert: () => undefined,
+  branch: 'develop',
+  onLaunchBranch: () => undefined,
+  onBackToDefault: () => undefined,
 };
 

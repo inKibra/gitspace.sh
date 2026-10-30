@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm, SELF } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from 'cloudflare:test';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
@@ -363,5 +363,92 @@ describe('automations on GitHub events', () => {
     expect(await refused({ action: { kind: 'startWorkspace', mode: null, instruction: 'Review it.' } })).toMatchObject({ status: 'error', failure: { field: 'action.mode' } });
     expect(await refused({ trigger: { kind: 'github', events: [{ event: 'pull_request', actions: ['opened'] }, { event: 'issues', actions: ['opened'] }] } })).toMatchObject({ status: 'error', failure: { field: 'conditions' } });
     expect(await refused({ trigger: { kind: 'manual' }, conditions: [] })).toMatchObject({ status: 'error', failure: { field: 'action.kind' } });
+  });
+});
+
+describe('watch automations', () => {
+  const release = (repository: string, tag: string, prerelease = false) => ({
+    tag_name: tag, name: tag, html_url: `https://github.com/${repository}/releases/tag/${tag}`, body: `Notes for ${tag}`,
+    published_at: '2026-10-29T00:00:00Z', prerelease, draft: false, author: { login: 'bradleat' },
+  });
+  /** Makes every watch of `automations` due and wakes it; the check itself runs in the alarm. */
+  const checkNow = (automations: DurableObjectStub<ProjectAutomationsDO>) => runInDurableObject(automations, async (_instance, state) => {
+    state.storage.sql.exec('UPDATE automation_watches SET next_check_at=0');
+    await state.storage.setAlarm(Date.now());
+  });
+
+  it('runs once on each release published after it was set up, whether a check or the webhook sees it first, and never on what came before', async () => {
+    const { projectId, searchId, automations, send, work, runs, submitted } = await installed(['bradleat']);
+    let published = [release('inKibra/pantry', 'v1.0.0')];
+    let checks = 0;
+    network.use(http.get(`${API}/repos/inKibra/pantry/releases`, () => { checks += 1; return HttpResponse.json(published); }));
+    automationValue(await automations.create({ projectId, draft: {
+      name: 'Releases', enabled: true, trigger: { kind: 'watch', repository: 'inKibra/pantry', on: 'release', every: 'hourly' },
+      conditions: [{ kind: 'prerelease', prerelease: false }], action: { kind: 'messageWorkspace', workspaceId: searchId, instruction: 'Upgrade to {{release.tag}}.' },
+    } }));
+    const watched = async () => (await runs()).filter(run => run.automationName === 'Releases');
+    // The first check records what was already published.
+    await vi.waitFor(async () => { await work(); expect(checks).toBe(1); });
+    expect(await watched()).toEqual([]);
+
+    // The webhook sees v1.1.0 first; the check after it finds nothing new.
+    published = [release('inKibra/pantry', 'v1.1.0'), ...published];
+    await send('release', { action: 'published', sender: { login: 'bradleat' }, release: release('inKibra/pantry', 'v1.1.0') });
+    await checkNow(automations);
+    await vi.waitFor(async () => { await work(); expect(checks).toBe(2); });
+    expect((await watched()).map(run => run.event)).toEqual(['release.published']);
+
+    // A check sees a prerelease and v1.2.0 first, oldest first; the webhook after it changes nothing.
+    published = [release('inKibra/pantry', 'v1.2.0'), release('inKibra/pantry', 'v1.2.0-rc.1', true), ...published];
+    await checkNow(automations);
+    await vi.waitFor(async () => { await work(); expect(checks).toBe(3); });
+    await send('release', { action: 'published', sender: { login: 'bradleat' }, release: release('inKibra/pantry', 'v1.2.0') });
+    const [stable, candidate, first] = await watched();
+    expect(await watched()).toHaveLength(3);
+    expect(candidate).toMatchObject({ state: 'skipped' });
+    expect(first).toMatchObject({ state: expect.not.stringMatching(/^skipped$/u) });
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: searchId, requestId: `automation:${stable?.id}`, text: expect.stringContaining('Upgrade to v1.2.0.') })));
+    expect(submitted).not.toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('Upgrade to v1.0.0.') }));
+  });
+
+  it('lets a release of another repository reach only the watch naming it, never the project\'s GitHub automations', async () => {
+    const { projectId, automations, work, runs } = await installed(['bradleat']);
+    let checks = 0;
+    network.use(http.get(`${API}/repos/earendil-works/pi/releases`, () => { checks += 1; return HttpResponse.json([]); }));
+    automationValue(await automations.create({ projectId, draft: reviewPullRequests }));
+    automationValue(await automations.create({ projectId, draft: { name: 'Every push', enabled: true, trigger: { kind: 'github', events: [{ event: 'push', actions: [] }] }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Pushed {{ref}}.' } } }));
+    automationValue(await automations.create({ projectId, draft: {
+      name: 'Pi releases', enabled: true, trigger: { kind: 'watch', repository: 'earendil-works/pi', on: 'release', every: 'daily' },
+      conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Pi {{release.tag}} is out.' },
+    } }));
+    await vi.waitFor(async () => { await work(); expect(checks).toBe(1); });
+    const deliver = async (event: string, payload: Record<string, unknown>) => {
+      const body = JSON.stringify({ ...payload, repository: { full_name: 'earendil-works/pi', html_url: 'https://github.com/earendil-works/pi' }, installation: { id: 91 } });
+      const response = await SELF.fetch(`${env.ACCOUNT_URL}/github/webhook`, { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-github-event': event, 'x-github-delivery': crypto.randomUUID(), 'x-hub-signature-256': await signature(body) } });
+      expect(response.status).toBe(202);
+    };
+    await deliver('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(3, { author: 'bradleat', head: 'fix' }) });
+    // A tag push reaches every project, as watches of tags read it; the project's own push automation is not for it.
+    await deliver('push', { ref: 'refs/tags/v1.4.0', after: commit('f'), before: commit('0'), deleted: false, created: true, compare: '', sender: { login: 'bradleat' }, head_commit: null, commits: [] });
+    await deliver('release', { action: 'published', sender: { login: 'bradleat' }, release: release('earendil-works/pi', 'v1.4.0') });
+    expect((await runs()).map(run => [run.automationName, run.event])).toEqual([['Pi releases', 'release.published']]);
+  });
+
+  it('follows the upstream parent\'s releases when the project\'s repository is a fork', async () => {
+    const { projectId, automations, work, runs } = await installed(['bradleat']);
+    let upstreamChecks = 0;
+    network.use(
+      http.get(`${API}/repos/inKibra/pantry`, () => HttpResponse.json({ fork: true, parent: { full_name: 'upstream-org/pantry' } })),
+      http.get(`${API}/repos/upstream-org/pantry/releases`, () => { upstreamChecks += 1; return HttpResponse.json([]); }),
+    );
+    automationValue(await automations.create({ projectId, draft: {
+      name: 'Upstream releases', enabled: true, trigger: { kind: 'watch', repository: null, on: 'release', every: 'daily' },
+      conditions: [{ kind: 'tag', mode: 'oneOf', values: ['v*'] }], action: { kind: 'messageProjectAgent', instruction: 'Merge {{release.tag}} of {{repository.full_name}}.' },
+    } }));
+    await vi.waitFor(async () => { await work(); expect(upstreamChecks).toBe(1); });
+    const body = JSON.stringify({ action: 'published', sender: { login: 'maintainer' }, release: release('upstream-org/pantry', 'v2.0.0'), repository: { full_name: 'upstream-org/pantry', html_url: 'https://github.com/upstream-org/pantry' }, installation: { id: 91 } });
+    expect((await SELF.fetch(`${env.ACCOUNT_URL}/github/webhook`, { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-github-event': 'release', 'x-github-delivery': crypto.randomUUID(), 'x-hub-signature-256': await signature(body) } })).status).toBe(202);
+    expect((await runs()).map(run => [run.automationName, run.event])).toEqual([['Upstream releases', 'release.published']]);
   });
 });

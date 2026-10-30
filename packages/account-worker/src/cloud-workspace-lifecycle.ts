@@ -1,7 +1,6 @@
 import type { z } from 'zod';
 import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { cloudResourceId } from '@gitspace/protocol';
-import { GITSPACE_SOURCE_PROJECT_ROLE } from '@gitspace/protocol/project-authority';
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { RuntimeGitCheckpoint, RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
@@ -10,6 +9,7 @@ import { ensureProjectCodeRepository } from './account-runtime-host.js';
 import { forwardPosition, type ForwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
+import { refreshProjectRemote } from './project-remote.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { forgetTenantScope } from './tenant-store.js';
 
@@ -392,6 +392,17 @@ export async function setCloudProjectBaseBranch(env: Env, userId: string, projec
     () => env.SPACE_AUTHORITY.getByName(`${userId}:${projectId}`).runtimeSetBaseBranch({ projectId, workspaceId: projectId }, expectedRevision, baseBranch));
 }
 
+/** The project's origin moves to `repositoryUrl` (a fork, a moved repository); its workspaces keep their branches and
+ * the base space reads from the new origin from now on. The new origin is read at once, as Check origin would. */
+export async function setCloudProjectRepository(env: Env, userId: string, projectId: string, expectedRevision: number, repositoryUrl: string): Promise<CloudProjectSummary> {
+  const authority = await requireProject(env, userId, projectId);
+  const updated = await env.USER_PROJECTS.getByName(userId).put(await authority.setRepository(expectedRevision, repositoryUrl));
+  await refreshProjectRemote(env, userId, projectId).catch((error: unknown) => {
+    console.warn(JSON.stringify({ event: 'project_repository_check_failed', projectId, message: error instanceof Error ? error.message : String(error) }));
+  });
+  return (await authority.getProject()) ?? updated;
+}
+
 /** Update base: the project's copy of its base branch moves to the origin's head only as a fast-forward (a copy with
  * commits the origin lacks is refused), then the clean idle base checkout follows through the base-branch change's
  * same-branch refresh. A busy or dirty base workspace is left for later: the copy stays updated, the operation fails
@@ -399,7 +410,6 @@ export async function setCloudProjectBaseBranch(env: Env, userId: string, projec
 export async function updateCloudProjectBase(env: Env, userId: string, projectId: string): Promise<void> {
   const authority = await requireProject(env, userId, projectId);
   const project = await requireActiveProject(authority, projectId);
-  if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
   const reference = project.repositoryReference;
   if (reference === null) throw new Error(`Project ${project.name} has no origin to update its base from`);
   const branch = project.baseBranch;

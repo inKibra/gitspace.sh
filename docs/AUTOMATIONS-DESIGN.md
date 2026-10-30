@@ -1,6 +1,6 @@
 # Automations: when something happens in a project, do something
 
-> **Status: A0 and A1 built (2026-10-27); A2 and A3 planned. Decisions from 2026-10-20; subject links, mentions, label triggers and replay decided 2026-10-27; a started workspace's mode and model role decided 2026-10-28.** Decisions from the 2026-10-20 and 2026-10-27 discussions; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
+> **Status: A0 and A1 built (2026-10-27), A4 built (2026-10-30, not launched); A2 and A3 planned. Decisions from 2026-10-20; subject links, mentions, label triggers and replay decided 2026-10-27; a started workspace's mode and model role decided 2026-10-28.** Decisions from the 2026-10-20 and 2026-10-27 discussions; the UI follows the Oct 17 mock (`packages/account-web/mock-automations.html`, `src/AutomationsMock.tsx`; see SIMPLIFICATION Batch 20 for where it differs from this design).
 
 ## 1. Summary
 
@@ -160,7 +160,7 @@ A top-level page that replaces Crons in the sidebar, with the project chosen in 
 | **A1** | GitHub events | Deliveries routed to projects; triggers (events and labels) and conditions; start a workspace for the subject; subject links (tool, start, branch); Send to the linked workspace and the four default automations; mentions of the tenant's bot; trust; concurrency and queue; replay. Golden test: a trusted PR into `main` starts a Review workspace; an outsider's PR is skipped as not trusted; a PR opened from a workspace's branch links to it and a review comment reaches its agent; `gitspace:plan` on an issue starts a Plan workspace. |
 | **A2** | Loops and decisions | Provenance; round and daily caps; *ask the project agent*. Golden test: CI fails on a run's PR, the workspace is told, the fix pushes, CI passes; a release produced by a run does not start a new run. |
 | **A3** | Lifecycle | Subject-closed notices; 7-day auto-close and checkout release. |
-| **A4** | Watching repositories | Watch trigger for releases, tags and deployments; webhook where the App receives the event, otherwise a check (daily by default, adjustable); seen records; trust for other repositories; the GitSpace project's release automation. Golden test: a release of a watched public repository starts one run within the interval and never a second; a release on a covered repository arrives by webhook; a fork's GitSpace project is offered the upstream tag as a pull request. |
+| **A4** | Watching repositories (built 2026-10-30) | Watch trigger for releases, tags and deployments; webhook where the App receives the event, otherwise a check (daily by default, adjustable); seen records; trust for other repositories; the GitSpace project's release automation. Golden test: a release of a watched public repository starts one run within the interval and never a second; a release on a covered repository arrives by webhook; a fork's GitSpace project is offered the upstream tag as a pull request. Tested in `automations-github.test.ts` (*watch automations*): one run per release whether the check or the webhook sees it first, nothing for releases that existed before; another repository's release reaches only its watch; a fork's watch follows its upstream parent. |
 
 ## 13. Open questions
 

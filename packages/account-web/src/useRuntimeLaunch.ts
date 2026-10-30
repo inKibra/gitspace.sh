@@ -1,21 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DeploymentStatusView, LaunchProgressView, LaunchSourceView, ReleaseTarget } from '@gitspace/protocol';
-import { appendLaunchProgress, launchTrackFrom, shortSha, type LaunchTrack } from './release.js';
-import { LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark, type RevertProgress } from './LaunchSheet.js';
+import { appendLaunchProgress, launchTrackFrom, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
+import { LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark } from './LaunchSheet.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-import { useBackToStable } from './useBackToStable.js';
 
 const reloadFrontend = () => window.location.reload();
 export interface RuntimeLaunch {
   launch: LaunchTrack | null;
-  revertProgress: RevertProgress | null;
   open: boolean;
   setOpen(open: boolean): void;
   mark: LaunchedMark | null;
   dismiss(): void;
   start(source: LaunchSourceView, machineId: string, targets: readonly ReleaseTarget[]): Promise<void>;
-  revert(): Promise<void>;
+  /** Every target returns to the default release; the account applies it, and this page follows it as a launch. */
+  backToDefault(): Promise<void>;
   /** Stop following a running launch whose building machine is gone; a later report from that machine still wins. */
   discard(launchId: string): Promise<void>;
 }
@@ -32,13 +31,6 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
   useEffect(() => () => { operation.current++; }, []);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
-  const stable = useBackToStable(status, refresh, () => {
-    window.sessionStorage.removeItem(LAUNCHED_STORAGE_KEY);
-    setMark(null);
-    setOpen(false);
-    reload();
-  });
-  useEffect(() => { if (stable.progress) setOpen(true); }, [stable.progress]);
   const accept = (progress: LaunchProgressView) => {
     setLaunch(previous => previous?.launchId === progress.launchId
       ? appendLaunchProgress(previous, { phase: progress.phase, message: progress.message, at: progress.updatedAt }, { sha: progress.sha, status: progress.status, error: progress.error })
@@ -74,41 +66,43 @@ export function useRuntimeLaunch(status: DeploymentStatusView | null | undefined
     window.sessionStorage.setItem(LAUNCHED_STORAGE_KEY, JSON.stringify(nextMark));
     reload();
   }, [status, launch, reload]);
-  const start = async (source: LaunchSourceView, machineId: string, targets: readonly ReleaseTarget[]) => {
+  /** Starts a launch with `request` and follows the progress it answers; a refusal shows as a failed launch. */
+  const run = async (source: LaunchSourceView, targets: readonly ReleaseTarget[], action: string, request: () => Promise<LaunchProgressView>) => {
     const token = ++operation.current;
-    stable.stop();
     localAttempt.current = true;
     followed.current = null;
     setOpen(true);
     try {
-      if (!machineId.trim()) throw new Error('Attach and choose a machine to launch GitSpace.');
-      const result = await rpcClient.deployment.launch({ source, machineId, targets: [...targets] });
-      if (result.status === 'error') throw result.error;
+      const progress = await request();
       if (operation.current !== token) return;
-      followed.current = result.value.launchId;
-      accept(result.value);
+      followed.current = progress.launchId;
+      accept(progress);
     } catch (error) {
       if (operation.current === token) {
-        const message = rpcErrorMessage(error, 'Launch workspace');
+        const message = rpcErrorMessage(error, action);
         setLaunch({ launchId: `rejected:${token}`, source, targets: [...targets], sha: null, status: 'failed', error: message, log: [{ phase: 'failed', message, at: new Date().toISOString() }] });
       }
       throw error;
     }
     await refreshRef.current();
   };
-  const revert = async () => {
-    ++operation.current;
-    localAttempt.current = true;
-    followed.current = null;
-    // Do not keep a previous launch's polling loop alive during the revert.
-    setLaunch(null);
-    await stable.revert();
-  };
+  const start = (source: LaunchSourceView, machineId: string, targets: readonly ReleaseTarget[]) => run(source, targets, 'Launch workspace', async () => {
+    if (!machineId.trim()) throw new Error('Attach and choose a machine to launch GitSpace.');
+    const result = await rpcClient.deployment.launch({ source, machineId, targets: [...targets] });
+    if (result.status === 'error') throw result.error;
+    return result.value;
+  });
+  const backToDefault = () => run({ kind: 'release', sha: status?.defaultRelease ?? 'default' }, RELEASE_TARGETS, 'Back to default', async () => {
+    const result = await rpcClient.deployment.backToDefault({});
+    if (result.status === 'error') throw result.error;
+    if (!result.value.launch) throw new Error('The account did not start Back to default.');
+    return result.value.launch;
+  });
   const discard = async (launchId: string) => {
     const result = await rpcClient.deployment.discardLaunch({ launchId });
     if (result.status === 'error') throw result.error;
     await refreshRef.current();
   };
   const dismiss = () => { window.sessionStorage.removeItem(LAUNCHED_STORAGE_KEY); setMark(null); };
-  return { launch, revertProgress: stable.progress, open, setOpen, mark, dismiss, start, revert, discard };
+  return { launch, open, setOpen, mark, dismiss, start, backToDefault, discard };
 }

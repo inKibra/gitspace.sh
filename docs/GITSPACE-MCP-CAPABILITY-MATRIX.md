@@ -185,7 +185,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | Existing RPC path(s) | Current base permission | R | D | I | O | Adapter | Behavior and constraints |
 |---|---|---|---|---|---|---|---|
 | `deployment.status` | `rpc.read` | T | - | - | F | Tool | Read saved state or metadata. Secrets/private keys must not enter outputs; status is not a live probe unless explicitly documented. |
-| `deployment.launch`<br>`deployment.revert` | `deployment.control` | F | T | F | F | Tool | Builds or reverts running GitSpace release targets; launch requires `machineId` and runs on exactly that online enrolled machine, with no available-machine fallback. Resume a paused build cache first. Preserve launch IDs and the target set. Accepted is not activated. |
+| `deployment.launch`<br>`deployment.backToDefault`<br>`deployment.launchPublished` | `deployment.control` | F | T | F | F | Tool | Launches running GitSpace release targets. `launch` builds on exactly the named online enrolled machine (`machineId`), with no available-machine fallback; resume a paused build cache first. `backToDefault` and `launchPublished` (by tag, from the channel) run in the account with no machine. Preserve launch IDs and the target set. Accepted is not activated. |
 
 ### secrets
 

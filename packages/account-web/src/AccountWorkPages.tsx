@@ -2,7 +2,8 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { rpcClient } from './rpc-client.js';
 import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, TabsSubtle, TabsSubtleItem, Tooltip } from '@gitspace/ui';
 import { Archive, Plus, RefreshCcw01, Trash01, XClose } from '@untitledui/icons';
-import { useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { isGitSpaceSourceRepository, type OriginCheckInterval } from '@gitspace/protocol';
 import { AccountSidebarContext, type SidebarSpaceSummary } from './AppSidebar.js';
 import { CreateProjectDialog, CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, PHASE_LABEL, PHASES, spaceHolderLabel, workspacePhaseLabel, workspaceStatusLabel, WorkspaceStatusDot, type GitSpaceShellProps, type ProjectLifecycleView, type SpaceHolderView, type WorkspaceView } from './GitSpaceShell.js';
 import { WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
@@ -285,24 +286,122 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
       })}
       {!visible.length ? <EmptyState title="No projects" description={filter === 'archived' ? 'Nothing is archived.' : 'Create a project or import a repository to start.'} /> : null}
     </div>
-    <Dialog open={settingsProject !== null} onOpenChange={(open) => { if (!open) setSettingsProjectId(null); }}><DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto">
+    <Dialog open={settingsProject !== null} onOpenChange={(open) => { if (!open) setSettingsProjectId(null); }}><DialogContent className="max-w-2xl max-h-[90dvh] overflow-y-auto">
       <DialogHeader><DialogTitle>{settingsProject?.name} settings</DialogTitle><DialogDescription>Settings shared by every workspace in this project.</DialogDescription></DialogHeader>
-      {settingsProject ? <ProjectBaseBranchSettings key={settingsProject.id} project={settingsProject} onSetBaseBranch={onSetProjectBaseBranch} /> : null}
-      {settingsProject && inference ? <section className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
-          <h3 className="text-body font-medium text-foreground">Inference</h3>
-          <p className="text-caption text-muted-foreground">Choose the canonical inference profile for every workspace in this project. Running work keeps its admitted profile; new work uses the new assignment.</p>
-        </div>
-        <ProjectInferenceSelector key={settingsProject.id} projectId={settingsProject.id} projectName={settingsProject.name} />
-        <p className="text-caption text-muted-foreground">Manage models, agents, and credentials under Navigate → Inference.</p>
-      </section> : null}
-      <p className="text-caption text-muted-foreground">Choose which of your Chromes agents here may use in <a className="text-foreground underline" href={browserPluginsUrl().href} onClick={event => { event.preventDefault(); setSettingsProjectId(null); navigateProductUrl(browserPluginsUrl()); }}>Plugins → Browsers</a>.</p>
+      {settingsProject ? <div className="flex flex-col">
+        <ProjectRepositoryRow key={`repository-${settingsProject.id}`} project={settingsProject} />
+        <ProjectBaseBranchRow key={`branch-${settingsProject.id}`} project={settingsProject} onSetBaseBranch={onSetProjectBaseBranch} />
+        <SettingRow label="Origin" hint={`Whether this project's copy of ${settingsProject.baseBranch} is behind origin/${settingsProject.baseBranch}.`} value={<ProjectOrigin project={settingsProject} />} />
+        <ProjectOriginCheckRow key={`origin-check-${settingsProject.id}`} project={settingsProject} />
+        {inference ? <SettingRow label="Inference" hint="The canonical inference profile for every workspace in this project. Running work keeps its admitted profile; new work uses the new assignment. Manage models, agents, and credentials under Navigate → Inference."
+          value={<ProjectInferenceSelector key={settingsProject.id} projectId={settingsProject.id} projectName={settingsProject.name} />} /> : null}
+        <SettingRow label="Browsers" value={<span className="text-caption text-muted-foreground">Which of your Chromes agents here may use</span>}
+          actions={<Button variant="ghost" size="compact" onClick={() => { setSettingsProjectId(null); navigateProductUrl(browserPluginsUrl()); }}>Plugins → Browsers</Button>} />
+      </div> : null}
       <DialogFooter><Button variant="secondary" onClick={() => setSettingsProjectId(null)}>Done</Button></DialogFooter>
     </DialogContent></Dialog>
     {error && !projectDialog && workspaceDialog === null ? <p role="alert" className="pt-4 text-caption text-destructive">{error}</p> : null}
     {onCreateProject ? <CreateProjectDialog open={projectDialog} onOpenChange={(open) => { setProjectDialog(open); if (!open) setError(null); }} pending={pending} error={projectDialog ? error : null} onSubmit={(input) => run(() => onCreateProject(input), () => setProjectDialog(false))} /> : null}
     {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
   </PageCanvas>;
+}
+
+/** One project setting: its name (with a longer explanation on hover), its value with at most one short line under it,
+ * and its actions. Changing a setting opens its field in place of the value. */
+function SettingRow({ label, hint, value, note, actions }: { label: string; hint?: string; value: ReactNode; note?: ReactNode; actions?: ReactNode }) {
+  const name = <span className="text-caption font-medium text-muted-foreground">{label}</span>;
+  return <div className="grid grid-cols-[8.5rem_minmax(0,1fr)_auto] items-center gap-x-4 border-b border-border py-3 last:border-b-0">
+    {hint ? <Tooltip content={hint} side="top"><span className="w-fit cursor-help underline decoration-dotted underline-offset-4">{name}</span></Tooltip> : name}
+    <div className="flex min-w-0 flex-col gap-0.5 text-body">{value}{note ? <span className="text-caption text-muted-foreground">{note}</span> : null}</div>
+    <div className="flex items-center gap-1">{actions}</div>
+  </div>;
+}
+
+/** A setting's field while it is being changed, with its explanation and Save / Cancel. */
+function SettingEditor({ label, placeholder, help, valid, pending, error, onSave, onCancel }: { label: string; placeholder: string; help: string; valid(value: string): boolean; pending: boolean; error: string | null; onSave(value: string): void; onCancel(): void }) {
+  const [value, setValue] = useState('');
+  const next = value.trim();
+  return <form className="flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); if (!pending && valid(next)) onSave(next); }}>
+    <InputGroup><InputField index={0} label={label} placeholder={placeholder} value={value} onChange={setValue} disabled={pending} autoFocus /></InputGroup>
+    <p className="text-caption text-muted-foreground">{help}</p>
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    <div className="flex gap-2"><Button type="submit" variant="secondary" size="compact" loading={pending} disabled={!valid(next)}>Save</Button><Button type="button" variant="ghost" size="compact" disabled={pending} onClick={onCancel}>Cancel</Button></div>
+  </form>;
+}
+
+/** Runs one setting change at a time; a failure stays on the open field. */
+function useSettingChange(action: string) {
+  const [editing, setEditing] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pendingRef = useRef(false);
+  const save = async (change: () => Promise<unknown>) => {
+    if (pendingRef.current) return;
+    pendingRef.current = true; setPending(true); setError(null);
+    try { await change(); setEditing(false); }
+    catch (failure) { setError(rpcErrorMessage(failure, action)); }
+    finally { pendingRef.current = false; setPending(false); }
+  };
+  return { editing, pending, error, open: () => { setError(null); setEditing(true); }, cancel: () => setEditing(false), save };
+}
+
+/** The project's origin address; changing it moves the project to a fork or a moved repository. For the GitSpace
+ * project, one line says what its repository means for releases. */
+function ProjectRepositoryRow({ project }: { project: ProjectLifecycleView }) {
+  const change = useSettingChange('Change repository');
+  const upstream = isGitSpaceSourceRepository(project.repositoryReference);
+  return <SettingRow label="Repository"
+    value={change.editing
+      ? <SettingEditor label="New repository address" placeholder="https://github.com/owner/repository" help="For a fork or a moved repository: the repository's root URL, an SSH address, or owner/repository for GitHub. Workspaces keep their branches; the base space reads from the new origin." valid={(value) => value !== ''} pending={change.pending} error={change.error}
+        onSave={(repositoryUrl) => void change.save(async () => {
+          const result = await rpcClient.project.setRepository({ projectId: project.id, expectedRevision: project.revision, repositoryUrl });
+          if (result.status === 'error') throw result.error;
+        })} onCancel={change.cancel} />
+      : <span className="truncate font-mono text-caption">{project.repositoryReference ?? 'No origin'}</span>}
+    note={change.editing || project.role !== 'gitspace-source' ? undefined : upstream ? 'Published GitSpace releases launch as they are.' : 'GitSpace releases arrive as merges; launching builds on a machine.'}
+    actions={change.editing || project.lifecycle !== 'active' || project.repositoryReference === null ? null : <Button variant="ghost" size="compact" onClick={change.open}>Change</Button>} />;
+}
+
+function ProjectBaseBranchRow({ project, onSetBaseBranch }: { project: ProjectLifecycleView; onSetBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'] }) {
+  const change = useSettingChange('Change base branch');
+  return <SettingRow label="Base branch"
+    value={change.editing && onSetBaseBranch
+      ? <SettingEditor label="New base branch" placeholder={project.baseBranch} help="Existing workspaces keep their branches; stack status will compare against the new base. The project’s base space must be open and have no uncommitted changes." valid={(value) => value !== '' && value !== project.baseBranch} pending={change.pending} error={change.error}
+        onSave={(branch) => void change.save(async () => { await onSetBaseBranch(project.id, project.revision, branch); })} onCancel={change.cancel} />
+      : <span className="font-mono text-caption">{project.baseBranch}</span>}
+    actions={change.editing || !onSetBaseBranch || project.lifecycle !== 'active' ? null : <Button variant="ghost" size="compact" onClick={change.open}>Change</Button>} />;
+}
+
+const ORIGIN_CHECK_LABEL: Record<OriginCheckInterval, string> = { daily: 'Once a day', 'every-6-hours': 'Every 6 hours', hourly: 'Every hour', manual: 'Only when I ask' };
+const ORIGIN_CHECK_INTERVALS: readonly OriginCheckInterval[] = ['daily', 'every-6-hours', 'hourly', 'manual'];
+
+/** Check the origin: how often GitSpace reads this project's origin on its own. */
+function ProjectOriginCheckRow({ project }: { project: ProjectLifecycleView }) {
+  const [checked, setChecked] = useState<OriginCheckInterval | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    void rpcClient.project.remote.checkInterval({ projectId: project.id }).then((result) => {
+      if (!current) return;
+      if (result.status === 'error') setError(rpcErrorMessage(result.error, 'Read when the origin is checked'));
+      else setChecked(result.value.interval);
+    });
+    return () => { current = false; };
+  }, [project.id]);
+  if (project.repositoryReference === null) return null;
+  return <SettingRow label="Check the origin" hint="Repositories your GitHub App is installed on report pushes at once; this check covers the rest."
+    value={<div className="flex flex-col gap-1">
+      <div className="w-44"><Select size="compact" value={checked ?? ''} disabled={checked === null} onValueChange={(value) => {
+        const next = ORIGIN_CHECK_INTERVALS.find((candidate) => candidate === value);
+        if (!next) return;
+        setError(null);
+        void rpcClient.project.remote.setCheckInterval({ projectId: project.id, interval: next }).then((result) => {
+          if (result.status === 'error') setError(rpcErrorMessage(result.error, 'Set when the origin is checked'));
+          else setChecked(result.value.interval);
+        });
+      }}><SelectTrigger aria-label="Check the origin" placeholder="Loading…" /><SelectContent>{ORIGIN_CHECK_INTERVALS.map((value, index) => <SelectItem key={value} value={value} index={index}>{ORIGIN_CHECK_LABEL[value]}</SelectItem>)}</SelectContent></Select></div>
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    </div>} />;
 }
 
 /** The base branch against its origin: whether GitSpace's copy is behind, when the origin was last checked, Update base
@@ -325,37 +424,8 @@ function ProjectOrigin({ project }: { project: ProjectLifecycleView }) {
   return <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
     {remote?.behind ? <Badge size="compact" color="amber">Behind origin</Badge> : null}
     <span>{remote === null ? 'Origin not checked yet' : remote.head === null ? `origin/${project.baseBranch} does not exist · checked ${new Date(remote.checkedAt).toLocaleString()}` : `origin/${project.baseBranch} checked ${new Date(remote.checkedAt).toLocaleString()}`}</span>
-    {remote?.behind && project.lifecycle === 'active' && project.role !== 'gitspace-source' ? <Button variant="secondary" size="compact" loading={pending === 'update'} disabled={pending !== null} onClick={() => void run('update')}>Update base</Button> : null}
+    {remote?.behind && project.lifecycle === 'active' ? <Button variant="secondary" size="compact" loading={pending === 'update'} disabled={pending !== null} onClick={() => void run('update')}>Update base</Button> : null}
     <Button variant="ghost" size="compact" loading={pending === 'check'} disabled={pending !== null} onClick={() => void run('check')} leadingIcon={glyph(RefreshCcw01)}>Check origin</Button>
     {error ? <p role="alert" className="w-full text-caption text-destructive">{error}</p> : null}
   </div>;
-}
-
-function ProjectBaseBranchSettings({ project, onSetBaseBranch }: { project: ProjectLifecycleView; onSetBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'] }) {
-  const [branch, setBranch] = useState('');
-  const [pending, setPending] = useState(false);
-  const pendingRef = useRef(false);
-  const [error, setError] = useState<string | null>(null);
-  const next = branch.trim();
-  const canChange = project.lifecycle === 'active' && !pending && next !== '' && next !== project.baseBranch;
-  return <section className="flex flex-col gap-3">
-    <div className="flex flex-col gap-1">
-      <h3 className="text-body font-medium text-foreground">Base branch</h3>
-      <p className="text-caption text-muted-foreground">Current base branch: <span className="font-mono text-foreground">{project.baseBranch}</span></p>
-    </div>
-    {project.role === 'gitspace-source' ? <p className="text-caption text-muted-foreground">Managed by GitSpace releases.</p>
-      : onSetBaseBranch ? <form id="project-base-branch-form" className="flex flex-col gap-3" onSubmit={async (event) => {
-        event.preventDefault();
-        if (!canChange || pendingRef.current) return;
-        pendingRef.current = true; setPending(true); setError(null);
-        try { await onSetBaseBranch(project.id, project.revision, next); setBranch(''); }
-        catch (failure) { setError(rpcErrorMessage(failure, 'Change base branch')); }
-        finally { pendingRef.current = false; setPending(false); }
-      }}>
-        <InputGroup><InputField index={0} label="New base branch" placeholder={project.baseBranch} value={branch} onChange={setBranch} disabled={pending || project.lifecycle !== 'active'} /></InputGroup>
-        <p className="text-caption text-muted-foreground">Existing workspaces keep their branches; stack status will compare against the new base. The project’s base space must be open and have no uncommitted changes.</p>
-        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-        <div><Button type="submit" variant="secondary" size="compact" loading={pending} disabled={!canChange}>{pending ? 'Changing base branch…' : 'Change base branch'}</Button></div>
-      </form> : null}
-  </section>;
 }

@@ -186,7 +186,7 @@ Account deployment progress comes from `DeploymentLauncher` through `deployment.
 
 In **Settings > Source > Running**, **Worker** reports the version stamp of the Worker answering the request. A separate **Platform record** row appears when the platform's last recorded deployment differs. The platform record does not prove which Worker answered.
 
-Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
+Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to default** uses the account's `deployment.backToDefault` operation.
 
 Native-v1 hosts reject native-v2 machine artifacts before draining. Upgrade the verifying host through authenticated bootstrap/recovery before activating such a release; selecting new source does not make an old host understand its manifest.
 

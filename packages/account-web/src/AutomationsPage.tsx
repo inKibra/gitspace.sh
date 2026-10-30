@@ -43,6 +43,8 @@ import {
   AUTOMATION_GITHUB_EVENTS,
   AUTOMATION_MODES,
   AUTOMATION_START_LABELS,
+  AUTOMATION_WATCH_EVERY_LABEL,
+  AUTOMATION_WATCH_LABEL,
   automationConditionKinds,
   automationErrors,
   automationFields,
@@ -71,6 +73,8 @@ import {
   type AutomationTestResult,
   type AutomationTrigger,
   type AutomationTriggerKind,
+  type AutomationWatchEvery,
+  type AutomationWatchOn,
   type AutomationView,
 } from '@gitspace/protocol/automations-contract';
 import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS } from '@gitspace/protocol/inference';
@@ -116,16 +120,20 @@ type BadgeColor = 'blue' | 'amber' | 'green' | 'gray' | 'red';
 const RUN_STATE_COLOR: Record<AutomationRunState, BadgeColor> = { running: 'blue', queued: 'amber', finished: 'green', skipped: 'gray', failed: 'red' };
 const MODE_LABEL: Record<AutomationMode, string> = { plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship' };
 const MODE_COLOR: Record<AutomationMode, 'indigo' | 'emerald' | 'violet' | 'amber'> = { plan: 'indigo', code: 'emerald', review: 'violet', ship: 'amber' };
-const TRIGGER_KINDS: readonly AutomationTriggerKind[] = ['github', 'label', 'schedule', 'manual'];
-const TRIGGER_OPTION_LABEL: Record<AutomationTriggerKind, string> = { github: 'GitHub event', label: 'Label added', schedule: 'Schedule', manual: 'Manual only' };
+const TRIGGER_KINDS: readonly AutomationTriggerKind[] = ['github', 'label', 'watch', 'schedule', 'manual'];
+const TRIGGER_OPTION_LABEL: Record<AutomationTriggerKind, string> = { github: 'GitHub event', label: 'Label added', watch: 'Watch a repository', schedule: 'Schedule', manual: 'Manual only' };
 /** What an instruction's placeholders are checked against, in the editor's refusal. */
-const TRIGGER_NOUN: Record<AutomationTriggerKind, string> = { github: 'the chosen events', label: 'a label event', schedule: 'a schedule', manual: 'a manual run' };
-const OFF_NOTE: Record<AutomationTriggerKind, string> = { github: 'Off: events are not recorded as runs', label: 'Off: events are not recorded as runs', schedule: 'Off: its schedule starts no runs', manual: 'Off: it starts no runs' };
+const TRIGGER_NOUN: Record<AutomationTriggerKind, string> = { github: 'the chosen events', label: 'a label event', watch: 'what is watched', schedule: 'a schedule', manual: 'a manual run' };
+const OFF_NOTE: Record<AutomationTriggerKind, string> = { github: 'Off: events are not recorded as runs', label: 'Off: events are not recorded as runs', watch: 'Off: its repository is not watched', schedule: 'Off: its schedule starts no runs', manual: 'Off: it starts no runs' };
 type ActionKind = AutomationAction['kind'];
 const EVENT_ACTION_KINDS: readonly ActionKind[] = ['startWorkspace', 'sendToLinked', 'messageWorkspace', 'messageProjectAgent'];
 const MESSAGE_ACTION_KINDS: readonly ActionKind[] = ['messageWorkspace', 'messageProjectAgent'];
-/** Starting a workspace and sending to the linked one need the pull request, issue or branch an event is about. */
-const TRIGGER_ACTIONS: Record<AutomationTriggerKind, readonly ActionKind[]> = { github: EVENT_ACTION_KINDS, label: EVENT_ACTION_KINDS, schedule: MESSAGE_ACTION_KINDS, manual: MESSAGE_ACTION_KINDS };
+/** Sending to the linked workspace needs the pull request, issue or branch an event is about; a watched release, tag
+ * or deployment can start a workspace of its own. */
+const TRIGGER_ACTIONS: Record<AutomationTriggerKind, readonly ActionKind[]> = { github: EVENT_ACTION_KINDS, label: EVENT_ACTION_KINDS, watch: ['startWorkspace', 'messageWorkspace', 'messageProjectAgent'], schedule: MESSAGE_ACTION_KINDS, manual: MESSAGE_ACTION_KINDS };
+const WATCH_ONS: readonly AutomationWatchOn[] = ['release', 'tag', 'deployment'];
+const WATCH_EVERY: readonly AutomationWatchEvery[] = ['daily', 'every-6-hours', 'hourly', 'every-15-minutes'];
+const WATCH_NOUN: Record<AutomationWatchOn, string> = { release: 'releases', tag: 'tags', deployment: 'deployments' };
 const ACTION_LABEL: Record<ActionKind, string> = { startWorkspace: 'Start a workspace for the subject', sendToLinked: 'Send to the linked workspace', messageWorkspace: 'Message a workspace', messageProjectAgent: 'Message the project agent' };
 /** The Mode choice that leaves the mode to the label; only a label trigger offers it. */
 const LABEL_MODE = 'label';
@@ -154,6 +162,7 @@ type ListMode = 'oneOf' | 'noneOf';
 const LIST_MODES: readonly ListMode[] = ['oneOf', 'noneOf'];
 const CONDITION_LABEL: Record<AutomationConditionKind, string> = {
   linked: 'Linked', mentionsBot: 'Mentions', baseBranch: 'Base branch', headBranch: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', labels: 'Labels', changedFiles: 'Changed files', conclusion: 'Conclusion', reviewState: 'Review state',
+  tag: 'Tag', prerelease: 'Prerelease', environment: 'Environment', deploymentState: 'State',
 };
 const LIST_RULE: Record<ListConditionKind, Record<ListMode, string>> = {
   baseBranch: { oneOf: 'is one of', noneOf: 'is not one of' },
@@ -162,16 +171,21 @@ const LIST_RULE: Record<ListConditionKind, Record<ListMode, string>> = {
   author: { oneOf: 'is one of', noneOf: 'is not one of' },
   labels: { oneOf: 'has any of', noneOf: 'has none of' },
   changedFiles: { oneOf: 'touch any of', noneOf: 'touch none of' },
+  tag: { oneOf: 'is one of', noneOf: 'is not one of' },
+  environment: { oneOf: 'is one of', noneOf: 'is not one of' },
 };
 const LINKED_RULES: readonly { value: string; label: string }[] = [{ value: 'linked', label: 'Is linked' }, { value: 'unlinked', label: 'Is not linked' }];
 const DRAFT_RULES: readonly { value: string; label: string }[] = [{ value: 'ready', label: 'Not a draft' }, { value: 'draft', label: 'Only drafts' }];
+const PRERELEASE_RULES: readonly { value: string; label: string }[] = [{ value: 'stable', label: 'Not a prerelease' }, { value: 'prerelease', label: 'Only prereleases' }];
 const VALUE_PLACEHOLDER: Record<ValuesConditionKind, string> = {
   baseBranch: 'main', headBranch: 'dependabot/*', branch: 'main', author: 'dependabot[bot]', labels: 'wontfix', changedFiles: 'docs/**', conclusion: 'failure', reviewState: 'approved',
+  tag: 'v*', environment: 'preview', deploymentState: 'failure',
 };
 /** GitHub's own values; branches, authors, labels and paths are typed. */
 const VALUE_SUGGESTIONS: Partial<Record<ValuesConditionKind, readonly string[]>> = {
   conclusion: ['success', 'failure', 'neutral', 'cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure'],
   reviewState: ['approved', 'changes_requested', 'commented', 'dismissed'],
+  deploymentState: ['success', 'failure', 'error', 'inactive', 'in_progress', 'queued', 'pending'],
 };
 
 const LINK_LABEL: Record<AutomationLinkSource, string> = {
@@ -277,8 +291,10 @@ function newCondition(kind: AutomationConditionKind): AutomationCondition {
     case 'linked': return { kind, linked: true };
     case 'mentionsBot': return { kind };
     case 'draft': return { kind, draft: false };
+    case 'prerelease': return { kind, prerelease: false };
     case 'conclusion':
-    case 'reviewState': return { kind, values: [] };
+    case 'reviewState':
+    case 'deploymentState': return { kind, values: [] };
     default: return { kind, mode: 'oneOf', values: [] };
   }
 }
@@ -288,10 +304,14 @@ function conditionPhrase(condition: AutomationCondition, bot: string): string {
   if (condition.kind === 'linked') return condition.linked ? 'on a linked pull request or issue' : 'with no linked workspace';
   if (condition.kind === 'mentionsBot') return `mentioning ${bot}`;
   if (condition.kind === 'draft') return condition.draft ? 'only drafts' : 'not drafts';
+  if (condition.kind === 'prerelease') return condition.prerelease ? 'only prereleases' : 'not prereleases';
   const values = condition.values.join(' or ');
   switch (condition.kind) {
     case 'conclusion': return `that ended ${values}`;
     case 'reviewState': return `that are ${values.replaceAll('_', ' ')}`;
+    case 'deploymentState': return `that ended ${values}`;
+    case 'tag': return condition.mode === 'noneOf' ? `not tagged ${values}` : `tagged ${values}`;
+    case 'environment': return condition.mode === 'noneOf' ? `not to ${values}` : `to ${values}`;
     case 'baseBranch': return condition.mode === 'noneOf' ? `not into ${values}` : `into ${values}`;
     case 'headBranch': return condition.mode === 'noneOf' ? `not from ${values}` : `from ${values}`;
     case 'branch': return condition.mode === 'noneOf' ? `not on ${values}` : `on ${values}`;
@@ -324,10 +344,15 @@ function ConditionReadback({ condition, bot }: { condition: AutomationCondition;
     case 'headBranch': return <>head branch is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
     case 'branch': return <>branch is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
     case 'author': return <>author is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
+    case 'tag': return <>tag is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
+    case 'prerelease': return condition.prerelease ? 'a prerelease' : 'not a prerelease';
+    case 'environment': return <>environment is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
+    case 'deploymentState': return <>state is <CodeList values={condition.values} last=" or " /></>;
   }
 }
 
 function subjectNoun(trigger: AutomationTrigger): string {
+  if (trigger.kind === 'watch') return `the ${AUTOMATION_WATCH_LABEL[trigger.on].toLowerCase()}, on a branch of its own`;
   if (trigger.kind !== 'github') return 'the pull request or issue';
   const [only, ...others] = [...new Set(trigger.events.map(entry => EVENT_SUBJECT[entry.event]))];
   return only && others.length === 0 ? only : 'the pull request, issue or branch';
@@ -397,6 +422,7 @@ function triggerReadback(automation: AutomationView, now: number): ReactNode {
     case 'manual': return <>Manual only: runs when you choose <strong className="font-semibold">Run now</strong></>;
     case 'label': return <>GitHub · label <CodeList values={Object.keys(AUTOMATION_START_LABELS)} last=" or " /> added to an issue or pull request</>;
     case 'github': return <>GitHub · {trigger.events.map((entry, index) => <span key={entry.event}>{index === 0 ? '' : ' · '}{AUTOMATION_EVENT_LABEL[entry.event].toLowerCase()}{entry.actions.length ? <> <CodeList values={entry.actions} last=", " /></> : null}</span>)}</>;
+    case 'watch': return <>{AUTOMATION_WATCH_LABEL[trigger.on]} of <Code>{trigger.repository ?? 'this project\'s repository (its upstream for a fork)'}</Code> · checked {AUTOMATION_WATCH_EVERY_LABEL[trigger.every].toLowerCase()} unless the GitHub App delivers it</>;
     case 'schedule': {
       const next = automation.enabled && automation.proposal === null ? automation.nextRunAt : null;
       const described = describeAutomationSchedule(trigger.cron);
@@ -430,7 +456,7 @@ interface CardHandlers {
 function AutomationCard({ automation, index, project, bot, busy, now, handlers }: { automation: AutomationView; index: number; project: AutomationsProject | undefined; bot: string; busy: boolean; now: number; handlers: CardHandlers }): ReactElement {
   const { proposal, action, trigger } = automation;
   const modes = action.kind === 'startWorkspace' ? action.mode ? [action.mode] : AUTOMATION_MODES : [];
-  const runsNow = trigger.kind === 'schedule' || trigger.kind === 'manual';
+  const runsNow = trigger.kind === 'schedule' || trigger.kind === 'manual' || trigger.kind === 'watch';
   return <Card index={index}>
     <CardHeader>
       <CardTitle><span className="flex flex-wrap items-center gap-2"><span className="[overflow-wrap:anywhere]">{automation.name}</span>
@@ -671,9 +697,11 @@ function ConditionRule({ condition, bot, onChange }: { condition: AutomationCond
   switch (condition.kind) {
     case 'linked': return <RuleSelect label={label} value={condition.linked ? 'linked' : 'unlinked'} choices={LINKED_RULES} onChange={value => onChange({ kind: 'linked', linked: value === 'linked' })} />;
     case 'draft': return <RuleSelect label={label} value={condition.draft ? 'draft' : 'ready'} choices={DRAFT_RULES} onChange={value => onChange({ kind: 'draft', draft: value === 'draft' })} />;
+    case 'prerelease': return <RuleSelect label={label} value={condition.prerelease ? 'prerelease' : 'stable'} choices={PRERELEASE_RULES} onChange={value => onChange({ kind: 'prerelease', prerelease: value === 'prerelease' })} />;
     case 'mentionsBot': return <span className="pt-1.5 text-body text-muted-foreground [overflow-wrap:anywhere]">Mentions {bot}</span>;
     case 'conclusion':
-    case 'reviewState': return <span className="pt-1.5 text-body text-muted-foreground">is one of</span>;
+    case 'reviewState':
+    case 'deploymentState': return <span className="pt-1.5 text-body text-muted-foreground">is one of</span>;
     default: return <RuleSelect label={label} value={condition.mode} choices={LIST_MODES.map(mode => ({ value: mode, label: LIST_RULE[condition.kind][mode] }))}
       onChange={value => { const mode = LIST_MODES.find(entry => entry === value); if (mode) onChange({ ...condition, mode }); }} />;
   }
@@ -737,6 +765,11 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
   const [triggerKind, setTriggerKind] = useState<AutomationTriggerKind>(initialTrigger);
   const [schedule, setSchedule] = useState<ScheduleChoice>(() => scheduleChoice(source?.trigger.kind === 'schedule' ? source.trigger.cron : NEW_AUTOMATION_CRON));
   const [events, setEvents] = useState<readonly EventChoice[]>(source?.trigger.kind === 'github' ? source.trigger.events : [NEW_EVENT]);
+  const watchSource = source?.trigger.kind === 'watch' ? source.trigger : null;
+  /** Blank watches this project's repository, or its upstream parent when it is a fork. */
+  const [watchRepository, setWatchRepository] = useState(watchSource?.repository ?? '');
+  const [watchOn, setWatchOn] = useState<AutomationWatchOn>(watchSource?.on ?? 'release');
+  const [watchEvery, setWatchEvery] = useState<AutomationWatchEvery>(watchSource?.every ?? 'daily');
   const [conditions, setConditions] = useState<readonly AutomationCondition[]>(source?.conditions ?? []);
   const [actionKind, setActionKind] = useState<ActionKind>(source?.action.kind ?? (TRIGGER_ACTIONS[initialTrigger].includes('startWorkspace') ? 'startWorkspace' : 'messageProjectAgent'));
   const [mode, setMode] = useState<AutomationMode | null>(source?.action.kind === 'startWorkspace' ? source.action.mode : initialTrigger === 'label' ? null : 'review');
@@ -778,6 +811,7 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
   const parsed = triggerKind === 'schedule' ? parseAutomationSchedule(cron) : null;
   const cronError = parsed && 'error' in parsed ? parsed.error : null;
   const trigger: AutomationTrigger = triggerKind === 'github' ? { kind: 'github', events: events.map(entry => ({ event: entry.event, actions: [...entry.actions] })) }
+    : triggerKind === 'watch' ? { kind: 'watch', repository: watchRepository.trim() || null, on: watchOn, every: watchEvery }
     : triggerKind === 'label' ? { kind: 'label' } : triggerKind === 'schedule' ? { kind: 'schedule', cron } : { kind: 'manual' };
   const offered = automationConditionKinds(trigger);
   // Conditions the chosen events do not offer stay out of the draft.
@@ -809,7 +843,7 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
   const unusedConditions = offered.filter(kind => !shownConditions.some(condition => condition.kind === kind));
   const completeConditions = shownConditions.filter(condition => !('values' in condition) || condition.values.length > 0);
   const [onlyEvent] = events;
-  const conditionsReadback = `Runs for ${events.length === 1 && onlyEvent ? EVENT_NOUN[onlyEvent.event] : 'events'}${completeConditions.length ? ` ${completeConditions.map(condition => conditionPhrase(condition, bot)).join(', ')}` : ' of every kind'}.`;
+  const conditionsReadback = `Runs for ${triggerKind === 'watch' ? WATCH_NOUN[watchOn] : events.length === 1 && onlyEvent ? EVENT_NOUN[onlyEvent.event] : 'events'}${completeConditions.length ? ` ${completeConditions.map(condition => conditionPhrase(condition, bot)).join(', ')}` : ' of every kind'}.`;
   const modeChoices = [...(triggerKind === 'label' ? [{ value: LABEL_MODE, label: 'The label\'s mode' }] : []), ...AUTOMATION_MODES.map(entry => ({ value: entry, label: MODE_LABEL[entry] }))];
   // A saved role the profile no longer offers stays chosen until changed; saving it is refused.
   const roleChoices = [...modelRoles, ...(modelRoles.includes(role) ? [] : [role])].map(entry => ({ value: entry, label: MODEL_ROLE_LABELS[entry] ?? entry }));
@@ -957,6 +991,21 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
           {schedule.preset === 'daily' || schedule.preset === 'weekly' ? <Field label="At (UTC)"><TextInput label="At (UTC)" type="time" value={clock} onChange={setClock} /></Field> : null}
           {schedule.preset === 'custom' ? <div className="sm:col-span-2"><Field label="Cron expression (UTC)"><TextInput label="Cron expression (UTC)" value={schedule.custom} onChange={custom => setSchedule(current => ({ ...current, custom }))} invalid={errors.cron !== undefined} mono placeholder={NEW_AUTOMATION_CRON} /></Field></div> : null}
         </div> : null}
+        {triggerKind === 'watch' ? <>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="sm:col-span-3"><Field label="Repository"><TextInput label="Blank: this project's repository" value={watchRepository} onChange={setWatchRepository} mono placeholder="owner/name" /></Field></div>
+            <Field label="Watch for"><Select value={watchOn} onValueChange={value => { const on = WATCH_ONS.find(entry => entry === value); if (on) setWatchOn(on); }}>
+              <SelectTrigger aria-label="Watch for" />{options(WATCH_ONS.map(on => ({ value: on, label: AUTOMATION_WATCH_LABEL[on] })))}
+            </Select></Field>
+            <Field label="Check"><Select value={watchEvery} onValueChange={value => { const every = WATCH_EVERY.find(entry => entry === value); if (every) setWatchEvery(every); }}>
+              <SelectTrigger aria-label="Check" />{options(WATCH_EVERY.map(every => ({ value: every, label: AUTOMATION_WATCH_EVERY_LABEL[every] })))}
+            </Select></Field>
+          </div>
+          <p aria-label="Watch readback" className="text-caption text-muted-foreground">
+            {watchRepository.trim() ? <>Releases of <span className="font-mono">{watchRepository.trim()}</span> you choose to watch reach the agent as trusted. </> : 'Blank watches this project\'s repository, or its upstream parent when the project is a fork. '}
+            Arrives at once when your GitHub App covers the repository and receives {watchOn === 'deployment' ? 'deployment statuses' : watchOn === 'tag' ? 'pushes' : 'releases'}; otherwise checked {AUTOMATION_WATCH_EVERY_LABEL[watchEvery].toLowerCase()}. Switching it on records what already exists, so it runs only on what comes after.
+          </p>
+        </> : null}
         {triggerKind === 'manual' ? <p className="text-caption text-muted-foreground">It runs only when you choose Run now on its card.</p> : null}
         {triggerKind === 'schedule' ? errors.cron
           ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{errors.cron}</p>
@@ -964,7 +1013,7 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
           : null}
       </section>
 
-      {triggerKind === 'github' ? <section aria-label="Only if" className="flex min-w-0 flex-col gap-3">
+      {triggerKind === 'github' || triggerKind === 'watch' ? <section aria-label="Only if" className="flex min-w-0 flex-col gap-3">
         <strong className="text-body font-semibold">Only if</strong>
         <p aria-label="Conditions readback" className="text-body [overflow-wrap:anywhere]">{conditionsReadback}</p>
         {shownConditions.length ? <ul aria-label="Filters" className="flex flex-col divide-y divide-border border-y border-border">
@@ -979,7 +1028,7 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
           </DropdownContent>
         </DropdownMenu></div> : null}
         {errors.conditions ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{errors.conditions}</p> : null}
-        <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">release/*</span>, <span className="font-mono">docs/**</span>. Events from authors without write access who are not on the trust list never match.</p>
+        <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">{triggerKind === 'watch' ? 'v*' : 'release/*'}</span>, <span className="font-mono">docs/**</span>.{triggerKind === 'watch' ? '' : ' Events from authors without write access who are not on the trust list never match.'}</p>
       </section> : null}
 
       <section aria-label="Then" className="flex min-w-0 flex-col gap-3">
@@ -1049,7 +1098,7 @@ function AutomationEditor({ projectId, workspaces, github, modelRoles, source, t
       </section> : <section aria-label="Test" className={`${shape.container} flex min-w-0 flex-col gap-3 border border-border p-4`}>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="secondary" size="compact" type="button" leadingIcon={TestGlyph} loading={pending === 'test'} disabled={pending !== null || cronError !== null} onClick={() => void test()}>Test</Button>
-          <span className="min-w-0 text-caption text-muted-foreground">Shows when it would run and the instruction the agent would read. Nothing runs.</span>
+          <span className="min-w-0 text-caption text-muted-foreground">{triggerKind === 'watch' ? 'Reads what the repository published lately and shows what it would do with each, and the instruction the agent would read. Nothing runs.' : 'Shows when it would run and the instruction the agent would read. Nothing runs.'}</span>
         </div>
         {shownTest ? <div className="flex flex-col gap-3 border-t border-border pt-3">
           <TestResults results={shownTest.value.results} />

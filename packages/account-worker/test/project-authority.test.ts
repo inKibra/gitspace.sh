@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID, type CloudProjectSummary, type HostedServiceRoute } from '@gitspace/protocol';
+import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID, GITSPACE_SOURCE_BRANCH, type CloudProjectSummary, type HostedServiceRoute } from '@gitspace/protocol';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -104,7 +104,7 @@ describe('ProjectAuthorityDO', () => {
     await runInDurableObject(authority, async instance => { await expect(instance.setProjectLifecycle(project.revision + 1, 'active')).rejects.toThrow(); });
   });
 
-  it('changes an active project base branch only at its current revision and never for the built-in source', async () => {
+  it('changes an active project base branch only at its current revision, the GitSpace project\'s like any other', async () => {
     const authority = projectEnv.PROJECT_AUTHORITY.getByName('base-branch');
     const project = await authority.bootstrap({ id: 'base-branch', name: 'Base branch', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
     await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release', 'a'.repeat(40)))).rejects.toThrow('must be active');
@@ -116,8 +116,8 @@ describe('ProjectAuthorityDO', () => {
     const reserved = await projectEnv.USER_PROJECTS.getByName('base-branch-source').ensureGitSpaceProject({ release: null, branch: 'release/test', commit: null });
     const sourceAuthority = projectEnv.PROJECT_AUTHORITY.getByName('base-branch-source-project');
     const source = await sourceAuthority.setProjectLifecycle((await sourceAuthority.ensureGitSpaceProject(reserved)).revision, 'active');
-    await expect(runInDurableObject(sourceAuthority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(source.revision, 'main', 'a'.repeat(40)))).rejects.toThrow('managed by GitSpace releases');
-    expect(await sourceAuthority.getProject()).toEqual(source);
+    expect(source.baseBranch).toBe(GITSPACE_SOURCE_BRANCH);
+    expect(await sourceAuthority.setBaseBranch(source.revision, 'main', 'a'.repeat(40))).toMatchObject({ baseBranch: 'main', revision: source.revision + 1 });
   });
 
   it('rejects stale bootstrap and workspace publication until an archived project is explicitly restored', async () => {
@@ -390,6 +390,23 @@ describe('ProjectAuthorityDO', () => {
     expect((await stub.putWorkspace({ ...work, branch: 'renamed', expectedRevision: work.revision })).remote).toBeNull();
     expect((await stub.setBaseBranch(active.revision, 'develop', 'b'.repeat(40))).remote).toBeNull();
   });
+
+  it('moves an active project to another repository only at its current revision, forgetting what the old origin said', async () => {
+    const stub = projectEnv.PROJECT_AUTHORITY.getByName('moved-repository');
+    const project = await stub.bootstrap({ id: 'moved-repository', name: 'Moved', repositoryReference: 'https://github.com/someone/moved.git', baseBranch: 'main', createdBy: 'user' });
+    await stub.putWorkspace({ id: 'moved-work', projectId: project.id, kind: 'worktree', name: 'Work', branch: 'work', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await expect(runInDurableObject(stub, (instance: ProjectAuthorityDO) => instance.setRepository(project.revision, 'https://github.com/fork/moved.git'))).rejects.toThrow('must be active');
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(null);
+    const active = await stub.setProjectLifecycle(project.revision, 'active');
+    await stub.recordRemoteHeads([{ branch: 'main', head: 'a'.repeat(40) }, { branch: 'work', head: 'b'.repeat(40) }]);
+    await expect(runInDurableObject(stub, (instance: ProjectAuthorityDO) => instance.setRepository(active.revision - 1, 'https://github.com/fork/moved.git'))).rejects.toThrow('revision conflict');
+
+    const moved = await stub.setRepository(active.revision, 'https://github.com/fork/moved.git');
+    expect(moved).toMatchObject({ repositoryReference: 'https://github.com/fork/moved.git', baseBranch: 'main', revision: active.revision + 1, remote: null });
+    expect(await stub.getWorkspace('moved-work')).toMatchObject({ branch: 'work', remote: null });
+    // The same address again changes nothing.
+    expect(await stub.setRepository(moved.revision, 'https://github.com/fork/moved.git')).toEqual(moved);
+  });
 });
 
 describe('UserProjectIndexDO', () => {
@@ -430,15 +447,16 @@ describe('UserProjectIndexDO', () => {
     expect(await authority.getProject()).toEqual(source);
   });
 
-  it('fills missing release provenance once without silently repinning a reserved checkout', async () => {
+  it('fills missing release provenance once without silently repinning a reserved checkout, on the GitSpace source branch', async () => {
     const index = projectEnv.USER_PROJECTS.getByName('source-provenance');
     const unresolved = await index.ensureGitSpaceProject({ release: null, branch: null, commit: null });
-    expect(unresolved.baseBranch).toBe('HEAD');
+    expect(unresolved.baseBranch).toBe(GITSPACE_SOURCE_BRANCH);
     const pinned = await index.ensureGitSpaceProject({ release: 'channel:one', branch: 'release/one', commit: 'a'.repeat(40) });
     const repeated = await index.ensureGitSpaceProject({ release: 'channel:two', branch: 'release/two', commit: 'b'.repeat(40) });
     expect(repeated.id).toBe(unresolved.id);
     expect(repeated.source).toEqual(pinned.source);
-    expect(repeated.baseBranch).toBe('release/one');
+    // The build's branch is provenance; the project's base branch stays its own.
+    expect(repeated.baseBranch).toBe(GITSPACE_SOURCE_BRANCH);
   });
 
   it('indexes projects and locates each workspace authority', async () => {

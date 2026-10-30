@@ -7,10 +7,8 @@ import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { storageMigrationStatusInputSchema } from '@gitspace/protocol/storage-migration';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
-import { defaultReleasePinSchema } from '@gitspace/protocol/default-release';
-import { GITSPACE_SOURCE_REPOSITORY, hostedServiceRouteSchema, hostedServiceUrlKind } from '@gitspace/protocol/project-authority';
+import { GITSPACE_SOURCE_PROJECT_ROLE, hostedServiceRouteSchema, hostedServiceUrlKind } from '@gitspace/protocol/project-authority';
 import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { readAdvertisedRefs } from '@gitspace/runtime-workspace-do';
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation, type UsageObservation } from '@gitspace/provider-auth';
@@ -93,7 +91,6 @@ import {
   launchProgressSchema,
   launcherStartedInputSchema,
   WORKER_VERSION_HEADER,
-  GITSPACE_CANONICAL_BRANCH,
   type DeploymentStatus,
 } from '@gitspace/protocol/deployment';
 import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } from './providers.js';
@@ -132,9 +129,12 @@ import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
-import { platformSwap, tenantPlatformJson, tenantProvider, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
+import { tenantPlatformJson, tenantProvider, tenantWorkerVersion } from './tenant-platform.js';
 import { accountDistributionResponse } from './distribution.js';
 import { admitPortableRelease } from './portable-release.js';
+import { CHANNEL_PREFIX, publishedRelease, publishedStageInput, releaseFile } from './channel.js';
+import { deployReleaseWorker, restartSpacesForRelease } from './release-worker.js';
+import { refreshProjectRemote } from './project-remote.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, accountStatus, activeAccount, authorizeControl } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DeviceVerifier, invalidateDeviceAuthority, withDeviceAuthority, type DeviceRegistrySnapshot, type MachineCredential } from './device-authority.js';
@@ -148,6 +148,7 @@ import {
   UserMcpConnectionsDO,
 } from './local-mcp.js';
 import {
+  ACCOUNT_LAUNCHER,
   launchReleaseInputSchema,
   machineAppliedInputSchema,
   machineChannelAppliedInputSchema,
@@ -2308,42 +2309,66 @@ function tenantReleases(env: Env, userId: string) {
 /** What this script reports as its own version: the build stamp, or `dev` for unstamped builds. */
 const WORKER_STAMP = { sha: WORKER_VERSION ?? null, version: WORKER_VERSION ?? 'dev' } as const;
 
+/**
+ * An account created before default releases runs the published release the platform created it from
+ * (`DEFAULT_ACCOUNT_RELEASE`), and takes that release as its default once, by reference. While the channel cannot
+ * answer, the account has no default and says so where one is needed.
+ */
+export async function ensureDefaultRelease(env: Env, userId: string): Promise<void> {
+  const pin = env.DEFAULT_ACCOUNT_RELEASE;
+  const releases = tenantReleases(env, userId);
+  if (pin === undefined || await releases.defaultRelease() !== null) return;
+  try {
+    await releases.adoptDefault(await holdPublishedRelease(env, userId, { pin }));
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'default_release_adoption_failed', pin, message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+/** A published release in the account, by reference: its natives mirrored, its files left in the channel. A commit the
+ * account already holds a release of is that release. */
+async function holdPublishedRelease(env: Env, userId: string, reference: { tag: string } | { pin: string }): Promise<string> {
+  const releases = tenantReleases(env, userId);
+  const { manifest, source } = await publishedRelease(env, reference);
+  if (await releases.hasRelease(manifest.commit)) return manifest.commit;
+  const input = publishedStageInput(manifest, source);
+  if (input.artifacts.portable) await admitPortableRelease(env, userId, input.sha, input.artifacts.portable);
+  await releases.stage(input, ACCOUNT_LAUNCHER);
+  return input.sha;
+}
+
 /** What the account runs, read from cloud state; no machine is consulted. */
 export async function readTenantDeployment(env: Env, userId: string): Promise<DeploymentStatus> {
+  await ensureDefaultRelease(env, userId);
   return tenantReleases(env, userId).status(userId, await tenantWorkerVersion(env, userId));
 }
-/** Starts Back to stable, or finds the one already running; the release object runs it to its end whether or not the
- * caller stays, and status reports it as `revert`. */
-export async function revertTenantRelease(env: Env, userId: string): Promise<DeploymentStatus> {
-  await tenantReleases(env, userId).startRevert(userId);
+/** Back to default: the account applies its default release to every target, with no machine; status reports it as
+ * the latest launch. */
+export async function backToDefault(env: Env, userId: string): Promise<DeploymentStatus> {
+  await tenantReleases(env, userId).backToDefault();
   return readTenantDeployment(env, userId);
 }
-/** Reads the canonical branch head from the public canonical repository (one ref advertisement, no clone) and stores
- * it; status serves the stored head. */
+/** Launches the published release `tag` by reference to every target, which makes it the default once its Worker runs. */
+export async function launchPublishedRelease(env: Env, userId: string, tag: string): Promise<DeploymentStatus> {
+  const sha = await holdPublishedRelease(env, userId, { tag });
+  await tenantReleases(env, userId).startHeldLaunch(sha, ['worker', 'machine', 'frontend']);
+  return readTenantDeployment(env, userId);
+}
 export async function discardTenantLaunch(env: Env, userId: string, launchId: string): Promise<DeploymentStatus> {
   await tenantReleases(env, userId).discardLaunch(launchId);
   return readTenantDeployment(env, userId);
 }
+/** Reads the head of the GitSpace project's base branch from the project's repository, as Check origin does, and keeps
+ * it as the canonical head; status serves the kept head. */
 export async function checkCanonicalHead(env: Env, userId: string): Promise<DeploymentStatus> {
-  const ref = `refs/heads/${GITSPACE_CANONICAL_BRANCH}`;
-  const commit = (await readAdvertisedRefs({ remote: GITSPACE_SOURCE_REPOSITORY, auth: null, refPrefix: ref })).get(ref);
-  if (!commit) throw new Error(`${GITSPACE_SOURCE_REPOSITORY} has no ${GITSPACE_CANONICAL_BRANCH} branch`);
-  await tenantReleases(env, userId).recordCanonicalHead({ repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit, checkedAt: new Date().toISOString() });
+  const listed = (await env.USER_PROJECTS.getByName(userId).list()).find(project => project.role === GITSPACE_SOURCE_PROJECT_ROLE);
+  if (!listed) throw new Error('This account has no GitSpace project');
+  await refreshProjectRemote(env, userId, listed.id);
+  const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:${listed.id}`).getProject();
+  if (!project?.repositoryReference) throw new Error('The GitSpace project has no repository');
+  if (!project.remote?.head) throw new Error(`${project.repositoryReference} has no ${project.baseBranch} branch`);
+  await tenantReleases(env, userId).recordCanonicalHead({ repository: project.repositoryReference, branch: project.baseBranch, commit: project.remote.head, checkedAt: project.remote.checkedAt });
   return readTenantDeployment(env, userId);
-}
-
-
-/** Every workspace object hears of the new release; one still resident on older code restarts on it when idle. */
-async function restartSpacesForRelease(env: Env, userId: string, sha: string): Promise<void> {
-  const definitions = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listSpaces();
-  const namespace = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
-  const outcomes = await Promise.all(definitions.map(definition => namespace.getByName(`${userId}:${definition.spaceId}`).restartForRelease(sha).catch((error: unknown) => {
-    console.error(JSON.stringify({ event: 'release_restart_failed', sha, workspaceId: definition.spaceId, message: error instanceof Error ? error.message : String(error) }));
-    return 'failed';
-  })));
-  const counts: Record<string, number> = {};
-  for (const outcome of outcomes) counts[outcome] = (counts[outcome] ?? 0) + 1;
-  console.info(JSON.stringify({ event: 'release_restarts', sha, ...counts }));
 }
 
 /** A Worker target must reach its account-owned platform script; an unavailable platform is a failed release. */
@@ -2353,15 +2378,7 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   const launched = await releases.launch(input);
   if (!launched) throw new ReleaseNotFoundError(input.sha);
   if (launched.record.status.worker !== 'pending') { await releases.finishLaunch(launched.record, input.targets); return launched; }
-  const worker = launched.record.artifacts.worker;
-  const metadata = launched.record.worker;
-  let outcome: WorkerSwap;
-  try {
-    if (!worker || !metadata) throw new Error('Worker artifact and metadata are required');
-    outcome = await platformSwap(env, '/deploy', { sha: input.sha, manifestKey: dataObjectKey(userId, worker.key), manifestHash: worker.hash, metadata, accountId: userId });
-  } catch (error) {
-    outcome = { status: 'failed', error: error instanceof Error ? error.message : 'Worker deployment failed' };
-  }
+  const outcome = await deployReleaseWorker(env, userId, launched.record);
   const record = await releases.setWorkerStatus(input.sha, outcome.status, outcome.error) ?? launched.record;
   if (outcome.status === 'applied') await restartSpacesForRelease(env, userId, input.sha);
   await releases.finishLaunch(record, input.targets);
@@ -2390,26 +2407,8 @@ const FRONTEND_CONTENT_TYPES: Record<string, string> = {
   wasm: 'application/wasm',
 };
 
-/** Default accounts pin immutable UI files; development assets retain their own namespace. */
-async function accountChannelResponse(request: Request, env: Env, pathname: string): Promise<Response> {
-  if (env.DEFAULT_ACCOUNT_RELEASE !== undefined) {
-    const pin = env.DEFAULT_ACCOUNT_RELEASE;
-    if (!defaultReleasePinSchema.safeParse(pin).success) return new Response('Pinned account frontend unavailable', { status: 503 });
-    try {
-      const target = new URL(`/v1/default-releases/${pin}/frontend/${pathname.slice(1)}`, env.PLATFORM_URL);
-      const assetRequest = new Request(target, { method: request.method, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
-      const response = await (env.PLATFORM_SERVICE ? env.PLATFORM_SERVICE.fetch(assetRequest) : fetch(assetRequest));
-      if ((response.status >= 300 && response.status < 400) || (response.ok && response.headers.get('x-gitspace-frontend-release') !== pin)) {
-        await response.body?.cancel();
-        return new Response('Pinned account frontend unavailable', { status: 503 });
-      }
-      if (pathname.startsWith('/assets/')) return response;
-      // The document names the hashed assets of whichever release is pinned now, so the browser revalidates it.
-      const headers = new Headers(response.headers);
-      headers.set('cache-control', 'no-cache');
-      return new Response(response.body, { status: response.status, headers });
-    } catch { return new Response('Pinned account frontend unavailable', { status: 503 }); }
-  }
+/** The account frontend bundled with this Worker (`ASSETS`): local development, and an account with no release yet. */
+async function bundledFrontendResponse(request: Request, env: Env, pathname: string): Promise<Response> {
   const assets = env.ASSETS;
   if (!assets) return new Response('Account frontend unavailable', { status: 503 });
   const asset = pathname.startsWith('/assets/') || pathname.startsWith('/fonts/')
@@ -2443,42 +2442,45 @@ function accountHandleForHostname(hostname: string): string | null {
   return match && match[1] !== 'api' && match[1] !== 'www' ? match[1]! : null;
 }
 
-/** Serves either the account's selected frontend tree or its bundled channel frontend. */
+/** Serves the frontend of the account's selected release, else its default's: from account storage, or for a published
+ * release from the channel through the edge cache. An account with neither gets the bundled frontend. */
 async function releaseFrontendResponse(request: Request, env: Env, pathname: string): Promise<Response | null> {
-    const handle = accountHandleForHostname(new URL(request.url).hostname);
-    if (!handle) return null;
-    const account = await accountState(env).getByHandle(handle);
-    if (!account) return new Response('Account not found', { status: 404 });
-    const denied = accountAccessResponse(await activeAccount(env, account.userId));
-    if (denied) return denied;
-    const ownerId = account.userId;
-  const frontend = await tenantReleases(env, ownerId).frontend();
-    if (frontend === null) {
-      return accountChannelResponse(request, env, pathname);
-    }
-  const prefix = `users/${ownerId}/${frontend.keyPrefix}/`;
-  const requested = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
-  if (requested.includes('..')) return new Response('Not found', { status: 404 });
-  let path = requested;
-  let object = await env.DATA.get(prefix + path);
-  if (!object && (requested === 'favicon.png' || requested === 'favicon.ico')) {
-    return accountChannelResponse(request, env, pathname);
+  const handle = accountHandleForHostname(new URL(request.url).hostname);
+  if (!handle) return null;
+  const account = await accountState(env).getByHandle(handle);
+  if (!account) return new Response('Account not found', { status: 404 });
+  const denied = accountAccessResponse(await activeAccount(env, account.userId));
+  if (denied) return denied;
+  const ownerId = account.userId;
+  let frontend = await tenantReleases(env, ownerId).frontend();
+  if (frontend === null) {
+    await ensureDefaultRelease(env, ownerId);
+    frontend = await tenantReleases(env, ownerId).frontend();
   }
+  if (frontend === null) return bundledFrontendResponse(request, env, pathname);
+  const method = request.method === 'HEAD' ? 'HEAD' : 'GET';
+  const parts = decodeURIComponent(pathname).split('/').filter(part => part !== '');
+  if (parts.some(part => part === '.' || part === '..')) return new Response('Not found', { status: 404 });
+  const requested = parts.length === 0 ? 'index.html' : parts.join('/');
+  let path = requested;
+  let object = await releaseFile(env, ownerId, `${frontend.keyPrefix}/${path}`, method);
+  if (!object && (requested === 'favicon.png' || requested === 'favicon.ico')) return bundledFrontendResponse(request, env, pathname);
   if (!object && !/\.[a-z0-9]+$/iu.test(requested)) {
     path = 'index.html';
-    object = await env.DATA.get(prefix + path);
+    object = await releaseFile(env, ownerId, `${frontend.keyPrefix}/${path}`, method);
   }
   if (!object) return new Response('Not found', { status: 404 });
   const dot = path.lastIndexOf('.');
   const headers = new Headers({
     'content-type': (dot === -1 ? undefined : FRONTEND_CONTENT_TYPES[path.slice(dot + 1).toLowerCase()]) ?? 'application/octet-stream',
-    'content-length': String(object.size),
+    // The document names the hashed assets of whichever release runs now, so the browser revalidates it.
     'cache-control': path.startsWith('assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
-    etag: object.httpEtag,
+    etag: object.etag,
     [WORKER_VERSION_HEADER]: WORKER_STAMP.version,
     'x-gitspace-frontend-release': frontend.sha,
   });
-  return new Response(request.method === 'HEAD' ? null : object.body, { headers });
+  if (object.size !== null) headers.set('content-length', String(object.size));
+  return new Response(object.body, { headers });
 }
 
 interface SyncRequestDiagnostics {
@@ -2641,6 +2643,7 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   const authorized = await authorizeControl(env, signed, 'storage.access', DATA_UPLOAD_OPERATIONS[signed.operation] ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
   if (authorized.status === 'error') return accountAccessResponse(authorized)!;
   if (diagnostics) diagnostics.stage = 'validate';
+  if (keyFromPath.startsWith(CHANNEL_PREFIX)) return publishedDataObjectResponse(env, signed, keyFromPath);
   if (keyFromPath.startsWith('releases/') || /^(?:objects|natives)\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
     return releaseDataObjectResponse(request, env, signed, keyFromPath, objectKey, diagnostics);
   }
@@ -2771,6 +2774,17 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
     }
     default: throw new DataRequestError(400, 'INVALID_OPERATION', 'Application object operation is invalid');
   }
+}
+
+/** A published release's files, which machines read through the account: from the channel (`channel.ts`), each checked
+ * by the machine against the digest its release names. */
+async function publishedDataObjectResponse(env: Env, signed: SignedControlRequest, keyFromPath: string): Promise<Response> {
+  if (signed.operation !== 'data.get' && signed.operation !== 'data.head') return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Published release files are read only');
+  const file = await releaseFile(env, env.ACCOUNT_ID, keyFromPath, signed.operation === 'data.head' ? 'HEAD' : 'GET');
+  if (!file) return new Response(null, { status: 404 });
+  const headers = new Headers({ 'cache-control': 'private, no-store', 'content-type': 'application/octet-stream', etag: file.etag });
+  if (file.size !== null) headers.set('content-length', String(file.size));
+  return new Response(file.body, { headers });
 }
 
 /** Release objects machines publish and read in plain text (release trees, executable chunks): not
@@ -3730,6 +3744,7 @@ const worker = {
               value = await launchRelease(env, body.userId, body.payload);
               break;
             case 'deploy.status':
+              await ensureDefaultRelease(env, body.userId);
               value = await releases.status(body.userId, await tenantWorkerVersion(env, body.userId), body.machineId);
               break;
             case 'deploy.launchProgress':

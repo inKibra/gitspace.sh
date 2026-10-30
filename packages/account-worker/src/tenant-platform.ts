@@ -1,4 +1,4 @@
-import { platformDeployResponseSchema, type PlatformDeployRequest, type PlatformRevertRequest, type ReleaseStatus } from '@gitspace/protocol/deployment';
+import { platformDeployResponseSchema, type PlatformDeployRequest, type ReleaseStatus } from '@gitspace/protocol/deployment';
 import type { WorkerVersion } from './tenant-releases.js';
 
 export async function tenantPlatformFetch(env: Env, path: string, init?: RequestInit): Promise<Response> {
@@ -31,21 +31,17 @@ export interface WorkerSwap {
   error: string | null;
 }
 
-/**
- * Sends a Worker swap to the platform (`/deploy`, `/revert`), or with no body reads the outcome of the revert kept at
- * `/operations/<id>`, which the platform answers once that swap has ended. Only a healthy swap of the requested release
- * is applied.
- */
-export async function platformSwap(env: Env, path: string, body?: (PlatformDeployRequest | PlatformRevertRequest) & { accountId: string }): Promise<WorkerSwap> {
+/** Asks the platform to swap this account's Worker to a release (`/deploy`); only a healthy swap of it is applied. */
+export async function platformDeploy(env: Env, body: PlatformDeployRequest & { accountId: string }): Promise<WorkerSwap> {
   try {
-    const response = await tenantPlatformFetch(env, path, body ? { method: 'POST', body: JSON.stringify(body) } : undefined);
-    if (!response.ok) return { status: 'failed', error: `Platform ${path} failed with HTTP ${response.status}: ${(await response.text()).slice(0, 512)}` };
+    const response = await tenantPlatformFetch(env, '/deploy', { method: 'POST', body: JSON.stringify(body) });
+    if (!response.ok) return { status: 'failed', error: `Platform /deploy failed with HTTP ${response.status}: ${(await response.text()).slice(0, 512)}` };
     const result = platformDeployResponseSchema.parse(await response.json());
     if (result.revertedTo !== null) return { status: 'failed', error: `Platform reverted to ${result.revertedTo}: ${result.sha} did not pass its health probe` };
     if (!result.healthy) return { status: 'failed', error: `Platform reported ${result.sha} unhealthy` };
     return { status: 'applied', error: null };
   } catch (error) {
-    return { status: 'failed', error: error instanceof Error ? error.message : `Platform ${path} failed` };
+    return { status: 'failed', error: error instanceof Error ? error.message : 'Platform /deploy failed' };
   }
 }
 

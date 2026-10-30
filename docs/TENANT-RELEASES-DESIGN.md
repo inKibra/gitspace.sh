@@ -1,13 +1,13 @@
 # Account releases: the platform builds, the account decides
 
-Status: agreed (2026-10-30), not built. Mock: `packages/account-web/mock-gitspace-project.html`
+Status: agreed (2026-10-30), built, not launched (see Launching). Mock: `packages/account-web/mock-gitspace-project.html`
 (`src/GitSpaceProjectMock.tsx`). The GitSpace project agent's conversation asks with question cards: a published
 release (launch it, or merge it into a fork), a fork's branch with changes to build, and promoting a trial (on upstream,
 open a pull request or move to a fork). The project settings dialog is every project's (Repository, Base branch, Origin,
 Inference); the topbar's Behind origin · Update and the sidebar ↓ are the existing ones. The sidebar and Settings →
 Releases show what the account runs. The mock's "Simulate" menu makes those events happen.
 
-## Already in place
+## Before this change
 
 - Every account has a GitSpace project (`ensureAccountGitSpaceProject`, role `gitspace-source`). Its repository is a
   normal project repository.
@@ -32,22 +32,26 @@ machine.
 
 ### 2. The account's default release
 
-The default is the release the GitSpace project runs: launching its canonical commit to every target makes that
-release the default. Workspace launches are trials and never change it. **Back to default** replaces Back to stable. It
-launches the default release to the worker, the frontend and the machines through the normal launch path, with no
-platform `revert { to: 'channel' }`. Machines with no selection, and new computers, follow the default, which replaces
-`stableMachineRelease`.
+The default is the release the GitSpace project runs, kept by the account's release object (`TenantReleasesDO`): a
+canonical commit or a published release, selected for every target with its Worker applied, becomes the default,
+whichever launch selected its last target. Workspace launches are trials and never change it. **Back to default**
+replaces Back to stable. The account launches the default release to the worker, the frontend and the machines itself,
+with no machine, and reports it as the latest launch; there is no platform `revert { to: 'channel' }`. Machines with no
+selection, and new computers (`/install`), follow the default, which replaces `stableMachineRelease`. An account created
+before default releases takes the published release it was created from (its `DEFAULT_ACCOUNT_RELEASE` pin) as its
+default once, by reference; while the channel cannot answer, it has no default and serves the frontend bundled with
+its Worker.
 
 ### 3. Published releases are used by reference
 
 GitHub builds and publishes; the platform Worker takes no part. `publish-default.yml`, run for a release tag (and
 still by hand), builds the natives, the cloud image, the worker, the frontend and the portable release. It writes them,
-unchanged in format, to a **public** bucket on its own domain (the **channel**; the name moves from "default release"
-to the platform side):
+unchanged in format, to a **public** bucket on its own domain (the **channel**, `GITSPACE_CHANNEL_URL`,
+`https://releases.gitspace.sh`), with the same keys as `RELEASES`:
 
 - `catalog.json`: every published release, newest first: tag, commit, pin, publish date;
-- `releases/<commit>/manifest.json` and the files it lists, each with its SHA-256. They are immutable, and only the
-  operator writes them.
+- `defaults/releases/<commit>/manifest.json` and the files it lists, each with its SHA-256. They are immutable, only
+  the operator's workflow writes them, and a tag stays bound to the release it first named.
 
 A **pin** is `<commit>:<SHA-256 of that commit's manifest.json>`. The commit locates the manifest, the hash proves its
 bytes, and the manifest lists the SHA-256 of every file, so a pin fixes every byte of one release. Accounts already
@@ -57,8 +61,10 @@ and cloud images.
 
 An account uses a published release without copying it:
 
-- **Record:** a release record with source `{ kind: 'release', tag, pin }`, whose files are channel URLs instead of
-  account-storage keys.
+- **Record:** a release record with source `{ kind: 'release', tag, pin }`, whose files are channel keys
+  (`channel/defaults/releases/<commit>/…`) instead of account-storage keys. The account answers every read of a
+  `channel/` key (`/__platform/objects`, the machines' data endpoint, `/install`, the frontend) from the channel, read
+  only.
 - **Worker:** launched through the existing `/deploy`, which reads a worker's manifest and modules through the
   account (`/__platform/objects/<key>`) and checks them against the manifest's SHA-256. For a published release the
   account answers those reads from the channel. The platform does nothing new.
@@ -87,9 +93,9 @@ The GitSpace project's agent can launch either, but they mean different things:
 
 **The release automation.** Automations can watch a repository's releases, tags and GitHub deployments
 (`docs/AUTOMATIONS-DESIGN.md` §4a): by webhook where the account's GitHub App receives the event, otherwise by checking
-GitHub once a day (adjustable). The GitSpace project starts with one: **Release of `inKibra/gitspace.sh`** (the
-upstream parent when the project tracks a fork) → message the project agent, which finds the release's pin in the
-catalog. Its instruction depends on what the project tracks:
+GitHub once a day (adjustable). The GitSpace project starts with one, **GitSpace releases**: a watch of releases of
+the project's repository (its upstream parent when the project tracks a fork) whose tag matches `v*` → message the
+project agent, which finds the release's pin in the catalog. Its instruction depends on what the project tracks:
 
 - **Upstream `develop`:** ask to launch the release by reference. Editing the automation can make it launch without
   asking.
@@ -146,7 +152,7 @@ The project menu's **Launch canonical develop** becomes **Launch** with the proj
 
 - `/v1/default-releases/*` and `defaultFrontendResponse`.
 - Reverting a tenant to the channel (`revert { to: 'channel' }`) and the channel fallback in `loadFallback`. A failed
-  swap reverts to the previous active release only.
+  swap reverts to the previous active release only; a failed first deploy has nothing to restore.
 - Injecting `DEFAULT_ACCOUNT_RELEASE` on every swap. It is set once, at creation.
 - The platform worker version in the Back to stable inference check. The release record's `inferenceVersion` answers it.
 
@@ -162,3 +168,18 @@ No platform code is added. The operator creates the public channel bucket and it
 4. The watch trigger (automations milestone A4) and the GitSpace project's release automation.
 5. Update base for the GitSpace project; the Check the origin setting.
 6. The platform cleanup above, once every tenant runs a release from step 3.
+
+## Launching
+
+1. Create the public R2 bucket `gitspace-channel` on `releases.gitspace.sh`, and let the publishing R2 key write it.
+   Set the repository variable `GITSPACE_CHANNEL_BUCKET` if the bucket has another name.
+2. Publish the release accounts run now to the channel:
+   `bun packages/deployment/src/default-release-cli.ts channel --commit <commit> --tag <tag> --bucket <releases bucket> --channel-bucket gitspace-channel`.
+   Without it, existing accounts cannot adopt their default.
+3. Launch the account Workers; each adopts its default on its first status or page load.
+4. Deploy the platform cleanup.
+5. On each GitHub App, accept the `deployments: read` permission and the `release` and `deployment_status` events, so
+   watched events arrive at once; checks cover the rest.
+
+Known gap: the compute provider still picks the cloud image from the platform's default pointer; images from the
+account's release are later work.

@@ -1,5 +1,6 @@
 import { gitSpaceSourceProvenanceSchema, type CloudProjectSummary, type GitSpaceSourceProvenance } from '@gitspace/protocol';
 import type { AccountStateDO } from './account-state.js';
+import { releaseFile } from './channel.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { TenantReleasesDO } from './tenant-releases.js';
 
@@ -16,6 +17,8 @@ export async function ensureAccountGitSpaceProject(
   const ensure = async (reserved: CloudProjectSummary): Promise<CloudProjectSummary> => {
     const project = await authorityNamespace.get(authorityNamespace.idFromName(`${userId}:${reserved.id}`)).ensureGitSpaceProject(reserved);
     await index.putWorkspaceLocation(project.id, project.id);
+    // Its release automation, once: GitSpace's releases reach its project agent (docs/TENANT-RELEASES-DESIGN.md §5).
+    await env.PROJECT_AUTOMATIONS.getByName(`${userId}:${project.id}`).addGitSpaceReleases({ projectId: project.id });
     return index.put(project);
   };
   if (existing && existing.lifecycle !== 'cloud-only') return ensure(existing);
@@ -41,9 +44,9 @@ export async function ensureAccountGitSpaceProject(
     }
   }
   if (frontend) {
-    const object = await env.DATA.get(`users/${userId}/${frontend.keyPrefix}/gitspace-source.json`);
-    if (object) {
-      const metadata = gitSpaceSourceProvenanceSchema.parse(await object.json());
+    const file = await releaseFile(env, userId, `${frontend.keyPrefix}/gitspace-source.json`, 'GET');
+    if (file?.body) {
+      const metadata = gitSpaceSourceProvenanceSchema.parse(await new Response(file.body).json());
       source = { ...metadata, release: frontend.sha, commit: /^[a-f0-9]{40,64}$/iu.test(frontend.sha) ? frontend.sha : metadata.commit };
     } else {
       const status = await releasesNamespace.get(releasesNamespace.idFromName(userId)).status(userId, { sha: null, version: null });

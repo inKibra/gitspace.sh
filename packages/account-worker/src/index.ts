@@ -40,6 +40,7 @@ import {
 } from '@gitspace/protocol/credential-vault';
 import { WORKER_VERSION_HEADER } from '@gitspace/protocol/deployment';
 import application, { REQUEST_MAX_BYTES } from './application.js';
+import { CHANNEL_PREFIX, releaseFile } from './channel.js';
 import { forwardTunnelRequest, relayRequest, tunnelTarget, verifiedTunnelBody, TUNNEL_MAX_BODY_BYTES, TunnelBodyProofSchema, INTERNAL_TUNNEL_BODY_PROOF, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
 import { handleMcpRequest } from './mcp-server.js';
 import { z } from 'zod';
@@ -1165,6 +1166,15 @@ export default {
       if (request.headers.get('authorization') !== `Bearer ${env.PLATFORM_TOKEN}`) return jsonError(401, 'PROVIDER_UNAUTHORIZED', 'Provider object authorization is required');
       if (request.method !== 'GET' && request.method !== 'HEAD') return jsonError(405, 'METHOD_NOT_ALLOWED', 'Provider object access is read-only');
       const key = decodeURIComponent(url.pathname.slice('/__platform/objects/'.length));
+      // A published release's Worker is read from the channel (`channel.ts`), checked by the platform against its pin.
+      const published = `users/${env.ACCOUNT_ID}/${CHANNEL_PREFIX}`;
+      if (key.startsWith(published)) {
+        const file = await releaseFile(env, env.ACCOUNT_ID, key.slice(`users/${env.ACCOUNT_ID}/`.length), request.method === 'HEAD' ? 'HEAD' : 'GET');
+        if (!file) return jsonError(404, 'OBJECT_NOT_FOUND', 'Published object is unavailable');
+        const headers = new Headers({ 'content-type': 'application/octet-stream', etag: file.etag });
+        if (file.size !== null) headers.set('content-length', String(file.size));
+        return new Response(file.body, { headers });
+      }
       const object = request.method === 'HEAD' ? await env.DATA.head(key) : await env.DATA.get(key);
       if (!object) return jsonError(404, 'OBJECT_NOT_FOUND', 'Tenant object is unavailable');
       return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(object.size), etag: object.httpEtag } });

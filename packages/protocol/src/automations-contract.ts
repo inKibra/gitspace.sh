@@ -163,6 +163,17 @@ export type AutomationMode = (typeof AUTOMATION_MODES)[number];
 /** A label trigger starts on these labels, each naming the mode a started workspace begins in. */
 export const AUTOMATION_START_LABELS: Readonly<Record<string, AutomationMode>> = { 'gitspace:plan': 'plan', 'gitspace:code': 'code', 'gitspace:review': 'review', 'gitspace:ship': 'ship' };
 
+/** What a watch trigger starts on (docs/AUTOMATIONS-DESIGN.md §4a): a published GitHub Release, a new tag, or a
+ * deployment's status. Each arrives as an event: `release`, `tag` (or a tag `push` by webhook), `deployment_status`. */
+export const AutomationWatchOnSchema = z.enum(['release', 'tag', 'deployment']);
+export type AutomationWatchOn = z.infer<typeof AutomationWatchOnSchema>;
+export const AUTOMATION_WATCH_LABEL: Record<AutomationWatchOn, string> = { release: 'Release', tag: 'Tag', deployment: 'Deployment' };
+/** How often a watched repository is checked when its events do not arrive by webhook; daily unless chosen. */
+export const AutomationWatchEverySchema = z.enum(['daily', 'every-6-hours', 'hourly', 'every-15-minutes']);
+export type AutomationWatchEvery = z.infer<typeof AutomationWatchEverySchema>;
+export const AUTOMATION_WATCH_EVERY_MS: Record<AutomationWatchEvery, number> = { daily: 86_400_000, 'every-6-hours': 21_600_000, hourly: 3_600_000, 'every-15-minutes': 900_000 };
+export const AUTOMATION_WATCH_EVERY_LABEL: Record<AutomationWatchEvery, string> = { daily: 'Once a day', 'every-6-hours': 'Every 6 hours', hourly: 'Every hour', 'every-15-minutes': 'Every 15 minutes' };
+
 // Triggers, conditions, actions and instructions. Each is one zod schema: the wire codec, the automations object's
 // stored JSON and the project agent's tool all read it.
 
@@ -177,6 +188,9 @@ export const AutomationTriggerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('github'), events: z.array(AutomationEventTriggerSchema).min(1).max(AUTOMATION_GITHUB_EVENTS.length) }).strict(),
   /** A `gitspace:plan`, `gitspace:code`, `gitspace:review` or `gitspace:ship` label added to an issue or pull request. */
   z.object({ kind: z.literal('label') }).strict(),
+  /** A repository publishing something: `repository` null watches the project's own repository, or its upstream parent
+   * when it is a fork; any other is an `owner/name` the account can read. */
+  z.object({ kind: z.literal('watch'), repository: z.string().regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/u, 'A watched repository is owner/name').nullable(), on: AutomationWatchOnSchema, every: AutomationWatchEverySchema }).strict(),
 ]);
 export type AutomationTrigger = z.infer<typeof AutomationTriggerSchema>;
 export type AutomationTriggerKind = AutomationTrigger['kind'];
@@ -203,6 +217,14 @@ export const AutomationConditionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('draft'), draft: z.boolean() }).strict(),
   z.object({ kind: z.literal('conclusion'), values: conditionValues }).strict(),
   z.object({ kind: z.literal('reviewState'), values: conditionValues }).strict(),
+  /** A watched release's or tag's name. */
+  listCondition('tag'),
+  /** `prerelease: false` passes only releases that are not prereleases. */
+  z.object({ kind: z.literal('prerelease'), prerelease: z.boolean() }).strict(),
+  /** A watched deployment's environment (`preview`, `production`). */
+  listCondition('environment'),
+  /** A watched deployment's state (`success`, `failure`, `error`, …). */
+  z.object({ kind: z.literal('deploymentState'), values: conditionValues }).strict(),
 ]);
 export type AutomationCondition = z.infer<typeof AutomationConditionSchema>;
 export type AutomationConditionKind = AutomationCondition['kind'];
@@ -219,8 +241,17 @@ export const AUTOMATION_EVENT_CONDITIONS: Record<AutomationGitHubEvent, readonly
   check_suite: ['linked', 'branch', 'conclusion'],
 };
 
-/** The conditions a trigger offers: those every one of its events offers. Schedules, manual runs and labels offer none. */
+/** The conditions each watched kind offers. */
+export const AUTOMATION_WATCH_CONDITIONS: Record<AutomationWatchOn, readonly AutomationConditionKind[]> = {
+  release: ['tag', 'prerelease', 'author'],
+  tag: ['tag'],
+  deployment: ['environment', 'deploymentState', 'author'],
+};
+
+/** The conditions a trigger offers: those every one of its events offers, or its watched kind's. Schedules, manual runs
+ * and labels offer none. */
 export function automationConditionKinds(trigger: AutomationTrigger): readonly AutomationConditionKind[] {
+  if (trigger.kind === 'watch') return AUTOMATION_WATCH_CONDITIONS[trigger.on];
   if (trigger.kind !== 'github') return [];
   const [first, ...rest] = trigger.events;
   if (!first) return [];
@@ -264,6 +295,12 @@ export const AUTOMATION_EVENT_FIELDS: Record<AutomationGitHubEvent, readonly Aut
   push: [{ path: 'ref', label: 'Ref' }, { path: 'after', label: 'New head commit' }, { path: 'compare', label: 'Compare link' }, { path: 'head_commit.message', label: 'Commit message' }],
   check_suite: [{ path: 'check_suite.head_branch', label: 'Branch' }, { path: 'check_suite.head_sha', label: 'Commit' }, { path: 'check_suite.conclusion', label: 'Conclusion' }],
 };
+/** Fields an instruction may name per watched kind (docs/AUTOMATIONS-DESIGN.md §4a). */
+export const AUTOMATION_WATCH_FIELDS: Record<AutomationWatchOn, readonly AutomationField[]> = {
+  release: [{ path: 'release.tag', label: 'Release tag' }, { path: 'release.name', label: 'Release name' }, { path: 'release.url', label: 'Release link' }, { path: 'release.notes', label: 'Release notes' }, { path: 'release.published_at', label: 'Published at' }],
+  tag: [{ path: 'tag.name', label: 'Tag' }, { path: 'tag.commit', label: 'Tagged commit' }, { path: 'tag.url', label: 'Tag link' }],
+  deployment: [{ path: 'deployment.environment', label: 'Environment' }, { path: 'deployment.state', label: 'State' }, { path: 'deployment.sha', label: 'Commit' }, { path: 'deployment.ref', label: 'Ref' }, { path: 'deployment.url', label: 'Deployment link' }, { path: 'deployment.creator', label: 'Created by' }],
+};
 
 /** The fields a trigger provides: for several events, those every one of them has. */
 export function automationFields(trigger: AutomationTrigger): readonly AutomationField[] {
@@ -271,6 +308,7 @@ export function automationFields(trigger: AutomationTrigger): readonly Automatio
     case 'schedule': return [NAME_FIELD, { path: 'scheduled_for', label: 'Scheduled time' }];
     case 'manual': return [NAME_FIELD, { path: 'requested_by', label: 'Requested by' }];
     case 'label': return [...EVENT_COMMON_FIELDS, { path: 'label.name', label: 'Label' }];
+    case 'watch': return [NAME_FIELD, { path: 'repository.full_name', label: 'Repository' }, ...AUTOMATION_WATCH_FIELDS[trigger.on]];
     case 'github': {
       const [first, ...rest] = trigger.events;
       const shared = first ? AUTOMATION_EVENT_FIELDS[first.event].filter(field => rest.every(entry => AUTOMATION_EVENT_FIELDS[entry.event].some(other => other.path === field.path))) : [];

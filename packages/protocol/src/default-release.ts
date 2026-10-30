@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { WORKER_MANIFEST_FILE, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, executableArtifactManifestSchema, machineNativePlatformSchema, releaseArtifactSchema } from './deployment.js';
+import { WORKER_MANIFEST_FILE, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, executableArtifactManifestSchema, machineNativePlatformSchema, releaseArtifactSchema, releasePinSchema } from './deployment.js';
 import { cloudImageReferenceSchema } from './cloud-image.js';
 import { PORTABLE_MANIFEST_FILE, portableFileKey, portableManifestSchema } from './machine-release.js';
 
@@ -50,11 +50,10 @@ export const defaultReleaseSchema = z.object({
 export type DefaultRelease = z.infer<typeof defaultReleaseSchema>;
 export type DefaultObject = z.infer<typeof defaultObjectSchema>;
 export const defaultPointerSchema = z.object({ schemaVersion: z.literal(1), current: defaultObjectSchema, previous: defaultObjectSchema.nullable() }).strict();
-export const defaultReleasePinSchema = z.string().regex(/^[a-f0-9]{40}:[a-f0-9]{64}$/u);
 export function defaultReleasePin(reference: DefaultObject): string {
   const match = /^defaults\/releases\/([a-f0-9]{40})\/manifest.json$/u.exec(reference.key);
   if (!match) throw new Error('Default manifest namespace mismatch');
-  return defaultReleasePinSchema.parse(`${match[1]}:${reference.sha256}`);
+  return releasePinSchema.parse(`${match[1]}:${reference.sha256}`);
 }
 export type DefaultReleaseReader = { get(key: string): Promise<{ bytes: Uint8Array; etag: string } | null> };
 export async function verifyDefaultObject(reader: DefaultReleaseReader, object: DefaultObject): Promise<Uint8Array> {
@@ -129,7 +128,7 @@ export async function loadDefaultRelease(reader: DefaultReleaseReader): Promise<
   return (await resolveDefaultRelease(reader)).release;
 }
 export async function loadPinnedDefaultRelease(reader: DefaultReleaseReader, pin: string): Promise<DefaultRelease> {
-  defaultReleasePinSchema.parse(pin);
+  releasePinSchema.parse(pin);
   const commit = pin.slice(0, 40);
   const key = `defaults/releases/${commit}/manifest.json`;
   const object = await reader.get(key);

@@ -28,7 +28,15 @@ export const projectOperationStateSchema = z.enum([
 export type ProjectOperationState = z.infer<typeof projectOperationStateSchema>;
 
 export const GITSPACE_SOURCE_PROJECT_ROLE = 'gitspace-source' as const;
+/** What a new GitSpace project builds: upstream GitSpace and its `develop`. Project settings can point it elsewhere. */
 export const GITSPACE_SOURCE_REPOSITORY = 'https://github.com/inKibra/gitspace.sh.git';
+export const GITSPACE_SOURCE_BRANCH = 'develop';
+
+/** How often GitSpace reads a project's origin on its own (Check the origin); `manual` only when someone asks. A
+ * repository the account's GitHub App covers also reports each push at once. Daily unless the project chooses. */
+export const originCheckIntervalSchema = z.enum(['daily', 'every-6-hours', 'hourly', 'manual']);
+export type OriginCheckInterval = z.infer<typeof originCheckIntervalSchema>;
+export const ORIGIN_CHECK_INTERVAL_MS: Record<OriginCheckInterval, number | null> = { daily: 86_400_000, 'every-6-hours': 21_600_000, hourly: 3_600_000, manual: null };
 
 /** Compare repository identity, never a project's display name. */
 export function isGitSpaceSourceRepository(reference: string | null): boolean {

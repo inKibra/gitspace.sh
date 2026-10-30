@@ -5,6 +5,8 @@ import {
   AUTOMATION_MAX_QUEUE_MS,
   AUTOMATION_MODES,
   AUTOMATION_START_LABELS,
+  AUTOMATION_WATCH_EVERY_MS,
+  AUTOMATION_WATCH_LABEL,
   AutomationActionSchema,
   AutomationConditionSchema,
   AutomationSubjectSchema,
@@ -42,7 +44,7 @@ import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { cloudResourceId, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { profileModelRoles } from '@gitspace/runtime-core/inference';
 import { z } from 'zod';
-import { AutomationEventSchema, automationEventName, describeAutomationEvent, globMatches, triggerMatches, type AutomationEvent } from './automation-events.js';
+import { AutomationEventSchema, automationEventName, describeAutomationEvent, globMatches, triggerMatches, watchedEvent, type AutomationEvent } from './automation-events.js';
 import { createCloudWorkspace, restoreCloudWorkspace, retryCloudWorkspaceCreation } from './cloud-workspace-lifecycle.js';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
@@ -61,6 +63,8 @@ const MAX_INSTRUCTION = 16_000;
 const TESTED_DELIVERIES = 50;
 const TESTED_EVENTS = 5;
 const MAX_TRUSTED = 200;
+/** Seen releases, tags and deployments a watch keeps; tag lists are not ordered by time, so a bounded set is kept. */
+const WATCH_SEEN_KEPT = 500;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 /** A run's submission to its workspace carries this request id prefix and the run id. */
 export const AUTOMATION_REQUEST_PREFIX = 'automation:';
@@ -242,7 +246,8 @@ function checkDraft(draft: AutomationDraft): AutomationDraft {
   if (new Set(conditions.map(condition => condition.kind)).size !== conditions.length) refuse('conditions', 'Use each condition once');
   const { action } = draft;
   const event = trigger.kind === 'github' || trigger.kind === 'label';
-  if ((action.kind === 'startWorkspace' || action.kind === 'sendToLinked') && !event) refuse('action.kind', 'Starting a workspace or sending to the linked one needs a GitHub event or label: a schedule or manual run has no pull request or issue');
+  if (action.kind === 'sendToLinked' && !event) refuse('action.kind', 'Sending to the linked workspace needs a GitHub event or label: a schedule, manual run or watched repository has no pull request or issue');
+  if (action.kind === 'startWorkspace' && !event && trigger.kind !== 'watch') refuse('action.kind', 'Starting a workspace needs a GitHub event, a label or a watched repository: a schedule or manual run starts none');
   if (action.kind === 'startWorkspace' && action.mode === null && trigger.kind !== 'label') refuse('action.mode', 'Choose the mode the workspace starts in; only a label trigger starts in the label\'s mode');
   if (action.instruction.trim().length === 0 || action.instruction.length > MAX_INSTRUCTION) refuse('action.instruction', `Instruction must be 1 to ${MAX_INSTRUCTION.toLocaleString('en-US')} characters`);
   const unknown = unknownAutomationPlaceholders(action.instruction, trigger);
@@ -252,6 +257,24 @@ function checkDraft(draft: AutomationDraft): AutomationDraft {
   }
   return { name, trigger, conditions, action, enabled: draft.enabled };
 }
+
+/** The GitSpace project's release automation (docs/TENANT-RELEASES-DESIGN.md §5): GitSpace's releases go to its project
+ * agent, which asks how to take each one. `repository` null watches the project's repository, or its upstream parent
+ * when the project builds a fork, so it follows the project wherever Project settings point it. */
+export const GITSPACE_RELEASES_AUTOMATION: AutomationDraft = {
+  name: 'GitSpace releases', enabled: true,
+  trigger: { kind: 'watch', repository: null, on: 'release', every: 'daily' },
+  conditions: [{ kind: 'tag', mode: 'oneOf', values: ['v*'] }],
+  action: {
+    kind: 'messageProjectAgent',
+    instruction: [
+      'GitSpace {{release.tag}} is published: {{release.url}}',
+      'Read this project\'s repository and base branch, and gitspace_deployment_status for what this account runs and its default release. From the release notes, say in a few lines what changes from the default.',
+      'Then ask me with a question card. If this project\'s repository is inKibra/gitspace.sh: update this account to {{release.tag}}? Options: Launch it now (gitspace_deployment_launchPublished with tag {{release.tag}}; nothing is built), Not now, Skip this release. If it is a fork: bring {{release.tag}} into its base branch? Options: Merge it in a workspace and open a pull request, Not now, Skip this release; once that pull request is merged, ask whether to build and launch the branch.',
+      'If I skipped {{release.tag}} earlier in this conversation, do not ask again.',
+    ].join('\n\n'),
+  },
+};
 
 /** The default automations installing the GitHub App adds (docs/AUTOMATIONS-DESIGN.md §4), by key. */
 function defaultAutomations(bot: string): Array<{ key: string; draft: AutomationDraft }> {
@@ -474,6 +497,20 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           activity_label TEXT,
           activity_at INTEGER
         );
+        CREATE TABLE IF NOT EXISTS automation_watches(
+          automation_id TEXT PRIMARY KEY,
+          trigger_json TEXT NOT NULL,
+          repository TEXT,
+          next_check_at INTEGER NOT NULL,
+          baseline INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS automation_watch_seen(
+          automation_id TEXT NOT NULL,
+          key TEXT NOT NULL,
+          seen_at INTEGER NOT NULL,
+          PRIMARY KEY (automation_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS automation_defaults_offered(key TEXT PRIMARY KEY);
       `);
     });
   }
@@ -617,8 +654,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     });
   }
 
-  /** A person starts one run now of a schedule or manual automation; a proposal never runs. An automation that runs
-   * on GitHub events runs on one with `runOnEvent`. */
+  /** A person starts one run now of a schedule or manual automation, or of a watch on what its repository published
+   * last; a proposal never runs. An automation that runs on GitHub events runs on one with `runOnEvent`. */
   async runNow(input: { projectId: string; automationId: string; requestedBy: string }): Promise<AutomationOutcome<AutomationRunView>> {
     return settled(async () => {
       const projectId = this.ensureProject(input.projectId);
@@ -629,8 +666,16 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const active = this.activeRun(automation.id);
       if (active) throw new AutomationRefusal({ kind: 'alreadyRunning', automationId: automation.id, runId: active.id });
       const now = Date.now();
-      const firing: Firing = { trigger: 'manual', requestedBy: input.requestedBy };
-      const runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, firing, this.messagePlan(projectId, automation, firing), now));
+      let runId: string;
+      if (automation.trigger.kind === 'watch') {
+        const [event] = await this.watchedEvents(projectId, automation.trigger, 1);
+        if (!event) refuse('trigger', `${await this.watchedRepository(projectId, automation.trigger)} has published no ${AUTOMATION_WATCH_LABEL[automation.trigger.on].toLowerCase()} yet`);
+        const plan = await this.evaluate(projectId, automation, this.eventContext(projectId, event, await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).botHandle()));
+        runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, { trigger: 'event', event, replayedBy: input.requestedBy }, plan, now));
+      } else {
+        const firing: Firing = { trigger: 'manual', requestedBy: input.requestedBy };
+        runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, firing, this.messagePlan(projectId, automation, firing), now));
+      }
       await this.changed(projectId);
       return this.runView(projectId, this.requiredRun(runId));
     });
@@ -653,16 +698,27 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     });
   }
 
-  /** A GitHub delivery for this project's repository. Links by branch first, then every switched-on automation whose
-   * trigger starts on it records a run, skipped ones included. Returns the number of runs recorded. */
+  /** A GitHub delivery: for this project's repository, or a release, tag or deployment of any repository (a watch may
+   * name any). Links by branch first, then every switched-on automation whose trigger starts on it records a run, skipped
+   * ones included; a watch records each release, tag or deployment it has seen, so one a check also finds runs once.
+   * Returns the number of runs recorded. */
   async receive(input: { projectId: string; event: AutomationEvent; bot: string | null }): Promise<number> {
     const projectId = this.ensureProject(input.projectId);
     const event = AutomationEventSchema.parse(input.event);
-    if (input.bot !== null) this.addDefaultAutomations(input.bot);
+    const own = (await this.repository(projectId))?.toLowerCase() === event.repository.toLowerCase();
+    if (own && input.bot !== null) this.addDefaultAutomations(input.bot);
     const context = this.eventContext(projectId, event, input.bot);
-    await this.linkFromEvent(projectId, event);
-    const matching = this.rows<AutomationRow>('SELECT * FROM automations WHERE enabled=1 AND proposal_json IS NULL ORDER BY default_key IS NOT NULL, name, id')
-      .map(row => this.automation(row)).filter(automation => triggerMatches(automation.trigger, event));
+    if (own) await this.linkFromEvent(projectId, event);
+    const matching: Automation[] = [];
+    for (const row of this.rows<AutomationRow>('SELECT * FROM automations WHERE enabled=1 AND proposal_json IS NULL ORDER BY default_key IS NOT NULL, name, id')) {
+      const automation = this.automation(row);
+      if (automation.trigger.kind === 'watch') {
+        if (event.watchKey === null || !triggerMatches(automation.trigger, event, await this.watchedRepository(projectId, automation.trigger))) continue;
+        if (!this.markSeen(automation.id, event.watchKey, Date.now())) continue;
+      } else if (!own || !triggerMatches(automation.trigger, event)) continue;
+      matching.push(automation);
+    }
+    if (!own && matching.length === 0) return 0;
     for (const automation of matching) {
       const plan = await this.evaluate(projectId, automation, context)
         .catch((error: unknown) => failedPlan(`Failed: ${errorMessage(error)}`));
@@ -677,6 +733,16 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   async addDefaults(input: { projectId: string; bot: string }): Promise<void> {
     const projectId = this.ensureProject(input.projectId);
     if (this.addDefaultAutomations(input.bot)) await this.changed(projectId);
+  }
+
+  /** The GitSpace project's release automation, added once (a person may change or delete it afterwards). */
+  async addGitSpaceReleases(input: { projectId: string }): Promise<void> {
+    const projectId = this.ensureProject(input.projectId);
+    if (this.ctx.storage.sql.exec("INSERT OR IGNORE INTO automation_defaults_offered(key) VALUES('gitspace-releases')").rowsWritten === 0) return;
+    if (this.rows('SELECT id FROM automations WHERE name=? OR default_key=?', GITSPACE_RELEASES_AUTOMATION.name, 'gitspace-releases').length === 0) {
+      this.save({ id: null, draft: checkDraft(GITSPACE_RELEASES_AUTOMATION), targetName: 'the project agent', proposal: null, createdBy: 'person', defaultKey: 'gitspace-releases' });
+    }
+    await this.changed(projectId);
   }
 
   /** A queued run, or one its workspace has not started, is skipped; one whose agent has started stops that agent. */
@@ -723,7 +789,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const draft = checkDraft(input.draft);
       const targetName = await this.targetName(projectId, draft.action);
       if (draft.trigger.kind === 'schedule' || draft.trigger.kind === 'manual') return { ...dryRun(draft, targetName, input.requestedBy, Date.now()), checks: [] };
-      return this.eventTest(projectId, { ...draft, targetName, id: '' }, input.deliveryId ?? null);
+      return this.eventTest(projectId, { ...draft, targetName, id: '' }, draft.trigger.kind === 'watch' ? null : input.deliveryId ?? null);
     });
   }
 
@@ -804,6 +870,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   async alarm(): Promise<void> {
     const projectId = this.rows<{ project_id: string }>('SELECT project_id FROM automation_identity WHERE id=1')[0]?.project_id;
     if (projectId === undefined) return;
+    await this.checkWatches(projectId);
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       for (const row of this.rows<AutomationRow>('SELECT * FROM automations WHERE next_run_at <= ? ORDER BY next_run_at, id', now)) {
@@ -915,7 +982,9 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       sentTo: new Map(),
       trust: once(async () => {
         const actor = event.actor;
-        if (actor === null) return { trusted: true, label: 'A check suite carries only GitHub\'s result' };
+        // Choosing to watch a repository trusts what its maintainers publish (docs/AUTOMATIONS-DESIGN.md §4a).
+        if (event.watchKey !== null && (await this.repository(projectId))?.toLowerCase() !== event.repository.toLowerCase()) return { trusted: true, label: `You watch ${event.repository}; what it publishes reaches the agent as trusted` };
+        if (actor === null) return { trusted: true, label: event.event === 'check_suite' ? 'A check suite carries only GitHub\'s result' : 'Only people with write access can tag the repository' };
         if (event.fromApp) return { trusted: true, label: 'Sent by this account\'s GitHub App' };
         if (this.rows('SELECT login FROM automation_trusted WHERE login=?', actor).length > 0) return { trusted: true, label: `@${actor} is on the trust list` };
         try {
@@ -1026,6 +1095,19 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       case 'messageProjectAgent': return { ...plan, kind: 'message', workspaceId: projectId, targetName: 'the project agent', would: 'Would message the project agent' };
       case 'messageWorkspace': return { ...plan, kind: 'message', workspaceId: action.workspaceId, targetName: automation.targetName, would: `Would message ${automation.targetName}` };
       case 'startWorkspace': {
+        if (event.watchKey !== null && action.mode !== null) {
+          // A release, tag or deployment names no pull request, issue or branch: the workspace starts from the base on a
+          // new branch of its own, which is its subject.
+          const label = (event.tag ?? event.environment ?? event.event).toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 40);
+          const name = `${action.mode}-${label}`;
+          const own: AutomationSubject = { kind: 'branch', number: null, branch: name, title: summary, url: event.fields['release.url'] ?? event.fields['tag.url'] ?? event.fields['deployment.url'] ?? null };
+          const starting = this.rows<RunRow>("SELECT * FROM automation_runs WHERE kind='start' AND state IN ('queued', 'running') AND target_name=?", name)[0];
+          if (starting || (await context.linked()) !== null || (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).listWorkspaces()).some(workspace => workspace.branch === name && workspace.lifecycle !== 'deleting')) {
+            return { ...failedPlan(`Skipped: workspace ${name} already exists`, 'skipped'), checks, timeline };
+          }
+          const start: Start = { name, mode: action.mode, role: action.role ?? null, subject: own, created: false, sourceKind: 'base', sourceRef: '', detail: automation.name };
+          return { ...plan, kind: 'start', start, workspaceId: cloudResourceId(name), targetName: name, would: `Would start workspace ${name} in ${MODE_LABEL[action.mode]} with model role ${MODEL_ROLE_LABELS[start.role ?? 'default'] ?? start.role}` };
+        }
         if (!subject) return { ...failedPlan('Skipped: the event names no pull request, issue or branch', 'skipped'), checks, timeline };
         const linked = await context.linked();
         if (linked) return { ...failedPlan(`Skipped: ${automationSubjectName(subject)} already has workspace ${linked.name}`, 'skipped'), checks, timeline };
@@ -1079,22 +1161,32 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     };
   }
 
-  /** A draft's test against recorded deliveries: one, or the recent ones its trigger starts on. */
+  /** A draft's test against recorded deliveries: one, or the recent ones its trigger starts on. A watch is tested on
+   * what its repository published lately, read now. */
   private async eventTest(projectId: string, automation: Automation, deliveryId: string | null): Promise<AutomationTest> {
-    const repository = await this.repository(projectId);
-    if (repository === null) refuse('trigger', 'This project has no GitHub repository, so it receives no GitHub events');
     const github = this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID);
     const bot = await github.botHandle();
+    const { trigger } = automation;
     let events: AutomationEvent[];
-    if (deliveryId !== null) events = [await this.recordedEvent(projectId, deliveryId)];
-    else {
-      const recent = await github.recordedEvents(repository, TESTED_DELIVERIES);
-      events = recent.map(event => AutomationEventSchema.parse(event)).filter(event => triggerMatches(automation.trigger, event)).slice(0, TESTED_EVENTS);
+    let source: string;
+    if (trigger.kind === 'watch') {
+      events = await this.watchedEvents(projectId, trigger, TESTED_EVENTS);
+      source = `${await this.watchedRepository(projectId, trigger)} has published no ${AUTOMATION_WATCH_LABEL[trigger.on].toLowerCase()} yet`;
+    } else {
+      const repository = await this.repository(projectId);
+      if (repository === null) refuse('trigger', 'This project has no GitHub repository, so it receives no GitHub events');
+      if (deliveryId !== null) events = [await this.recordedEvent(projectId, deliveryId)];
+      else {
+        const recent = await github.recordedEvents(repository, TESTED_DELIVERIES);
+        events = recent.map(event => AutomationEventSchema.parse(event)).filter(event => triggerMatches(trigger, event)).slice(0, TESTED_EVENTS);
+      }
+      source = `GitSpace has recorded no event for ${repository} that this trigger starts on`;
     }
-    if (events.length === 0) return { results: [{ label: 'Recorded events', result: `GitSpace has recorded no event for ${repository} that this trigger starts on`, runs: false }], instruction: '', checks: [] };
+    if (events.length === 0) return { results: [{ label: trigger.kind === 'watch' ? 'Published' : 'Recorded events', result: source, runs: false }], instruction: '', checks: [] };
+    const watched = trigger.kind === 'watch' ? await this.watchedRepository(projectId, trigger) : null;
     const tested = await Promise.all(events.map(async event => {
       const label = `${describeAutomationEvent(event)} · ${automationEventName(event)} · ${utcLabel(event.receivedAt)}`;
-      if (!triggerMatches(automation.trigger, event)) return { result: { label, result: `Would not run: this trigger does not start on ${automationEventName(event)}`, runs: false }, checks: [], event };
+      if (!triggerMatches(trigger, event, watched)) return { result: { label, result: `Would not run: this trigger does not start on ${automationEventName(event)}`, runs: false }, checks: [], event };
       const plan = await this.evaluate(projectId, automation, this.eventContext(projectId, event, bot)).catch((error: unknown) => failedPlan(`Failed: ${errorMessage(error)}`));
       return { result: { label, result: plan.ended?.outcome ?? plan.would, runs: plan.ended === null }, checks: plan.checks, event };
     }));
@@ -1213,6 +1305,85 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return reference === null ? null : githubRepositoryOf(reference);
   }
 
+  /** Forks' upstream parents, as GitHub named them while this object ran. */
+  private readonly upstreams = new Map<string, string | null>();
+
+  /** The repository a watch reads: the one it names, else the project's own, or that one's upstream parent when the
+   * project's repository is a fork. Null for a project with no GitHub repository. */
+  private async watchedRepository(projectId: string, trigger: Extract<AutomationTrigger, { kind: 'watch' }>): Promise<string | null> {
+    if (trigger.repository !== null) return trigger.repository;
+    const own = await this.repository(projectId);
+    if (own === null) return null;
+    if (!this.upstreams.has(own.toLowerCase())) this.upstreams.set(own.toLowerCase(), await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).upstreamOf(own));
+    return this.upstreams.get(own.toLowerCase()) ?? own;
+  }
+
+  /** What a watch's repository published lately, newest first, as events (`limit` at most). */
+  private async watchedEvents(projectId: string, trigger: Extract<AutomationTrigger, { kind: 'watch' }>, limit = Infinity): Promise<AutomationEvent[]> {
+    const repository = await this.watchedRepository(projectId, trigger);
+    if (repository === null) refuse('trigger.repository', 'This project has no GitHub repository: name the repository to watch');
+    const items = await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).watchedItems(repository, trigger.on);
+    return items.slice(0, limit).map(item => {
+      const event = watchedEvent({ repository, item, deliveryId: `watch:${repository}`, receivedAt: Date.now(), fromApp: false });
+      return { ...event, deliveryId: `watch:${repository}:${event.watchKey ?? ''}` };
+    });
+  }
+
+  /** Records that a watch has seen `key`; false when it already had. A watch keeps its newest seen keys. */
+  private markSeen(automationId: string, key: string, now: number): boolean {
+    const added = this.ctx.storage.sql.exec('INSERT OR IGNORE INTO automation_watch_seen(automation_id, key, seen_at) VALUES(?, ?, ?)', automationId, key, now).rowsWritten > 0;
+    if (added) this.ctx.storage.sql.exec(`DELETE FROM automation_watch_seen WHERE automation_id=? AND key NOT IN (
+      SELECT key FROM automation_watch_seen WHERE automation_id=? ORDER BY seen_at DESC LIMIT ?)`, automationId, automationId, WATCH_SEEN_KEPT);
+    return added;
+  }
+
+  /**
+   * Checks each watch whose interval came: its repository's releases, tags or deployments. The first check of a watch
+   * (created, switched on, or its trigger changed) records what exists, so it runs only on what comes after; later
+   * checks run on what it has not seen, oldest first. A failed check is tried at the next interval.
+   */
+  private async checkWatches(projectId: string): Promise<void> {
+    const now = Date.now();
+    for (const watch of this.rows<{ automation_id: string; next_check_at: number; baseline: number }>('SELECT automation_id, next_check_at, baseline FROM automation_watches WHERE next_check_at <= ?', now)) {
+      const row = this.rows<AutomationRow>('SELECT * FROM automations WHERE id=? AND enabled=1 AND proposal_json IS NULL', watch.automation_id)[0];
+      const automation = row ? this.automation(row) : null;
+      if (automation?.trigger.kind !== 'watch') continue;
+      const trigger = automation.trigger;
+      try {
+        const events = await this.watchedEvents(projectId, trigger);
+        const fresh = events.filter(event => event.watchKey !== null && this.markSeen(automation.id, event.watchKey, now)).reverse();
+        if (watch.baseline === 1) {
+          for (const event of fresh) {
+            const plan = await this.evaluate(projectId, automation, this.eventContext(projectId, event, null)).catch((error: unknown) => failedPlan(`Failed: ${errorMessage(error)}`));
+            this.ctx.storage.transactionSync(() => this.recordRun(automation, { trigger: 'event', event, replayedBy: null }, plan, Date.now()));
+          }
+        }
+        this.ctx.storage.sql.exec('UPDATE automation_watches SET baseline=1, next_check_at=? WHERE automation_id=?', now + AUTOMATION_WATCH_EVERY_MS[trigger.every], automation.id);
+      } catch (error) {
+        console.warn(JSON.stringify({ event: 'automation_watch_check_failed', projectId, automationId: automation.id, message: errorMessage(error) }));
+        this.ctx.storage.sql.exec('UPDATE automation_watches SET next_check_at=? WHERE automation_id=?', now + AUTOMATION_WATCH_EVERY_MS[trigger.every], automation.id);
+      }
+    }
+  }
+
+  /** A switched-on watch has a row, checked now when it is new or its trigger changed (what it had seen is forgotten);
+   * any other automation has none. */
+  private syncWatches(): void {
+    const watches = new Map(this.rows<{ automation_id: string; trigger_json: string }>('SELECT automation_id, trigger_json FROM automation_watches').map(row => [row.automation_id, row.trigger_json]));
+    for (const row of this.rows<AutomationRow>("SELECT * FROM automations WHERE enabled=1 AND proposal_json IS NULL AND json_extract(trigger_json, '$.kind')='watch'")) {
+      const stored = watches.get(row.id);
+      watches.delete(row.id);
+      if (stored === row.trigger_json) continue;
+      this.ctx.storage.sql.exec('DELETE FROM automation_watch_seen WHERE automation_id=?', row.id);
+      this.ctx.storage.sql.exec('INSERT INTO automation_watches(automation_id, trigger_json, next_check_at, baseline) VALUES(?, ?, ?, 0) ON CONFLICT(automation_id) DO UPDATE SET trigger_json=excluded.trigger_json, next_check_at=excluded.next_check_at, baseline=0',
+        row.id, row.trigger_json, Date.now());
+    }
+    for (const automationId of watches.keys()) {
+      this.ctx.storage.sql.exec('DELETE FROM automation_watches WHERE automation_id=?', automationId);
+      this.ctx.storage.sql.exec('DELETE FROM automation_watch_seen WHERE automation_id=?', automationId);
+    }
+  }
+
   private async recordedEvent(projectId: string, deliveryId: string): Promise<AutomationEvent> {
     const repository = await this.repository(projectId);
     const event = repository === null ? null : await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).recordedEvent(repository, deliveryId);
@@ -1230,6 +1401,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const due = immediate ? now : this.rows<{ at: number | null }>(`
       SELECT MIN(at) AS at FROM (
         SELECT MIN(next_run_at) AS at FROM automations
+        UNION ALL SELECT MIN(next_check_at) FROM automation_watches
         UNION ALL SELECT MIN(retry_at) FROM automation_runs WHERE state='running' AND submitted=0
         UNION ALL SELECT MIN(created_at) + ? FROM automation_runs WHERE state='queued'
       )
@@ -1241,6 +1413,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   /** After every change: the alarm follows the work, the account index gets the project's counts and newest runs (the
    * overview reads only those), and open tabs refetch. */
   private async changed(projectId: string): Promise<void> {
+    this.syncWatches();
     await this.reschedule();
     const now = Date.now();
     const day = utcDay(now);
@@ -1390,6 +1563,18 @@ function checkCondition(condition: AutomationCondition, event: AutomationEvent, 
       : { label, passed: event.draft !== true, reason: 'the pull request is a draft' };
     case 'conclusion': return { label, passed: event.conclusion !== null && values.includes(event.conclusion), reason: `the conclusion is ${event.conclusion ?? 'none yet'}` };
     case 'reviewState': return { label, passed: event.reviewState !== null && values.some(value => value.toLowerCase() === event.reviewState), reason: `the review is ${(event.reviewState ?? 'unknown').replaceAll('_', ' ')}` };
+    case 'tag': {
+      const matched = event.tag !== null && values.some(pattern => globMatches(pattern, event.tag ?? '', false));
+      return { label, passed: condition.mode === 'oneOf' ? matched : !matched, reason: `the tag is ${event.tag ?? 'unknown'}` };
+    }
+    case 'prerelease': return condition.prerelease
+      ? { label, passed: event.prerelease === true, reason: 'it is not a prerelease' }
+      : { label, passed: event.prerelease !== true, reason: 'it is a prerelease' };
+    case 'environment': {
+      const matched = event.environment !== null && values.some(pattern => globMatches(pattern, event.environment ?? '', true));
+      return { label, passed: condition.mode === 'oneOf' ? matched : !matched, reason: `the environment is ${event.environment ?? 'unknown'}` };
+    }
+    case 'deploymentState': return { label, passed: event.deploymentState !== null && values.some(value => value.toLowerCase() === event.deploymentState), reason: `the deployment is ${event.deploymentState ?? 'unknown'}` };
   }
 }
 
@@ -1411,6 +1596,10 @@ function conditionLabel(condition: AutomationCondition, bot: string | null): str
     case 'draft': return condition.draft ? 'a draft' : 'not a draft';
     case 'conclusion': return `conclusion is ${values}`;
     case 'reviewState': return `review is ${values.replaceAll('_', ' ')}`;
+    case 'tag': return `tag is ${not}${values}`;
+    case 'prerelease': return condition.prerelease ? 'a prerelease' : 'not a prerelease';
+    case 'environment': return `environment is ${not}${values}`;
+    case 'deploymentState': return `state is ${values}`;
   }
 }
 

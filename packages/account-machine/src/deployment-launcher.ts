@@ -6,7 +6,7 @@ import type { ExecutorJournal, LocalAttachment } from '@gitspace/runtime-machine
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceRevision } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
-import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, type DeploymentStatus, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { launchSourceSchema, releaseTargetSchema, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, type DeploymentStatus, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { portableFileKey, portableManifestSchema } from '@gitspace/protocol/machine-release';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-objects.js';
 import { z } from 'zod';
@@ -70,8 +70,8 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-/** What a launch builds: an attached workspace cache, or a canonical commit. */
-type BuildSource = { kind: 'workspace'; workspace: DeploymentSource } | { kind: 'canonical'; commit: string };
+/** What a launch builds: an attached workspace cache, or a commit of the GitSpace project's repository and branch. */
+type BuildSource = { kind: 'workspace'; workspace: DeploymentSource } | Extract<LaunchSource, { kind: 'canonical' }>;
 /** The tree a launch builds, its release key and recorded source, and how to dispose of it afterwards. */
 interface PreparedSource { root: string; key: string; label: string; source: ReleaseSource; environment: Record<string, string>; remove(): Promise<void> }
 
@@ -165,6 +165,8 @@ export class DeploymentLauncher {
   launch(input: DeploymentLaunchInput): LaunchProgress {
     if (this.active) throw new DeploymentLaunchError('BUSY', 'A release is already being built on this machine');
     const source = launchSourceSchema.parse(input.source);
+    // A release the account already holds is applied by the account (`deployment.backToDefault`, `deployment.launchPublished`).
+    if (source.kind === 'release') throw new DeploymentLaunchError('NOT_GITSPACE', 'A release the account holds is launched by the account, not built on a machine');
     const build: BuildSource = source.kind === 'workspace' ? { kind: 'workspace', workspace: deploymentSource(this.options.attachments(), this.options.machineId, source.workspaceId) } : source;
     const targets = [...new Set(z.array(releaseTargetSchema).parse(input.targets))];
     if (targets.length === 0) throw new DeploymentLaunchError('NOT_GITSPACE', 'A release needs at least one target');
@@ -193,23 +195,25 @@ export class DeploymentLauncher {
     };
   }
 
-  /** One canonical commit, fetched into a cached repository and checked out detached into its own worktree. */
-  private async canonicalSource(commit: string): Promise<PreparedSource> {
+  /** One commit of the GitSpace project's repository, fetched into a cached repository and checked out detached into its
+   * own worktree. */
+  private async canonicalSource(build: Extract<LaunchSource, { kind: 'canonical' }>): Promise<PreparedSource> {
+    const { repository: origin, branch, commit } = build;
     const repository = join(this.options.buildRoot, 'canonical.git');
     if (!existsSync(join(repository, 'HEAD'))) {
       await mkdir(repository, { recursive: true });
       await git(repository, ['init', '--bare', '--quiet']);
     }
-    await git(repository, ['fetch', '--quiet', '--no-tags', '--depth', '1', GITSPACE_SOURCE_REPOSITORY, commit]);
+    await git(repository, ['fetch', '--quiet', '--no-tags', '--depth', '1', origin, commit]);
     const root = join(this.options.buildRoot, `canonical-${commit}`);
     await git(repository, ['worktree', 'prune']);
     await rm(root, { recursive: true, force: true });
     await git(repository, ['worktree', 'add', '--detach', '--force', root, commit]);
     const revision = await workspaceRevision(root);
-    if (revision.key !== commit) throw new Error(`The canonical checkout of ${commit} is not clean`);
+    if (revision.key !== commit) throw new Error(`The checkout of ${commit} from ${origin} is not clean`);
     return {
-      root, key: commit, label: `${GITSPACE_CANONICAL_BRANCH} @ ${commit.slice(0, 12)}`, environment: { GITSPACE_SOURCE_BRANCH: GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_COMMIT: commit },
-      source: { kind: 'canonical', repository: GITSPACE_SOURCE_REPOSITORY, branch: GITSPACE_CANONICAL_BRANCH, commit },
+      root, key: commit, label: `${branch} @ ${commit.slice(0, 12)}`, environment: { GITSPACE_SOURCE_BRANCH: branch, GITSPACE_SOURCE_COMMIT: commit },
+      source: { kind: 'canonical', repository: origin, branch, commit },
       remove: async () => { await git(repository, ['worktree', 'remove', '--force', root]).catch(() => rm(root, { recursive: true, force: true })); },
     };
   }
@@ -241,8 +245,8 @@ export class DeploymentLauncher {
     let prepared: PreparedSource | null = null;
     let buildRoot: string | null = null;
     try {
-      if (build.kind === 'canonical') progress('checkout', `fetching ${GITSPACE_CANONICAL_BRANCH} @ ${build.commit.slice(0, 12)} from ${GITSPACE_SOURCE_REPOSITORY}`);
-      prepared = build.kind === 'workspace' ? await this.workspaceSource(build.workspace) : await this.canonicalSource(build.commit);
+      if (build.kind === 'canonical') progress('checkout', `fetching ${build.branch} @ ${build.commit.slice(0, 12)} from ${build.repository}`);
+      prepared = build.kind === 'workspace' ? await this.workspaceSource(build.workspace) : await this.canonicalSource(build);
       const { root, environment } = prepared;
       const protocolPackage = await readFile(join(root, 'packages/protocol/package.json'), 'utf8').then(
         (source) => JSON.parse(source) as unknown,
