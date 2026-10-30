@@ -1,8 +1,9 @@
 # Account releases: the platform builds, the account decides
 
 Status: agreed (2026-10-30), not built. Mock: `packages/account-web/mock-gitspace-project.html`
-(`src/GitSpaceProjectMock.tsx`): the sidebar, the GitSpace project page and its agent, and Settings → Releases, for an
-upstream or a forked project with a new upstream release, a workspace trial, or nothing new.
+(`src/GitSpaceProjectMock.tsx`): the GitSpace project agent asks with a question card when upstream publishes a release
+(launch it, or for a fork merge it), when its branch has changes ready to launch, or about a running trial; the sidebar
+and Settings → Releases show what the account runs.
 
 ## Already in place
 
