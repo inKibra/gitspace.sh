@@ -3,9 +3,9 @@
 Status: agreed (2026-10-30), not built. Mock: `packages/account-web/mock-gitspace-project.html`
 (`src/GitSpaceProjectMock.tsx`). The GitSpace project agent's conversation asks with question cards: a published
 release (launch it, or merge it into a fork), a fork's branch with changes to build, and promoting a trial (on upstream,
-open a pull request or move to a fork). Project settings → Source points the project at upstream or a fork, and Origin
-shows it behind with Sync and the daily check. The sidebar and Settings → Releases show what the account runs. The
-mock's "Simulate" menu makes those events happen.
+open a pull request or move to a fork). The project settings dialog is every project's (Repository, Base branch, Origin,
+Inference); the topbar's Behind origin · Update and the sidebar ↓ are the existing ones. The sidebar and Settings →
+Releases show what the account runs. The mock's "Simulate" menu makes those events happen.
 
 ## Already in place
 
@@ -99,15 +99,16 @@ catalog. Its instruction depends on what the project tracks:
 Nothing tells accounts; each account's automation looks. The agent remembers what you answered, such as a skipped
 release, from its conversation.
 
-### 6. Behind its origin, and Sync
+### 6. Behind its origin, and Update base
 
-The GitSpace project shows that its branch is behind its origin like any project (the ↓ beside its name), including
-when `develop` moves with no tag, so anyone can sync it. **Sync** updates the project's copy of the source; it launches
-nothing. The GitSpace project no longer hides Update base (`role === 'gitspace-source'` in `RuntimeWorkspace.tsx` and
-`AccountWorkPages.tsx`).
+The GitSpace project shows that its branch is behind its origin like any project: the ↓ beside its name, Behind
+origin/`develop` · Update in its topbar, and Update base and Check origin in its settings, including when `develop`
+moves with no tag. Update base fast-forwards the project's copy; it launches nothing. The GitSpace project no longer
+hides Update base (`role === 'gitspace-source'` in `RuntimeWorkspace.tsx` and `AccountWorkPages.tsx`).
 
-A project the GitHub App covers learns of a push at once. Any other project only learns when someone chooses Check
-origin today; a project setting, **Check the origin: daily** by default and adjustable, keeps it current.
+A project the GitHub App covers learns of a push at once. Any other project only learns when someone opens it
+(`useOriginCheck`) or chooses Check origin. A new setting for every project in its settings dialog, **Check the origin**,
+once a day by default and adjustable, keeps it current.
 
 ### 7. Trials and promoting one
 
@@ -124,11 +125,20 @@ project points:
 
 ### 8. Pointing the GitSpace project at a fork
 
-**Project settings → Source** names the repository and branch the GitSpace project builds. **Use a fork** picks a fork
-of `inKibra/gitspace.sh` the account's GitHub App covers (create it on GitHub first) and its branch; **Track upstream**
-returns. The project agent can do the same when asked, or when you choose to move to your own fork on a trial. The
-default release stays until the next launch; the release automation then follows the fork's upstream parent, and
+The GitSpace project uses the settings dialog every project has. Two changes there apply to every project:
+
+- **Repository**, new: change the project's origin to another address (the same field as creating a project). Use it to
+  move to a fork or a moved repository. Workspaces keep their branches; the base space fetches from the new origin.
+- **Base branch**, existing: the GitSpace project no longer refuses it ("Managed by GitSpace releases" in
+  `AccountWorkPages.tsx`, and the `gitspace-source` check in `ProjectAuthority.setBaseBranch`).
+
+The only GitSpace-specific line in the dialog says what its repository means for releases: on `inKibra/gitspace.sh`,
+published releases launch as they are; on any other repository, releases arrive as merges and launching builds on a
+machine. The project agent can make the same changes when asked, or when you choose to move to your fork on a trial.
+The default release stays until the next launch. The release automation follows the fork's upstream parent, and
 behind-origin follows the fork's branch.
+
+The project menu's **Launch canonical develop** becomes **Launch** with the project's base branch.
 
 ## What leaves the platform
 
@@ -142,10 +152,11 @@ No platform code is added. The operator creates the public channel bucket and it
 
 ## Order of work
 
-1. Canonical from the GitSpace project's source; Project settings → Source.
+1. Canonical from the GitSpace project's repository and base branch; Repository in project settings; Base branch
+   allowed for the GitSpace project; Launch with the base branch.
 2. The default release and Back to default; machines and installs follow the default.
 3. The public channel and catalog; published releases by reference, including the frontend; the publish workflow runs
    on tags and creates the GitHub Release.
 4. The watch trigger (automations milestone A4) and the GitSpace project's release automation.
-5. Behind origin and Sync for the GitSpace project; the daily origin check.
+5. Update base for the GitSpace project; the Check the origin setting.
 6. The platform cleanup above, once every tenant runs a release from step 3.
