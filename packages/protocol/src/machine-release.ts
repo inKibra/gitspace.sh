@@ -127,8 +127,9 @@ export function nativeMirrorKey(digest: string): string {
 /** Where natives are mirrored, by SHA-256. */
 export interface NativeMirror {
   has(sha256: string): Promise<boolean>;
-  /** Stores `body`, exactly `native.size` bytes, at `nativeMirrorKey(native.sha256)`. `body` fails before its last bytes
-   * when they differ from `native`; a store whose body failed holds nothing. */
+  /** Stores `body`, the download of `native`, at `nativeMirrorKey(native.sha256)` only if it is exactly the pinned bytes;
+   * otherwise stores nothing and fails. R2 checks a put against its SHA-256 itself; a store that cannot reads the body
+   * through `verifiedNative`. */
   put(native: MachineNativeFile, body: ReadableStream<Uint8Array>): Promise<void>;
 }
 
@@ -153,8 +154,13 @@ function verifyingNative(native: MachineNativeFile): TransformStream<Uint8Array,
   });
 }
 
-/** Copies every upstream asset `natives` names that the mirror lacks, each checked against its SHA-256 and size as it
- * passes. Returns the SHA-256 of each asset copied. */
+/** `body` as it passes, failing before its last bytes unless the whole of it matched `native`'s SHA-256 and size. */
+export function verifiedNative(native: MachineNativeFile, body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  return body.pipeThrough(verifyingNative(native));
+}
+
+/** Copies every upstream asset `natives` names that the mirror lacks; the mirror stores only the pinned bytes. The
+ * download is handed over as it arrives (a Worker stores it without reading it). Returns the SHA-256 of each asset copied. */
 export async function mirrorNatives(natives: PortableNatives, mirror: NativeMirror, download: (url: string) => Promise<Response>): Promise<string[]> {
   const unique = new Map<string, MachineNativeFile>();
   for (const files of Object.values(portableNativesSchema.parse(natives))) for (const file of Object.values(files)) unique.set(file.sha256, file);
@@ -162,11 +168,12 @@ export async function mirrorNatives(natives: PortableNatives, mirror: NativeMirr
   for (const native of unique.values()) {
     if (await mirror.has(native.sha256)) continue;
     const response = await download(native.url);
-    if (!response.ok || !response.body) {
+    const length = response.headers.get('content-length');
+    if (!response.ok || !response.body || (length !== null && Number(length) !== native.size)) {
       await response.body?.cancel();
-      throw new Error(`Cannot download ${native.url}: HTTP ${response.status}`);
+      throw new Error(`Cannot download ${native.url}: ${response.ok ? `${length} bytes, not its pinned ${native.size}` : `HTTP ${response.status}`}`);
     }
-    await mirror.put(native, response.body.pipeThrough(verifyingNative(native)));
+    await mirror.put(native, response.body);
     copied.push(native.sha256);
   }
   return copied;

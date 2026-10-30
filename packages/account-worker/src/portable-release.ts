@@ -2,7 +2,7 @@ import type { ReleaseArtifact } from '@gitspace/protocol/deployment';
 import { mirrorNatives, nativeMirrorKey, PORTABLE_MANIFEST_FILE, portableFileKey, portableManifestSchema, verifyPortableFiles, type NativeMirror } from '@gitspace/protocol/machine-release';
 
 /** Upstream native files in the account's own storage at `users/<account>/natives/sha256/<sha256>`, where its machines
- * read them through the data endpoint. R2 checks each object's SHA-256 again as it stores it. */
+ * read them through the data endpoint. R2 checks each object against its pinned SHA-256 as it stores it. */
 function accountNativeMirror(bucket: R2Bucket, userId: string): NativeMirror {
   const key = (sha256: string) => `users/${userId}/${nativeMirrorKey(sha256)}`;
   return {
@@ -10,19 +10,8 @@ function accountNativeMirror(bucket: R2Bucket, userId: string): NativeMirror {
       return await bucket.head(key(sha256)) !== null;
     },
     async put(native, body) {
-      const fixed = new FixedLengthStream(native.size);
-      const piping = new AbortController();
-      const [stored, piped] = await Promise.allSettled([
-        bucket.put(key(native.sha256), fixed.readable, { sha256: native.sha256, customMetadata: { sha256: `sha256:${native.sha256}` } }).catch((error: unknown) => {
-          // A put that fails without draining the body would leave the pipe waiting on it.
-          piping.abort(error);
-          throw error;
-        }),
-        body.pipeTo(fixed.writable, { signal: piping.signal }),
-      ]);
-      // A failed body (bytes that differ from the pin) is the cause of the failed put it aborts.
-      if (piped.status === 'rejected') throw piped.reason;
-      if (stored.status === 'rejected') throw stored.reason;
+      // R2 refuses bytes that miss the SHA-256, storing nothing; the download passes through without this Worker reading it.
+      await bucket.put(key(native.sha256), body, { sha256: native.sha256, customMetadata: { sha256: `sha256:${native.sha256}` } });
     },
   };
 }

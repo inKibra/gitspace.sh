@@ -9,7 +9,7 @@ import { releaseStorageClient } from './release.js';
 import { buildDefaultRelease, publishDefaultRelease, rollbackDefaultRelease, type DefaultReleaseStorage } from './default-release.js';
 import { defaultNativeArtifactSchema } from '@gitspace/protocol/default-release';
 import { workerManifestSchema } from '@gitspace/protocol/deployment';
-import { mirrorNatives, nativeMirrorKey, portableManifestSchema, type NativeMirror } from '@gitspace/protocol/machine-release';
+import { mirrorNatives, nativeMirrorKey, portableManifestSchema, verifiedNative, type NativeMirror } from '@gitspace/protocol/machine-release';
 import { DISTRIBUTION_PLATFORMS } from './distribution.js';
 
 /** The platform's native mirror in its releases bucket, reached with the publishing key. */
@@ -26,7 +26,7 @@ function bucketNativeMirror(client: S3Client, bucket: string): NativeMirror {
     },
     async put(native, body) {
       // Reading the body fails, before anything is sent, when its bytes differ from the pin.
-      const bytes = await new Response(body).bytes();
+      const bytes = await new Response(verifiedNative(native, body)).bytes();
       await client.send(new PutObjectCommand({ Bucket: bucket, Key: nativeMirrorKey(native.sha256), Body: bytes, ContentType: 'application/octet-stream', ContentLength: bytes.byteLength }), { abortSignal: AbortSignal.timeout(5 * 60_000) });
     },
   };

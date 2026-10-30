@@ -1,6 +1,6 @@
 import { expect, it } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { PORTABLE_ENTRYPOINTS, mirrorNatives, portableManifestSchema, verifyPortableFiles, type MachineNativeFile, type NativeMirror, type PortableManifest } from '../src/machine-release.js';
+import { PORTABLE_ENTRYPOINTS, mirrorNatives, portableManifestSchema, verifiedNative, verifyPortableFiles, type MachineNativeFile, type NativeMirror, type PortableManifest } from '../src/machine-release.js';
 
 const digest = (seed: string) => seed.repeat(64).slice(0, 64);
 function native(name: 'bun' | 'rg' | 'git-lfs', abi: MachineNativeFile['abi']): MachineNativeFile {
@@ -88,7 +88,7 @@ function mirrored() {
   const stored = new Map<string, Uint8Array>();
   const mirror: NativeMirror = {
     async has(sha256) { return stored.has(sha256); },
-    async put(native, body) { stored.set(native.sha256, await new Response(body).bytes()); },
+    async put(native, body) { stored.set(native.sha256, await new Response(verifiedNative(native, body)).bytes()); },
   };
   return { natives, served, stored, mirror, download: async (url: string) => new Response(served.get(url)) };
 }
