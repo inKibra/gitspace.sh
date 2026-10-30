@@ -1,193 +1,71 @@
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { createGunzip } from 'node:zlib';
-import {
-  currentDistributionPlatform,
-  currentGlibcVersion,
-  distributionBaseUrl,
-  distributionChannelSchema,
-  distributionManifestSchema,
-  versionAtLeast,
-  type DistributionFile,
-  type DistributionManifest,
-} from '@gitspace/deployment/distribution';
+import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { chmod, copyFile, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { CheckpointBlobStore } from '@gitspace/account-machine';
+import { currentDistributionPlatform } from '@gitspace/deployment/distribution';
+import { assembleMachineGeneration } from '@gitspace/deployment/machine-assembly';
+import { parseInstallMetadata } from '@gitspace/protocol/install-script';
+import { nativeMirrorKey, PORTABLE_MANIFEST_FILE, portableFileKey, portableManifestSchema } from '@gitspace/protocol/machine-release';
 
-async function download(url: URL): Promise<Response> {
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(10 * 60_000) });
-  if (!response.ok || !response.body) {
-    await response.body?.cancel();
-    throw new Error(`Cannot download GitSpace release ${url}: HTTP ${response.status}. If this platform has not been published, use GitSpace in the browser without pairing this machine.`);
-  }
-  return response;
+/** The host entry of a runtime built here: the generation's own bootstrap, trusting the generation built with it. */
+function hostEntry(manifestHash: string): string {
+  return [
+    '// Written by gitspace machine setup: starts the machine host of the generation installed beside this file, loaded',
+    '// from where it was installed (a runtime path, so imported dynamically).',
+    'process.env.GITSPACE_BUNDLE_ROOT ??= import.meta.dir;',
+    `process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH ??= ${JSON.stringify(manifestHash)};`,
+    "const { startMachineHost } = await import('./machine/machine-bootstrap.js');",
+    'await startMachineHost();',
+    '',
+  ].join('\n');
 }
 
-async function metadata(url: URL, maximum: number, expected?: { size: number; sha256: string }): Promise<Uint8Array> {
-  const response = await download(url);
-  const reader = response.body!.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > maximum) throw new Error(`GitSpace release metadata exceeds ${maximum} bytes`);
-      chunks.push(value);
-    }
-  } finally {
-    await reader.cancel();
-    reader.releaseLock();
-  }
-  const bytes = Buffer.concat(chunks, size);
-  if (expected && (size !== expected.size || createHash('sha256').update(bytes).digest('hex') !== expected.sha256)) {
-    throw new Error(`GitSpace release metadata integrity check failed: ${url}`);
-  }
-  return bytes;
-}
-
-async function downloadPayload(url: URL, path: string, expected: { size: number; sha256: string }): Promise<void> {
-  const response = await download(url);
-  const reader = response.body!.getReader();
-  const handle = await open(path, 'wx', 0o600);
-  const hash = createHash('sha256');
-  let size = 0;
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > expected.size) throw new Error('GitSpace runtime download exceeds its published size');
-      hash.update(value);
-      await handle.writeFile(value);
-    }
-    if (size !== expected.size || hash.digest('hex') !== expected.sha256) throw new Error('GitSpace runtime download integrity check failed');
-    await handle.sync();
-  } finally {
-    await handle.close();
-    await reader.cancel();
-    reader.releaseLock();
-  }
-}
-
-/** The authenticated inventory supplies paths and lengths. The payload cannot create links, special files, or traverse directories. */
-async function unpack(payload: string, root: string, files: DistributionFile[]): Promise<void> {
-  const source = createReadStream(payload);
-  const decompressed = source.pipe(createGunzip());
-  source.on('error', (error) => decompressed.destroy(error));
-  const chunks = decompressed[Symbol.asyncIterator]();
-  let chunk: Uint8Array = new Uint8Array();
-  let offset = 0;
-  try {
-    for (const file of files) {
-      const destination = join(root, file.path);
-      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-      const handle = await open(destination, 'wx', 0o600);
-      const hash = createHash('sha256');
-      let remaining = file.size;
-      try {
-        while (remaining > 0) {
-          if (offset === chunk.byteLength) {
-            const next = await chunks.next();
-            if (next.done) throw new Error(`Truncated GitSpace runtime file: ${file.path}`);
-            chunk = next.value as Uint8Array;
-            offset = 0;
-          }
-          const length = Math.min(remaining, chunk.byteLength - offset);
-          const bytes = chunk.subarray(offset, offset + length);
-          hash.update(bytes);
-          await handle.writeFile(bytes);
-          offset += length;
-          remaining -= length;
-        }
-        if (hash.digest('hex') !== file.sha256) throw new Error(`GitSpace runtime file integrity check failed: ${file.path}`);
-        await handle.chmod(file.mode);
-      } finally {
-        await handle.close();
-      }
-    }
-    if (offset !== chunk.byteLength || !(await chunks.next()).done) throw new Error('GitSpace runtime contains unlisted payload bytes');
-  } finally {
-    decompressed.destroy();
-    source.destroy();
-  }
-}
-
-async function verifyInstalled(root: string, manifest: DistributionManifest): Promise<void> {
-  if (!(await lstat(root)).isDirectory()) throw new Error('Installed runtime is not a regular directory');
-  const inventory = new Map(manifest.runtime.files.map((file) => [file.path, file]));
-  async function visit(directory: string, prefix = ''): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const name = `${prefix}${entry.name}`;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) { await visit(path, `${name}/`); continue; }
-      if (!entry.isFile()) throw new Error(`Installed runtime contains a link or special file: ${name}`);
-      if (name === 'distribution-manifest.json') continue;
-      const expected = inventory.get(name);
-      if (!expected) throw new Error(`Installed runtime contains an unlisted file: ${name}`);
-      const stat = await lstat(path);
-      const hash = createHash('sha256');
-      for await (const bytes of createReadStream(path)) hash.update(bytes);
-      if (stat.size !== expected.size || (stat.mode & 0o777) !== expected.mode || hash.digest('hex') !== expected.sha256) {
-        throw new Error(`Installed runtime failed integrity verification: ${name}. Remove this runtime directory and pair again.`);
-      }
-      inventory.delete(name);
-    }
-  }
-  await visit(root);
-  if (inventory.size !== 0) throw new Error(`Installed runtime is missing ${inventory.keys().next().value}`);
-}
-
-/** Install only published bootstrap code. Account-selected machine/OMP releases remain the host's responsibility. */
-export async function installRuntime(configRoot: string, apiUrl: string): Promise<string> {
+/**
+ * Builds this computer's machine runtime from its account's release, which the account names at
+ * `distribution/v1/install/<platform>.txt`: `bin/bun` (the Bun this client runs on, the release's pinned one as the
+ * installer verified it), `machine/` (a generation built here from the release's portable files and the account's copy
+ * of its native tools, read through the signed data endpoint: `assembleMachineGeneration`), and `host.js`, starting that
+ * generation's bootstrap with its manifest as the host's trust anchor. Records the runtime in `runtime-selection.json`
+ * and returns its path. Nothing comes from anywhere but the account.
+ */
+export async function installRuntime(configRoot: string, account: { accountUrl: string; blobs: Pick<CheckpointBlobStore, 'get'> }): Promise<string> {
   const platform = currentDistributionPlatform();
-  const glibc = platform.startsWith('linux-') ? currentGlibcVersion() : null;
-  const base = distributionBaseUrl(apiUrl);
-  const channel = distributionChannelSchema.parse(JSON.parse(new TextDecoder().decode(await metadata(new URL(`stable/${platform}.json`, base), 64 * 1024))));
-  if (channel.platform !== platform) throw new Error('GitSpace release channel returned the wrong platform');
-  const release = new URL(`releases/${channel.release}/${platform}/`, base);
-  const manifestBytes = await metadata(new URL('manifest.json', release), channel.manifest.size, channel.manifest);
-  const manifest = distributionManifestSchema.parse(JSON.parse(new TextDecoder().decode(manifestBytes)));
-  if (manifest.platform !== platform || manifest.release !== channel.release) throw new Error('GitSpace release manifest does not match its channel');
-  if (glibc && manifest.minimumGlibc && !versionAtLeast(glibc, manifest.minimumGlibc)) {
-    throw new Error(`This GitSpace runtime requires glibc ${manifest.minimumGlibc} or newer; this machine has ${glibc}. Upgrade the Linux distribution or use GitSpace in the browser without pairing.`);
-  }
-  const runtimeDirectory = join(configRoot, 'runtime');
-  await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  const destination = join(runtimeDirectory, channel.manifest.sha256);
-  const existing = await lstat(destination).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (existing) {
-    await verifyInstalled(destination, manifest);
-  } else {
-    const staging = await mkdtemp(join(runtimeDirectory, '.install-'));
+  const response = await fetch(new URL(`/distribution/v1/install/${platform}.txt`, account.accountUrl), { redirect: 'error', signal: AbortSignal.timeout(60_000) });
+  if (!response.ok) throw new Error(`Your account has no machine release to install (HTTP ${response.status}). Launch a release with the machine target, then run gitspace machine start.`);
+  const install = parseInstallMetadata(await response.text());
+  const key = `releases/${install.release}/${PORTABLE_MANIFEST_FILE}`;
+  const bytes = await account.blobs.get(key, `sha256:${install.portableSha256}`);
+  if (!bytes) throw new Error(`Release ${install.release} has no portable files in your account`);
+  const manifest = portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+  const root = join(configRoot, 'runtimes', `${install.release}-${platform}-${Bun.version}`);
+  if (!existsSync(join(root, 'host.js'))) {
+    const staging = `${root}.staging-${randomUUID()}`;
+    await mkdir(join(staging, 'bin'), { recursive: true });
     try {
-      const payload = join(staging, 'runtime.bin.gz');
-      const tree = join(staging, 'tree');
-      await mkdir(tree, { mode: 0o700 });
-      await downloadPayload(new URL('runtime.bin.gz', release), payload, manifest.runtime);
-      await unpack(payload, tree, manifest.runtime.files);
-      await writeFile(join(tree, 'distribution-manifest.json'), manifestBytes, { mode: 0o644 });
-      try {
-        await rename(tree, destination);
-      } catch (error) {
-        if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-        await verifyInstalled(destination, manifest);
-      }
-    } finally {
-      await rm(staging, { recursive: true, force: true });
-    }
+      await copyFile(process.execPath, join(staging, 'bin', 'bun'));
+      await chmod(join(staging, 'bin', 'bun'), 0o755);
+      await mkdir(join(staging, 'machine'));
+      const built = await assembleMachineGeneration({
+        manifest, output: join(staging, 'machine'),
+        file: async file => {
+          const content = await account.blobs.get(portableFileKey(key, file.path), `sha256:${file.sha256}`);
+          if (!content) throw new Error(`Release file ${file.path} is missing from your account`);
+          return content;
+        },
+        archive: async pin => {
+          const content = await account.blobs.get(nativeMirrorKey(pin.sha256), `sha256:${pin.sha256}`);
+          if (!content) throw new Error(`Your account holds no copy of ${pin.url}`);
+          return new Response(content.slice());
+        },
+      });
+      await writeFile(join(staging, 'host.js'), hostEntry(built.manifestHash));
+      await rename(staging, root);
+    } finally { await rm(staging, { recursive: true, force: true }); }
   }
   const selection = join(configRoot, 'runtime-selection.json');
-  const temporary = `${selection}.next-${crypto.randomUUID()}`;
-  try {
-    await writeFile(temporary, JSON.stringify({ path: destination }), { mode: 0o600, flag: 'wx' });
-    await rename(temporary, selection);
-  } finally {
-    await rm(temporary, { force: true });
-  }
-  return destination;
+  const temporary = `${selection}.${randomUUID()}`;
+  await writeFile(temporary, JSON.stringify({ path: root }), { mode: 0o600 });
+  await rename(temporary, selection);
+  return root;
 }

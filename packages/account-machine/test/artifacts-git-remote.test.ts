@@ -392,30 +392,39 @@ it('does not let a source shallow marker conceal required snapshot layers', asyn
   expect(readFileSync(join(f.root, '.git/shallow'), 'utf8')).toBe(`${checkpoint.worktreeCommit}\n`);
 });
 
-it('sends a push Artifacts refuses with HTTP 500 again as whole objects, and retries no other refusal', async () => {
+it('sends a push Artifacts refuses for its deltas again as whole objects, and retries no other refusal', async () => {
   const f = fixture();
-  // Stands in for Artifacts' receive-pack: a pack that may carry deltas fails as it does there; a whole-object pack passes.
   const bin = join(f.root, 'shim'); mkdirSync(bin);
   const attempts = join(f.root, 'attempts');
   const realGit = Bun.which('git')!;
-  writeFileSync(join(bin, 'git'), `#!/bin/sh
-case " $* " in
-  *" push "*) echo "$*" >> '${attempts}'
-    case " $* " in *" pack.window=0 "*) ;; *) echo 'error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500' >&2; echo 'send-pack: unexpected disconnect while reading sideband packet' >&2; exit 1 ;; esac ;;
-esac
-exec '${realGit}' "$@"
-`);
-  chmodSync(join(bin, 'git'), 0o755);
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
-    writeFileSync(join(f.root, 'file'), 'content'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'content');
-    git(f.root, 'update-ref', f.checkpointRef, 'HEAD');
-    await f.publish();
-    expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(git(f.root, 'rev-parse', 'HEAD'));
-    const pushes = readFileSync(attempts, 'utf8').trim().split('\n');
-    expect(pushes).toHaveLength(2);
-    expect(pushes[1]).toContain('--no-thin');
+    // How Artifacts' receive-pack refuses a pack of deltas: HTTP 500 (djmc, 2026-10-19), or a delta whose base it says it
+    // lacks (inkibra-cell-executor-sandbox-spike, 2026-10-28). The same objects sent whole pass.
+    const refusals = [
+      "echo 'error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500' >&2; echo 'send-pack: unexpected disconnect while reading sideband packet' >&2",
+      "echo 'error: remote unpack failed: receive-pack delta base is missing' >&2; echo ' ! [remote rejected] HEAD -> refs/gitspace/snapshot (receive-pack delta base is missing)' >&2",
+    ];
+    for (const [index, refusal] of refusals.entries()) {
+      writeFileSync(join(bin, 'git'), `#!/bin/sh
+case " $* " in
+  *" push "*) echo "$*" >> '${attempts}'
+    case " $* " in *" pack.window=0 "*) ;; *) ${refusal}; exit 1 ;; esac ;;
+esac
+exec '${realGit}' "$@"
+`);
+      chmodSync(join(bin, 'git'), 0o755);
+      rmSync(attempts, { force: true });
+      writeFileSync(join(f.root, 'file'), `content ${index}`);
+      git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', `content ${index}`);
+      git(f.root, 'update-ref', f.checkpointRef, 'HEAD');
+      await f.publish();
+      expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(git(f.root, 'rev-parse', 'HEAD'));
+      const pushes = readFileSync(attempts, 'utf8').trim().split('\n');
+      expect(pushes).toHaveLength(2);
+      expect(pushes[1]).toContain('--no-thin');
+    }
 
     // The remote refusing the update is not Artifacts failing on deltas: it is reported, not retried.
     rmSync(attempts);

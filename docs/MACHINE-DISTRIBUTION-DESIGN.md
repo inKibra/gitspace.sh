@@ -30,14 +30,13 @@ As built (D0), in code the "portable release" (`@gitspace/protocol/machine-relea
 
 ## 4. Install
 
-`curl -fsSL https://<handle>.gitspace.sh/install | sh -s -- --pair <token>`, served by the account (one command, as entry 107):
+`curl -fsSL https://<handle>.gitspace.sh/install | sh -s -- --pair <token>`. Built (2026-10-29): everything comes from the account; the platform serves nothing for an install.
 
-1. Check the platform and its ABI floor; download the pinned Bun, `rg` and `git-lfs` for it from the mirror, checking each SHA-256.
-2. Download the account's current release JavaScript, checking its digest from the account's manifest.
-3. Install `~/.local/bin/gitspace` as a wrapper that runs the CLI JavaScript on the pinned Bun.
-4. Run `gitspace machine setup --pair <token>`.
+1. The account names what to install at `distribution/v1/install/<platform>.txt` (`formatInstallMetadata`): its install release (`TenantReleasesDO.installRelease`: the selected machine release, else its newest one a machine applied), that release's portable manifest digest, the platform's pinned Bun archive and the executable in it, and the release's `cli/gitspace.js`.
+2. The script (`installScript`) downloads the Bun archive from the account's copy (`distribution/v1/natives/<sha256>`, only natives that release names) and the client (`distribution/v1/releases/<release>/cli/gitspace.js`), checking each against the metadata; it installs Bun at `~/.local/share/gitspace/bun/<sha256>/bun`, the client under `~/.local/share/gitspace/releases/<release>/`, and `~/.local/bin/gitspace` running that client on that Bun. It needs `curl`, `unzip` and `sha256sum` or `shasum`.
+3. `gitspace machine setup --pair <token>` pairs, then builds the runtime (`installRuntime`, `cli/src/bootstrap.ts`) through the signed data endpoint: the release's portable manifest, its machine files and this platform's `rg` and `git-lfs` from the account's copy, assembled and compiled here (`assembleMachineGeneration`), with `bin/bun` the client's own Bun and `host.js` starting the generation's `machine-bootstrap.js` with that generation's manifest as its trust anchor.
 
-The computer runs exactly the account's release from its first minute, on any of the four platforms.
+The computer runs exactly the account's release from its first minute, on any of the four platforms. With no release selected (after Back to stable), machines follow that same install release. Cloud machines still boot from the platform's container image, which carries a runtime from the native distribution; moving them to the account's release is still to do.
 
 ## 5. Updates
 

@@ -8,6 +8,7 @@ import { MACHINE_PAIRING_TTL_MS, createRelayAuthorization, createServerClock, de
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
+import { CloudDataCheckpointBlobStore } from '@gitspace/account-machine';
 import { installRuntime } from './bootstrap.js';
 
 const CONFIG_ROOT = process.env.GITSPACE_CONFIG_HOME ?? join(homedir(), '.config', 'gitspace');
@@ -145,8 +146,9 @@ async function startMachine(): Promise<void> {
   if (current) throw new Error(`Machine is already running (pid ${current.pid})`);
   const selectionPath = join(CONFIG_ROOT, 'runtime-selection.json');
   if (!existsSync(selectionPath)) {
-    console.log('Downloading the verified machine runtime...');
-    await installRuntime(CONFIG_ROOT, 'https://api.gitspace.sh');
+    console.log(`Building the machine runtime from ${config.handle}'s release...`);
+    const blobs = new CloudDataCheckpointBlobStore({ baseUrl: config.apiUrl, userId: config.userId, machineId: config.machine.id, signingPrivateKey: credentialProtocolBase64.decode(config.machine.signingPrivateKey), clock: accountClock });
+    await installRuntime(CONFIG_ROOT, { accountUrl: config.accountUrl, blobs });
   }
   const { path: runtimeRoot } = JSON.parse(await readFile(selectionPath, 'utf8')) as { path: string };
   const bun = join(runtimeRoot, 'bin', 'bun');

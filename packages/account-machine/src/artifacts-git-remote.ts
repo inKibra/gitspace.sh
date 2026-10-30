@@ -96,13 +96,15 @@ const PUSH = ['-c', 'core.hooksPath=/dev/null', 'push'];
 const WHOLE_OBJECTS = ['-c', 'pack.window=0', '-c', 'pack.depth=0', '-c', 'pack.allowPackReuse=false'];
 
 /**
- * Artifacts' receive-pack answers HTTP 500 to some packs of deltas and accepts the same objects sent whole (djmc,
- * 2026-10-19: 164 objects, 146 deltas, refused every time). A push refused that way is sent once more without deltas.
+ * Artifacts' receive-pack refuses some packs of deltas and accepts the same objects sent whole: with HTTP 500 (djmc,
+ * 2026-10-19: 164 objects, 146 deltas, refused every time), or saying a delta's base is missing though it advertised
+ * that base (inkibra-cell-executor-sandbox-spike, 2026-10-28, every sync for two days). A push refused either way is
+ * sent once more without deltas.
  */
 async function pushToArtifacts(repositoryPath: string, refspec: string[], environment: Record<string, string>): Promise<void> {
   try { await git(repositoryPath, [...PUSH, ...refspec], environment); }
   catch (error) {
-    if (!(error instanceof ArtifactsGitError) || !/\bHTTP 500\b/u.test(error.message)) throw error;
+    if (!(error instanceof ArtifactsGitError) || !/\bHTTP 500\b|delta base is missing/u.test(error.message)) throw error;
     await git(repositoryPath, [...WHOLE_OBJECTS, ...PUSH, '--no-thin', ...refspec], environment);
   }
 }

@@ -145,7 +145,7 @@ async function executable(sha: string, target: 'machine', files: Record<string, 
 }
 
 describe('release follower', () => {
-  it('automatically applies a negotiated native default through the verified complete-host updater', async () => {
+  it('applies the account\'s stable release it is given while none is selected, through the verified complete-host updater', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-default-follower-'));
     roots.push(root);
     const sha = `${'a'.repeat(40)}-${process.platform}-${process.arch}`;
@@ -154,8 +154,7 @@ describe('release follower', () => {
       'host-runtime.js': 'host-default', 'machine-update.js': 'updater-default',
       'machine-bootstrap.js': 'bootstrap-default', 'drizzle/meta/_journal.json': '{"entries":[]}',
     });
-    const manifestKey = `distribution/v1/releases/default/${process.platform}-${process.arch}/machine/manifest.json`;
-    const artifact = { ...built.artifact, key: manifestKey };
+    const artifact = built.artifact;
     const status: DeploymentStatus = {
       launch: null, desired: { worker: null, machine: null, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} }, releases: [],
@@ -164,7 +163,7 @@ describe('release follower', () => {
     const authority = {
       ...baseAuthority,
       machineProtocol: async (input: { version: number | null; platform?: string | null }) => {
-        if (input.platform !== `${process.platform}-${process.arch}`) throw new Error('Native platform was not negotiated');
+        if (input.platform !== `${process.platform}-${process.arch}`) throw new Error('The machine did not name its platform');
         status.desired.machine = sha;
         status.releases = [release(sha, artifact, null)];
         return { version: input.version, required: 1 as const, state: 'ready' as const, releaseSha: sha, error: null };
@@ -172,7 +171,7 @@ describe('release follower', () => {
     };
     const host = fakeHost('applied');
     const follower = new ReleaseFollower({
-      authority, blobs: { get: async key => built.objects[key === manifestKey ? built.artifact.key : key] ?? null },
+      authority, blobs: { get: async key => built.objects[key] ?? null },
       machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
       runningMachineSha: null, generation: null, onError: error => { throw error; },
     });
@@ -442,7 +441,7 @@ describe('release follower', () => {
     const record = release(sha, machine, null);
     record.artifacts.portable = { key: portableKey, hash: hashOf(portableBytes), size: portableBytes.byteLength };
     const status: DeploymentStatus = {
-      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      launch: null, canonical: null, revert: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
       current: { worker: { sha: null, version: null }, machines: {} }, releases: [record],
     };
     const authority = fakeAuthority(status);

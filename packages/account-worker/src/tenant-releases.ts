@@ -16,6 +16,7 @@ import {
   type MachineExecutionAdmission,
   type CanonicalHead,
   type DeploymentStatus,
+  type ReleaseArtifact,
   type ReleaseRecord,
   type RevertProgress,
   type ReleaseStatus,
@@ -26,8 +27,7 @@ import {
 import { z } from 'zod';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
-import { defaultMachineReleaseSchema } from '@gitspace/protocol/default-release';
-import { platformSwap, tenantPlatformJson, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
+import { platformSwap, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
@@ -360,28 +360,34 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     return this.machineExecutionAdmission(machineId);
   }
 
+  /** The release a machine follows while the account selects none (after Back to stable): the account's newest machine
+   * release a machine applied, which every platform follows through its portable files; else its newest one. */
+  private stableMachineRelease(): ReleaseRecord | null {
+    const followable = this.ctx.storage.sql.exec<ReleaseRow>('SELECT record_json FROM releases ORDER BY created_at DESC, sha').toArray()
+      .map((row) => releaseRecordSchema.parse(JSON.parse(row.record_json)))
+      .filter((record) => record.artifacts.portable || record.artifacts.machine);
+    return followable.find((record) => record.artifacts.portable && Object.values(record.status.machines).includes('applied'))
+      ?? followable.find((record) => record.artifacts.portable) ?? followable[0] ?? null;
+  }
+
+  /** The release a new computer installs from (`/install`): the selected machine release when every platform can follow
+   * it, else the account's stable one. */
+  installRelease(): { sha: string; portable: ReleaseArtifact } | null {
+    const desired = this.desired().machine;
+    const selected = desired === null ? null : this.findRelease(desired);
+    const record = selected?.artifacts.portable ? selected : this.stableMachineRelease();
+    return record?.artifacts.portable ? { sha: record.sha, portable: record.artifacts.portable } : null;
+  }
+
   private async resolveMachineDefault(machineId: string): Promise<void> {
     if (this.desired().machine !== null) return;
-    const stored = await this.ctx.storage.get(`machine-protocol:${machineId}`);
-    const protocol = stored === undefined ? null : machineProtocolInputSchema.parse(stored);
-    const generation = this.ctx.storage.sql.exec<Pick<MachineRow, 'generation'>>('SELECT generation FROM machines WHERE machine_id=?', machineId).toArray()[0]?.generation;
-    if (!protocol?.platform && (!generation || !/^sha256:[a-f0-9]{64}$/u.test(generation))) {
-      await this.ctx.storage.put(`machine-default-error:${machineId}`, 'This legacy machine has not reported a verifiable native generation. Automatic updating is waiting for its healthy host acknowledgement.');
+    const stable = this.stableMachineRelease();
+    if (!stable) {
+      await this.ctx.storage.put(`machine-default-error:${machineId}`, 'The account has no machine release yet: launch one with the machine target.');
       return;
     }
-    try {
-      const selected = defaultMachineReleaseSchema.parse(await tenantPlatformJson<unknown>(this.env, '/machine-release', {
-        method: 'POST', body: JSON.stringify(protocol?.platform ? { platform: protocol.platform } : { generation }),
-      }));
-      await this.stage({
-        sha: selected.sha, label: `Default ${selected.commit}`, source: { kind: 'canonical', repository: GITSPACE_SOURCE_REPOSITORY, branch: null, commit: selected.commit },
-        artifacts: { worker: null, machine: selected.artifact, frontend: null }, worker: null,
-      }, 'platform-default');
-      await this.ctx.storage.put(`machine-default:${machineId}`, selected.sha);
-      await this.ctx.storage.delete(`machine-default-error:${machineId}`);
-    } catch (error) {
-      await this.ctx.storage.put(`machine-default-error:${machineId}`, `Automatic machine update unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4096));
-    }
+    await this.ctx.storage.put(`machine-default:${machineId}`, stable.sha);
+    await this.ctx.storage.delete(`machine-default-error:${machineId}`);
   }
 
   async machineExecutionAdmission(machineId: string): Promise<MachineExecutionAdmission> {
@@ -394,7 +400,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     const updateError = this.desired().machine === null ? await this.ctx.storage.get(`machine-default-error:${machineId}`) : undefined;
     const error = protocol.blocker ?? (updateError !== undefined ? z.string().parse(updateError)
       : record?.status.machines[machineId] === 'failed' ? record.machineErrors?.[machineId] ?? 'Machine update failed; select a repaired release to retry.'
-      : !record?.artifacts.machine ? 'Waiting for the authenticated machine to negotiate its native update target.'
+      : !record?.artifacts.machine && !record?.artifacts.portable ? 'Waiting for the authenticated machine to negotiate its native update target.'
       : null);
     return { version: protocol.version, required: MACHINE_EXECUTION_PROTOCOL_VERSION, state: error ? 'blocked' : 'updating', releaseSha, error };
   }

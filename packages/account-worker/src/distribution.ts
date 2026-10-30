@@ -1,14 +1,35 @@
 import { machineNativePlatformSchema } from '@gitspace/protocol/deployment';
-import { machineClientSchema } from '@gitspace/protocol/default-release';
-import { installScript } from '@gitspace/protocol/install-script';
-import { tenantPlatformFetch, tenantPlatformJson } from './tenant-platform.js';
+import { formatInstallMetadata, installScript } from '@gitspace/protocol/install-script';
+import { nativeMirrorKey, portableFileKey, portableManifestSchema, type PortableManifest } from '@gitspace/protocol/machine-release';
 
 const PUBLIC_HEADERS = { 'x-content-type-options': 'nosniff' };
+/** The release's client, the one portable file a computer downloads before it is paired. */
+const CLIENT_PATH = 'cli/gitspace.js';
+
+/** The release new computers install (`TenantReleasesDO.installRelease`) and its portable manifest, as the account holds it. */
+async function installSource(env: Env): Promise<{ sha: string; manifest: PortableManifest; manifestSha256: string; portableKey: string } | null> {
+  const release = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).installRelease();
+  if (!release) return null;
+  const object = await env.DATA.get(`users/${env.ACCOUNT_ID}/${release.portable.key}`);
+  if (!object) return null;
+  const bytes = new Uint8Array(await object.arrayBuffer());
+  const manifestSha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+  if (`sha256:${manifestSha256}` !== release.portable.hash) return null;
+  return { sha: release.sha, manifest: portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes))), manifestSha256, portableKey: release.portable.key };
+}
+
+function stream(object: R2ObjectBody, immutable: boolean, head: boolean): Response {
+  return new Response(head ? null : object.body, {
+    headers: { ...PUBLIC_HEADERS, 'content-type': 'application/octet-stream', 'content-length': String(object.size), 'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' },
+  });
+}
 
 /**
- * The account's installer: `/install` installs from this account's address, whose `stable/<platform>.txt` names the
- * client of the account's release (the platform's stable client where that release has none) and whose
- * `releases/<release>/<platform>/gitspace` serves those bytes. Public: a computer runs it before pairing.
+ * The account's installer, entirely from the account's own release (`installSource`): `/install`, the script; and under
+ * `/distribution/v1/`, what it downloads before the computer is paired: `install/<platform>.txt` (the release, its
+ * portable manifest's digest, the platform's pinned Bun and the client's digest), `natives/<sha256>` (a pinned upstream
+ * archive that release names, from the account's copy) and `releases/<release>/cli/gitspace.js`. Everything else a
+ * machine needs it reads once paired, through the signed data endpoint. Public: a computer runs it before pairing.
  */
 export async function accountDistributionResponse(request: Request, env: Env, pathname: string): Promise<Response | null> {
   if (pathname !== '/install' && !pathname.startsWith('/distribution/')) return null;
@@ -19,24 +40,27 @@ export async function accountDistributionResponse(request: Request, env: Env, pa
       headers: { ...PUBLIC_HEADERS, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache' },
     });
   }
-  const stable = /^\/distribution\/v1\/stable\/([a-z0-9-]+)\.txt$/u.exec(pathname);
-  const download = /^\/distribution\/v1\/releases\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/([a-z0-9-]+)\/gitspace$/u.exec(pathname);
-  const platform = machineNativePlatformSchema.safeParse(stable?.[1] ?? download?.[2]);
-  if (!platform.success) return new Response('Not found', { status: 404, headers: PUBLIC_HEADERS });
-  if (!download) {
-    const answer = await tenantPlatformJson<unknown>(env, `/machine-release/client/${platform.data}`).then(value => machineClientSchema.safeParse(value), () => null);
-    if (!answer?.success || answer.data.platform !== platform.data) return new Response('Release channel unavailable', { status: 503, headers: PUBLIC_HEADERS });
-    return new Response(head ? null : `gitspace-distribution-v1\n${answer.data.release}\n${answer.data.sha256}\n`, {
-      headers: { ...PUBLIC_HEADERS, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache' },
-    });
+  const metadata = /^\/distribution\/v1\/install\/([a-z0-9-]+)\.txt$/u.exec(pathname);
+  const native = /^\/distribution\/v1\/natives\/([a-f0-9]{64})$/u.exec(pathname);
+  const client = /^\/distribution\/v1\/releases\/([A-Za-z0-9][A-Za-z0-9._-]{0,159})\/cli\/gitspace\.js$/u.exec(pathname);
+  if (!metadata && !native && !client) return new Response('Not found', { status: 404, headers: PUBLIC_HEADERS });
+  const platform = metadata ? machineNativePlatformSchema.safeParse(metadata[1]) : null;
+  if (platform && !platform.success) return new Response('Not found', { status: 404, headers: PUBLIC_HEADERS });
+  const source = await installSource(env);
+  if (!source) return new Response('This account has no machine release to install yet: launch one with the machine target.', { status: 503, headers: PUBLIC_HEADERS });
+  const cli = source.manifest.files.find(file => file.path === CLIENT_PATH);
+  if (!cli) return new Response('This account\'s release has no client', { status: 503, headers: PUBLIC_HEADERS });
+  if (platform?.success) {
+    const bun = source.manifest.natives[platform.data].bun;
+    const metadata = formatInstallMetadata({ release: source.sha, portableSha256: source.manifestSha256, bun: { sha256: bun.sha256, size: bun.size, executableSha256: bun.executable.sha256, executableSize: bun.executable.size, member: bun.member }, cli: { sha256: cli.sha256, size: cli.size } });
+    return new Response(head ? null : metadata, { headers: { ...PUBLIC_HEADERS, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache' } });
   }
-  const response = await tenantPlatformFetch(env, `/machine-release/client/${platform.data}/${download[1]}`, { method: request.method, signal: request.signal });
-  if (!response.ok) {
-    await response.body?.cancel();
-    return response.status === 404 ? new Response('Not found', { status: 404, headers: PUBLIC_HEADERS }) : new Response('Client unavailable', { status: 503, headers: PUBLIC_HEADERS });
+  if (native) {
+    const named = Object.values(source.manifest.natives).some(files => Object.values(files).some(file => file.sha256 === native[1]));
+    const object = named ? await env.DATA.get(`users/${env.ACCOUNT_ID}/${nativeMirrorKey(native[1]!)}`) : null;
+    return object ? stream(object, true, head) : new Response('Not found', { status: 404, headers: PUBLIC_HEADERS });
   }
-  const headers = new Headers({ ...PUBLIC_HEADERS, 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable' });
-  const length = response.headers.get('content-length');
-  if (length !== null) headers.set('content-length', length);
-  return new Response(head ? null : response.body, { headers });
+  if (client?.[1] !== source.sha) return new Response('Not found', { status: 404, headers: PUBLIC_HEADERS });
+  const object = await env.DATA.get(`users/${env.ACCOUNT_ID}/${portableFileKey(source.portableKey, CLIENT_PATH)}`);
+  return object ? stream(object, true, head) : new Response('Not found', { status: 404, headers: PUBLIC_HEADERS });
 }

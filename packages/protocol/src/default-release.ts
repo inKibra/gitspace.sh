@@ -20,7 +20,6 @@ export const defaultNativeArtifactSchema = z.object({
 });
 export type DefaultNativeArtifact = z.infer<typeof defaultNativeArtifactSchema>;
 export const defaultNativeProvenanceSchema = z.object({ sourceRevision: defaultCommitSchema, platform: machineNativePlatformSchema, machine: z.object({ treeHash: z.string().regex(/^sha256:[a-f0-9]{64}$/u) }) }).passthrough();
-export const defaultMachineReleaseSchema = z.object({ sha: z.string().min(1), commit: defaultCommitSchema, platform: machineNativePlatformSchema, artifact: releaseArtifactSchema }).strict();
 export const defaultReleaseSchema = z.object({
   schemaVersion: z.literal(1), commit: defaultCommitSchema,
   /** Capability of every included target; absent on defaults published before it was recorded, which cannot be verified. */
@@ -116,14 +115,6 @@ export async function verifyDefaultNativeArtifact(reader: DefaultReleaseReader, 
   }
 }
 
-/** The installer client for one platform of an account: release id and the SHA-256 its published manifest records. */
-export const machineClientSchema = z.object({
-  release: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u), platform: machineNativePlatformSchema,
-  sha256: z.string().regex(/^[a-f0-9]{64}$/u), size: z.number().int().positive(),
-}).strict();
-export type MachineClient = z.infer<typeof machineClientSchema>;
-export const defaultNativeSelectionSchema = z.object({ platform: machineNativePlatformSchema.optional(), generation: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional() }).strict();
-type NativeSelection = z.infer<typeof defaultNativeSelectionSchema>;
 export async function resolveDefaultRelease(reader: DefaultReleaseReader, pin?: string | null): Promise<{ release: DefaultRelease; pin: string }> {
   if (pin !== undefined && pin !== null) return { release: await loadPinnedDefaultRelease(reader, pin), pin };
   const pointer = await reader.get(DEFAULT_ACCOUNT_POINTER);
@@ -146,29 +137,4 @@ export async function loadPinnedDefaultRelease(reader: DefaultReleaseReader, pin
   const reference = { key, sha256: pin.slice(41), size: object.bytes.byteLength };
   // Reuse the exact bytes read above while retaining the canonical hash verifier.
   return readDefaultManifest({ get: async requested => requested === key ? object : reader.get(requested) }, reference);
-}
-type NativeRelease = Pick<DefaultRelease, 'commit' | 'machines'>;
-export async function defaultMachineRelease(reader: DefaultReleaseReader, release: NativeRelease, selection: NativeSelection) {
-  let platform = selection.platform;
-  if (!platform && selection.generation) {
-    const index = await reader.get(`distribution/v1/generations/${selection.generation.slice(7)}.json`);
-    if (index) {
-      const native = defaultNativeArtifactSchema.parse(JSON.parse(new TextDecoder().decode(index.bytes)));
-      if (native.generation !== selection.generation) throw new Error('Native generation index mismatch');
-      await verifyDefaultNativeArtifact(reader, native);
-      platform = native.platform;
-    }
-  }
-  const native = release.machines.find(native => native.platform === platform);
-  if (!native) throw new Error('No verified default machine for this native platform');
-  if (native.commit !== release.commit) throw new Error('Default machine commit mismatch');
-  await verifyDefaultNativeArtifact(reader, native);
-  return defaultMachineReleaseSchema.parse({ sha: `${release.commit}-${native.platform}`, commit: release.commit, platform: native.platform, artifact: { key: native.artifact.key, hash: `sha256:${native.artifact.sha256}`, size: native.artifact.size } });
-}
-export async function defaultMachineObject(reader: DefaultReleaseReader, release: NativeRelease, key: string): Promise<Uint8Array> {
-  for (const native of release.machines) {
-    const object = native.artifact.key === key ? native.artifact : native.chunks.find(chunk => chunk.key === key || key === `objects/sha256/${chunk.sha256}`);
-    if (object) { await verifyDefaultNativeArtifact(reader, native); return verifyDefaultObject(reader, object); }
-  }
-  throw new Error('Object is not part of the pinned default machine release');
 }

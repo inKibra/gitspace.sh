@@ -132,7 +132,7 @@ import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
 import { AccountStateDO } from './account-state.js';
-import { platformSwap, tenantPlatformFetch, tenantPlatformJson, tenantProvider, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
+import { platformSwap, tenantPlatformJson, tenantProvider, tenantWorkerVersion, type WorkerSwap } from './tenant-platform.js';
 import { accountDistributionResponse } from './distribution.js';
 import { admitPortableRelease } from './portable-release.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
@@ -2641,7 +2641,7 @@ async function dataObjectResponse(request: Request, env: Env, keyFromPath: strin
   const authorized = await authorizeControl(env, signed, 'storage.access', DATA_UPLOAD_OPERATIONS[signed.operation] ? SIGNED_UPLOAD_MAX_AGE_MS : SIGNED_REQUEST_MAX_AGE_MS);
   if (authorized.status === 'error') return accountAccessResponse(authorized)!;
   if (diagnostics) diagnostics.stage = 'validate';
-  if (keyFromPath.startsWith('releases/') || keyFromPath.startsWith('distribution/v1/releases/') || /^(?:objects|natives)\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
+  if (keyFromPath.startsWith('releases/') || /^(?:objects|natives)\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
     return releaseDataObjectResponse(request, env, signed, keyFromPath, objectKey, diagnostics);
   }
   const namespace = tenantNamespace(keyFromPath);
@@ -2773,7 +2773,7 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
   }
 }
 
-/** Release objects machines publish and read in plain text (release trees, executable chunks, platform fallbacks): not
+/** Release objects machines publish and read in plain text (release trees, executable chunks): not
  * tenant storage, so neither scoped nor encrypted at rest, and written whole. Upstream native files (`natives/sha256/`) are
  * read here and written by the account alone. */
 async function releaseDataObjectResponse(request: Request, env: Env, signed: SignedControlRequest, keyFromPath: string, objectKey: string, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
@@ -2815,22 +2815,7 @@ async function releaseDataObjectResponse(request: Request, env: Env, signed: Sig
   if (operation !== 'data.head' && operation !== 'data.get') return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Release objects are written whole');
   if (diagnostics) diagnostics.stage = operation === 'data.head' ? 'r2.head' : 'r2.get';
   const object = operation === 'data.head' ? await env.DATA.head(objectKey) : await env.DATA.get(objectKey);
-  if (!object) {
-    if (keyFromPath.startsWith('distribution/v1/releases/') || /^objects\/sha256\/[a-f0-9]{64}$/u.test(keyFromPath)) {
-      const response = await tenantPlatformFetch(env, `/machine-release/blob?${new URLSearchParams({ key: keyFromPath })}`, { signal: request.signal });
-      const expectedHash = signed.payload.hash;
-      if (response.ok && expectedHash !== undefined && expectedHash !== response.headers.get('x-gitspace-sha256')) {
-        await response.body?.cancel();
-        return dataError(409, 'HASH_MISMATCH', 'Machine release object hash does not match');
-      }
-      if (operation === 'data.head') {
-        await response.body?.cancel();
-        return new Response(null, { status: response.status, headers: response.headers });
-      }
-      return response;
-    }
-    return new Response(null, { status: 404 });
-  }
+  if (!object) return new Response(null, { status: 404 });
   // An object stored with its hash is served only under that hash.
   const expectedHash = signed.payload.hash;
   const recordedHash = object.customMetadata?.sha256;

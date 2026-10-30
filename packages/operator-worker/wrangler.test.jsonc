@@ -13,12 +13,6 @@
     "PLATFORM_URL": "https://platform.test",
     "PLATFORM_BOOTSTRAP_TOKEN": "test-platform-bootstrap-token"
   },
-  "r2_buckets": [
-    {
-      "binding": "DISTRIBUTION",
-      "bucket_name": "gitspace-distribution-test"
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {

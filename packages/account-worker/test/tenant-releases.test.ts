@@ -207,6 +207,23 @@ describe('tenant releases', () => {
     expect((await record())?.machineErrors).toEqual({ 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
   });
 
+  it('while the account selects no machine release, machines follow and new computers install its newest one a machine applied', async () => {
+    const { userId } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const portable = (sha: string) => ({ ...stageInput(sha), artifacts: { worker: null, machine: null, frontend: null, portable: { key: `releases/${sha}/portable.manifest.json`, hash: HASH, size: 1 } }, worker: null });
+    await releases.stage(portable('stable-older'), 'machine-a');
+    await releases.machineApplied('machine-a', { sha: 'stable-older', target: 'machine', generation: 'generation-1', status: 'applied' });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await releases.stage(portable('stable-newer'), 'machine-a');
+    const followed = async (machineId: string) => deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }, machineId)).desired.machine;
+    // The newer release no machine has applied yet is not stable.
+    expect(await followed('machine-b')).toBe('stable-older');
+    expect(await releases.installRelease()).toMatchObject({ sha: 'stable-older' });
+    await releases.machineApplied('machine-a', { sha: 'stable-newer', target: 'machine', generation: 'generation-2', status: 'applied' });
+    expect(await followed('machine-b')).toBe('stable-newer');
+    expect(await releases.installRelease()).toMatchObject({ sha: 'stable-newer' });
+  });
+
   it('a launch left running is ended by its building machine restarting, and only by that', async () => {
     const { userId, control } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);

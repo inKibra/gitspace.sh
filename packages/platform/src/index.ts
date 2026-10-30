@@ -12,8 +12,6 @@ import { CreditLedgerDO, isCreditLedgerRecord } from './credit-ledger.js';
 import { deployTenantWorker, type DeployResult } from './deployer.js';
 import { TenantControlDO } from './tenant-control.js';
 import { defaultFrontendResponse } from './default-release.js';
-import { machineClientResponse } from './default-client.js';
-import { defaultMachineResponse } from './default-native.js';
 import { invokeCompute } from './compute-provider.js';
 import { fetchUsageReport, usageReportKey, usageReportSchema, usageReportScripts, usageSpikes, utcDate, utcDayWindow, HOURLY_SPIKE_FLOORS, SPIKE_FLOORS, SPIKE_RATIO, type UsageReport } from './usage-report.js';
 
@@ -346,8 +344,6 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   if (denied) return denied;
   const config = await deployments.tenantConfig();
   if (!config) return platformError(409, 'TENANT_UNPROVISIONED', 'Tenant resource namespace is missing');
-  if (path === '/machine-release' || path === '/machine-release/blob') return defaultMachineResponse(request, env, tenant);
-  if (path.startsWith('/machine-release/client/')) return machineClientResponse(request, env, tenant, path);
   const operation = /^\/operations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/u.exec(path);
   if (operation && request.method === 'GET') {
     // Waits while the swap still runs: the caller that started it may have left without its answer.

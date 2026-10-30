@@ -1,5 +1,4 @@
 interface Env {
-  DISTRIBUTION: R2Bucket;
   ASSETS: Fetcher;
   PLATFORM_URL: string;
   PLATFORM_BOOTSTRAP_TOKEN: string;
