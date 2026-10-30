@@ -5,7 +5,8 @@ import { z } from 'zod';
 import type { JsonValue, Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
-import { RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeApprovalAnswerSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT } from '@gitspace/blocks';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
@@ -328,7 +329,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     },
   }));
   tools.push(defineTool({ name: 'todo', description: 'Replace the durable work checklist.', parameters: Type.Object({ items: Type.Array(Type.Object({ id: Type.String(), text: Type.String(), status: Type.Union([Type.Literal('pending'), Type.Literal('active'), Type.Literal('completed')]) })) }), replay: 'safe', async execute(input, api, context) { return serialized(String(api.conversationId), async () => { await api.commit(async tx => { const doc = await tx.doc(TodosDoc, api.conversationId); doc.items = input.items; }, context); return { output: [{ type: 'text', text: 'Checklist updated.' }] }; }); } }));
-  for (const kind of ['ask', 'approval'] as const) tools.push(defineTool({ name: kind === 'ask' ? 'ask' : 'propose_plan', description: kind === 'ask' ? 'Ask the user and durably wait for their answer.' : 'Propose an implementation plan; wait for explicit human approval. Never required for conversational replies.', parameters: Type.Object({ prompt: Type.String(), choices: Type.Array(Type.String()) }), replay: 'safe', async execute(input, api, context) {
+  for (const kind of ['ask', 'approval'] as const) tools.push(defineTool({ name: kind === 'ask' ? 'ask' : 'propose_plan', description: kind === 'ask' ? 'Ask the user and durably wait for their answer.' : 'Propose an implementation plan, in Markdown, as `prompt`; wait for explicit human approval. The answer is `{ approved, note }`: the note adds to an approved plan or says why it was rejected. Never required for conversational replies.', parameters: Type.Object({ prompt: Type.String(), choices: Type.Array(Type.String()) }), replay: 'safe', async execute(input, api, context) {
     const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
     await api.commit(async tx => {
       const doc = await tx.doc(QuestionsDoc);
@@ -336,7 +337,10 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       if (kind === 'approval') { const plan = await tx.doc(PlanDoc, api.conversationId); plan.text = input.prompt; plan.status = 'proposed'; plan.questionId = id; }
     }, context);
     const answer = await services.question(id, api, context);
-    return { output: [{ type: 'text', text: JSON.stringify(answer) }], ...(kind === 'ask' ? { details: { results: askResults(answer) } } : {}) };
+    if (kind === 'ask') return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: askResults(answer) } };
+    const { approved, note } = RuntimeApprovalAnswerSchema.parse(answer);
+    // The card's answers, as the transcript's ask block reads them (`planQuestions`).
+    return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: [{ id: APPROVAL_DECISION, selectedOptions: [approved ? APPROVE : REJECT], customInput: null }, { id: APPROVAL_NOTE, selectedOptions: [], customInput: note }] } };
   } }));
   tools.push(defineTool({ name: 'ask_takeover', description: ASK_TAKEOVER, parameters: runtimeToolParameters(RuntimeAskTakeoverArgumentsSchema), prepareArguments: input => parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
     const args = parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input);

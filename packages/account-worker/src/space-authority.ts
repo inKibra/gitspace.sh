@@ -4,7 +4,7 @@ import { workspaceLiveKey, type LiveNotice } from '@gitspace/protocol/live-notic
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
-import { RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeApprovalAnswerSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCommentAuthorSchema, RuntimeBrowserCommentFilterSchema, RuntimeBrowserCommentWriteSchema, RuntimeBrowserHolderSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentFilter, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite, type RuntimeBrowserHolder, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
 import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { announceComment, workspaceCommentThreads, writeWorkspaceComment, type CommentScope } from './browser-comments.js';
@@ -878,7 +878,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const input = RuntimeAnswerInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
     const result = await runtime.answer(input, actor);
-    if (input.answer !== true || !input.questionId.startsWith('machine-attach:')) return result;
+    if (!input.questionId.startsWith('machine-attach:') || RuntimeApprovalAnswerSchema.safeParse(input.answer).data?.approved !== true) return result;
     const question = (await runtime.snapshot()).questions.find(item => item.id === input.questionId);
     if (question?.tool?.name !== 'machines') return result;
     const machineId = z.object({ machine: RuntimeMachineIdSchema }).parse(question.tool.args).machine;

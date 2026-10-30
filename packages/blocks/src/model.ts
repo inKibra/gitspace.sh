@@ -46,8 +46,11 @@ export const toolCallBlockSchema = base.extend({
   details: z.unknown().optional(),
 });
 
+/** `kind: 'plan'` is a `propose_plan` call (`planQuestions`). A question with `written: false` is answered only by its
+ * options; an `optional` one may be skipped. */
 export const askBlockSchema = base.extend({
   type: z.literal('ask'),
+  kind: z.literal('plan').optional(),
   toolCallId: z.string(),
   status: z.enum(['pending', 'answered', 'dismissed']),
   questions: z.array(z.object({
@@ -62,6 +65,8 @@ export const askBlockSchema = base.extend({
     })).optional(),
     multiple: z.boolean().optional(),
     recommended: z.number().int().nonnegative().optional(),
+    written: z.boolean().optional(),
+    optional: z.boolean().optional(),
     answer: z.union([z.string(), z.array(z.string())]).optional(),
   })),
 });

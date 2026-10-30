@@ -429,6 +429,8 @@ const PendingAskQuestionCodec = wire.object({
   })),
   multi: wire.boolean,
   recommended: wire.nullable(wire.number),
+  /** False: only an option answers it. */
+  written: wire.boolean,
 });
 const PendingAskAnswerCodec = wire.object({
   id: wire.string,

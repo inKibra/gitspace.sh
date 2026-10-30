@@ -600,7 +600,9 @@ describe('cloud workspace lifecycle with no machines', () => {
         (await tx.doc(QuestionsDoc)).items.push({ id: 'approved-plan', conversationId: String(root.id), kind: 'approval', prompt: 'Approve this plan?', choices: [], answer: null });
       }, BACKGROUND_CONTEXT);
       await runtime.snapshot();
-      await runtime.answer({ ...identity, questionId: 'approved-plan', answer: true }, { deviceId: 'browser', canApprove: true });
+      await expect(runtime.answer({ ...identity, questionId: 'approved-plan', answer: true }, { deviceId: 'browser', canApprove: true })).rejects.toThrow('An approval answer is { approved, note }');
+      await runtime.answer({ ...identity, questionId: 'approved-plan', answer: { approved: true, note: 'Keep the badge behind the flag.' } }, { deviceId: 'browser', canApprove: true });
+      expect((await runtime.snapshot()).questions.find(question => question.id === 'approved-plan')?.answer).toEqual({ approved: true, note: 'Keep the badge behind the flag.' });
       expect((await authority.listWorkspaces()).find(workspace => workspace.id === identity.workspaceId)?.phase).toBe('code');
       await runtime.wake();
       await runtime.harness.close(BACKGROUND_CONTEXT);

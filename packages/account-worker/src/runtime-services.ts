@@ -1,5 +1,6 @@
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { z } from 'zod';
+import { APPROVE, REJECT } from '@gitspace/blocks';
 import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
@@ -347,7 +348,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const pending = questions.items.find(item => item.conversationId === conversationId && item.answer === null && item.id.startsWith(`machine-attach:${machine.id}:`));
         if (pending) return pending.id;
         const id = `machine-attach:${machine.id}:${crypto.randomUUID()}`;
-        questions.items.push({ id, conversationId, kind: 'approval', prompt: `Attach ${machine.label} to this workspace? Agents may not attach it on their own.`, choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: machine.id } } });
+        questions.items.push({ id, conversationId, kind: 'approval', prompt: `Attach ${machine.label} to this workspace? Agents may not attach it on their own.`, choices: [APPROVE, REJECT], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: machine.id } } });
         return id;
       }, BACKGROUND_CONTEXT);
       return { state: 'awaiting-approval', machineId: machine.id, label: machine.label, questionId };

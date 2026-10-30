@@ -45,6 +45,9 @@ export const RuntimeSnapshotInputSchema = RuntimeIdentitySchema;
 export const RuntimeSubmitInputSchema = z.object({ ...identity, conversationId: z.string().optional(), requestId: z.string().min(1), text: z.string().min(1), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional() });
 export const RuntimeCancelInputSchema = z.object({ ...identity, conversationId: z.string() });
 export const RuntimeAnswerInputSchema = z.object({ ...identity, questionId: z.string(), answer: RuntimeJsonSchema });
+/** The answer to an `approval` question (a proposed plan, a machine-attach request): the decision, and what the person
+ * added to it or why they rejected it. */
+export const RuntimeApprovalAnswerSchema = z.strictObject({ approved: z.boolean(), note: z.string().min(1).nullable() });
 export const RuntimeWatchInputSchema = z.object({ ...identity, after: z.number().int().nonnegative().nullable() });
 const segment = z.union([z.string().refine(value => !['__proto__', 'prototype', 'constructor'].includes(value)), z.number().int().nonnegative()]);
 const path = z.array(segment);
@@ -66,5 +69,6 @@ export type RuntimeWatchEvent = z.infer<typeof RuntimeWatchEventSchema>;
 export type RuntimeSubmitInput = z.infer<typeof RuntimeSubmitInputSchema>;
 export type RuntimeCancelInput = z.infer<typeof RuntimeCancelInputSchema>;
 export type RuntimeAnswerInput = z.infer<typeof RuntimeAnswerInputSchema>;
+export type RuntimeApprovalAnswer = z.infer<typeof RuntimeApprovalAnswerSchema>;
 export type RuntimeWatchInput = z.infer<typeof RuntimeWatchInputSchema>;
 export type RuntimeAttachInput = z.infer<typeof RuntimeAttachInputSchema>;

@@ -27,7 +27,7 @@ const services: ToolServices = {
   images: { async store(image) { storedImages.push(image.data); return { ...image, data: `stored:${image.data}` }; }, load: async image => ({ ...image, data: image.data.replace(/^stored:/u, '') }) },
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
-  question: async () => 'answered', instructions: async () => '', preflight: async () => {},
+  question: async (_id, api) => api.callId === 'propose_plan' ? { approved: false, note: 'Split the backfill out.' } : 'answered', instructions: async () => '', preflight: async () => {},
   async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
   results: {
     async put(input) { kept.set(keptReference(input), input.text); return keptReference(input); },
@@ -89,6 +89,7 @@ test('every registered tool advertises its real object contract and executes thr
     expect(results.filter(result => result.isError)).toEqual([]);
     // The transcript shows the answer from the result's details, not from its text.
     expect(results.find(result => result.toolCallId === 'ask')?.details).toEqual({ results: [{ selectedOptions: [], customInput: 'answered' }] });
+    expect(results.find(result => result.toolCallId === 'propose_plan')?.details).toEqual({ results: [{ id: 'decision', selectedOptions: ['Reject'], customInput: null }, { id: 'note', selectedOptions: [], customInput: 'Split the backfill out.' }] });
     // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
     expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan', 'ask_takeover'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);

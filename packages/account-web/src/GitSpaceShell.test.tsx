@@ -134,13 +134,13 @@ describe('GitSpaceShell', () => {
     expect(connected).not.toContain('href="/inference?section=providers"');
   });
 
-  it('shows a question GitSpace asks itself, such as plan approval, with a link to the plan, even without an ask call in the transcript', () => {
-    const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
-    const pendingAsk = {
-      id: 'ask-plan', source: 'gitspace' as const, links: [{ label: 'Open plan', uri: 'drive://workspace/music-updates-plan.md' }],
-      questions: [{ id: 'plan-approval', question: 'Approve “music-updates” and move this workspace to Code?', header: 'Plan', multi: false, recommended: 0, options: [
-        { label: 'Approve and move to Code', description: 'The agent implements the plan with full tools.', preview: null },
-        { label: 'Keep planning', description: null, preview: null },
+  it('shows a question GitSpace asks itself, such as a machine-attach approval, above the composer with only its choices', () => {
+    const rejects = async () => { throw new Error('not used'); };
+    const pendingAsk: NonNullable<NonNullable<GitSpaceShellProps['sessionControls']>['value']['pendingAsk']> = {
+      id: 'machine-attach:m-1:a', source: 'gitspace', links: [{ label: 'Open plan', uri: 'drive://workspace/music-updates-plan.md' }],
+      questions: [{ id: 'decision', question: 'Attach Darktop to this workspace? Agents may not attach it on their own.', header: 'Approval required', multi: false, recommended: null, written: false, options: [
+        { label: 'Approve', description: null, preview: null },
+        { label: 'Reject', description: null, preview: null },
       ] }],
     };
     const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
@@ -148,13 +148,14 @@ describe('GitSpaceShell', () => {
       onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} />);
-    expect(html).toContain('Approve “music-updates” and move this workspace to Code?');
-    expect(html).toContain('Approve and move to Code');
-    expect(html).toContain('Keep planning');
+    expect(html).toContain('Attach Darktop to this workspace?');
+    expect(html).toContain('Approve');
+    expect(html).toContain('Reject');
+    expect(html).not.toContain('Describe in your own words');
     expect(html).toContain('Open plan');
     expect(html).toContain(`href="${resourceLinkHref('drive://workspace/music-updates-plan.md')}"`);
     const toolAsk = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={{ ...sessionControls, value: { ...sessionControls.value, pendingAsk: { ...pendingAsk, source: 'ask-tool' } } }} />);
-    expect(toolAsk).not.toContain('Approve and move to Code');
+    expect(toolAsk).not.toContain('Attach Darktop to this workspace?');
   });
 
   it('never offers a dependent as a new dependency on the Overview', () => {

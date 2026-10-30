@@ -70,32 +70,6 @@ describe('TurnTranscript', () => {
     expect(running).toContain('aria-expanded="true"');
     expect(running).toContain('role="status"');
   });
-
-  it('renders the submitted answer beside every completed ask question', () => {
-    const turns: TurnBlock[] = [{
-      id: 'turn-ask',
-      type: 'turn',
-      status: 'done',
-      items: [{
-        id: 'ask-1',
-        type: 'ask',
-        toolCallId: 'ask-1',
-        status: 'answered',
-        questions: [
-          { id: 'runtime', prompt: 'Choose a runtime', answer: 'Bun' },
-          { id: 'checks', prompt: 'Which checks?', multiple: true, answer: ['Types', 'Browser'] },
-          { id: 'optional', prompt: 'Anything else?' },
-        ],
-      }],
-      sideAgents: [],
-    }];
-
-    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
-
-    expect(html).toContain('Choose a runtime — Bun');
-    expect(html).toContain('Which checks? — Types, Browser');
-    expect(html).toContain('Anything else? — Skipped');
-  });
   it('shows the tabs a sent message connected as chips of their site and Chrome, not as the text the agent reads', () => {
     const turns: TurnBlock[] = [{
       id: 'turn-tab', type: 'turn', status: 'done', sideAgents: [], items: [],

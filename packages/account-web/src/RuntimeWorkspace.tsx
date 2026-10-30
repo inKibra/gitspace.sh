@@ -1,10 +1,10 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { ResourceFile } from './resource-files.js';
-import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
+import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
 import type { InspectorView, LaunchSourceView } from '@gitspace/protocol';
-import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, type RuntimeAnswerInput, type RuntimeApprovalAnswer, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
@@ -110,10 +110,13 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     },
   } : null, [identity, conversationId, snapshot.cursor]);
   const transcript = useTranscriptHistory(transcriptSource);
-  // ask_takeover cards answer in the transcript, never above the composer.
+  // ask_takeover cards answer in the transcript, never above the composer; so does a plan, on its propose_plan card. A
+  // machine-attach approval (it names the tool it gates) has no call there and answers above the composer.
   const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null && item.kind !== 'takeover');
   const controls: SessionControlsProps | undefined = value ? {
-    value: value.pendingAsk || !question ? value : { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: question.id, question: question.prompt, header: question.kind === 'approval' ? 'Approval required' : null, multi: false, recommended: null, options: (question.kind === 'approval' ? ['Approve', 'Reject'] : question.choices).map(label => ({ label, description: null, preview: null })) }] } },
+    value: value.pendingAsk || !question ? value : { ...value, pendingAsk: { id: question.id, source: question.kind === 'approval' && !question.tool ? 'ask-tool' : 'gitspace', links: [], questions: [question.kind === 'approval'
+      ? { id: APPROVAL_DECISION, question: question.prompt, header: 'Approval required', multi: false, recommended: null, written: false, options: [APPROVE, REJECT].map(label => ({ label, description: null, preview: null })) }
+      : { id: question.id, question: question.prompt, header: null, multi: false, recommended: null, written: true, options: question.choices.map(label => ({ label, description: null, preview: null })) }] } },
     onCycleRole: async direction => { await run({ type: 'cycleRole', direction }); },
     onSetModel: async (provider, model) => { await run({ type: 'setModel', provider, model }); },
     onSetThinking: async thinking => { await run({ type: 'setThinking', thinking }); },
@@ -125,11 +128,18 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     onPromoteQueuedMessage: async index => { await run({ type: 'promoteQueuedMessage', index }); },
     onAnswerAsk: async (id, answers) => {
       if (value.pendingAsk?.id === id || question?.id !== id) { await run({ type: 'answerAsk', id, answers }); return; }
-      const answer = answers.find(item => item.id === id);
-      if (!answer) throw new Error('An answer is required.');
-      const selectedAnswer = answer.selectedOptions[0];
-      if (question.kind === 'approval' && selectedAnswer !== 'Approve' && selectedAnswer !== 'Reject') throw new Error('Choose Approve or Reject.');
-      const response = await rpcClient.runtime.answer({ ...identity, questionId: id, answer: question.kind === 'approval' ? selectedAnswer === 'Approve' : answer.customInput || [...answer.selectedOptions] });
+      let answer: RuntimeAnswerInput['answer'];
+      if (question.kind === 'approval') {
+        const decision = answers.find(item => item.id === APPROVAL_DECISION)?.selectedOptions[0];
+        if (decision !== APPROVE && decision !== REJECT) throw new Error('Choose Approve or Reject.');
+        const approval: RuntimeApprovalAnswer = { approved: decision === APPROVE, note: answers.find(item => item.id === APPROVAL_NOTE)?.customInput?.trim() || null };
+        answer = approval;
+      } else {
+        const written = answers.find(item => item.id === id);
+        if (!written) throw new Error('An answer is required.');
+        answer = written.customInput || [...written.selectedOptions];
+      }
+      const response = await rpcClient.runtime.answer({ ...identity, questionId: id, answer });
       if (response.status === 'error') throw response.error;
       await run({ type: 'control' });
     },

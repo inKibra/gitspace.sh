@@ -6,7 +6,7 @@ import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
 import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, PlanDoc, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, recordMachineReconnection, recordProcessExit, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
-import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import { RuntimeApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
@@ -700,13 +700,14 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         if (question.answer !== null) { if (JSON.stringify(question.answer) !== JSON.stringify(input.answer)) throw new Error('Question already answered'); return; }
         if (question.kind === 'takeover') throw new Error('A take-over request is answered on its card: Not now, or Take over and then Resume agent');
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
-        if (question.kind === 'approval' && typeof input.answer !== 'boolean') throw new Error('Approval answer must be a boolean');
+        const approval = question.kind === 'approval' ? RuntimeApprovalAnswerSchema.safeParse(input.answer) : null;
+        if (approval && !approval.success) throw new Error('An approval answer is { approved, note }');
         question.answer = input.answer;
         if (question.kind === 'approval') {
           const id = conversationIds.get(question.conversationId); if (id === undefined) throw new Error('Approval conversation missing');
           const plan = await tx.doc(PlanDoc, id);
           if (plan.questionId === input.questionId) {
-            plan.status = input.answer === true ? 'approved' : 'rejected';
+            plan.status = approval?.data?.approved ? 'approved' : 'rejected';
             if (plan.status === 'approved') {
               await options.setWorkspacePhase?.('code');
               const workspace = await tx.doc(WorkspaceDoc);

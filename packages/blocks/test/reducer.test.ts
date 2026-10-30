@@ -148,6 +148,28 @@ describe('reduceTranscriptToTurns', () => {
     }));
   });
 
+  it('projects a propose_plan call as a plan card: the plan decided by Approve or Reject, then an optional note', () => {
+    const started = [
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'plan-1', toolName: 'propose_plan', args: { prompt: '## Streaks\n\nOne mark a day.', choices: [] } } },
+    ];
+    const [pending] = reduceTranscriptToTurns(started)[0]?.items ?? [];
+    expect(pending).toEqual(expect.objectContaining({ type: 'ask', kind: 'plan', status: 'pending', questions: [
+      expect.objectContaining({ id: 'decision', prompt: '## Streaks\n\nOne mark a day.', written: false, options: [expect.objectContaining({ id: 'Approve' }), expect.objectContaining({ id: 'Reject' })] }),
+      expect.objectContaining({ id: 'note', prompt: 'Anything to add?', optional: true }),
+    ] }));
+    const [answered] = reduceTranscriptToTurns([...started,
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'toolResult', toolCallId: 'plan-1', details: { results: [
+        { id: 'decision', selectedOptions: ['Approve'], customInput: null },
+        { id: 'note', selectedOptions: [], customInput: 'Cap the backfill at the start date.' },
+      ] }, content: [] } } },
+    ])[0]?.items ?? [];
+    expect(answered).toEqual(expect.objectContaining({ type: 'ask', kind: 'plan', status: 'answered', questions: [
+      expect.objectContaining({ id: 'decision', answer: 'Approve' }),
+      expect.objectContaining({ id: 'note', answer: 'Cap the backfill at the start date.' }),
+    ] }));
+  });
+
   it('retains submitted ask answers in the completed block', () => {
     const turns = reduceTranscriptToTurns([
       { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },

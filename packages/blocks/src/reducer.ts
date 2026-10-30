@@ -1,3 +1,4 @@
+import { planQuestions } from './approval.js';
 import { providerErrorText } from './provider-error.js';
 import { WORKSPACE_REPORT_ENTRY, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock } from './model.js';
 import type { TranscriptItem } from './history.js';
@@ -272,13 +273,14 @@ export class TranscriptProjector {
   }
 
   #startTool(toolCallId: string, tool: string, args: Record<string, unknown>, startedAt?: string, includeInput = false): void {
-    if (tool === 'ask') {
+    if (tool === 'ask' || tool === 'propose_plan') {
       if (!this.#findAsk(toolCallId)) this.#write({
         id: this.#toolId(toolCallId, 'ask'),
         type: 'ask',
+        ...(tool === 'propose_plan' ? { kind: 'plan' } : {}),
         toolCallId,
         status: 'pending',
-        questions: askQuestions(args),
+        questions: tool === 'propose_plan' ? planQuestions(typeof args.prompt === 'string' ? args.prompt : '') : askQuestions(args),
       });
     } else if (!this.#findTool(toolCallId)) {
       const id = this.#toolId(toolCallId, 'tool');

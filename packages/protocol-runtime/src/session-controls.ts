@@ -20,7 +20,7 @@ export type ModelSelectionIntent = z.infer<typeof ModelSelectionIntentSchema>;
 
 export const PendingAskAnswerSchema = z.object({ id: z.string(), selectedOptions: z.array(z.string()).readonly(), customInput: z.string().nullable() });
 export type PendingAskAnswer = z.infer<typeof PendingAskAnswerSchema>;
-export const PendingAskSchema = z.object({ id: z.string(), source: z.enum(['ask-tool', 'gitspace']), links: z.array(z.object({ label: z.string(), uri: z.string() })), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string().nullable(), options: z.array(z.object({ label: z.string(), description: z.string().nullable(), preview: z.string().nullable() })), multi: z.boolean(), recommended: z.number().nullable() })) });
+export const PendingAskSchema = z.object({ id: z.string(), source: z.enum(['ask-tool', 'gitspace']), links: z.array(z.object({ label: z.string(), uri: z.string() })), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string().nullable(), options: z.array(z.object({ label: z.string(), description: z.string().nullable(), preview: z.string().nullable() })), multi: z.boolean(), recommended: z.number().nullable(), written: z.boolean() })) });
 export const SessionControlSchema = z.object({
   sessionId: z.string(), inference: z.object({ profileId: z.string(), profileName: z.string(), profileRevision: z.number(), assignmentRevision: z.number() }).optional(),
   role: z.string().nullable(), roleLabel: z.string().nullable(), roles: z.array(z.object({ id: z.string(), label: z.string(), provider: z.string(), model: z.string(), thinking: z.string().nullable(), current: z.boolean() })),

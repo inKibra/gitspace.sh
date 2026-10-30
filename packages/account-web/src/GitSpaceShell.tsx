@@ -351,11 +351,11 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
   const pendingAsk = sessionControls?.value.pendingAsk ?? null;
   const answerInline = pendingAsk?.source === 'ask-tool' && sessionControls ? (answers: PendingAskAnswer[]) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined;
-  // GitSpace's own questions (plan approval) have no ask call in the transcript to attach to.
+  // GitSpace's own questions (a machine-attach approval) have no ask call in the transcript to attach to.
   const standaloneAsk: AskBlock | null = pendingAsk?.source === 'gitspace' ? {
     id: pendingAsk.id, type: 'ask', toolCallId: pendingAsk.id, status: 'pending',
     questions: pendingAsk.questions.map((question) => ({
-      id: question.id, prompt: question.question, multiple: question.multi,
+      id: question.id, prompt: question.question, multiple: question.multi, written: question.written,
       ...(question.header ? { header: question.header } : {}),
       ...(question.recommended === null ? {} : { recommended: question.recommended }),
       options: question.options.map((option) => ({
