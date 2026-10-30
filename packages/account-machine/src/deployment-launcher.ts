@@ -6,7 +6,7 @@ import type { ExecutorJournal, LocalAttachment } from '@gitspace/runtime-machine
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { hashArtifactPath, workspaceRevision } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
-import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { GITSPACE_CANONICAL_BRANCH, GITSPACE_SOURCE_REPOSITORY, launchSourceSchema, releaseTargetSchema, workerManifestSchema, workerModuleKey, workerReleaseMetadataSchema, type DeploymentStatus, type LaunchProgress, type LaunchSource, type ReleaseArtifact, type ReleaseRecord, type ReleaseSource, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { portableFileKey, portableManifestSchema } from '@gitspace/protocol/machine-release';
 import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-objects.js';
 import { z } from 'zod';
@@ -107,6 +107,7 @@ export function deploymentSource(attachments: readonly LocalAttachment[], machin
 }
 
 export interface ReleaseAuthority {
+  deploymentStatus(): Promise<DeploymentStatus>;
   stageRelease(input: StageReleaseInput): Promise<ReleaseRecord>;
   launchRelease(sha: string, targets: ReleaseTarget[]): Promise<{ record: ReleaseRecord; desired: TenantDesired }>;
   /** The account keeps the latest launch so every browser can follow it, whichever machine answers or none does. */
@@ -213,6 +214,18 @@ export class DeploymentLauncher {
     };
   }
 
+  /** Launches a staged release; worker and frontend activation finish in this call, machine hosts follow. */
+  private async launchStaged(sha: string, targets: ReleaseTarget[], progress: (phase: string, message: string, status?: LaunchProgress['status']) => void): Promise<ReleaseRecord> {
+    progress('launch', `launching into ${targets.join(', ')}`);
+    const launched = await this.options.authority.launchRelease(sha, targets);
+    if ((targets.includes('worker') && launched.record.status.worker === 'failed')
+      || (targets.includes('frontend') && launched.record.status.frontend === 'failed')) {
+      throw new Error(launched.record.error ?? 'Release activation failed');
+    }
+    progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, 'succeeded');
+    return launched.record;
+  }
+
   private async run(build: BuildSource, targets: ReleaseTarget[]): Promise<ReleaseRecord> {
     const current = this.progress!;
     const progress = (phase: string, message: string, status: LaunchProgress['status'] = 'running'): void => {
@@ -240,6 +253,15 @@ export class DeploymentLauncher {
       }
       const sha = prepared.key;
       current.sha = sha;
+      // A release is built once: its objects are written once, and a rebuild differs in its bytecode. The account's
+      // release of this source is staged again as it is (the account admits it again) and launched.
+      const built = (await this.options.authority.deploymentStatus()).releases.find(release => release.sha === sha);
+      if (built && targets.every(target => built.artifacts[target])) {
+        progress('stage', `launching the account's release of ${sha.slice(0, 12)} again, as it was built`);
+        const { worker, machine, frontend, portable } = built.artifacts;
+        await this.options.authority.stageRelease({ sha, inferenceVersion: 1, label: built.label, source: built.source ?? prepared.source, artifacts: { worker, machine, frontend, ...(portable ? { portable } : {}) }, worker: built.worker });
+        return await this.launchStaged(sha, targets, progress);
+      }
       buildRoot = join(this.options.buildRoot, sha);
       progress('install', `bun install --frozen-lockfile in ${root}`);
       const install = Bun.spawn([process.execPath, 'install', '--frozen-lockfile'], {
@@ -302,15 +324,7 @@ export class DeploymentLauncher {
         artifacts,
         worker,
       });
-      progress('launch', `launching into ${targets.join(', ')}`);
-      const launched = await this.options.authority.launchRelease(sha, targets);
-      // Worker/frontend activation finishes in this call; machine hosts follow asynchronously.
-      if ((targets.includes('worker') && launched.record.status.worker === 'failed')
-        || (targets.includes('frontend') && launched.record.status.frontend === 'failed')) {
-        throw new Error(launched.record.error ?? 'Release activation failed');
-      }
-      progress('launched', `worker=${launched.record.status.worker} machine=${targets.includes('machine') ? 'pending' : 'skipped'} frontend=${launched.record.status.frontend}`, 'succeeded');
-      return launched.record;
+      return await this.launchStaged(sha, targets, progress);
     } catch (error) {
       progress('failed', error instanceof Error ? error.message : String(error), 'failed');
       throw error;

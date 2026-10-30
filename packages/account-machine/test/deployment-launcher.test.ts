@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { buildWorkspaceTarget, DeploymentLauncher, deploymentSource } from '../src/deployment-launcher.js';
 import { ExecutorJournal, type LocalAttachment } from '@gitspace/runtime-machine';
 import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
-import { releaseRecordSchema, releaseTargetSchema, type LaunchProgress, type ReleaseRecord } from '@gitspace/protocol';
+import { releaseRecordSchema, releaseTargetSchema, type DeploymentStatus, type LaunchProgress, type ReleaseRecord } from '@gitspace/protocol';
+
+/** The account's deployment status, holding `releases`. */
+function accountStatus(releases: ReleaseRecord[]): DeploymentStatus {
+  return { launch: null, canonical: null, revert: null, desired: { worker: null, machine: null, frontend: null, updatedAt: new Date(0).toISOString() }, current: { worker: { sha: null, version: null }, machines: {} }, releases };
+}
 import type { BuiltArtifact } from '@gitspace/deployment';
 
 const roots: string[] = [];
@@ -92,13 +97,16 @@ describe('canonical cache deployment sources', () => {
     const uploaded = new Map<string, string>();
     const progress: LaunchProgress[] = [];
     let staged: ReleaseRecord | null = null;
+    const stagings: unknown[] = [];
     const completed = Promise.withResolvers<void>();
     const launcher = new DeploymentLauncher({
       attachments: () => journal.attachments(), machineId: 'builder', buildRoot: join(root, 'builds'),
       blobs: { put: async (key, bytes) => { uploaded.set(key, new TextDecoder().decode(bytes)); return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`; } },
       authority: {
+        deploymentStatus: async () => accountStatus(staged ? [staged] : []),
         reportLaunchProgress: async value => { progress.push(value); if (value.status !== 'running') completed.resolve(); },
         stageRelease: async input => {
+          stagings.push(input);
           staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'skipped', frontend: 'pending', machines: {} }, error: null });
           return staged;
         },
@@ -125,6 +133,15 @@ describe('canonical cache deployment sources', () => {
       }
       expect([...uploaded.entries()].find(([key]) => key.endsWith('/index.html'))?.[1]).toBe('built from the cloud cache');
       expect(existsSync(join(root, 'gitspace.db'))).toBe(false);
+      if (activation === 'pending') {
+        // The same source launched again is the account's release launched again: staged as it was, nothing rebuilt.
+        uploaded.clear();
+        const again = await launcher.launchAndWait({ source: { kind: 'workspace', workspaceId: 'workspace' }, targets: ['frontend'] });
+        expect(uploaded.size).toBe(0);
+        expect(stagings).toHaveLength(2);
+        expect(stagings[1]).toEqual(stagings[0]);
+        expect(again).toMatchObject({ status: { frontend: 'pending' } });
+      }
     } finally { journal.close(); }
   });
 
@@ -178,6 +195,7 @@ describe('canonical cache deployment sources', () => {
         return hash;
       } },
       authority: {
+        deploymentStatus: async () => accountStatus([]),
         reportLaunchProgress: async () => {},
         stageRelease: async input => {
           staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'pending', frontend: 'skipped', machines: {} }, error: null });
@@ -258,6 +276,7 @@ describe('canonical cache deployment sources', () => {
         return hash;
       } },
       authority: {
+        deploymentStatus: async () => accountStatus([]),
         reportLaunchProgress: async () => {},
         stageRelease: async input => {
           staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'skipped', frontend: 'skipped', machines: {} }, error: null });
