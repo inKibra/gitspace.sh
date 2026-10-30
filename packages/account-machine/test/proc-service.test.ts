@@ -11,7 +11,7 @@ import { cacheServiceOperation } from '../src/cache-services.js';
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
 import { HostedRoutesFake } from './hosted-routes-fake.js';
 
-const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
+const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {} };
 
 test('proc ready.port becomes a private signed machine URL and stop releases its lease', async () => {
   const root = await mkdtemp(join(tmpdir(), 'proc-service-'));

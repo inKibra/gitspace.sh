@@ -46,8 +46,7 @@ its Worker.
 
 GitHub builds and publishes; the platform Worker takes no part. `publish-default.yml`, run for a release tag (and
 still by hand), builds the natives, the cloud image, the worker, the frontend and the portable release. It writes them,
-unchanged in format, to a **public** bucket on its own domain (the **channel**, `GITSPACE_CHANNEL_URL`,
-`https://releases.gitspace.sh`), with the same keys as `RELEASES`:
+unchanged in format, to a private bucket, the **channel** (`gitspace-channel`), with the same keys as `RELEASES`:
 
 - `catalog.json`: every published release, newest first: tag, commit, pin, publish date;
 - `defaults/releases/<commit>/manifest.json` and the files it lists, each with its SHA-256. They are immutable, only
@@ -68,7 +67,7 @@ An account uses a published release without copying it:
 - **Worker:** launched through the existing `/deploy`, which reads a worker's manifest and modules through the
   account (`/__platform/objects/<key>`) and checks them against the manifest's SHA-256. For a published release the
   account answers those reads from the channel. The platform does nothing new.
-- **Frontend:** the account serves the release's files fetched from the channel, cached at the edge.
+- **Frontend:** the account serves the release's files read from the channel.
 - **Machines:** they download the portable files from the channel and check them against the pinned digests, as they
   check every download. The account mirrors the natives the release pins, as now.
 
@@ -156,14 +155,18 @@ The project menu's **Launch canonical develop** becomes **Launch** with the proj
 - Injecting `DEFAULT_ACCOUNT_RELEASE` on every swap. It is set once, at creation.
 - The platform worker version in the Back to stable inference check. The release record's `inferenceVersion` answers it.
 
-No platform code is added. The operator creates the public channel bucket and its domain.
+One platform piece is added (approved 2026-10-30): the resource source `release-channel`, which binds each account
+Worker to `gitspace-release-channel` (`packages/release-channel`), a Worker that reads the channel bucket and answers
+only GET and HEAD for `catalog.json` and `defaults/releases/`. Accounts never get the bucket itself: an R2 binding
+also writes and deletes, and an account can run a Worker built from its own workspace, which could then publish a
+release every other account's release automation would offer. The platform var `RELEASE_CHANNEL_SERVICE` names it.
 
 ## Order of work
 
 1. Canonical from the GitSpace project's repository and base branch; Repository in project settings; Base branch
    allowed for the GitSpace project; Launch with the base branch.
 2. The default release and Back to default; machines and installs follow the default.
-3. The public channel and catalog; published releases by reference, including the frontend; the publish workflow runs
+3. The release channel and catalog; published releases by reference, including the frontend; the publish workflow runs
    on tags and creates the GitHub Release.
 4. The watch trigger (automations milestone A4) and the GitSpace project's release automation.
 5. Update base for the GitSpace project; the Check the origin setting.
@@ -171,15 +174,19 @@ No platform code is added. The operator creates the public channel bucket and it
 
 ## Launching
 
-1. Create the public R2 bucket `gitspace-channel` on `releases.gitspace.sh`, and let the publishing R2 key write it.
-   Set the repository variable `GITSPACE_CHANNEL_BUCKET` if the bucket has another name.
-2. Publish the release accounts run now to the channel:
+1. Create the private R2 bucket `gitspace-channel`, and let the publishing R2 key write it (set the repository variable
+   `GITSPACE_CHANNEL_BUCKET` if the bucket has another name).
+2. Deploy `packages/release-channel` (`gitspace-release-channel`).
+3. Publish the release accounts run now to the channel:
    `bun packages/deployment/src/default-release-cli.ts channel --commit <commit> --tag <tag> --bucket <releases bucket> --channel-bucket gitspace-channel`.
    Without it, existing accounts cannot adopt their default.
-3. Launch the account Workers; each adopts its default on its first status or page load.
-4. Deploy the platform cleanup.
-5. On each GitHub App, accept the `deployments: read` permission and the `release` and `deployment_status` events, so
-   watched events arrive at once; checks cover the rest.
+4. Deploy the platform: its deployer binds `release-channel`, and the cleanup goes with it. An older deployer skips a
+   source it does not know, so an account Worker launched before this step has no channel. Until step 5, an account
+   still on an older Worker that follows its pinned default frontend (no frontend selected) has no frontend, since its
+   proxy route is gone; one that runs a selected frontend is unaffected.
+5. Launch the account Workers; each adopts its default on its first status or page load.
+6. On each GitHub App, accept the `deployments: read` permission and the `release` and `deployment_status` events, so
+   watched events arrive at once; checks cover the rest (issue #170).
 
 Known gap: the compute provider still picks the cloud image from the platform's default pointer; images from the
 account's release are later work.

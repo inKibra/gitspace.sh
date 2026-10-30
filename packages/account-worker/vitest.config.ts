@@ -21,6 +21,8 @@ export default defineConfig({
       miniflare: {
         serviceBindings: {
           ASSETS: async () => new Response(null, { status: 404 }),
+          // A test that reads published releases passes its own channel in the environment it calls with.
+          RELEASE_CHANNEL: async () => new Response(null, { status: 404 }),
         },
         bindings: {
           AUTH_PUBLIC_KEY: Buffer.from(rootPublicKey).toString('base64'),

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DEFAULT_ACCOUNT_POINTER, defaultCommitSchema, defaultPointerSchema, defaultReleasePin, defaultReleaseSchema, defaultImageProvenanceSchema, readDefaultManifest, verifyDefaultObject, verifyDefaultPortable, verifyDefaultReleaseContents, verifyDefaultWorker, type DefaultRelease, type DefaultReleaseReader, type DefaultObject } from '@gitspace/protocol/default-release';
-import { CHANNEL_CATALOG, channelCatalogSchema, WORKER_MANIFEST_FILE, workerModuleKey, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { channelCatalogSchema, WORKER_MANIFEST_FILE, workerModuleKey, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { CHANNEL_CATALOG } from '@gitspace/protocol/release-channel';
 import { PORTABLE_MANIFEST_FILE, portableFileKey } from '@gitspace/protocol/machine-release';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
 
@@ -99,7 +100,7 @@ export async function rollbackDefaultRelease(storage: DefaultReleaseStorage): Pr
 }
 
 /**
- * Publishes the release of `commit`, as `source` holds it, to the public channel under `tag`: its manifest and every
+ * Publishes the release of `commit`, as `source` holds it, to the release channel under `tag`: its manifest and every
  * file it names, unchanged and each checked against its digest, then its catalog entry, last, so the catalog only ever
  * names a complete release. A tag already in the catalog must name this release.
  */

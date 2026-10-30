@@ -9,7 +9,7 @@ import { WorkspaceServiceManager } from '../src/workspace-services.js';
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
 import { HostedRoutesFake } from './hosted-routes-fake.js';
 
-const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
+const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {} };
 const BETA = '1a2b3c4d-0000-4000-8000-000000000002';
 
 test('a declared service gets its workspace URL and a machine URL naming the machine, and stop releases both leases', async () => {

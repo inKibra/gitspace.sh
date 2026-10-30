@@ -30,7 +30,6 @@ function checkouts(rootPath: string): WorkspaceCheckouts {
     projectId: (spaceId) => spaceId === 'space-a' ? 'project-a' : null,
     list: () => ['space-a'],
     use: async () => {},
-    changed: async () => {},
   };
 }
 

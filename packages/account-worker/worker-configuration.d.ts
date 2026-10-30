@@ -33,8 +33,8 @@ interface Env {
   RELAY_URL: string;
   PLATFORM_URL: string;
   DEFAULT_ACCOUNT_RELEASE?: string;
-  /** The public channel of published GitSpace releases (`channel.ts`). */
-  GITSPACE_CHANNEL_URL: string;
+  /** GitSpace's published releases, read only (`channel.ts`, `packages/release-channel`). */
+  RELEASE_CHANNEL: Fetcher;
   PLATFORM_SERVICE?: Fetcher;
   PLATFORM_TOKEN: string;
   STORAGE_BUCKET: string;

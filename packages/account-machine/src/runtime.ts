@@ -100,7 +100,6 @@ export async function startMachineRuntime() {
     projectId: spaceId => readyCheckout(spaceId)?.attachment.projectId ?? null,
     list: () => [...new Set((executorRuntime?.journal.attachments() ?? []).filter(local => local.attachment.state === 'ready').map(local => local.attachment.workspaceId))],
     use: async spaceId => { if (executorRuntime) await executorRuntime.useWorkspace(spaceId); },
-    changed: async () => { await executorRuntime?.sync(); },
   };
   // Every checkout this machine holds, so a covered origin's credential helper answers only for a live grant.
   const machineCheckouts = () => executorRuntime?.journal.attachments() ?? [];

@@ -161,8 +161,7 @@
     "ACCOUNT_URL": "http://localhost:8788",
     "RELAY_URL": "http://localhost:8788",
     "PLATFORM_URL": "http://localhost:8787",
-    "STORAGE_BUCKET": "gitspace-local-tenant",
-    "GITSPACE_CHANNEL_URL": "https://releases.gitspace.sh"
+    "STORAGE_BUCKET": "gitspace-local-tenant"
   },
   "observability": {
     "enabled": true,
@@ -173,6 +172,11 @@
     {
       "binding": "ASSETS",
       "service": "gitspace-auth"
+    },
+    {
+      // Published releases, read only (`packages/release-channel`).
+      "binding": "RELEASE_CHANNEL",
+      "service": "gitspace-release-channel"
     }
   ]
 }

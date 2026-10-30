@@ -14,6 +14,7 @@ interface Env {
   PLATFORM_URL: string;
   PLATFORM_SERVICE_NAME: string;
   PUBLIC_ASSETS_SERVICE: string;
+  RELEASE_CHANNEL_SERVICE: string;
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
   CF_ANALYTICS_TOKEN: string;

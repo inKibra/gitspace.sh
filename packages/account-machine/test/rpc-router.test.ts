@@ -13,7 +13,7 @@ import { createGitSpaceRpcHandler } from '../src/rpc-router.js';
 test('refuses a launch addressed to another machine before running the builder', async () => {
   let builds = 0;
   const rpc = createGitSpaceRpcHandler({
-    machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} }),
+    machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {} }),
     deployment: { launch: () => { builds++; throw new Error('Build source unavailable'); } },
   });
   const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
@@ -36,7 +36,7 @@ test('runs a shell in an explicit ready cache without a held workspace and fence
     path: spaceId => spaceId === 'workspace-a' ? checkout : null,
     projectId: spaceId => spaceId === 'workspace-a' ? 'project-a' : null,
     list: () => ['workspace-a'],
-    use: async () => {}, changed: async () => {},
+    use: async () => {},
   }, undefined, () => {
     announced.resolve();
     announced = Promise.withResolvers<void>();

@@ -11,7 +11,7 @@ import { createServiceAccessClient } from '../src/service-forward.js';
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
 import { HostedRoutesFake } from './hosted-routes-fake.js';
 
-const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
+const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {} };
 
 test('real machine connector authenticates service ingress before bridging a local WebSocket', async () => {
   const root = await mkdtemp(join(tmpdir(), 'service-ws-'));

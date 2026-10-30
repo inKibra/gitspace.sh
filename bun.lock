@@ -391,6 +391,13 @@
         "zod": "^4.4.3",
       },
     },
+    "packages/release-channel": {
+      "name": "@gitspace/release-channel",
+      "version": "0.0.0",
+      "dependencies": {
+        "@gitspace/protocol": "workspace:*",
+      },
+    },
     "packages/runtime-core": {
       "name": "@gitspace/runtime-core",
       "version": "0.0.0",
@@ -780,6 +787,8 @@
     "@gitspace/protocol-workspace": ["@gitspace/protocol-workspace@workspace:packages/protocol-workspace"],
 
     "@gitspace/provider-auth": ["@gitspace/provider-auth@workspace:packages/provider-auth"],
+
+    "@gitspace/release-channel": ["@gitspace/release-channel@workspace:packages/release-channel"],
 
     "@gitspace/runtime-core": ["@gitspace/runtime-core@workspace:packages/runtime-core"],
 

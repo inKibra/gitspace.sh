@@ -80,7 +80,6 @@ export interface WorkspaceCheckouts {
   /** Workspace ids with a ready checkout. */
   list(): string[];
   use(spaceId: string): Promise<void>;
-  changed(): Promise<void>;
 }
 
 type HubClientFactory = (projectDirectory: string) => Promise<DaemonBrokerClient>;
@@ -273,7 +272,6 @@ export class WorkspaceHubTerminalCoordinator {
     };
     const started = await scope.client.request({ op: 'start', spec, owner: ownerFor(spaceId, 'user') });
     if (started.op !== 'start') throw new Error('Supervisor returned an invalid start response');
-    await this.checkouts.changed();
     const { env, ...configuration } = spec;
     return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(env) });
   }
@@ -309,7 +307,6 @@ export class WorkspaceHubTerminalCoordinator {
     };
     const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'service')}:${serviceName}` });
     if (started.op !== 'start') throw new Error(`Supervisor returned an invalid start response for service ${serviceName}`);
-    await this.checkouts.changed();
     const { env: bindings, ...configuration } = spec;
     return this.view(spaceId, started.daemon, { ...configuration, envNames: Object.keys(bindings) });
   }
@@ -598,7 +595,6 @@ export class WorkspaceHubTerminalCoordinator {
     if (terminalKind(spaceId, described.daemon.owner) === 'lifecycle') throw new Error('Lifecycle terminals must be cancelled through their environment run');
     const result = await client.request({ op: 'stop', name, timeoutMs: 5_000 });
     if (result.op !== 'stop') throw new Error(`Supervisor returned an invalid stop response for ${name}`);
-    await this.checkouts.changed();
     return this.view(spaceId, result.daemon, spec);
   }
 

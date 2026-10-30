@@ -1,7 +1,7 @@
 name: Publish Default Release
 
 # Publishes one commit as a GitSpace release: native machine builds for all four platforms, then the same-commit cloud
-# image, worker, frontend and portable release. A release tag (`v*`) also copies it, unchanged, to the public channel
+# image, worker, frontend and portable release. A release tag (`v*`) also copies it, unchanged, to the release channel
 # with a catalog entry, which accounts use by reference, and creates the GitHub Release accounts' release automations
 # watch. New accounts start on the newest published default; existing accounts move only when they launch a release.
 on:
@@ -123,7 +123,7 @@ jobs:
       COMMIT: ${{ needs.resolve.outputs.commit }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       # The default and the native machine objects it names live in the platform's releases bucket; a tagged release is
-      # also copied to the public channel bucket. The key is scoped to those two buckets' objects.
+      # also copied to the release channel's bucket. The key is scoped to those two buckets' objects.
       R2_ACCESS_KEY_ID: ${{ secrets.RELEASES_R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ vars.GITSPACE_RELEASES_BUCKET || 'gitspace-releases-rebuild-20260913' }}

@@ -73,8 +73,7 @@
     "source": "object-storage-name"
   },
   {
-    "name": "GITSPACE_CHANNEL_URL",
-    "source": "literal",
-    "value": "https://releases.gitspace.sh"
+    "name": "RELEASE_CHANNEL",
+    "source": "release-channel"
   }
 ]

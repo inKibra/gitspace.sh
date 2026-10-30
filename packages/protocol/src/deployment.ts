@@ -76,7 +76,7 @@ export const workerBundleSchema = z.object({
 
 /** Worker metadata the platform needs to upload the worker; derived from the workspace's wrangler config. */
 /** The resource sources this code binds. A release names only these when it is built. */
-export const resourceSourceSchema = z.enum(['object-storage', 'object-storage-name', 'artifacts', 'worker-loader', 'browser-rendering', 'workers-ai', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']);
+export const resourceSourceSchema = z.enum(['object-storage', 'object-storage-name', 'artifacts', 'worker-loader', 'browser-rendering', 'workers-ai', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'release-channel', 'literal']);
 export type ResourceSource = z.infer<typeof resourceSourceSchema>;
 
 export const workerReleaseMetadataSchema = z.object({
@@ -303,10 +303,9 @@ export const launchProgressSchema = z.object({
 });
 export type LaunchProgress = z.infer<typeof launchProgressSchema>;
 
-/** A published GitSpace release in the channel's catalog (`CHANNEL_CATALOG`), newest first. */
+/** A published GitSpace release in the channel's catalog (`CHANNEL_CATALOG` in `release-channel.ts`), newest first. */
 export const channelReleaseSchema = z.object({ tag: z.string().min(1).max(160), commit: commitSchema, pin: releasePinSchema, publishedAt: z.string().datetime() }).strict();
 export type ChannelRelease = z.infer<typeof channelReleaseSchema>;
-export const CHANNEL_CATALOG = 'catalog.json';
 export const channelCatalogSchema = z.object({ schemaVersion: z.literal(1), releases: z.array(channelReleaseSchema) }).strict();
 export type ChannelCatalog = z.infer<typeof channelCatalogSchema>;
 

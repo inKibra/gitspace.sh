@@ -1,10 +1,11 @@
 import { expect, it, vi } from 'vitest';
-import { env, SELF } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
-import { CHANNEL_CATALOG, deploymentStatusSchema, platformDeployRequestSchema, WORKER_MANIFEST_FILE, type ReleaseArtifact, type ReleaseSource, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { deploymentStatusSchema, platformDeployRequestSchema, WORKER_MANIFEST_FILE, type ReleaseArtifact, type ReleaseSource, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { NATIVE_UPSTREAMS, PORTABLE_ENTRYPOINTS, PORTABLE_MANIFEST_FILE, portableFileKey, type MachineNativeFile, type MachineNativeName, type PortableManifest } from '@gitspace/protocol/machine-release';
+import { CHANNEL_CATALOG } from '@gitspace/protocol/release-channel';
 import worker from '../src/index.js';
 import { launchPublishedRelease } from '../src/application.js';
 import { network } from './network.js';
@@ -99,26 +100,31 @@ async function published(commit: string, tag: string): Promise<Published> {
   return { commit, tag, pin: `${commit}:${await hex(manifest)}`, objects, worker: release.worker.manifest };
 }
 
-/** The public channel serving `releases`, newest first. Records each request and whether it carried credentials. */
+/** The release channel serving `releases`, newest first, bound as `RELEASE_CHANNEL` in the environment the account
+ * Worker is called with. Records each request and whether it carried credentials. */
 function channel(releases: Published[]) {
   const requests: Array<{ key: string; method: string; credentials: boolean }> = [];
   const catalog = encoder.encode(JSON.stringify({ schemaVersion: 1, releases: releases.map(release => ({ tag: release.tag, commit: release.commit, pin: release.pin, publishedAt: '2026-10-29T00:00:00.000Z' })) }));
-  network.use(http.all(`${env.GITSPACE_CHANNEL_URL}/*`, ({ request }) => {
-    const key = new URL(request.url).pathname.slice(1);
-    requests.push({ key, method: request.method, credentials: request.headers.has('authorization') || request.headers.has('cookie') });
-    const bytes = key === CHANNEL_CATALOG ? catalog : releases.map(release => release.objects.get(key)).find(found => found !== undefined);
-    if (!bytes) return new HttpResponse(null, { status: 404 });
-    return new HttpResponse(request.method === 'HEAD' ? null : bytes.slice(), { headers: { 'content-length': String(bytes.byteLength), etag: `"${key}"` } });
-  }));
-  return requests;
+  const releaseChannel = {
+    async fetch(input, init) {
+      const request = new Request(input, init);
+      const key = decodeURIComponent(new URL(request.url).pathname.slice(1));
+      requests.push({ key, method: request.method, credentials: request.headers.has('authorization') || request.headers.has('cookie') });
+      const bytes = key === CHANNEL_CATALOG ? catalog : releases.map(release => release.objects.get(key)).find(found => found !== undefined);
+      if (!bytes) return new Response(null, { status: 404 });
+      return new Response(request.method === 'HEAD' ? null : bytes.slice(), { headers: { 'content-length': String(bytes.byteLength), etag: `"${key}"` } });
+    },
+    connect: (address, options) => env.RELEASE_CHANNEL.connect(address, options),
+  } satisfies Fetcher;
+  return { requests, runtime: { ...env, RELEASE_CHANNEL: releaseChannel } };
 }
 
 it('takes the published release it was created from as its default once, by reference, and serves its frontend from the channel', async () => {
   const { userId, origin, releases } = await account();
   const release = await published('d'.repeat(40), 'v1.0.0');
-  const requests = channel([release]);
+  const { requests, runtime: withChannel } = channel([release]);
   const downloads = upstream();
-  const runtime = { ...env, DEFAULT_ACCOUNT_RELEASE: release.pin };
+  const runtime = { ...withChannel, DEFAULT_ACCOUNT_RELEASE: release.pin };
 
   const page = await worker.fetch(new Request(`${origin}/settings`, { headers: { authorization: 'Bearer private-browser-token', cookie: 'private-cookie' } }), runtime);
   expect(page.status).toBe(200);
@@ -149,8 +155,8 @@ it('takes the published release it was created from as its default once, by refe
 it('serves the frontend bundled with the Worker and has no default while the channel lacks the release the account was created from', async () => {
   const { userId, origin, releases } = await account();
   const release = await published('f'.repeat(40), 'v1.0.0');
-  channel([]);
-  const page = await worker.fetch(new Request(`${origin}/`), { ...env, DEFAULT_ACCOUNT_RELEASE: release.pin });
+  const { runtime } = channel([]);
+  const page = await worker.fetch(new Request(`${origin}/`), { ...runtime, DEFAULT_ACCOUNT_RELEASE: release.pin });
   expect(page.headers.get('x-gitspace-frontend-release')).toBeNull();
   expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null })).defaultRelease).toBeNull();
 });
@@ -158,28 +164,29 @@ it('serves the frontend bundled with the Worker and has no default while the cha
 it('answers its machines and the platform with a published release\'s files from the channel, read only', async () => {
   const { userId, origin } = await account();
   const release = await published('d'.repeat(40), 'v1.0.0');
-  channel([release]);
+  const { runtime } = channel([release]);
   upstream();
-  await worker.fetch(new Request(`${origin}/`), { ...env, DEFAULT_ACCOUNT_RELEASE: release.pin });
+  await worker.fetch(new Request(`${origin}/`), { ...runtime, DEFAULT_ACCOUNT_RELEASE: release.pin });
   const signed = (operation: 'data.get' | 'data.head' | 'data.put', key: string) => btoa(JSON.stringify(createSignedControlRequest({ userId, machineId: 'machine-a', operation, payload: operation === 'data.put' ? { key, hash: `sha256:${'0'.repeat(64)}`, size: 1 } : { key }, signingPrivateKey: machineSigningPrivateKey }))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
   const portable = `channel/${portableFileKey(`defaults/releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js')}`;
-  const read = await SELF.fetch(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } });
+  const read = await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } }), runtime);
   expect([read.status, await read.text()]).toEqual([200, 'cli/gitspace.js of v1.0.0']);
-  expect((await SELF.fetch(`https://auth.test/v1/data/channel/defaults/releases/${release.commit}/missing`, { headers: { 'x-gitspace-control': signed('data.get', `channel/defaults/releases/${release.commit}/missing`) } })).status).toBe(404);
-  const write = await SELF.fetch(`https://auth.test/v1/data/${portable}`, { method: 'PUT', headers: { 'content-length': '1', 'x-gitspace-control': signed('data.put', portable) }, body: 'x' });
+  const missing = `channel/defaults/releases/${release.commit}/missing`;
+  expect((await worker.fetch(new Request(`https://auth.test/v1/data/${missing}`, { headers: { 'x-gitspace-control': signed('data.get', missing) } }), runtime)).status).toBe(404);
+  const write = await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { method: 'PUT', headers: { 'content-length': '1', 'x-gitspace-control': signed('data.put', portable) }, body: 'x' }), runtime);
   expect(write.status).toBe(400);
 
   const manifestPath = `users/${userId}/channel/${release.worker.key}`.split('/').map(encodeURIComponent).join('/');
-  const platform = await SELF.fetch(`https://tenant.test/__platform/objects/${manifestPath}`, { headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}` } });
+  const platform = await worker.fetch(new Request(`https://tenant.test/__platform/objects/${manifestPath}`, { headers: { authorization: `Bearer ${env.PLATFORM_TOKEN}` } }), runtime);
   expect([platform.status, await platform.text()]).toEqual([200, 'worker modules of v1.0.0']);
-  expect((await SELF.fetch(`https://tenant.test/__platform/objects/${manifestPath}`, { headers: { authorization: 'Bearer not-the-platform' } })).status).toBe(401);
+  expect((await worker.fetch(new Request(`https://tenant.test/__platform/objects/${manifestPath}`, { headers: { authorization: 'Bearer not-the-platform' } }), runtime)).status).toBe(401);
 });
 
 it('launches a published release by its tag to every target with no machine, and it becomes the default once the platform runs its Worker', async () => {
   const { userId, origin, releases } = await account();
   const first = await published('d'.repeat(40), 'v1.0.0');
   const next = await published('a'.repeat(40), 'v1.1.0');
-  channel([next, first]);
+  const { runtime } = channel([next, first]);
   upstream();
   const deploys: unknown[] = [];
   network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/deploy`, async ({ request }) => {
@@ -187,11 +194,11 @@ it('launches a published release by its tag to every target with no machine, and
     deploys.push(body);
     return HttpResponse.json({ sha: platformDeployRequestSchema.parse(body).sha, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
   }));
-  await worker.fetch(new Request(`${origin}/`), { ...env, DEFAULT_ACCOUNT_RELEASE: first.pin });
+  await worker.fetch(new Request(`${origin}/`), { ...runtime, DEFAULT_ACCOUNT_RELEASE: first.pin });
   expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null })).defaultRelease).toBe(first.commit);
-  await expect(launchPublishedRelease(env, userId, 'v9.9.9')).rejects.toThrow('no release v9.9.9');
+  await expect(launchPublishedRelease(runtime, userId, 'v9.9.9')).rejects.toThrow('no release v9.9.9');
 
-  const started = deploymentStatusSchema.parse(await launchPublishedRelease(env, userId, 'v1.1.0'));
+  const started = deploymentStatusSchema.parse(await launchPublishedRelease(runtime, userId, 'v1.1.0'));
   expect(started.launch).toMatchObject({ source: { kind: 'release', sha: next.commit }, targets: ['worker', 'machine', 'frontend'] });
   const finished = await vi.waitFor(async () => {
     const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
@@ -202,13 +209,13 @@ it('launches a published release by its tag to every target with no machine, and
   expect(finished.defaultRelease).toBe(next.commit);
   expect(finished.desired).toMatchObject({ worker: next.commit, machine: next.commit, frontend: next.commit });
   expect(deploys).toEqual([{ accountId: userId, sha: next.commit, manifestKey: `users/${userId}/channel/${next.worker.key}`, manifestHash: `sha256:${next.worker.sha256}`, metadata: WORKER_METADATA }]);
-  expect(await (await worker.fetch(new Request(`${origin}/`), env)).text()).toBe('<main>v1.1.0</main>');
+  expect(await (await worker.fetch(new Request(`${origin}/`), runtime)).text()).toBe('<main>v1.1.0</main>');
 });
 
 it('launches a published commit the account already built as the release it holds, from its own files', async () => {
   const { userId, releases } = await account();
   const release = await published('a'.repeat(40), 'v1.1.0');
-  channel([release]);
+  const { runtime } = channel([release]);
   const downloads = upstream();
   const deploys: unknown[] = [];
   network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/deploy`, async ({ request }) => {
@@ -221,7 +228,7 @@ it('launches a published commit the account already built as the release it hold
   await releases.stage({ sha: release.commit, label: 'develop @ aaaaaaaaaaaa', inferenceVersion: 1, source, worker: WORKER_METADATA,
     artifacts: { worker: own(WORKER_MANIFEST_FILE), machine: null, frontend: own('frontend'), portable: own(PORTABLE_MANIFEST_FILE) } }, 'machine-a');
 
-  await launchPublishedRelease(env, userId, 'v1.1.0');
+  await launchPublishedRelease(runtime, userId, 'v1.1.0');
   const finished = await vi.waitFor(async () => {
     const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
     if (status.launch?.status === 'running') throw new Error('The launch is still running');

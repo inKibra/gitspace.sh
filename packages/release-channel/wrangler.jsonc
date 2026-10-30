@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // GitSpace's published releases, read only. Account Workers bind it as a service (resource source `release-channel`);
+  // it has no route and no public URL.
+  "name": "gitspace-release-channel",
+  "main": "src/index.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "compatibility_date": "2026-08-27",
+  "r2_buckets": [
+    {
+      // Written only by the publish workflow (`publish-default.yml`) with its own R2 key.
+      "binding": "CHANNEL",
+      "bucket_name": "gitspace-channel"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

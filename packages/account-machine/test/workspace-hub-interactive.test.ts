@@ -26,7 +26,6 @@ function fixture(): Fixture {
     projectId: (spaceId) => spaceId === 'workspace-a' ? 'project-a' : null,
     list: () => ['workspace-a'],
     use: async () => {},
-    changed: async () => {},
   }, undefined, (notice) => {
     notices.push(notice);
     arrived.resolve();

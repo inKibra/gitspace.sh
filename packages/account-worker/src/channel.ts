@@ -1,27 +1,22 @@
-import { CHANNEL_CATALOG, channelCatalogSchema, releasePinSchema, type ReleaseArtifact, type ReleaseSource, type StageReleaseInput } from '@gitspace/protocol/deployment';
+import { channelCatalogSchema, releasePinSchema, type ReleaseArtifact, type ReleaseSource, type StageReleaseInput } from '@gitspace/protocol/deployment';
 import { loadPinnedDefaultRelease, type DefaultRelease, type DefaultReleaseReader } from '@gitspace/protocol/default-release';
+import { CHANNEL_CATALOG } from '@gitspace/protocol/release-channel';
 
 /**
- * The channel: GitSpace's public bucket of published releases (`GITSPACE_CHANNEL_URL`), holding `catalog.json` and each
- * release under `defaults/releases/<commit>/`. A release record names a channel file by its channel key under this
- * prefix; the account answers every read of such a key (machines, the platform's `/deploy`, `/install`, the frontend)
- * from the channel, so a published release is used where it is, never copied.
+ * The channel: GitSpace's published releases, `catalog.json` and each release under `defaults/releases/<commit>/`,
+ * read through the read-only release channel Worker this account binds (`RELEASE_CHANNEL`, resource source
+ * `release-channel`). A release record names a channel file by its channel key under this prefix; the account answers
+ * every read of such a key (machines, the platform's `/deploy`, `/install`, the frontend) from the channel, so a
+ * published release is used where it is, never copied.
  */
 export const CHANNEL_PREFIX = 'channel/';
 
-/** Published files never change: the edge keeps them a day. The catalog grows with each release, so it is kept briefly. */
-const FILE_CACHE_SECONDS = 86_400;
-const CATALOG_CACHE_SECONDS = 300;
-
-/** One channel file, `GET` or `HEAD`, through the edge cache; null when the channel has no such file. */
+/** One channel file, `GET` or `HEAD`; null when the channel has no such file. */
 export async function channelObject(env: Env, key: string, method: 'GET' | 'HEAD' = 'GET'): Promise<Response | null> {
   if (key.startsWith('/') || key.split('/').some(part => part === '' || part === '.' || part === '..')) throw new Error(`Channel key ${key} is invalid`);
-  const response = await fetch(new URL(key, `${env.GITSPACE_CHANNEL_URL.replace(/\/+$/u, '')}/`), {
-    method, signal: AbortSignal.timeout(60_000),
-    cf: { cacheEverything: true, cacheTtl: key === CHANNEL_CATALOG ? CATALOG_CACHE_SECONDS : FILE_CACHE_SECONDS },
-  });
+  const response = await env.RELEASE_CHANNEL.fetch(new Request(new URL(key, 'https://release-channel.internal/'), { method, signal: AbortSignal.timeout(60_000) }));
   if (response.status === 404) { await response.body?.cancel(); return null; }
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`The GitSpace channel answered HTTP ${response.status} for ${key}`); }
+  if (!response.ok) { await response.body?.cancel(); throw new Error(`The GitSpace release channel answered HTTP ${response.status} for ${key}`); }
   return response;
 }
 

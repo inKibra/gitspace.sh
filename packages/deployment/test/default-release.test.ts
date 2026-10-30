@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { buildDefaultRelease, publishDefaultRelease, publishToChannel, rollbackDefaultRelease, type DefaultReleaseStorage } from '../src/default-release.js';
 import { DEFAULT_ACCOUNT_POINTER, loadDefaultRelease, loadPinnedDefaultRelease } from '@gitspace/protocol/default-release';
-import { CHANNEL_CATALOG, channelCatalogSchema } from '@gitspace/protocol/deployment';
+import { channelCatalogSchema } from '@gitspace/protocol/deployment';
+import { CHANNEL_CATALOG } from '@gitspace/protocol/release-channel';
 
 const sha = 'a'.repeat(40);
 const nextSha = 'b'.repeat(40);

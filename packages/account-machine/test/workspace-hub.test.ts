@@ -51,7 +51,6 @@ function checkouts(held = new Map<string, string>(), use: WorkspaceCheckouts['us
     projectId: (spaceId) => held.has(spaceId) ? 'project-a' : null,
     list: () => [...held.keys()],
     use,
-    changed: async () => {},
   };
 }
 

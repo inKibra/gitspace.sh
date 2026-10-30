@@ -66,7 +66,6 @@ function fixture(script: string, phase = 'cloud/provision') {
     projectId: (spaceId) => spaceId === 'workspace-a' ? 'project-a' : null,
     list: () => ['workspace-a'],
     use: async () => {},
-    changed: async () => {},
   };
   const ledger = new Ledger();
   ledger.workspaces.push(cloudWorkspaceDefinitionSchema.parse({

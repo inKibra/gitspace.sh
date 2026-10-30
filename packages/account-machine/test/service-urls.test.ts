@@ -12,7 +12,7 @@ import { serviceHostname, WorkspaceServiceManager } from '../src/workspace-servi
 import type { WorkspaceCheckouts } from '../src/workspace-hub.js';
 import { HostedRoutesFake } from './hosted-routes-fake.js';
 
-const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {}, changed: async () => {} };
+const noCheckouts: WorkspaceCheckouts = { path: () => null, projectId: () => null, list: () => [], use: async () => {} };
 const terminals = { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } };
 const ALPHA = 'aaaa1111-0000-4000-8000-000000000001';
 const BETA = 'bbbb2222-0000-4000-8000-000000000002';

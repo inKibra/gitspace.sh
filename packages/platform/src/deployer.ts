@@ -102,7 +102,7 @@ export function scriptUploadMetadata(
   metadata: WorkerReleaseMetadata,
   migrations: MigrationUpload | null,
   tags: string[],
-  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; platformService: string; token: string; publicAssetsService: string },
+  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; platformService: string; token: string; publicAssetsService: string; releaseChannelService: string },
 ): ScriptUploadMetadata {
   const bindings: ScriptUploadMetadata['bindings'] = metadata.durableObjects.map(binding => ({ type: 'durable_object_namespace', name: binding.name, class_name: binding.className }));
   const names = new Set(bindings.map(binding => binding.name));
@@ -115,6 +115,8 @@ export function scriptUploadMetadata(
     if (resource.source === 'browser-rendering') { bindings.push({ type: 'browser', name: resource.name }); continue; }
     if (resource.source === 'workers-ai') { bindings.push({ type: 'ai', name: resource.name }); continue; }
     if (resource.source === 'public-assets') { bindings.push({ type: 'service', name: resource.name, service: tenant.publicAssetsService }); continue; }
+    // Read only by construction: an account may run a Worker it built, so it never gets the channel bucket itself.
+    if (resource.source === 'release-channel') { bindings.push({ type: 'service', name: resource.name, service: tenant.releaseChannelService }); continue; }
     if (resource.source === 'platform-service') { bindings.push({ type: 'service', name: resource.name, service: tenant.platformService }); continue; }
     if (resource.source === 'provider-token') { bindings.push({ type: 'secret_text', name: resource.name, text: tenant.token }); continue; }
     let value: string;
@@ -421,6 +423,7 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
     rootPublicKey: tenantConfig.rootPublicKey,
     blobBucket: tenantConfig.blobBucket,
     publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
+    releaseChannelService: env.RELEASE_CHANNEL_SERVICE,
   });
   const rejected = await uploadScript(env, tenant, candidate.workerKey, uploadMetadata);
   if (rejected) return { status: 'error', error: rejected };
@@ -440,7 +443,7 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
       fallback.metadata,
       fallbackDelta,
       [tenant, fallback.sha],
-      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, platformService: env.PLATFORM_SERVICE_NAME, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE },
+      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, platformService: env.PLATFORM_SERVICE_NAME, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE, releaseChannelService: env.RELEASE_CHANNEL_SERVICE },
     ));
     if (fallbackRejected) {
       console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackRejected.message }));

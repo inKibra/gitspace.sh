@@ -69,6 +69,7 @@
     "PLATFORM_URL": "https://platform.test",
     "PLATFORM_SERVICE_NAME": "gitspace-platform-test",
     "PUBLIC_ASSETS_SERVICE": "public-assets-test",
+    "RELEASE_CHANNEL_SERVICE": "release-channel-test",
     "R2_PARENT_ACCESS_KEY_ID": "test-parent-access-key",
     "USAGE_REPORT_SCRIPTS": "usage-test-tenant",
     "WATCHDOG_EMAIL_FROM": "watchdog@alerts.example.test",

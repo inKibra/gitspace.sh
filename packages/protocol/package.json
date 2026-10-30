@@ -10,6 +10,7 @@
     "./live-notice": "./src/live-notice.ts",
     "./cloud-image": "./src/cloud-image.ts",
     "./credential-vault": "./src/credential-vault.ts",
+    "./release-channel": "./src/release-channel.ts",
     "./inference": "./src/inference.ts",
     "./device-grant": "./src/device-grant.ts",
     "./machine-pairing": "./src/machine-pairing.ts",
