@@ -8,6 +8,17 @@ export type CheckoutSourceFacts = z.infer<typeof CheckoutSourceFactsSchema>;
 
 export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine', 'import_ref', 'drive_transfer'];
 
+/** Operating system names a `needs` may use for a platform's OS; macOS reports itself as `darwin`. */
+const OS_CAPABILITIES: Record<string, readonly string[]> = { darwin: ['darwin', 'macos'], linux: ['linux'] };
+
+/** What a machine offers to `needs`: every executor's tools, then its platform as it reported it (`darwin-arm64`), its
+ * operating system (`darwin`, `macos`) and its architecture (`arm64`). */
+export function machineCapabilities(platform: string | null): string[] {
+  if (platform === null) return [...executorCapabilities];
+  const [os = '', arch = ''] = platform.split('-');
+  return [...executorCapabilities, platform, ...(OS_CAPABILITIES[os] ?? [os]), arch];
+}
+
 /** Invoked behind canonical project/workspace and enrolled-machine authorization. */
 export class RuntimeAttachmentController {
   constructor(private readonly options: {
@@ -19,6 +30,8 @@ export class RuntimeAttachmentController {
     origin(projectId: string): Promise<string | null>;
     /** Enrollment/trust checks are required even when the target is offline. */
     authorizeMachine(machineId: RuntimeAttachment['machineId']): Promise<void>;
+    /** What the machine offers to `needs`: its tools and platform (`machineCapabilities`). */
+    capabilities(machineId: RuntimeAttachment['machineId']): Promise<string[]>;
     /** What the last assignment read learned about a commit's checkout: computed once per commit, not per read. */
     sourceFacts: { read(): Promise<CheckoutSourceFacts | null>; write(facts: CheckoutSourceFacts): Promise<void> };
   }) {}
@@ -43,7 +56,7 @@ export class RuntimeAttachmentController {
   async assignments(raw: unknown) {
     const input = RuntimeAssignmentsInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
-    const assigned = await this.options.attachments.assignments(input.machineId, executorCapabilities);
+    const assigned = await this.options.attachments.assignments(input.machineId, await this.options.capabilities(input.machineId));
     const assignments = await Promise.all(assigned.map(async ({ grant }) => {
       const checkpoint = await this.options.snapshot();
       if (!checkpoint) return { grant, source: null, checkpoint };

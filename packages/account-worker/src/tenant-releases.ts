@@ -415,6 +415,16 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     return this.machineExecutionAdmission(machineId);
   }
 
+  /** Each machine's platform (`darwin-arm64`, `linux-x64`, …) as it last reported it, on connecting or starting. */
+  async machinePlatforms(): Promise<Record<string, string>> {
+    const platforms: Record<string, string> = {};
+    for (const [key, value] of await this.ctx.storage.list({ prefix: 'machine-protocol:' })) {
+      const platform = machineProtocolInputSchema.catch({ version: null }).parse(value).platform;
+      if (platform) platforms[key.slice('machine-protocol:'.length)] = platform;
+    }
+    return platforms;
+  }
+
   /** The default release, when machines can follow it (a machine build or portable files). */
   private defaultMachineRelease(): ReleaseRecord | null {
     const sha = this.defaultRelease();

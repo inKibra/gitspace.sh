@@ -26,7 +26,7 @@ import { importRefThroughBaseMachine } from './runtime-ref-import.js';
 import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
-import { CheckoutSourceFactsSchema, RuntimeAttachmentController, executorCapabilities } from './runtime-attachments.js';
+import { CheckoutSourceFactsSchema, RuntimeAttachmentController, machineCapabilities } from './runtime-attachments.js';
 import { confirmMachinePresence, notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
@@ -977,6 +977,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
         const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
         if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
       },
+      capabilities: async machineId => machineCapabilities((await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machinePlatforms())[machineId] ?? null),
       sourceFacts: {
         read: async () => CheckoutSourceFactsSchema.nullable().catch(null).parse(await this.ctx.storage.get('assignment.source') ?? null),
         write: facts => this.ctx.storage.put('assignment.source', facts),
@@ -991,7 +992,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const { connected } = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).attachMachineWorkspace(input.machineId, { projectId: input.projectId, workspaceId: input.workspaceId });
     const runtime = await this.getRuntime(input);
     await runtime.cloudFiles.initializeSnapshot();
-    const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace.branch }, capabilities: executorCapabilities }, connected);
+    const platform = (await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machinePlatforms())[input.machineId] ?? null;
+    const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace.branch }, capabilities: machineCapabilities(platform) }, connected);
     runtime.publish();
     await notifyMachines(this.env, [input.machineId], ['assignments'], input.workspaceId);
     return result;

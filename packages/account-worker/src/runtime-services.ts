@@ -34,7 +34,7 @@ import type { RuntimeModelHelper } from './runtime-inference.js';
 import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
-import { executorCapabilities } from './runtime-attachments.js';
+import { machineCapabilities } from './runtime-attachments.js';
 import { compareCloudHistory, readCloudBaseTip } from './cloud-stack-status.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
 import { QuestionsDoc } from '@gitspace/runtime-core';
@@ -303,23 +303,26 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text }] };
   }
   /** The named machine; else the account default machine when online and permitted; else any online permitted machine
-   * offering `needs`. Its attachment is requested without waiting for setup, and the conversation hears when it is
-   * ready. A machine agents may not attach becomes a question to the user instead. */
+   * offering `needs`: its tools and platform (`machineCapabilities`). Its attachment is requested without waiting for
+   * setup, and the conversation hears when it is ready. A machine agents may not attach becomes a question to the user
+   * instead. */
   async function attachMachine(conversationId: string, request: { machine?: string; needs?: readonly string[] }): Promise<MachineAttachOutcome> {
     const runtime = options.runtime();
     const attachments = runtime.attachments.list();
-    const fleet = (await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).listMachines()).filter(machine => machine.desiredState !== 'removed');
-    // A machine never attached here offers what every executor offers.
+    const [machines, platforms] = await Promise.all([env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).listMachines(), env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machinePlatforms()]);
+    const fleet = machines.filter(machine => machine.desiredState !== 'removed');
+    // An attachment here may have learned more, such as a paired browser.
     const offers = (machineId: string) => {
       const known = attachments.filter(item => item.machineId === machineId).sort((left, right) => right.generation - left.generation)[0];
-      return (request.needs ?? []).every(need => (known?.capabilities ?? executorCapabilities).includes(need));
+      const offered = new Set([...known?.capabilities ?? [], ...machineCapabilities(platforms[machineId] ?? null)]);
+      return (request.needs ?? []).every(need => offered.has(need));
     };
     let chosen: FleetMachineDefinition | undefined;
     if (request.machine !== undefined) {
       const named = fleet.filter(machine => machine.id === request.machine || machine.label === request.machine);
       if (named.length > 1) throw new Error('Machine label is ambiguous; use its id');
       chosen = named[0];
-      if (!chosen) throw new Error(`No machine is named ${request.machine}.`);
+      if (!chosen) throw new Error(`No machine is named ${request.machine}. This account's machines: ${fleet.map(machine => machine.label).sort().join(', ') || 'none'}.`);
       if (chosen.state !== 'online') throw new Error(`${chosen.label} is offline. Start GitSpace on ${chosen.label} or attach another machine.`);
     } else {
       // A machine already setting up for this workspace is the one to wait for.
@@ -329,7 +332,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const online = fleet.filter(machine => machine.state === 'online' && offers(machine.id)).sort((left, right) => Number(right.id === defaultId) - Number(left.id === defaultId));
       chosen = online.find(machine => machine.agentsMayAttach !== false) ?? online[0];
       if (!chosen) {
-        if (request.needs?.length && fleet.some(machine => machine.state === 'online')) throw new Error(`No online machine offers ${request.needs.join(', ')}.`);
+        if (request.needs?.length && fleet.some(machine => machine.state === 'online')) {
+          const online = fleet.filter(machine => machine.state === 'online').map(machine => `${machine.label} (${platforms[machine.id] ?? 'platform not reported'})`).sort();
+          throw new Error(`No online machine offers ${request.needs.join(', ')}. Online: ${online.join(', ')}.`);
+        }
         const known = fleet.find(machine => machine.id === defaultId) ?? fleet.find(machine => machine.kind === 'physical') ?? fleet[0];
         throw new Error(known ? `No machine is online. Start GitSpace on ${known.label} or attach a machine.` : 'No machine is online. Add a machine in Settings → Machines.');
       }
@@ -638,9 +644,18 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           options.runtime().publish();
           return completed(input, detached);
         }
-        // Offline attachments are not machines an agent can use; a machine whose heartbeat lapsed is reported offline first.
+        // Every machine of the account, with this workspace's attachment of it; one whose heartbeat lapsed is reported offline first.
         await confirmMachinePresence(env, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)).map(item => item.machineId));
-        return completed(input, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)));
+        const [machines, platforms] = await Promise.all([env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).listMachines(), env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machinePlatforms()]);
+        const attachments = options.runtime().attachments.list().filter(item => item.state !== 'detached');
+        return completed(input, machines.filter(machine => machine.desiredState !== 'removed').map(machine => {
+          const attachment = attachments.filter(item => item.machineId === machine.id).sort((left, right) => right.generation - left.generation)[0];
+          return {
+            id: machine.id, label: machine.label, state: machine.state, kind: machine.kind, platform: platforms[machine.id] ?? null, notes: machine.notes,
+            agentsMayAttach: machine.agentsMayAttach !== false,
+            attachment: attachment ? { attachmentId: attachment.attachmentId, generation: attachment.generation, state: attachment.state, online: isAttachmentOnline(attachment) } : null,
+          };
+        }));
       }
       if (input.tool === 'workspace_status') {
         await confirmMachinePresence(env, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)).map(item => item.machineId));

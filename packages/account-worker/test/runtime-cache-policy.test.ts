@@ -56,3 +56,11 @@ it('lists an existing cache after a failed publication', async () => {
   const assignments = await authority.runtimeAssignments({ projectId, workspaceId, machineId });
   expect(assignments.assignments.map(item => item.grant.attachment.attachmentId)).toEqual([attachment.attachmentId]);
 });
+
+it('an attachment offers its machine\'s platform to a tool\'s needs once the machine reports it, from the next assignment read', async () => {
+  const { projectId, workspaceId, machineId, authority, attachment } = await cacheFixture();
+  expect(attachment.capabilities).not.toContain('darwin');
+  await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machineProtocol(machineId, { version: null, platform: 'darwin-arm64' });
+  const { assignments } = await authority.runtimeAssignments({ projectId, workspaceId, machineId });
+  expect(assignments[0]?.grant.attachment.capabilities).toEqual(expect.arrayContaining(['bash', 'darwin-arm64', 'darwin', 'macos', 'arm64']));
+});

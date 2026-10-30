@@ -74,23 +74,36 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports, attachRequests };
 }
 
-test('the agent machines list and dispatch see only live attachments whose machine is connected', async () => {
-  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`machines-list:${crypto.randomUUID()}`), async (_instance, ctx) => {
-    const { runtime, invoke, text, identity } = await ownerFixture(ctx);
-    const now = new Date().toISOString();
-    const live = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'live', machineId: 'live', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, online: true });
-    // Removed while ready and connected.
-    const destroyed = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'destroyed', machineId: 'destroyed', state: 'detached' });
-    const silent = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'silent', machineId: 'silent', online: false });
-    for (const attachment of [destroyed, silent, live]) ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
-    const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: dispatch.machineId }] }));
-    try {
-      expect(RuntimeAttachmentSchema.array().parse(JSON.parse(text(await invoke('machines', { op: 'list' })))).map(item => item.attachmentId)).toEqual(['live']);
-      await invoke('bash', { command: 'pwd', on: 'destroyed' });
-      ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id=?', live.attachmentId);
-      await invoke('bash', { command: 'pwd' });
-      expect(machine).not.toHaveBeenCalled();
-    } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+test('the agent machines list names every account machine with its platform and this workspace\'s attachment; dispatch uses only live ones', async () => {
+  await withFleet([{ label: 'Live' }, { label: 'Silent' }, { label: 'Destroyed' }, { label: 'Laptop', online: false }], null, async ids => {
+    const releases = env.TENANT_RELEASES.getByName(env.ACCOUNT_ID);
+    await releases.machineProtocol(machineId(ids, 'Live'), { version: null, platform: 'linux-x64' });
+    await releases.machineProtocol(machineId(ids, 'Laptop'), { version: null, platform: 'darwin-arm64' });
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`machines-list:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const { runtime, invoke, text, identity } = await ownerFixture(ctx);
+      const now = new Date().toISOString();
+      const live = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'live', machineId: machineId(ids, 'Live'), generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['bash'], updatedAt: now, online: true });
+      // Removed while ready and connected.
+      const destroyed = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'destroyed', machineId: machineId(ids, 'Destroyed'), state: 'detached' });
+      const silent = RuntimeAttachmentSchema.parse({ ...live, attachmentId: 'silent', machineId: machineId(ids, 'Silent'), online: false });
+      for (const attachment of [destroyed, silent, live]) ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', attachment.attachmentId, JSON.stringify(attachment), 'fixture');
+      const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: dispatch.machineId }] }));
+      try {
+        const listed: unknown[] = JSON.parse(text(await invoke('machines', { op: 'list' })));
+        expect(listed).toHaveLength(4);
+        expect(listed).toEqual(expect.arrayContaining([
+          expect.objectContaining({ label: 'Live', platform: 'linux-x64', attachment: { attachmentId: 'live', generation: 1, state: 'ready', online: true } }),
+          expect.objectContaining({ label: 'Silent', platform: null, attachment: expect.objectContaining({ attachmentId: 'silent', online: false }) }),
+          expect.objectContaining({ label: 'Destroyed', attachment: null }),
+          // A machine never attached here, offline, still names itself and its platform.
+          expect.objectContaining({ label: 'Laptop', state: 'offline', platform: 'darwin-arm64', agentsMayAttach: true, attachment: null }),
+        ]));
+        await invoke('bash', { command: 'pwd', on: machineId(ids, 'Destroyed') });
+        ctx.storage.sql.exec('DELETE FROM runtime_attachments WHERE id=?', live.attachmentId);
+        await invoke('bash', { command: 'pwd' });
+        expect(machine).not.toHaveBeenCalled();
+      } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
   });
 });
 
@@ -422,7 +435,22 @@ test('machines attach picks the named machine, else the default, else an online 
     // The default does not offer a GPU and the machine that did is offline, so the online one that did is chosen.
     expect(await attachInFreshWorkspace({ needs: ['gpu'] }, [{ machineId: alpha, capabilities: ['bash', 'gpu'] }, { machineId: charlie, capabilities: ['bash', 'gpu'] }])).toMatchObject({ outcome: { state: 'attaching', machineId: alpha }, requested: [alpha] });
     expect(await attachInFreshWorkspace({ machine: 'Charlie' })).toMatchObject({ error: 'Charlie is offline. Start GitSpace on Charlie or attach another machine.', requested: [] });
-    expect(await attachInFreshWorkspace({ needs: ['tpu'] })).toMatchObject({ error: 'No online machine offers tpu.', requested: [] });
+    expect(await attachInFreshWorkspace({ needs: ['tpu'] })).toMatchObject({ error: 'No online machine offers tpu. Online: Alpha (platform not reported), Bravo (platform not reported).', requested: [] });
+  });
+});
+
+test('machines attach finds a machine by its platform, and a miss names what the account has', async () => {
+  await withFleet([{ label: 'Darktop' }, { label: 'MacBook-Pro-2.local' }], 'Darktop', async ids => {
+    const releases = env.TENANT_RELEASES.getByName(env.ACCOUNT_ID);
+    const mac = machineId(ids, 'MacBook-Pro-2.local');
+    await releases.machineProtocol(machineId(ids, 'Darktop'), { version: null, platform: 'linux-x64' });
+    await releases.machineProtocol(mac, { version: null, platform: 'darwin-arm64' });
+    // The default is Darktop; only the Mac offers macOS, darwin-arm64 or arm64.
+    for (const needs of [['macos'], ['darwin'], ['darwin-arm64'], ['bash', 'arm64']]) {
+      expect(await attachInFreshWorkspace({ needs })).toMatchObject({ outcome: { state: 'attaching', machineId: mac }, requested: [mac] });
+    }
+    expect(await attachInFreshWorkspace({ needs: ['ios'] })).toMatchObject({ error: 'No online machine offers ios. Online: Darktop (linux-x64), MacBook-Pro-2.local (darwin-arm64).', requested: [] });
+    expect(await attachInFreshWorkspace({ machine: 'MacBook' })).toMatchObject({ error: 'No machine is named MacBook. This account\'s machines: Darktop, MacBook-Pro-2.local.', requested: [] });
   });
 });
 
