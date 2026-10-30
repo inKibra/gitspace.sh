@@ -7,7 +7,8 @@ import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
  * rest by R2 (SSE-C) with its scope's key from the credential vault, and records its scope and plaintext SHA-256 and size
  * at creation. An object streamed in parts before its digest was known (a drive file uploaded as it arrives) records only
  * its scope: whoever names it records the digest and size, and reads it with them as `expected`. A full read verifies
- * the digest and size before releasing its last bytes; a range read trusts R2.
+ * the digest and size before releasing its last bytes, unless its reader checks them itself (a machine's download); a
+ * range read trusts R2.
  */
 
 export type Sha256 = `sha256:${string}`;
@@ -147,7 +148,8 @@ export class TenantStore {
     return stored ? { scope, sha256: declared.sha256, size: declared.size } : null;
   }
 
-  async get(name: string, scope: string, options: { range?: TenantRange; expected?: TenantExpected } = {}): Promise<TenantObject | null> {
+  /** `readerVerifies`: the body goes to a reader that checks the digest and size itself, so it passes unhashed. */
+  async get(name: string, scope: string, options: { range?: TenantRange; expected?: TenantExpected; readerVerifies?: boolean } = {}): Promise<TenantObject | null> {
     const range = options.range;
     if (range && (!Number.isSafeInteger(range.offset) || !Number.isSafeInteger(range.length) || range.offset < 0 || range.length < 1)) throw new Error('Tenant object range is invalid');
     const object = await this.bucket.get(this.key(name), { ssecKey: await this.ssecKey(scope), ...(range ? { range } : {}) })
@@ -164,7 +166,7 @@ export class TenantStore {
     try { metadata = storedMetadata(object, scope, options.expected); }
     catch (error) { await object.body.cancel(); throw error; }
     if (range) return { ...metadata, body: object.body, range };
-    return { ...metadata, body: object.body.pipeThrough(verifying(metadata)), range: null };
+    return { ...metadata, body: options.readerVerifies ? object.body : object.body.pipeThrough(verifying(metadata)), range: null };
   }
 
   /** A whole object of at most `maxBytes`, verified before it is returned. */

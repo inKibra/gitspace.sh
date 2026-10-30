@@ -2706,7 +2706,9 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
       if (!read.success) return dataError(400, 'INVALID_OBJECT_METADATA', 'A read names the SHA-256 it expects, if any');
       // An object that records no digest of its own is read against the one its reader expects.
       const expected = read.data.hash ? { sha256: read.data.hash } : undefined;
-      const object = signed.operation === 'data.get' ? await store.get(name, scope, expected ? { expected } : {}) : null;
+      // A machine checks every download's digest and size itself (`verifiedBytes`), so the bytes pass unhashed: hashing
+      // them here too ran three 54–72 MB LFS reads past the request's CPU limit.
+      const object = signed.operation === 'data.get' ? await store.get(name, scope, { ...(expected ? { expected } : {}), readerVerifies: true }) : null;
       const metadata = signed.operation === 'data.get' ? object : await store.head(name, scope, expected);
       if (!metadata) return new Response(null, { status: 404 });
       if (read.data.hash !== undefined && read.data.hash !== metadata.sha256) {
@@ -2717,9 +2719,7 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
         ...noStore, 'content-length': String(metadata.size), 'content-type': 'application/octet-stream',
         'x-gitspace-sha256': metadata.sha256, 'x-gitspace-size': String(metadata.size),
       });
-      // The verified body has no length of its own, so it would go out chunked without the content-length machines
-      // read the size from; a fixed length keeps it.
-      return new Response(object ? object.body.pipeThrough(new FixedLengthStream(metadata.size)) : null, { headers });
+      return new Response(object?.body ?? null, { headers });
     }
     case 'data.put': {
       const declared = dataObjectWriteSchema.safeParse(signed.payload);
