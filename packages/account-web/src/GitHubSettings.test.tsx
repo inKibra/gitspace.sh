@@ -95,6 +95,24 @@ it('shows a callback error with its message and drops both parameters', async ()
   expect(window.location.search).toBe('?section=github');
 });
 
+it('records a request GitHub returned without state for the project this browser started it from, once', async () => {
+  window.localStorage.setItem('gitspace.github.install', JSON.stringify({ projectId: 'portal', at: Date.now() }));
+  window.history.replaceState(null, '', '/settings?section=github&github=request-unrecorded');
+  const action = vi.fn(async () => undefined);
+  await render({ github: installed, onGitHubAction: action });
+  await act(async () => {});
+  expect(action).toHaveBeenCalledExactlyOnceWith({ kind: 'record-request', projectId: 'portal' });
+  expect(document.body.querySelector('[role="status"]')?.textContent).toBe('Install requested: an organization owner must approve it on GitHub');
+  expect(window.location.search).toBe('?section=github');
+  // The intent is spent: a later return records a request of unknown organization.
+  window.history.replaceState(null, '', '/settings?section=github&github=request-unrecorded');
+  await act(() => root.unmount());
+  root = createRoot(container);
+  await render({ github: installed, onGitHubAction: action });
+  await act(async () => {});
+  expect(action).toHaveBeenLastCalledWith({ kind: 'record-request', projectId: null });
+});
+
 it('shows each organization once, by what holds it up, and sends what the person decides', async () => {
   const action = vi.fn(async () => undefined);
   await render({ github: installed, onGitHubAction: action });

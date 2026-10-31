@@ -38,7 +38,7 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
 const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
   'inspector.guide.setApproval', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
-  'github.request.cancel', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
+  'github.request.cancel', 'github.request.record', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
   'storageIncidents.list', 'storageIncidents.resume',
 ].includes(path);
 const agentSessionCommands = [

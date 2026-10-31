@@ -116,6 +116,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'github.app.rotateKey': 'cloud',
   'github.install.start': 'cloud',
   'github.request.cancel': 'cloud',
+  'github.request.record': 'cloud',
   'github.installation.confirm': 'cloud',
   'github.installation.uninstall': 'cloud',
   'github.uninstalled.dismiss': 'cloud',

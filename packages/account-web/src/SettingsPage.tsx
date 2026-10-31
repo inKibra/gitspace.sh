@@ -8,7 +8,7 @@ import type { ApiClientDraft } from './device.js';
 import type { McpAccessView } from '@gitspace/protocol/mcp-access';
 import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubInstallRequestView, GitHubState } from '@gitspace/protocol/github';
 import { GITHUB_REMOVED_KEPT, GitHubLoginSchema } from '@gitspace/protocol/github';
-import { CopyStepsButton, OwnerSteps, githubInstallationUrl, githubInstallationsUrl, githubTime, ownerStepsText } from './GitHubAccess.js';
+import { CopyStepsButton, OwnerSteps, githubInstallationUrl, githubInstallationsUrl, githubTime, ownerStepsText, rememberGitHubInstall, takeGitHubInstall } from './GitHubAccess.js';
 import { formatRelativeTime } from './relative-time.js';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -920,10 +920,12 @@ export function submitGitHubManifest({ action, manifest }: GitHubAppManifestForm
   document.body.append(form);
   form.submit();
 }
+const GITHUB_REQUESTED = 'Install requested: an organization owner must approve it on GitHub';
 const GITHUB_CALLBACK_OUTCOMES: Record<string, string> = {
   created: 'GitHub App created',
   installed: 'Installed',
-  requested: 'Install requested: an organization owner must approve it on GitHub',
+  requested: GITHUB_REQUESTED,
+  'request-unrecorded': 'Recording your install request…',
   updated: 'Installation updated',
   received: 'GitHub reported an install. GitSpace keeps it if it answers one of your requests; otherwise it asks you below.',
 };
@@ -1022,7 +1024,9 @@ function GitHubAppSummary({ app, onStartGitHubInstall, onRotateGitHubKey }: { ap
     setInstalling(true);
     setError(null);
     try {
-      window.location.assign(await onStartGitHubInstall());
+      const url = await onStartGitHubInstall();
+      rememberGitHubInstall(null);
+      window.location.assign(url);
     } catch (cause) {
       setError(rpcErrorMessage(cause, 'Install GitHub App'));
     } finally {
@@ -1055,7 +1059,9 @@ export type GitHubAction =
   | { kind: 'confirm'; installationId: number }
   | { kind: 'uninstall'; installationId: number }
   | { kind: 'dismiss-uninstalled'; installationId: number }
-  | { kind: 'clear-removed' };
+  | { kind: 'clear-removed' }
+  /** A request this browser made on GitHub that came back without GitSpace's state; `projectId` when it started there. */
+  | { kind: 'record-request'; projectId: string | null };
 const GITHUB_TILES = new Map<string, IconComponent>();
 /** An account's tile: its initial, one component per letter so rows keep their icons across renders. */
 function githubTile(login: string | null): IconComponent {
@@ -1083,7 +1089,16 @@ function GitHubOrganizationRow({ login, title, index, summary, state, children, 
 }
 export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall, onRotateGitHubKey, onGitHubAction }: Pick<SettingsPageProps, 'github' | 'onStartGitHubApp' | 'onStartGitHubInstall' | 'onRotateGitHubKey' | 'onGitHubAction'>) {
   const shape = useShape();
-  const [callback] = useState(() => typeof window === 'undefined' ? null : githubCallbackOutcome(window.location.search));
+  const [callback, setCallback] = useState(() => typeof window === 'undefined' ? null : githubCallbackOutcome(window.location.search));
+  const [unrecorded] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('github') === 'request-unrecorded');
+  const recording = useRef(false);
+  // GitHub returned from a request without GitSpace's state: this browser records the install it started.
+  useEffect(() => {
+    if (!unrecorded || recording.current) return;
+    recording.current = true;
+    onGitHubAction({ kind: 'record-request', projectId: takeGitHubInstall()?.projectId ?? null })
+      .then(() => setCallback({ error: false, text: GITHUB_REQUESTED }), (cause: unknown) => setCallback({ error: true, text: rpcErrorMessage(cause, 'Record install request') }));
+  }, [unrecorded]);
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [uninstalling, setUninstalling] = useState<GitHubInstallationView | null>(null);
@@ -1106,7 +1121,7 @@ export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall,
   };
   const installAgain = async () => {
     setActionError(null);
-    try { window.location.assign(await onStartGitHubInstall()); }
+    try { const url = await onStartGitHubInstall(); rememberGitHubInstall(null); window.location.assign(url); }
     catch (cause) { setActionError(rpcErrorMessage(cause, 'Install GitHub App')); }
   };
   const banner = callback ? <p role={callback.error ? 'alert' : 'status'} className={`${shape.container} bg-surface-2 px-3 py-2 text-body shadow-surface-1 ${callback.error ? 'text-destructive' : 'text-foreground'}`}>{callback.text}</p> : null;

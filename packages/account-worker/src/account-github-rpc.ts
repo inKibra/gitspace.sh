@@ -1,7 +1,7 @@
 import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
 import {
   githubAppRotateKeyContract, githubAppStartContract, githubInstallationConfirmContract, githubInstallationUninstallContract, githubInstallStartContract,
-  githubProjectAccessContract, githubRemovedClearContract, githubRequestCancelContract, githubStateContract, githubUninstalledDismissContract,
+  githubProjectAccessContract, githubRemovedClearContract, githubRequestCancelContract, githubRequestRecordContract, githubStateContract, githubUninstalledDismissContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
@@ -33,6 +33,10 @@ export function githubCloudProcedures(env: Env, requireAdministration: () => Pro
     try { await requireAdministration(); return ok(await github.cancelRequest(input.requestId)); }
     catch (error) { return err(errors.OperationFailed({ operation: 'cancel GitHub install request', message: message(error) })); }
   });
+  const recordRequest = server.implement(githubRequestRecordContract).handler(async ({ input, errors }) => {
+    try { await requireAdministration(); return ok(await github.recordStartedRequest(input.projectId)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'record GitHub install request', message: message(error) })); }
+  });
   const confirm = server.implement(githubInstallationConfirmContract).handler(async ({ input, errors }) => {
     try { await requireAdministration(); return ok(await github.confirmInstallation(input.installationId)); }
     catch (error) { return err(errors.OperationFailed({ operation: 'keep GitHub installation', message: message(error) })); }
@@ -54,7 +58,7 @@ export function githubCloudProcedures(env: Env, requireAdministration: () => Pro
     catch (error) { return err(errors.OperationFailed({ operation: 'read project repository access', message: message(error) })); }
   });
   return {
-    state, app: { start: startApp, rotateKey }, install: { start: startInstall }, request: { cancel: cancelRequest },
+    state, app: { start: startApp, rotateKey }, install: { start: startInstall }, request: { cancel: cancelRequest, record: recordRequest },
     installation: { confirm, uninstall }, uninstalled: { dismiss: dismissUninstalled }, removed: { clear: clearRemoved }, projectAccess,
   };
 }

@@ -1046,6 +1046,15 @@ export const githubRequestCancelContract = gitspaceRpc
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+/** Record an install request this browser made on GitHub when GitHub returned without GitSpace's state (it drops it
+ * on its own pages): for the project's repository owner when it started from that project. */
+export const githubRequestRecordContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.optional(wire.string) }))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 /** Keep an installation that waits for confirmation; it answers the oldest request whose organization was unknown. */
 export const githubInstallationConfirmContract = gitspaceRpc
   .procedure()
@@ -2396,7 +2405,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     state: githubStateContract,
     app: { start: githubAppStartContract, rotateKey: githubAppRotateKeyContract },
     install: { start: githubInstallStartContract },
-    request: { cancel: githubRequestCancelContract },
+    request: { cancel: githubRequestCancelContract, record: githubRequestRecordContract },
     installation: { confirm: githubInstallationConfirmContract, uninstall: githubInstallationUninstallContract },
     uninstalled: { dismiss: githubUninstalledDismissContract },
     removed: { clear: githubRemovedClearContract },

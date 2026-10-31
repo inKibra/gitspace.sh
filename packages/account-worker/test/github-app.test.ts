@@ -346,6 +346,11 @@ describe('GitHub App', () => {
     const requested = await github().projectAccess(portal.id);
     expect(requested).toMatchObject({ state: 'requested', request: { organization: 'BrandByX', project: { id: portal.id, name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', times: 2 } });
     expect((await github().state()).requests).toHaveLength(1);
+    // GitHub drops the state on its own pages (a request already pending sends the install to its target picker): the
+    // redirect records nothing, and the account's own browser records what it started.
+    expect(outcome(await setupCallback(0, 'request', null)).get('github')).toBe('request-unrecorded');
+    expect((await github().state()).requests).toMatchObject([{ times: 2 }]);
+    expect((await github().recordStartedRequest(portal.id)).requests).toMatchObject([{ organization: 'BrandByX', project: { id: portal.id }, times: 3 }]);
 
     // An owner of BrandByX approves it elsewhere: no state reaches GitSpace, only the webhook.
     installationApi(key, 95, 'BrandByX', { names: ['BrandByX/payne-portals'] });

@@ -863,7 +863,8 @@ function GitSpaceProduct() {
       : action.kind === 'confirm' ? await rpcClient.github.installation.confirm({ installationId: action.installationId })
         : action.kind === 'uninstall' ? await rpcClient.github.installation.uninstall({ installationId: action.installationId })
           : action.kind === 'dismiss-uninstalled' ? await rpcClient.github.uninstalled.dismiss({ installationId: action.installationId })
-            : await rpcClient.github.removed.clear({});
+            : action.kind === 'record-request' ? await rpcClient.github.request.record(action.projectId === null ? {} : { projectId: action.projectId })
+              : await rpcClient.github.removed.clear({});
     if (result.status === 'error') throw result.error;
     await githubQuery.refetch();
   };

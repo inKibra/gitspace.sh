@@ -2,12 +2,35 @@ import type { GitHubInstallationView, GitHubProjectAccess } from '@gitspace/prot
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { Check, Clock, Copy01, LinkExternal01, Lock01 } from '@untitledui/icons';
 import { useState, type ReactElement, type ReactNode } from 'react';
+import { z } from 'zod';
 import { glyph } from './glyph.js';
 import { formatRelativeTime } from './relative-time.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 /** A project's repository access while its agent cannot read it. */
 export type BlockedProjectAccess = Exclude<GitHubProjectAccess, { state: 'ready' }>;
+
+const INSTALL_INTENT_KEY = 'gitspace.github.install';
+/** An install started longer ago than this is not the one GitHub just returned from. */
+const INSTALL_INTENT_MS = 60 * 60_000;
+const InstallIntentSchema = z.object({ projectId: z.string().min(1).nullable(), at: z.number() });
+
+/** Remembers, in this browser, what an install about to open on GitHub is for: GitHub drops GitSpace's state when it
+ * routes the install through its own pages, and Settings then records the request from this. */
+export function rememberGitHubInstall(projectId: string | null): void {
+  try { window.localStorage.setItem(INSTALL_INTENT_KEY, JSON.stringify({ projectId, at: Date.now() })); }
+  catch { /* Storage unavailable: the request is recorded as of unknown organization. */ }
+}
+
+/** What the last install this browser started was for, read once; null when none started within the hour. */
+export function takeGitHubInstall(): { projectId: string | null } | null {
+  try {
+    const stored = window.localStorage.getItem(INSTALL_INTENT_KEY);
+    window.localStorage.removeItem(INSTALL_INTENT_KEY);
+    const intent = InstallIntentSchema.safeParse(JSON.parse(stored ?? 'null'));
+    return intent.success && Date.now() - intent.data.at < INSTALL_INTENT_MS ? { projectId: intent.data.projectId } : null;
+  } catch { return null; }
+}
 
 /** Where an organization's owners answer install requests and see what each installation may read. */
 export function githubInstallationsUrl(organization: string): string {

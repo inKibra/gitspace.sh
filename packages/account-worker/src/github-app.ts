@@ -438,25 +438,24 @@ export class GitHubAppDO extends BudgetedDurableObject {
     if (!app) throw new Error('Create the GitHub App first');
     const base = `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new`;
     if (projectId === undefined) return { url: `${base}?state=${this.createState('install', null)}` };
-    const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
-    const repository = project?.repositoryReference ? githubRepositoryOf(project.repositoryReference) : null;
-    if (!project || repository === null) throw new Error('This project has no GitHub repository');
-    const organization = repository.slice(0, repository.indexOf('/'));
-    const state = this.createState('install', { organization, projectId, repository });
-    const target = await githubRequest(`/users/${encodeURIComponent(organization)}`, { token: await this.readToken(repository), schema: z.object({ id: z.number().int().positive() }) })
-      .catch((error: unknown) => { console.error(JSON.stringify({ event: 'github_install_target_unread', organization, message: error instanceof Error ? error.message : String(error) })); return null; });
-    return { url: target ? `${base}/permissions?target_id=${target.id}&state=${state}` : `${base}?state=${state}` };
+    const target = await this.installTarget(projectId);
+    const state = this.createState('install', target);
+    const account = await githubRequest(`/users/${encodeURIComponent(target.organization)}`, { token: await this.readToken(target.repository), schema: z.object({ id: z.number().int().positive() }) })
+      .catch((error: unknown) => { console.error(JSON.stringify({ event: 'github_install_target_unread', organization: target.organization, message: error instanceof Error ? error.message : String(error) })); return null; });
+    return { url: account ? `${base}/permissions?target_id=${account.id}&state=${state}` : `${base}?state=${state}` };
   }
 
   /** GitHub's setup redirect. An install GitSpace started is kept, and a request it started is recorded (one per
-   * organization; requests whose organization is unknown are one). An update of a kept installation refreshes it. Any
-   * other redirect (an owner approving elsewhere, or a link without state) changes nothing: the installation webhook
+   * organization; requests whose organization is unknown are one). An update of a kept installation refreshes it.
+   * GitHub drops the state when it routes an install through its own pages (a request already pending sends it to
+   * the target picker), so a request without one is left for the signed-in app to record (`recordStartedRequest`);
+   * this unauthenticated redirect never records one. Any other redirect changes nothing: the installation webhook
    * decides. */
-  async installed(input: { installationId: number | null; setupAction: SetupAction; state: string | null }): Promise<'installed' | 'updated' | 'requested' | 'received'> {
+  async installed(input: { installationId: number | null; setupAction: SetupAction; state: string | null }): Promise<'installed' | 'updated' | 'requested' | 'request-unrecorded' | 'received'> {
     if (!this.app()) throw new Error('This account has no GitHub App');
     const started = this.consumeState(input.state, 'install');
     if (input.setupAction === 'request') {
-      if (started === null) throw new Error('This install request did not start from GitSpace');
+      if (started === null) return 'request-unrecorded';
       this.recordRequest(started.target);
       this.changed();
       return 'requested';
@@ -471,6 +470,23 @@ export class GitHubAppDO extends BudgetedDurableObject {
       return 'updated';
     }
     return 'received';
+  }
+
+  /** Records a request the account's own browser reports making on GitHub after GitHub returned without state: for a
+   * project's repository owner when it started from that project, of unknown organization otherwise. */
+  async recordStartedRequest(projectId?: string): Promise<GitHubState> {
+    if (!this.app()) throw new Error('This account has no GitHub App');
+    this.recordRequest(projectId === undefined ? null : await this.installTarget(projectId));
+    this.changed();
+    return this.state();
+  }
+
+  /** The account owning a project's GitHub repository, which an install started from the project is meant for. */
+  private async installTarget(projectId: string): Promise<InstallTarget> {
+    const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
+    const repository = project?.repositoryReference ? githubRepositoryOf(project.repositoryReference) : null;
+    if (!project || repository === null) throw new Error('This project has no GitHub repository');
+    return { organization: repository.slice(0, repository.indexOf('/')), projectId, repository };
   }
 
   /** Forgets a request. GitHub keeps its own until an organization owner answers or the requester cancels it there. */

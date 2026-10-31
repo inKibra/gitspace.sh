@@ -30,7 +30,7 @@ import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useLiveChanges } from './live-notices.js';
 import { useEventRefresh } from './SynchronizationProvider.js';
-import { RepositoryAccessCard } from './GitHubAccess.js';
+import { RepositoryAccessCard, rememberGitHubInstall } from './GitHubAccess.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -242,6 +242,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         card: <RepositoryAccessCard access={blocked} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={async () => {
           const result = await rpcClient.github.install.start({ projectId: props.projectId });
           if (result.status === 'error') throw result.error;
+          rememberGitHubInstall(props.projectId);
           return result.value.url;
         }} />,
         notice: `The project agent starts once GitSpace can read ${blocked.repository}.`,
