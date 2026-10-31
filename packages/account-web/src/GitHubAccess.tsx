@@ -1,0 +1,150 @@
+import type { GitHubInstallationView, GitHubProjectAccess } from '@gitspace/protocol/github';
+import { Badge, Button, useShape } from '@gitspace/ui';
+import { Check, Clock, Copy01, LinkExternal01, Lock01 } from '@untitledui/icons';
+import { useState, type ReactElement, type ReactNode } from 'react';
+import { glyph } from './glyph.js';
+import { formatRelativeTime } from './relative-time.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
+
+/** A project's repository access while its agent cannot read it. */
+export type BlockedProjectAccess = Exclude<GitHubProjectAccess, { state: 'ready' }>;
+
+/** Where an organization's owners answer install requests and see what each installation may read. */
+export function githubInstallationsUrl(organization: string): string {
+  return `https://github.com/organizations/${encodeURIComponent(organization)}/settings/installations`;
+}
+
+/** Where an installation's repositories are chosen: its account's owners change them there. */
+export function githubInstallationUrl(installation: Pick<GitHubInstallationView, 'id' | 'account'>): string {
+  return installation.account.kind === 'organization'
+    ? `${githubInstallationsUrl(installation.account.login)}/${installation.id}`
+    : `https://github.com/settings/installations/${installation.id}`;
+}
+
+/** What an organization owner does on GitHub to approve a request, written to be forwarded as is. `organization` is null
+ * when GitSpace does not know which organization the request was for. */
+export function ownerStepsText(appName: string, organization: string | null, repository: string | null): string {
+  const allow = repository ? `Allow ${repository.slice(repository.indexOf('/') + 1)} (or all repositories)` : 'Choose the repositories GitSpace should read';
+  return [
+    `To install ${appName} on ${organization ?? 'your organization'}:`,
+    `1. Open ${organization ? githubInstallationsUrl(organization) : 'https://github.com/organizations/<organization>/settings/installations'}`,
+    `2. Under "Pending GitHub Apps installation requests", find ${appName} and choose Review.`,
+    `3. ${allow}, then Install.`,
+  ].join('\n');
+}
+
+export function OwnerSteps({ appName, organization, repository }: { appName: string; organization: string | null; repository: string | null }): ReactElement {
+  const shape = useShape();
+  return <div className={`flex flex-col gap-2 bg-surface-2 p-3 ${shape.container}`}>
+    <span className="text-caption font-medium text-foreground">{organization ? `For an owner of ${organization}` : 'For an owner of the organization'}</span>
+    <ol className="flex list-decimal flex-col gap-1 pl-5 text-caption text-muted-foreground">
+      <li>Open <span className="font-mono text-foreground [overflow-wrap:anywhere]">{organization ? githubInstallationsUrl(organization).replace('https://', '') : 'github.com/organizations/<organization>/settings/installations'}</span></li>
+      <li>Under <span className="text-foreground">Pending GitHub Apps installation requests</span>, find <span className="text-foreground">{appName}</span> and choose <span className="text-foreground">Review</span>.</li>
+      <li>{repository ? <>Allow <span className="text-foreground">{repository.slice(repository.indexOf('/') + 1)}</span> (or all repositories)</> : 'Choose the repositories GitSpace should read'}, then <span className="text-foreground">Install</span>.</li>
+    </ol>
+    <span className="text-caption text-muted-foreground">GitHub also emails the owners about the request.{organization ? null : " Not sure which organization you picked? GitHub lists your requests on the App's install page."}</span>
+  </div>;
+}
+
+export function CopyStepsButton({ text, label = 'Copy steps for the owner', variant = 'primary' }: { text: string; label?: string; variant?: 'primary' | 'secondary' }): ReactElement {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); setCopied(true); setFailed(false); }
+    catch { setFailed(true); }
+  };
+  return <Button variant={variant} size="compact" type="button" leadingIcon={glyph(copied ? Check : Copy01)} onClick={() => void copy()}>{failed ? 'Copy failed: select the steps above' : copied ? 'Copied' : label}</Button>;
+}
+
+/** One step of getting access: done, current, or still to come. */
+function Step({ state, title, detail }: { state: 'done' | 'current' | 'next'; title: ReactNode; detail?: ReactNode }): ReactElement {
+  const shape = useShape();
+  return <li className="flex gap-3">
+    <span className={`mt-0.5 inline-flex size-5 shrink-0 items-center justify-center ${shape.bg} ${state === 'done' ? 'bg-foreground text-background' : state === 'current' ? 'bg-active text-foreground ring-1 ring-inset ring-border' : 'text-muted-foreground ring-1 ring-inset ring-border'}`}>
+      {state === 'done' ? <Check width={12} height={12} strokeWidth={1.5} /> : state === 'current' ? <Clock width={12} height={12} strokeWidth={1.5} /> : null}
+    </span>
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <span className={`text-body ${state === 'next' ? 'text-muted-foreground' : 'text-foreground'}`}>{title}</span>
+      {detail ? <span className="text-caption text-muted-foreground">{detail}</span> : null}
+    </span>
+  </li>;
+}
+
+/** "Oct 31, 3:22 AM": when something happened on GitHub, in the reader's time zone. */
+export function githubTime(iso: string): string {
+  return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * The project page's card while its agent cannot read its repository: GitSpace reaches a private GitHub repository only
+ * through the account's App, so the card names the one way in and tracks it. `onInstall` resolves to the App's install
+ * page with the repository's owner chosen.
+ */
+export function RepositoryAccessCard({ access, onInstall, onOpenSettings }: { access: BlockedProjectAccess; onInstall(): Promise<string>; onOpenSettings(): void }): ReactElement {
+  const shape = useShape();
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { repository, organization, appName } = access;
+  const name = repository.slice(repository.indexOf('/') + 1);
+  const install = async () => {
+    setInstalling(true);
+    setError(null);
+    try { window.location.assign(await onInstall()); }
+    catch (cause) { setError(rpcErrorMessage(cause, 'Install GitHub App')); setInstalling(false); }
+  };
+  const badge = access.state === 'needs-app' ? <Badge variant="dot" size="compact" color="gray">Not connected</Badge>
+    : access.state === 'requested' ? <Badge variant="dot" size="compact" color="amber">Waiting on {organization}</Badge>
+      : <Badge variant="dot" size="compact" color="amber">Repository not allowed</Badge>;
+  return <section aria-label="Repository access" className={`flex w-full max-w-[560px] flex-col gap-4 border border-border bg-card p-5 ${shape.container}`}>
+    <div className="flex items-start justify-between gap-3">
+      <span className="flex items-center gap-2 text-caption text-muted-foreground"><Lock01 width={14} height={14} strokeWidth={1.5} /><span className="font-mono">{repository}</span> · private</span>
+      {badge}
+    </div>
+    {access.state === 'needs-app' && access.appName === null ? <>
+      <div className="flex flex-col gap-1.5">
+        <h2 className="text-subtitle font-semibold text-foreground">Create your GitHub App first</h2>
+        <p className="text-body text-muted-foreground">This repository is private. GitSpace reads a private GitHub repository only through your own GitHub App, and this account has none yet. Create it in Settings → GitHub, then install it on {organization} from here.</p>
+      </div>
+      <div className="flex flex-wrap gap-2"><Button variant="primary" size="compact" type="button" onClick={onOpenSettings}>Open Settings → GitHub</Button></div>
+    </> : access.state === 'needs-app' ? <>
+      <div className="flex flex-col gap-1.5">
+        <h2 className="text-subtitle font-semibold text-foreground">Install your GitHub App on {organization}</h2>
+        <p className="text-body text-muted-foreground">This repository is private. GitSpace reads it only through your GitHub App, <span className="text-foreground">{appName}</span>, and that App isn't installed on {organization}. There is no other way in: until it is, this project's agent and workspaces can't start.</p>
+      </div>
+      <p className="text-caption text-muted-foreground">If you're not an owner of {organization}, GitHub sends your install to its owners as a request, and this page tracks it.</p>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="primary" size="compact" type="button" loading={installing} trailingIcon={glyph(LinkExternal01)} onClick={() => void install()}>Install on {organization}</Button>
+      </div>
+    </> : access.state === 'requested' ? <>
+      <div className="flex flex-col gap-1.5">
+        <h2 className="text-subtitle font-semibold text-foreground">Waiting for an owner of {organization} to approve</h2>
+        <p className="text-body text-muted-foreground">You asked to install <span className="text-foreground">{access.appName}</span> on {organization}. Only an organization owner can approve it. GitSpace keeps the install and imports <span className="font-mono text-foreground">{name}</span> as soon as they do; nothing else is needed from you.</p>
+      </div>
+      <ol className="flex flex-col gap-3">
+        <Step state="done" title="Requested by you" detail={`${githubTime(access.request.firstRequestedAt)}${access.request.times > 1 ? ` · asked ${access.request.times} times, last ${githubTime(access.request.lastRequestedAt)}` : ''}`} />
+        <Step state="current" title={`An owner of ${organization} approves it on GitHub`} detail={`Pending · requested ${formatRelativeTime(new Date(access.request.firstRequestedAt))}`} />
+        <Step state="next" title={`GitSpace imports ${name}`} detail="Starts on its own when GitHub reports the install." />
+      </ol>
+      <OwnerSteps appName={access.appName} organization={organization} repository={repository} />
+      <div className="flex flex-wrap items-center gap-2">
+        <CopyStepsButton text={ownerStepsText(access.appName, organization, repository)} />
+        <Button variant="secondary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)} onClick={() => window.open(githubInstallationsUrl(organization), '_blank', 'noopener,noreferrer')}>I'm an owner: open on GitHub</Button>
+      </div>
+    </> : <>
+      <div className="flex flex-col gap-1.5">
+        <h2 className="text-subtitle font-semibold text-foreground">Allow {name} in the App on {organization}</h2>
+        <p className="text-body text-muted-foreground"><span className="text-foreground">{access.appName}</span> is installed on {organization}, but only for selected repositories, and <span className="font-mono text-foreground">{name}</span> isn't one of them. An owner adds it in the App's repository access.</p>
+      </div>
+      <ol className="flex flex-col gap-3">
+        <Step state="done" title={`Installed on ${organization}`} detail={access.installation.repositories.length ? `Selected repositories: ${access.installation.repositories.map((full) => full.slice(full.indexOf('/') + 1)).join(', ')}` : 'No repositories selected'} />
+        <Step state="current" title={`${name} added to the App's repositories`} detail={`GitHub → ${organization} settings → GitHub Apps → ${access.appName} → Configure → Repository access`} />
+        <Step state="next" title={`GitSpace imports ${name}`} />
+      </ol>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="primary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)} onClick={() => window.open(githubInstallationUrl(access.installation), '_blank', 'noopener,noreferrer')}>Add {name} on GitHub</Button>
+        <CopyStepsButton variant="secondary" label="Copy steps for an owner" text={[`To let ${access.appName} read ${repository}:`, `1. Open ${githubInstallationUrl(access.installation)}`, `2. Under Repository access, add ${name} (or choose All repositories), then Save.`].join('\n')} />
+      </div>
+    </>}
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+  </section>;
+}

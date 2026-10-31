@@ -160,7 +160,7 @@ export interface AppSidebarProps {
   failedAutomationRuns?: number;
   onNewProject?(): void;
   /** `section` deep-links a settings tab, e.g. `source` from the pill. */
-  onOpenSettings?(section?: 'source'): void;
+  onOpenSettings?(section?: 'source' | 'github'): void;
   /** The signed-in user; the footer identity row. */
   user?: { name: string; handle?: string | null };
   /** Null or absent when this install has no deployment status (not a GitSpace tenant). */

@@ -7,6 +7,7 @@ export type ToolAnnotation =
   | { readOnlyHint: false; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
 export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "github.state": { readOnlyHint: true, openWorldHint: false },
+  "github.projectAccess": { readOnlyHint: true, openWorldHint: true },
   "runtime.snapshot": { readOnlyHint: true, openWorldHint: false },
   "runtime.watch": { readOnlyHint: true, openWorldHint: false },
   "runtime.draft": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

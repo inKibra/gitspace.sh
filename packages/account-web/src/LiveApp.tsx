@@ -19,7 +19,7 @@ import { requestMcpAccess } from './mcp-access.js';
 import { applyAppearance } from './appearance.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSection.js';
 import { forgetProviderLogin, readProviderLogin, saveProviderLogin, type RecoverableProviderLogin } from './provider-login-recovery.js';
-import { SettingsPage } from './SettingsPage.js';
+import { SettingsPage, type GitHubAction } from './SettingsPage.js';
 import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { LiveEnvironment } from './environment/LiveEnvironment.js';
@@ -488,7 +488,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
     try { await operation(); }
     catch (cause) { setSidebarActionError(rpcErrorMessage(cause, 'Workspace action')); }
   };
-  const navigate = (view: ProductRoute, section?: 'source'): void => {
+  const navigate = (view: ProductRoute, section?: 'source' | 'github'): void => {
     const url = setProductRoute(new URL(window.location.href), view);
     if (section) url.searchParams.set('section', section);
     else url.searchParams.delete('section');
@@ -530,7 +530,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
   </AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
 }
 
-type LiveWorkspaceProps = { onOpenSettings: (section?: 'source') => void };
+type LiveWorkspaceProps = { onOpenSettings: (section?: 'source' | 'github') => void };
 
 function selectInspection(projectId: string, workspaceId: string | null): void {
   const url = new URL(window.location.href);
@@ -721,7 +721,7 @@ function GitSpaceProduct() {
     if (settingsQuery.state !== 'success') return;
     setDraft((current) => current?.revision === settingsQuery.value.revision ? current : { ...settingsQuery.value });
   }, [settingsQuery.state, settingsQuery.state === 'success' ? settingsQuery.value.revision : null]);
-  const navigateProduct = (next: ProductRoute, mode: 'push' | 'replace' = 'push', section: 'source' | null = null): void => {
+  const navigateProduct = (next: ProductRoute, mode: 'push' | 'replace' = 'push', section: 'source' | 'github' | null = null): void => {
     const url = setProductRoute(new URL(window.location.href), next);
     if (section) url.searchParams.set('section', section);
     else url.searchParams.delete('section');
@@ -855,6 +855,15 @@ function GitSpaceProduct() {
   };
   const replaceGitHubKey = async (privateKey: string): Promise<void> => {
     const result = await rotateGitHubKey.mutateAsync({ privateKey });
+    if (result.status === 'error') throw result.error;
+    await githubQuery.refetch();
+  };
+  const runGitHubAction = async (action: GitHubAction): Promise<void> => {
+    const result = action.kind === 'cancel-request' ? await rpcClient.github.request.cancel({ requestId: action.requestId })
+      : action.kind === 'confirm' ? await rpcClient.github.installation.confirm({ installationId: action.installationId })
+        : action.kind === 'uninstall' ? await rpcClient.github.installation.uninstall({ installationId: action.installationId })
+          : action.kind === 'dismiss-uninstalled' ? await rpcClient.github.uninstalled.dismiss({ installationId: action.installationId })
+            : await rpcClient.github.removed.clear({});
     if (result.status === 'error') throw result.error;
     await githubQuery.refetch();
   };
@@ -1068,6 +1077,7 @@ function GitSpaceProduct() {
     onStartGitHubApp={createGitHubApp}
     onStartGitHubInstall={installGitHubApp}
     onRotateGitHubKey={replaceGitHubKey}
+    onGitHubAction={runGitHubAction}
     devices={devicesValue ?? null}
     onRevokeDevice={revokeDeviceAndRefresh}
     onSignOut={signOutThisBrowser}

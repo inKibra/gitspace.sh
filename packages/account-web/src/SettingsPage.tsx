@@ -6,8 +6,10 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import type { ApiClientDraft } from './device.js';
 import type { McpAccessView } from '@gitspace/protocol/mcp-access';
-import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubState } from '@gitspace/protocol/github';
-import { GitHubLoginSchema } from '@gitspace/protocol/github';
+import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubInstallRequestView, GitHubState } from '@gitspace/protocol/github';
+import { GITHUB_REMOVED_KEPT, GitHubLoginSchema } from '@gitspace/protocol/github';
+import { CopyStepsButton, OwnerSteps, githubInstallationUrl, githubInstallationsUrl, githubTime, ownerStepsText } from './GitHubAccess.js';
+import { formatRelativeTime } from './relative-time.js';
 import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { rpcClient } from './rpc-client.js';
@@ -45,8 +47,9 @@ import {
   TabsSubtleItem,
   TabsSubtlePanel,
   useShape,
+  type IconComponent,
 } from '@gitspace/ui';
-import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key01, Monitor01, Rocket02, Server01, Settings02, Terminal, User01, Zap } from '@untitledui/icons';
+import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key01, LinkExternal01, Monitor01, Rocket02, Server01, Settings02, Terminal, User01, Zap } from '@untitledui/icons';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
@@ -126,6 +129,8 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   onStartGitHubInstall: () => Promise<string>;
   /** Store a private key generated on GitHub; rejects with GitHub's reason when it does not accept it. */
   onRotateGitHubKey: (privateKey: string) => Promise<void>;
+  /** Cancel a request, keep or uninstall an installation, or clear what GitSpace listed; rejects with the reason. */
+  onGitHubAction: (action: GitHubAction) => Promise<void>;
   saving: boolean;
   error: string | null;
 }
@@ -920,6 +925,7 @@ const GITHUB_CALLBACK_OUTCOMES: Record<string, string> = {
   installed: 'Installed',
   requested: 'Install requested: an organization owner must approve it on GitHub',
   updated: 'Installation updated',
+  received: 'GitHub reported an install. GitSpace keeps it if it answers one of your requests; otherwise it asks you below.',
 };
 /** The outcome GitHub's callbacks leave in the Settings URL. */
 function githubCallbackOutcome(search: string): { error: boolean; text: string } | null {
@@ -1023,41 +1029,66 @@ function GitHubAppSummary({ app, onStartGitHubInstall, onRotateGitHubKey }: { ap
       setInstalling(false);
     }
   };
-  return <Group title="GitHub App">
+  return <section className="flex flex-col gap-3" aria-label="Your GitHub App">
     <SettingRows>
       <Card size="compact">
         <CardMedia icon={ICONS.github} />
         <CardHeader>
           <CardTitle><a href={app.htmlUrl} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">{app.name}</a></CardTitle>
-          <CardDescription>Owned by {app.owner.kind === 'organization' ? 'organization' : 'account'} <span className="font-mono">{app.owner.login}</span> · created {new Date(app.createdAt).toLocaleString()}</CardDescription>
+          <CardDescription>Owned by <span className="font-mono">{app.owner.login}</span> · created {githubTime(app.createdAt)} · private key {githubTime(app.keyUpdatedAt)}</CardDescription>
         </CardHeader>
-        <CardFooter><Button variant="primary" size="compact" loading={installing} onClick={() => void install()}>Install on GitHub</Button></CardFooter>
+        <CardFooter className="gap-2">
+          <Button variant="primary" size="compact" loading={installing} trailingIcon={glyph(LinkExternal01)} onClick={() => void install()}>Install on GitHub</Button>
+          <Button variant="ghost" size="compact" onClick={() => { setRotated(false); setRotating(true); }}>Replace private key</Button>
+        </CardFooter>
       </Card>
-      <SettingRow title="Private key" description={`Updated ${new Date(app.keyUpdatedAt).toLocaleString()}. GitSpace signs as the App with it.`}>
-        <Button variant="secondary" size="compact" onClick={() => { setRotated(false); setRotating(true); }}>Replace private key</Button>
-      </SettingRow>
     </SettingRows>
+    <p className="text-caption text-muted-foreground">On an account you own, GitHub installs it at once. Elsewhere GitHub sends the owners a request; GitSpace asks you to confirm the install when it arrives. To give one project access, start from that project: GitSpace then knows the organization and keeps the install itself.</p>
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
     {rotated ? <p role="status" className="text-caption text-foreground">Private key replaced. Delete the old key on <a href={githubAppSettingsUrl(app)} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">GitHub</a>.</p> : null}
     <GitHubKeyDialog open={rotating} onOpenChange={setRotating} app={app} onRotate={onRotateGitHubKey} onRotated={() => setRotated(true)} />
-  </Group>;
+  </section>;
 }
-function GitHubInstallationRow({ installation, index }: { installation: GitHubInstallationView; index?: number }) {
-  const permissions = Object.entries(installation.permissions).sort(([left], [right]) => left.localeCompare(right)).map(([name, level]) => `${name}:${level}`).join(' ');
-  return <Card size="compact" index={index}>
-    <CardMedia icon={ICONS.github} />
-    <CardHeader>
-      <CardTitle>{installation.account.login}<Badge color="gray">{installation.account.kind === 'organization' ? 'Organization' : 'User'}</Badge></CardTitle>
-      <CardDescription>{installation.repositorySelection === 'all' ? 'All repositories' : 'Selected repositories'}{installation.repositories.length ? <>: <span className="font-mono">{installation.repositories.join(', ')}</span></> : null}</CardDescription>
-      <p className="text-caption text-muted-foreground">{installation.projects.length ? `Linked projects: ${installation.projects.map((project) => project.name).join(', ')}` : 'No GitSpace project uses these repositories yet.'}</p>
-      {permissions ? <p className="font-mono text-caption text-muted-foreground">{permissions}</p> : null}
-    </CardHeader>
-    <CardFooter><Badge color="green">Installed {new Date(installation.installedAt).toLocaleDateString()}</Badge></CardFooter>
+/** What changes an installation or request; the page's state arrives again afterwards. */
+export type GitHubAction =
+  | { kind: 'cancel-request'; requestId: string }
+  | { kind: 'confirm'; installationId: number }
+  | { kind: 'uninstall'; installationId: number }
+  | { kind: 'dismiss-uninstalled'; installationId: number }
+  | { kind: 'clear-removed' };
+const GITHUB_TILES = new Map<string, IconComponent>();
+/** An account's tile: its initial, one component per letter so rows keep their icons across renders. */
+function githubTile(login: string | null): IconComponent {
+  const letter = login ? login.slice(0, 1).toUpperCase() : '?';
+  const known = GITHUB_TILES.get(letter);
+  if (known) return known;
+  const tile: IconComponent = ({ className }) => <span aria-hidden className={`text-[12px] font-semibold leading-none ${className ?? ''}`}>{letter}</span>;
+  GITHUB_TILES.set(letter, tile);
+  return tile;
+}
+function GitHubFact({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="flex gap-3 text-caption"><span className="w-28 shrink-0 text-muted-foreground">{label}</span><span className="min-w-0 text-foreground [overflow-wrap:anywhere]">{children}</span></div>;
+}
+/** One account the App is installed on, asked for, or was removed from: its state, what GitSpace knows, what fits. */
+function GitHubOrganizationRow({ login, title, index, summary, state, children, actions }: { login: string | null; title: string; index: number; summary: string; state: ReactNode; children: ReactNode; actions: ReactNode }) {
+  return <Card size="compact" index={index} className="flex-wrap">
+    <CardMedia icon={githubTile(login)} />
+    <CardHeader><CardTitle>{title}</CardTitle><CardDescription>{summary}</CardDescription></CardHeader>
+    <CardFooter>{state}</CardFooter>
+    <div className="flex basis-full flex-col gap-3 pb-3 pl-[42px] pr-3">
+      <div className="flex flex-col gap-1.5">{children}</div>
+      <div className="flex flex-wrap gap-2">{actions}</div>
+    </div>
   </Card>;
 }
-export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall, onRotateGitHubKey }: Pick<SettingsPageProps, 'github' | 'onStartGitHubApp' | 'onStartGitHubInstall' | 'onRotateGitHubKey'>) {
+export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall, onRotateGitHubKey, onGitHubAction }: Pick<SettingsPageProps, 'github' | 'onStartGitHubApp' | 'onStartGitHubInstall' | 'onRotateGitHubKey' | 'onGitHubAction'>) {
   const shape = useShape();
   const [callback] = useState(() => typeof window === 'undefined' ? null : githubCallbackOutcome(window.location.search));
+  const [pending, setPending] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [uninstalling, setUninstalling] = useState<GitHubInstallationView | null>(null);
+  const [cancelling, setCancelling] = useState<GitHubInstallRequestView | null>(null);
+  const [reviewingRemoved, setReviewingRemoved] = useState(false);
   // The outcome shows once: a reload or a later visit must not repeat it.
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -1066,27 +1097,152 @@ export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall,
     url.searchParams.delete('message');
     navigateProductUrl(url, 'replace');
   }, []);
+  const run = async (key: string, action: GitHubAction): Promise<boolean> => {
+    setPending(key);
+    setActionError(null);
+    try { await onGitHubAction(action); return true; }
+    catch (cause) { setActionError(rpcErrorMessage(cause, 'GitHub')); return false; }
+    finally { setPending(null); }
+  };
+  const installAgain = async () => {
+    setActionError(null);
+    try { window.location.assign(await onStartGitHubInstall()); }
+    catch (cause) { setActionError(rpcErrorMessage(cause, 'Install GitHub App')); }
+  };
   const banner = callback ? <p role={callback.error ? 'alert' : 'status'} className={`${shape.container} bg-surface-2 px-3 py-2 text-body shadow-surface-1 ${callback.error ? 'text-destructive' : 'text-foreground'}`}>{callback.text}</p> : null;
   if (!github) return <>{banner}<Group title="GitHub App"><EmptyState icon={icon(GitPullRequest, 20)} title="Loading GitHub…" description="Asking GitSpace Cloud for your GitHub App." /></Group></>;
   if (!github.app) return <>{banner}<GitHubAppCreate onStartGitHubApp={onStartGitHubApp} /></>;
-  const installed = github.installations.length > 0 || github.pendingRequests.length > 0;
+  const app = github.app;
+  let index = 0;
+  const rows = [
+    ...github.installations.map((installation) => <GitHubOrganizationRow key={`installation:${installation.id}`} index={index++} login={installation.account.login} title={installation.account.login}
+      summary={`${installation.account.kind === 'organization' ? 'Organization' : 'Account'} · ${installation.repositorySelection === 'all' ? 'all repositories' : `${installation.repositories.length} selected ${installation.repositories.length === 1 ? 'repository' : 'repositories'}`}`}
+      state={<Badge variant="dot" size="compact" color="green">Installed</Badge>}
+      actions={<>
+        <Button variant="secondary" size="compact" trailingIcon={glyph(LinkExternal01)} onClick={() => window.open(githubInstallationUrl(installation), '_blank', 'noopener,noreferrer')}>Choose repositories on GitHub</Button>
+        <Button variant="ghost" size="compact" onClick={() => setUninstalling(installation)}>Uninstall…</Button>
+      </>}>
+      <GitHubFact label="Repositories">{installation.repositories.length ? <span className="font-mono">{installation.repositories.join(', ')}</span> : installation.repositorySelection === 'all' ? 'All repositories' : 'None selected'}</GitHubFact>
+      <GitHubFact label="Projects">{installation.projects.length ? installation.projects.map((project) => project.name).join(', ') : 'No GitSpace project uses these repositories yet'}</GitHubFact>
+      <GitHubFact label="Installed">{githubTime(installation.installedAt)}</GitHubFact>
+    </GitHubOrganizationRow>),
+    ...github.unconfirmed.map((installation) => <GitHubOrganizationRow key={`unconfirmed:${installation.id}`} index={index++} login={installation.account.login} title={installation.account.login}
+      summary={`${installation.account.kind === 'organization' ? 'Organization' : 'Account'} · ${installation.repositorySelection === 'all' ? 'all repositories' : `${installation.repositories.length} selected ${installation.repositories.length === 1 ? 'repository' : 'repositories'}`}`}
+      state={<Badge variant="dot" size="compact" color="amber">Is this yours?</Badge>}
+      actions={<>
+        <Button variant="primary" size="compact" loading={pending === `confirm:${installation.id}`} disabled={pending !== null} onClick={() => void run(`confirm:${installation.id}`, { kind: 'confirm', installationId: installation.id })}>Yes, it's mine</Button>
+        <Button variant="ghost" size="compact" loading={pending === `uninstall:${installation.id}`} disabled={pending !== null} onClick={() => void run(`uninstall:${installation.id}`, { kind: 'uninstall', installationId: installation.id })}>Not mine: uninstall</Button>
+      </>}>
+      <GitHubFact label="Installed">{githubTime(installation.installedAt)} by <span className="font-mono">{installation.installedBy}</span></GitHubFact>
+      <GitHubFact label="Why we ask">You have a request whose organization GitSpace doesn't know. If this install answers it, keep it and the request is resolved.</GitHubFact>
+      <GitHubFact label="Repositories">{installation.repositorySelection === 'all' ? 'All repositories' : <span className="font-mono">{installation.repositories.join(', ') || 'None selected'}</span>}</GitHubFact>
+      <GitHubFact label="Until you confirm">GitSpace doesn't use it: no access to its repositories, none of its events. Uninstalled {githubTime(installation.removeAt)} if not confirmed.</GitHubFact>
+    </GitHubOrganizationRow>),
+    ...github.uninstalled.map((installation) => <GitHubOrganizationRow key={`uninstalled:${installation.id}`} index={index++} login={installation.account.login} title={installation.account.login}
+      summary={`${installation.account.kind === 'organization' ? 'Organization' : 'Account'} · not installed`}
+      state={<Badge variant="dot" size="compact" color="red">Uninstalled on GitHub</Badge>}
+      actions={<>
+        <Button variant="primary" size="compact" trailingIcon={glyph(LinkExternal01)} disabled={pending !== null} onClick={() => void installAgain()}>Install again</Button>
+        <Button variant="ghost" size="compact" loading={pending === `dismiss:${installation.id}`} disabled={pending !== null} onClick={() => void run(`dismiss:${installation.id}`, { kind: 'dismiss-uninstalled', installationId: installation.id })}>Dismiss</Button>
+      </>}>
+      <GitHubFact label="Uninstalled">{githubTime(installation.uninstalledAt)} by <span className="font-mono">{installation.uninstalledBy}</span> on GitHub</GitHubFact>
+      <GitHubFact label="Affected">{installation.projects.length ? `${installation.projects.map((project) => project.name).join(', ')} can no longer sync ${installation.projects.map((project) => project.repository.slice(project.repository.indexOf('/') + 1)).join(', ')}; their workspaces keep their cloud copies.` : 'No GitSpace project used it.'}</GitHubFact>
+    </GitHubOrganizationRow>),
+    ...github.requests.map((request) => <GitHubOrganizationRow key={`request:${request.id}`} index={index++} login={request.organization} title={request.organization ?? 'Unknown organization'}
+      summary={request.organization ? 'Organization · not installed' : 'Organization not known yet'}
+      state={request.organization ? <Badge variant="dot" size="compact" color="amber">Waiting on an owner</Badge> : <Badge variant="dot" size="compact" color="gray">Requested</Badge>}
+      actions={<>
+        <CopyStepsButton variant={request.organization ? 'primary' : 'secondary'} text={ownerStepsText(app.name, request.organization, request.repository)} />
+        {request.organization ? <Button variant="secondary" size="compact" trailingIcon={glyph(LinkExternal01)} onClick={() => window.open(githubInstallationsUrl(request.organization ?? ''), '_blank', 'noopener,noreferrer')}>I'm an owner: open on GitHub</Button> : null}
+        <Button variant="ghost" size="compact" disabled={pending !== null} onClick={() => setCancelling(request)}>Cancel request</Button>
+      </>}>
+      <GitHubFact label="Requested">by you · {githubTime(request.firstRequestedAt)}{request.times > 1 ? `, and again ${githubTime(request.lastRequestedAt)} (${request.times} requests, shown once)` : ''}</GitHubFact>
+      {request.organization
+        ? <>
+            {request.repository ? <GitHubFact label="For">{request.project ? `${request.project.name} · ` : ''}<span className="font-mono">{request.repository}</span></GitHubFact> : null}
+            <GitHubFact label="Waiting">Requested {formatRelativeTime(new Date(request.firstRequestedAt))} · GitSpace keeps the install when an owner of {request.organization} approves it, whenever that is.</GitHubFact>
+          </>
+        : <GitHubFact label="Note">GitHub doesn't tell GitSpace which organization a request is for. When an owner approves it, GitSpace asks you to confirm the install before using it.</GitHubFact>}
+      <OwnerSteps appName={app.name} organization={request.organization} repository={request.repository} />
+    </GitHubOrganizationRow>),
+  ];
+  const uninstallingProjects = uninstalling?.projects.map((project) => project.name).join(', ') ?? '';
   return <>
     {banner}
-    <GitHubAppSummary app={github.app} onStartGitHubInstall={onStartGitHubInstall} onRotateGitHubKey={onRotateGitHubKey} />
-    <Group title="Installations">{installed
-      ? <SettingRows>
-        {github.installations.map((installation) => <GitHubInstallationRow key={installation.id} installation={installation} />)}
-        {github.pendingRequests.map((request, index) => <SettingRow key={`${request.requestedAt}:${index}`} title="Install requested" description={`Waiting for an organization owner to approve the install on GitHub. Requested ${new Date(request.requestedAt).toLocaleString()}.`}><Badge color="amber">Pending</Badge></SettingRow>)}
-      </SettingRows>
-      : <EmptyState icon={icon(GitPullRequest, 20)} title="Not installed yet" description="Install the App on GitHub and choose its repositories. GitSpace projects whose remote is one of them link automatically." />}</Group>
-    <Group title="Recent webhook deliveries">{github.deliveries.length
-      ? <SettingRows>{github.deliveries.map((delivery) => <Card size="compact" key={delivery.id}>
-        <CardHeader>
-          <CardTitle><span className="font-mono">{delivery.event}{delivery.action ? `.${delivery.action}` : ''}</span></CardTitle>
-          <CardDescription><span className="tabular-nums">{new Date(delivery.receivedAt).toLocaleString()}</span> · {delivery.repository ?? 'no repository'} · {delivery.outcome}</CardDescription>
-        </CardHeader>
-      </Card>)}</SettingRows>
-      : <EmptyState title="No deliveries yet" description="GitHub sends webhook events here once the App is installed." />}</Group>
+    <GitHubAppSummary app={app} onStartGitHubInstall={onStartGitHubInstall} onRotateGitHubKey={onRotateGitHubKey} />
+    <Group title="Organizations">
+      {rows.length ? <SettingRows>{rows}</SettingRows> : <EmptyState icon={icon(GitPullRequest, 20)} title="Not installed yet" description="Install the App on GitHub and choose its repositories. GitSpace projects whose remote is one of them link automatically." />}
+      {github.removed[0]
+        ? <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+            <span>GitSpace removed {github.removed.length} {github.removed.length === 1 ? 'install' : 'installs'} it didn't expect · latest {githubTime(github.removed[0].removedAt)}</span>
+            <Button variant="tertiary" size="compact" onClick={() => setReviewingRemoved(true)}>Review</Button>
+          </div>
+        : null}
+      {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
+    </Group>
+    <Accordion type="single" collapsible>
+      <AccordionItem value="deliveries" index={0}>
+        <AccordionTrigger>Recent webhook deliveries · {github.deliveries.length}</AccordionTrigger>
+        <AccordionContent>{github.deliveries.length
+          ? <ul className="flex flex-col gap-2 text-caption">{github.deliveries.map((delivery) => <li key={delivery.id} className="flex flex-wrap gap-x-3">
+              <span className="w-32 shrink-0 tabular-nums text-muted-foreground">{githubTime(delivery.receivedAt)}</span>
+              <span className="font-mono text-foreground">{delivery.event}{delivery.action ? `.${delivery.action}` : ''}</span>
+              <span className="min-w-0 text-muted-foreground [overflow-wrap:anywhere]">{delivery.repository ?? 'no repository'} · {delivery.outcome}</span>
+            </li>)}</ul>
+          : <p className="text-caption text-muted-foreground">GitHub sends webhook events here once the App is installed.</p>}</AccordionContent>
+      </AccordionItem>
+    </Accordion>
+    <Dialog open={uninstalling !== null} onOpenChange={(open) => { if (!open) setUninstalling(null); }}>
+      {uninstalling ? <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Uninstall {app.name} from {uninstalling.account.login}?</DialogTitle>
+          <DialogDescription>This removes the App from {uninstalling.account.login} on GitHub, for the whole {uninstalling.account.kind === 'organization' ? 'organization' : 'account'}. An owner can install it again later.</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-2 text-caption text-muted-foreground">
+          <span className="font-medium text-foreground">{uninstallingProjects ? `What stops for ${uninstallingProjects}` : 'What stops'}</span>
+          <span>· Cloud imports and syncing of these private repositories</span>
+          <span>· Pushes, pull requests and checks GitSpace makes as the App</span>
+          <span>· GitHub events for their automations</span>
+          <span>Workspaces keep their cloud copies and branches; nothing is deleted.</span>
+        </div>
+        <DialogFooter>
+          <Button variant="secondary" type="button" disabled={pending !== null} onClick={() => setUninstalling(null)}>Cancel</Button>
+          <Button variant="primary" type="button" loading={pending === `uninstall:${uninstalling.id}`} disabled={pending !== null} onClick={() => void run(`uninstall:${uninstalling.id}`, { kind: 'uninstall', installationId: uninstalling.id }).then((done) => { if (done) setUninstalling(null); })}>Uninstall from {uninstalling.account.login}</Button>
+        </DialogFooter>
+      </DialogContent> : null}
+    </Dialog>
+    <Dialog open={cancelling !== null} onOpenChange={(open) => { if (!open) setCancelling(null); }}>
+      {cancelling ? <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Cancel this request?</DialogTitle>
+          <DialogDescription>GitSpace forgets it. GitHub keeps the request until an owner answers it; to withdraw it there too, open the App's install page on GitHub and choose Cancel Request{cancelling.organization ? ` next to ${cancelling.organization}` : ''}.</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" type="button" trailingIcon={glyph(LinkExternal01)} onClick={() => window.open(`https://github.com/apps/${encodeURIComponent(app.slug)}/installations/select_target`, '_blank', 'noopener,noreferrer')}>Open GitHub</Button>
+          <Button variant="primary" type="button" loading={pending === `cancel:${cancelling.id}`} disabled={pending !== null} onClick={() => void run(`cancel:${cancelling.id}`, { kind: 'cancel-request', requestId: cancelling.id }).then((done) => { if (done) setCancelling(null); })}>Forget request</Button>
+        </DialogFooter>
+      </DialogContent> : null}
+    </Dialog>
+    <Dialog open={reviewingRemoved} onOpenChange={setReviewingRemoved}>
+      {reviewingRemoved ? <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Installs GitSpace removed</DialogTitle>
+          <DialogDescription>Each was installed with no pending request that could be for its account and not by you, or waited for your confirmation and didn't get it, so GitSpace uninstalled it. The latest {GITHUB_REMOVED_KEPT} are kept.</DialogDescription>
+        </DialogHeader>
+        <ul className="flex max-h-[320px] flex-col gap-2 overflow-y-auto text-caption">
+          {github.removed.map((removed, position) => <li key={`${removed.account}:${removed.removedAt}:${position}`} className="flex gap-3">
+            <span className="w-32 shrink-0 tabular-nums text-muted-foreground">{githubTime(removed.removedAt)}</span>
+            <span className="min-w-0 flex-1 text-foreground">{removed.account}</span>
+            <span className="font-mono text-muted-foreground">by {removed.installedBy}</span>
+          </li>)}
+        </ul>
+        <p className="text-caption text-muted-foreground">Was one of these yours? Install again from Install on GitHub, or from the project that needs it, so GitSpace expects it.</p>
+        <DialogFooter>
+          <Button variant="secondary" type="button" onClick={() => setReviewingRemoved(false)}>Close</Button>
+          <Button variant="ghost" type="button" loading={pending === 'clear-removed'} disabled={pending !== null} onClick={() => void run('clear-removed', { kind: 'clear-removed' }).then((done) => { if (done) setReviewingRemoved(false); })}>Clear list</Button>
+        </DialogFooter>
+      </DialogContent> : null}
+    </Dialog>
   </>;
 }
 function DefaultsSettings({ settings, machines, onChange }: Pick<SettingsPageProps, 'settings' | 'machines' | 'onChange'>) {

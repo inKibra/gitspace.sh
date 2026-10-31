@@ -6,7 +6,7 @@ import type { GitHubState } from '@gitspace/protocol/github';
 import { GitHubSettings } from './SettingsPage.js';
 
 const unused = async (): Promise<never> => { throw new Error('Not used by this scenario'); };
-const noApp: GitHubState = { app: null, installations: [], pendingRequests: [], deliveries: [] };
+const noApp: GitHubState = { app: null, installations: [], requests: [], unconfirmed: [], removed: [], uninstalled: [], deliveries: [] };
 const installed: GitHubState = {
   app: { id: 7, slug: 'gitspace-brad', name: 'GitSpace brad', htmlUrl: 'https://github.com/apps/gitspace-brad', owner: { kind: 'user', login: 'brad' }, createdAt: '2026-10-17T10:00:00.000Z', keyUpdatedAt: '2026-10-17T10:00:00.000Z' },
   installations: [{
@@ -18,7 +18,10 @@ const installed: GitHubState = {
     installedAt: '2026-10-17T11:00:00.000Z',
     projects: [{ id: 'project-1', name: 'GitSpace', repository: 'inKibra/gitspace.sh' }],
   }],
-  pendingRequests: [{ requestedAt: '2026-10-17T12:00:00.000Z' }],
+  requests: [{ id: 'request-1', organization: 'BrandByX', project: { id: 'portal', name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', firstRequestedAt: '2026-10-17T12:00:00.000Z', lastRequestedAt: '2026-10-18T12:00:00.000Z', times: 2 }],
+  unconfirmed: [{ id: 99, account: { kind: 'organization', login: 'acme-labs' }, installedBy: 'octocat', installedAt: '2026-10-18T13:00:00.000Z', removeAt: '2026-10-25T13:00:00.000Z', repositorySelection: 'all', repositories: [] }],
+  removed: [],
+  uninstalled: [],
   deliveries: [{ id: 'delivery-1', event: 'installation_repositories', action: 'added', installationId: 42, repository: 'inKibra/site', receivedAt: '2026-10-17T11:05:00.000Z', outcome: 'recorded' }],
 };
 
@@ -40,7 +43,7 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 function render(overrides: Partial<ComponentProps<typeof GitHubSettings>> = {}) {
-  return act(() => root.render(<GitHubSettings github={noApp} onStartGitHubApp={unused} onStartGitHubInstall={unused} onRotateGitHubKey={unused} {...overrides} />));
+  return act(() => root.render(<GitHubSettings github={noApp} onStartGitHubApp={unused} onStartGitHubInstall={unused} onRotateGitHubKey={unused} onGitHubAction={unused} {...overrides} />));
 }
 async function click(label: string) {
   const target = [...document.body.querySelectorAll('button')].find((candidate) => candidate.textContent?.trim() === label);
@@ -92,15 +95,24 @@ it('shows a callback error with its message and drops both parameters', async ()
   expect(window.location.search).toBe('?section=github');
 });
 
-it('lists each installation with its repositories, linked projects and pending owner approvals', async () => {
-  await render({ github: installed });
+it('shows each organization once, by what holds it up, and sends what the person decides', async () => {
+  const action = vi.fn(async () => undefined);
+  await render({ github: installed, onGitHubAction: action });
   const text = document.body.textContent ?? '';
-  expect(text).toContain('inKibra');
-  expect(text).toContain('Selected repositories: inKibra/gitspace.sh, inKibra/site');
-  expect(text).toContain('Linked projects: GitSpace');
-  expect(text).toContain('contents:write metadata:read');
-  expect(text).toContain('Waiting for an organization owner to approve the install on GitHub');
-  expect(text).toContain('installation_repositories.added');
+  expect(text).toContain('inKibra/gitspace.sh, inKibra/site');
+  expect(text).toContain('Waiting on an owner');
+  expect(text).toContain('Landscaping Portal · BrandByX/payne-portals');
+  expect(text).toContain('2 requests, shown once');
+  expect(text).toContain('Is this yours?');
+  await click("Yes, it's mine");
+  expect(action).toHaveBeenLastCalledWith({ kind: 'confirm', installationId: 99 });
+  await click('Cancel request');
+  await click('Forget request');
+  expect(action).toHaveBeenLastCalledWith({ kind: 'cancel-request', requestId: 'request-1' });
+  await click('Uninstall…');
+  await click('Uninstall from inKibra');
+  expect(action).toHaveBeenLastCalledWith({ kind: 'uninstall', installationId: 42 });
+  expect(action).toHaveBeenCalledTimes(3);
 });
 
 it('reports a private key GitHub rejects and confirms one it accepts', async () => {

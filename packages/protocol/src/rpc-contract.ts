@@ -84,7 +84,7 @@ import {
   ProjectMcpGrantViewCodec,
 } from './mcp-contract.js';
 import { MachineDiscardConfirmationCodec, MachineDiscardRequiredCodec } from './machine-discard.js';
-import { GitHubAppManifestFormCodec, GitHubAppOwnerCodec, GitHubStateCodec } from './github.js';
+import { GitHubAppManifestFormCodec, GitHubAppOwnerCodec, GitHubProjectAccessCodec, GitHubStateCodec } from './github.js';
 
 export const rpcErrors = defineErrors('gitspace', {
   machineDiscardRequired: { data: MachineDiscardRequiredCodec, httpStatus: 409 },
@@ -1029,13 +1029,62 @@ export const githubAppStartContract = gitspaceRpc
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-/** The App's GitHub install page, carrying a one-time state the setup callback must present. */
+/** The App's GitHub install page, carrying a one-time state the setup callback must present. Started from a project,
+ * the state names the project's repository owner, so its install is kept when an owner there approves it. */
 export const githubInstallStartContract = gitspaceRpc
   .procedure()
-  .input(wire.object({}))
+  .input(wire.object({ projectId: wire.optional(wire.string) }))
   .output(wire.object({ url: wire.string }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+/** Forget an install request. GitHub keeps the request until an organization owner answers it. */
+export const githubRequestCancelContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ requestId: wire.string }))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Keep an installation that waits for confirmation; it answers the oldest request whose organization was unknown. */
+export const githubInstallationConfirmContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ installationId: wire.integer() }))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Uninstall the App from an account on GitHub: a kept installation, or one waiting for confirmation. */
+export const githubInstallationUninstallContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ installationId: wire.integer() }))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Stop showing a kept installation someone uninstalled on GitHub. */
+export const githubUninstalledDismissContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ installationId: wire.integer() }))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Empty the list of installations GitSpace removed. */
+export const githubRemovedClearContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Whether a project's agent can read its GitHub repository, and if not, how it gets access. */
+export const githubProjectAccessContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string }))
+  .output(GitHubProjectAccessCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
 
 /** Replace the App's private key with one generated on GitHub; it is stored only after GitHub accepts it. */
 export const githubAppRotateKeyContract = gitspaceRpc
@@ -2347,6 +2396,11 @@ export const gitspaceContract = gitspaceRpc.contract({
     state: githubStateContract,
     app: { start: githubAppStartContract, rotateKey: githubAppRotateKeyContract },
     install: { start: githubInstallStartContract },
+    request: { cancel: githubRequestCancelContract },
+    installation: { confirm: githubInstallationConfirmContract, uninstall: githubInstallationUninstallContract },
+    uninstalled: { dismiss: githubUninstalledDismissContract },
+    removed: { clear: githubRemovedClearContract },
+    projectAccess: githubProjectAccessContract,
   },
   mcp: {
     connections: {

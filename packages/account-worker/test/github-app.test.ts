@@ -61,6 +61,14 @@ function deliver(event: string, deliveryId: string, body: string, signed: string
   return SELF.fetch(`${env.ACCOUNT_URL}/github/webhook`, { method: 'POST', headers, body });
 }
 
+/** An `installation.created` delivery: `sender` installed the App on `account`, on all repositories unless some are named. */
+function createdPayload(installationId: number, account: string, sender: string, repositories: string[] = []) {
+  return {
+    action: 'created', sender: { login: sender }, repositories: repositories.map((full_name) => ({ full_name })),
+    installation: { id: installationId, account: { login: account, type: 'Organization' }, repository_selection: repositories.length ? 'selected' : 'all' },
+  };
+}
+
 /** The settings outcome a GitHub callback redirected the browser to. */
 function outcome(response: Response): URLSearchParams {
   expect(response.status).toBe(303);
@@ -260,9 +268,9 @@ describe('GitHub App', () => {
     const repositories = { names: ['inKibra/pantry', 'inKibra/tools'] };
     installationApi(key, 91, 'inKibra', repositories);
 
-    // A setup callback without GitSpace's state claims nothing.
+    // A setup callback without GitSpace's state claims nothing: the installation webhook decides.
     const stray = outcome(await setupCallback(91, 'install', null));
-    expect(stray.get('github')).toBe('error');
+    expect(stray.get('github')).toBe('received');
     expect((await github().state()).installations).toEqual([]);
 
     const state = await installState();
@@ -275,7 +283,8 @@ describe('GitHub App', () => {
     await vi.waitFor(() => expect(notices).toHaveBeenCalledWith({ projectId: pantry.id, workspaceId: pantry.id }, 'Linked to GitHub: GitSpace test on inKibra covers inKibra/pantry.'));
     expect(notices).toHaveBeenCalledTimes(1);
     // The state was spent by that install.
-    expect(outcome(await setupCallback(92, 'install', state)).get('github')).toBe('error');
+    expect(outcome(await setupCallback(92, 'install', state)).get('github')).toBe('received');
+    expect((await github().state()).installations.map((installation) => installation.id)).toEqual([91]);
 
     // GitHub reports the selection changed; the project unlinks.
     repositories.names = ['inKibra/tools'];
@@ -298,7 +307,7 @@ describe('GitHub App', () => {
       return new HttpResponse(null, { status: 204 });
     }));
     const installationCreated = async (installationId: number, deliveryId: string) => {
-      const body = JSON.stringify({ action: 'created', installation: { id: installationId } });
+      const body = JSON.stringify(createdPayload(installationId, 'inKibra', 'stranger'));
       expect((await deliver('installation', deliveryId, body, await signature(body))).status).toBe(202);
     };
     await installationCreated(91, 'stranger-installed');
@@ -314,7 +323,109 @@ describe('GitHub App', () => {
     expect(await runDurableObjectAlarm(github())).toBe(false);
     const view = await github().state();
     expect(view.installations.map((installation) => installation.id)).toEqual([92]);
-    expect(view.deliveries.find((delivery) => delivery.id === 'stranger-installed')?.outcome).toContain('not started from GitSpace');
+    expect(view.deliveries.find((delivery) => delivery.id === 'stranger-installed')?.outcome).toContain('not expected');
+    expect(view.removed).toEqual([{ account: 'inKibra', installedBy: 'stranger', removedAt: expect.any(String) }]);
+  });
+
+  it("keeps an installation that answers a project's request for its organization, and one the App's owner made", async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    const portal = await project('Landscaping Portal', 'https://github.com/BrandByX/payne-portals.git');
+    network.use(
+      http.get(`${API}/users/BrandByX`, () => HttpResponse.json({ id: 160976157, login: 'BrandByX' })),
+      http.get('https://github.com/BrandByX/payne-portals.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })),
+    );
+    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test' });
+
+    // Started from the project, GitHub opens with the repository's owner chosen, and the request names it.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { url } = await github().startInstall(portal.id);
+      expect(url).toMatch(/^https:\/\/github\.com\/apps\/gitspace-test\/installations\/new\/permissions\?target_id=160976157&state=[A-Za-z0-9_-]{43}$/u);
+      expect(outcome(await setupCallback(0, 'request', new URL(url).searchParams.get('state'))).get('github')).toBe('requested');
+    }
+    const requested = await github().projectAccess(portal.id);
+    expect(requested).toMatchObject({ state: 'requested', request: { organization: 'BrandByX', project: { id: portal.id, name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', times: 2 } });
+    expect((await github().state()).requests).toHaveLength(1);
+
+    // An owner of BrandByX approves it elsewhere: no state reaches GitSpace, only the webhook.
+    installationApi(key, 95, 'BrandByX', { names: ['BrandByX/payne-portals'] });
+    const approved = JSON.stringify(createdPayload(95, 'BrandByX', 'leather-s'));
+    expect((await deliver('installation', 'brandbyx-approved', approved, await signature(approved))).status).toBe(202);
+    const kept = await github().state();
+    expect(kept.installations.map((installation) => installation.account.login)).toEqual(['BrandByX']);
+    expect(kept.requests).toEqual([]);
+    expect(kept.deliveries[0]?.outcome).toBe('kept: answers the request for BrandByX');
+    expect(await github().projectAccess(portal.id)).toEqual({ state: 'ready' });
+
+    // The App's owner installs it straight from GitHub, with no request at all.
+    installationApi(key, 96, 'octo-labs', { names: [] });
+    const own = JSON.stringify(createdPayload(96, 'octo-labs', 'octo'));
+    expect((await deliver('installation', 'owner-installed', own, await signature(own))).status).toBe(202);
+    expect((await github().state()).installations.map((installation) => installation.id)).toEqual([95, 96]);
+  });
+
+  it('waits for confirmation while a request of unknown organization is pending, and uninstalls one never confirmed', async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    const uninstalled: string[] = [];
+    network.use(http.delete(`${API}/app/installations/:id`, ({ params }) => { uninstalled.push(String(params.id)); return new HttpResponse(null, { status: 204 }); }));
+    for (let attempt = 0; attempt < 2; attempt++) expect(outcome(await setupCallback(0, 'request', await installState())).get('github')).toBe('requested');
+    expect((await github().state()).requests).toMatchObject([{ organization: null, project: null, times: 2 }]);
+
+    const arrivals: Array<[number, string]> = [[97, 'acme-labs'], [98, 'other-org']];
+    for (const [id, account] of arrivals) {
+      const body = JSON.stringify(createdPayload(id, account, 'someone', ['acme-labs/site']));
+      expect((await deliver('installation', `installed-${id}`, body, await signature(body))).status).toBe(202);
+    }
+    const waiting = await github().state();
+    expect(waiting.installations).toEqual([]);
+    expect(waiting.unconfirmed.map((installation) => [installation.id, installation.account.login, installation.installedBy])).toEqual([[97, 'acme-labs', 'someone'], [98, 'other-org', 'someone']]);
+    expect(Date.parse(waiting.unconfirmed[0]!.removeAt) - Date.now()).toBeGreaterThan(6 * 24 * 60 * 60_000);
+    expect(await github().coverage('acme-labs/site')).toBeNull();
+    // Nothing an unconfirmed installation sends reaches automations or projects.
+    const push = JSON.stringify({ installation: { id: 97 }, repository: { full_name: 'acme-labs/site' }, ref: 'refs/heads/main', after: 'a'.repeat(40) });
+    await deliver('push', 'unconfirmed-push', push, await signature(push));
+    expect((await github().state()).deliveries[0]?.outcome).toBe('recorded: installation not kept');
+
+    installationApi(key, 97, 'acme-labs', { names: ['acme-labs/site'] });
+    const confirmed = await github().confirmInstallation(97);
+    expect(confirmed.installations.map((installation) => installation.id)).toEqual([97]);
+    expect(confirmed.requests).toMatchObject([{ organization: null, times: 1 }]);
+    expect(confirmed.unconfirmed.map((installation) => installation.id)).toEqual([98]);
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 7 * 24 * 60 * 60_000 + 1);
+    expect(await runDurableObjectAlarm(github())).toBe(true);
+    expect(uninstalled).toEqual(['98']);
+    const after = await github().state();
+    expect(after.unconfirmed).toEqual([]);
+    expect(after.removed).toMatchObject([{ account: 'other-org', installedBy: 'someone' }]);
+  });
+
+  it('lists a kept installation someone uninstalled on GitHub with the projects it served, and uninstalls one from GitSpace without listing it', async () => {
+    const key = await rsaKey('pkcs1');
+    await createApp(key);
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    const pantry = await project('Pantry', 'git@github.com:inKibra/pantry.git');
+    const deleted: string[] = [];
+    network.use(http.delete(`${API}/app/installations/:id`, ({ params }) => { deleted.push(String(params.id)); return new HttpResponse(null, { status: 204 }); }));
+    installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
+    expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
+    const removedOnGitHub = JSON.stringify({ action: 'deleted', installation: { id: 91 }, sender: { login: 'leather-s' } });
+    await deliver('installation', 'removed-on-github', removedOnGitHub, await signature(removedOnGitHub));
+    const lost = await github().state();
+    expect(lost.installations).toEqual([]);
+    expect(lost.uninstalled).toEqual([{ id: 91, account: { login: 'inKibra', kind: 'organization' }, uninstalledBy: 'leather-s', uninstalledAt: expect.any(String), projects: [{ id: pantry.id, name: 'Pantry', repository: 'inKibra/pantry' }] }]);
+    expect((await github().dismissUninstalled(91)).uninstalled).toEqual([]);
+
+    installationApi(key, 93, 'inKibra', { names: ['inKibra/pantry'] });
+    expect(outcome(await setupCallback(93, 'install', await installState())).get('github')).toBe('installed');
+    const after = await github().uninstall(93);
+    expect(deleted).toEqual(['93']);
+    expect(after.installations).toEqual([]);
+    // GitHub's deletion webhook follows; GitSpace already let go, so nothing is listed.
+    const ours = JSON.stringify({ action: 'deleted', installation: { id: 93 }, sender: { login: 'octo' } });
+    await deliver('installation', 'removed-by-gitspace', ours, await signature(ours));
+    expect((await github().state()).uninstalled).toEqual([]);
   });
 
   it('replaces the private key only after GitHub accepts the new one for this App', async () => {

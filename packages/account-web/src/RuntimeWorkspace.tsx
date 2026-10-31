@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { ResourceFile } from './resource-files.js';
 import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
@@ -27,6 +27,10 @@ import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
 import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
 import { BrowserWatchDialog } from './BrowserWatchDialog.js';
+import { accountLiveKey } from '@gitspace/protocol/live-notice';
+import { useLiveChanges } from './live-notices.js';
+import { useEventRefresh } from './SynchronizationProvider.js';
+import { RepositoryAccessCard } from './GitHubAccess.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -81,6 +85,20 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const [launchRequest, setLaunchRequest] = useState<{ source: LaunchSourceView; targets: typeof RELEASE_TARGETS } | null>(null);
   const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
+  // A project whose private repository the GitHub App does not reach shows how to get access instead of a transcript.
+  const projectView = inspection.workspace.kind === 'base' && inspection.project.repositoryReference !== null;
+  const accessQuery = useResultQuery(rpcClient.github.projectAccess, { projectId: props.projectId }, { enabled: projectView });
+  const accessValue = useRetainedQueryValue(accessQuery, props.projectId);
+  useEventRefresh(useLiveChanges(accountLiveKey('github')), () => accessQuery.refetch(), projectView);
+  const blocked = projectView && accessValue && accessValue.state !== 'ready' ? accessValue : null;
+  // The agent's start, which imports the repository, was refused while access was missing: it starts again once it is not.
+  const wasBlocked = useRef(false);
+  useEffect(() => {
+    if (blocked) { wasBlocked.current = true; return; }
+    if (!wasBlocked.current) return;
+    wasBlocked.current = false;
+    void session.run({ type: 'control' }).catch(() => {});
+  }, [blocked === null]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalChoice, setTerminalChoice] = useState<{ spaceId: string; machineId: string } | null>(null);
   const scope = useMemo(() => runtimeScope(snapshot, inspection, relationValue), [snapshot, inspection, relationValue]);
@@ -220,6 +238,14 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         setLaunchRequest({ source: { kind: 'canonical', repository, branch, commit }, targets: RELEASE_TARGETS });
       }), onBackToDefault: () => perform(launch.backToDefault) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onBackToDefault={() => perform(launch.backToDefault)} onDismiss={launch.dismiss} /> : undefined}
+      access={blocked ? {
+        card: <RepositoryAccessCard access={blocked} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={async () => {
+          const result = await rpcClient.github.install.start({ projectId: props.projectId });
+          if (result.status === 'error') throw result.error;
+          return result.value.url;
+        }} />,
+        notice: `The project agent starts once GitSpace can read ${blocked.repository}.`,
+      } : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
       sessionCommand={sessionCommand}

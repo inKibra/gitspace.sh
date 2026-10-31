@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import {
-  GitHubAppOwnerSchema, GitHubLoginSchema, GitHubRepositoryNameSchema, GitHubStateSchema, githubRepositoryOf,
-  type GitHubAppManifestForm, type GitHubAppOwner, type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
+  GITHUB_REMOVED_KEPT, GitHubAppOwnerSchema, GitHubLoginSchema, GitHubRepositoryNameSchema, GitHubStateSchema, githubRepositoryOf,
+  type GitHubAppManifestForm, type GitHubAppOwner, type GitHubInstallationView, type GitHubInstallRequestView, type GitHubProjectAccess,
+  type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
 } from '@gitspace/protocol/github';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
@@ -14,8 +15,11 @@ import { notifyMachines } from './machine-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const STATE_TTL_MS = 15 * 60_000;
-/** How long an installation GitSpace did not start may stay: its setup callback can still claim it meanwhile. */
+/** How long an installation nothing explains stays before GitSpace uninstalls it: a setup callback carrying GitSpace's
+ * state (an install on an account the person owns) can still claim it meanwhile. */
 const UNCLAIMED_GRACE_MS = 10 * 60_000;
+/** How long an installation that may answer a request of unknown organization waits for the account to confirm it. */
+const CONFIRM_MS = 7 * 24 * 60 * 60_000;
 const UNINSTALL_RETRY_MS = 5 * 60_000;
 /** An installation token is reused while more than this remains of its hour. */
 const TOKEN_REUSE_MARGIN_MS = 5 * 60_000;
@@ -67,13 +71,27 @@ const DeliveryPayloadSchema = z.object({
   ref: z.string().max(1_024).optional(),
   after: z.string().max(100).optional(),
   deleted: z.boolean().optional(),
+  sender: z.object({ login: z.string().min(1).max(100) }).optional(),
 });
+/** An `installation.created` delivery: who installed the App where, and on which repositories. */
+const InstallationCreatedSchema = z.object({
+  installation: z.object({ id: z.number().int().positive(), account: GitHubAccountPayloadSchema, repository_selection: z.enum(['all', 'selected']) }),
+  sender: z.object({ login: z.string().min(1).max(100) }),
+  repositories: z.array(z.object({ full_name: GitHubRepositoryNameSchema })).optional(),
+});
+type InstallationCreated = z.infer<typeof InstallationCreatedSchema>;
 /** A commit id as a push reports a branch's new head. */
 const PushedHeadSchema = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u);
 type DeliveryPayload = z.infer<typeof DeliveryPayloadSchema>;
 const SetupActionSchema = z.enum(['install', 'update', 'request']);
 type SetupAction = z.infer<typeof SetupActionSchema>;
 type StatePurpose = 'create' | 'install';
+/** What an install state was started for: a project's repository names the account it is meant for. */
+interface InstallTarget {
+  organization: string;
+  projectId: string;
+  repository: string;
+}
 
 interface AppRow extends Record<string, SqlStorageValue> {
   id: number;
@@ -104,6 +122,27 @@ interface DeliveryRow extends Record<string, SqlStorageValue> {
   outcome: string;
   /** The delivery as automations read it (`AutomationEvent`); null for events automations do not start on. */
   event_json: string | null;
+}
+/** An installation not kept yet. What its delivery said is null on rows recorded before GitSpace kept it. */
+interface UnclaimedRow extends Record<string, SqlStorageValue> {
+  installation_id: number;
+  deadline: number;
+  confirm: number;
+  account_login: string | null;
+  account_kind: string | null;
+  installed_by: string | null;
+  installed_at: number | null;
+  repository_selection: string | null;
+  repositories_json: string | null;
+}
+interface RequestRow extends Record<string, SqlStorageValue> {
+  id: string;
+  organization: string | null;
+  project_id: string | null;
+  repository: string | null;
+  first_requested_at: number;
+  last_requested_at: number;
+  times: number;
 }
 /** A project whose remote is on GitHub; `repository` is lowercased `owner/name` for matching. */
 interface RepositoryProject {
@@ -240,7 +279,28 @@ export class GitHubAppDO extends BudgetedDurableObject {
         installation_id INTEGER PRIMARY KEY,
         deadline INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS pending_requests (requested_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS install_requests (
+        id TEXT PRIMARY KEY,
+        organization TEXT,
+        project_id TEXT,
+        repository TEXT,
+        first_requested_at INTEGER NOT NULL,
+        last_requested_at INTEGER NOT NULL,
+        times INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS removed_installations (
+        account_login TEXT NOT NULL,
+        installed_by TEXT NOT NULL,
+        removed_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS uninstalled_installations (
+        id INTEGER PRIMARY KEY,
+        account_login TEXT NOT NULL,
+        account_kind TEXT NOT NULL,
+        uninstalled_by TEXT NOT NULL,
+        uninstalled_at INTEGER NOT NULL,
+        projects_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS automation_defaults (project_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS deliveries (
         id TEXT PRIMARY KEY,
@@ -252,37 +312,49 @@ export class GitHubAppDO extends BudgetedDurableObject {
         outcome TEXT NOT NULL
       );
     `);
-    if (!ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(deliveries)').toArray().some(column => column.name === 'event_json')) ctx.storage.sql.exec('ALTER TABLE deliveries ADD COLUMN event_json TEXT');
+    const added: Array<[table: string, column: string, type: string]> = [
+      ['deliveries', 'event_json', 'TEXT'],
+      ['states', 'organization', 'TEXT'], ['states', 'project_id', 'TEXT'], ['states', 'repository', 'TEXT'],
+      // An unclaimed installation that waits for confirmation (`confirm` 1) is shown with what its delivery said.
+      ['unclaimed_installations', 'confirm', 'INTEGER NOT NULL DEFAULT 0'], ['unclaimed_installations', 'account_login', 'TEXT'],
+      ['unclaimed_installations', 'account_kind', 'TEXT'], ['unclaimed_installations', 'installed_by', 'TEXT'],
+      ['unclaimed_installations', 'installed_at', 'INTEGER'], ['unclaimed_installations', 'repository_selection', 'TEXT'],
+      ['unclaimed_installations', 'repositories_json', 'TEXT'],
+    ];
+    for (const [table, column, type] of added) {
+      if (!ctx.storage.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().some(existing => existing.name === column)) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+    // Requests recorded before organizations were: one request whose organization is unknown.
+    if (ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending_requests'").toArray().length > 0) {
+      const pending = ctx.storage.sql.exec<{ first: number | null; last: number | null; times: number }>('SELECT MIN(requested_at) AS first, MAX(requested_at) AS last, COUNT(*) AS times FROM pending_requests').one();
+      if (pending.first !== null && pending.last !== null) {
+        ctx.storage.sql.exec('INSERT INTO install_requests(id, organization, project_id, repository, first_requested_at, last_requested_at, times) VALUES (?, NULL, NULL, NULL, ?, ?, ?)',
+          base64url(crypto.getRandomValues(new Uint8Array(12))), pending.first, pending.last, pending.times);
+      }
+      ctx.storage.sql.exec('DROP TABLE pending_requests');
+    }
   }
 
   async state(): Promise<GitHubState> {
     const projects = await this.repositoryProjects();
     const app = this.app();
-    const repositories = new Map<number, string[]>();
-    for (const row of this.ctx.storage.sql.exec<{ installation_id: number; full_name: string }>('SELECT installation_id, full_name FROM installation_repositories ORDER BY full_name').toArray()) {
-      repositories.set(row.installation_id, [...repositories.get(row.installation_id) ?? [], row.full_name]);
-    }
     return GitHubStateSchema.parse({
       app: app ? {
         id: app.id, slug: app.slug, name: app.name, htmlUrl: app.html_url,
         owner: { login: app.owner_login, kind: app.owner_kind },
         createdAt: new Date(app.created_at).toISOString(), keyUpdatedAt: new Date(app.key_updated_at).toISOString(),
       } : null,
-      installations: this.ctx.storage.sql.exec<InstallationRow>('SELECT * FROM installations ORDER BY installed_at, id').toArray().map((row) => {
-        const names = repositories.get(row.id) ?? [];
-        const covered = new Map(names.map((name) => [name.toLowerCase(), name]));
-        return {
-          id: row.id, account: { login: row.account_login, kind: row.account_kind },
-          repositorySelection: row.repository_selection, repositories: names,
-          permissions: JSON.parse(row.permissions_json), installedAt: new Date(row.installed_at).toISOString(),
-          projects: projects.flatMap((project) => {
-            const repository = covered.get(project.repository);
-            return repository ? [{ id: project.id, name: project.name, repository }] : [];
-          }),
-        };
-      }),
-      pendingRequests: this.ctx.storage.sql.exec<{ requested_at: number }>('SELECT requested_at FROM pending_requests ORDER BY requested_at').toArray()
-        .map((row) => ({ requestedAt: new Date(row.requested_at).toISOString() })),
+      installations: this.installationViews(projects),
+      requests: this.requestViews(projects),
+      unconfirmed: this.ctx.storage.sql.exec<UnclaimedRow>('SELECT * FROM unclaimed_installations WHERE confirm = 1 ORDER BY installed_at, installation_id').toArray().map((row) => ({
+        id: row.installation_id, account: { login: row.account_login, kind: row.account_kind },
+        installedBy: row.installed_by, installedAt: new Date(row.installed_at ?? row.deadline).toISOString(), removeAt: new Date(row.deadline).toISOString(),
+        repositorySelection: row.repository_selection, repositories: JSON.parse(row.repositories_json ?? '[]'),
+      })),
+      removed: this.ctx.storage.sql.exec<{ account_login: string; installed_by: string; removed_at: number }>('SELECT * FROM removed_installations ORDER BY removed_at DESC, rowid DESC').toArray()
+        .map((row) => ({ account: row.account_login, installedBy: row.installed_by, removedAt: new Date(row.removed_at).toISOString() })),
+      uninstalled: this.ctx.storage.sql.exec<{ id: number; account_login: string; account_kind: string; uninstalled_by: string; uninstalled_at: number; projects_json: string }>('SELECT * FROM uninstalled_installations ORDER BY uninstalled_at DESC').toArray()
+        .map((row) => ({ id: row.id, account: { login: row.account_login, kind: row.account_kind }, uninstalledBy: row.uninstalled_by, uninstalledAt: new Date(row.uninstalled_at).toISOString(), projects: JSON.parse(row.projects_json) })),
       deliveries: this.ctx.storage.sql.exec<DeliveryRow>('SELECT * FROM deliveries ORDER BY received_at DESC, rowid DESC LIMIT ?', LISTED_DELIVERIES).toArray()
         .map((row) => ({
           id: row.id, event: row.event, action: row.action, installationId: row.installation_id,
@@ -291,11 +363,32 @@ export class GitHubAppDO extends BudgetedDurableObject {
     });
   }
 
+  /**
+   * Whether a project's agent can read its repository. A repository not on GitHub, public, or covered by an installation
+   * is ready; a private one is reached only through the App, so the answer says what stands in the way: no install on its
+   * owner, a request an owner there has not answered, or an install that leaves this repository out.
+   */
+  async projectAccess(projectId: string): Promise<GitHubProjectAccess> {
+    const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
+    if (!project) throw new Error(`Project ${projectId} was not found`);
+    const repository = project.repositoryReference === null ? null : githubRepositoryOf(project.repositoryReference);
+    if (repository === null || this.coverage(repository) !== null || await this.publicOnGitHub(repository)) return { state: 'ready' };
+    const organization = repository.slice(0, repository.indexOf('/'));
+    const appName = this.app()?.name ?? null;
+    if (appName === null) return { state: 'needs-app', repository, organization, appName };
+    const projects = await this.repositoryProjects();
+    const request = this.requestViews(projects).find((candidate) => candidate.organization?.toLowerCase() === organization.toLowerCase());
+    if (request) return { state: 'requested', repository, organization, appName, request };
+    const installation = this.installationViews(projects).find((candidate) => candidate.account.login.toLowerCase() === organization.toLowerCase());
+    if (installation) return { state: 'not-selected', repository, organization, appName, installation };
+    return { state: 'needs-app', repository, organization, appName };
+  }
+
   /** The manifest form that creates the App on GitHub; its state is good for one creation callback. */
   startApp(owner: GitHubAppOwner): GitHubAppManifestForm {
     const parsed = GitHubAppOwnerSchema.parse(owner);
     if (this.app() || this.creating) throw new Error('This account already has a GitHub App');
-    const state = this.createState('create');
+    const state = this.createState('create', null);
     const manifest = {
       name: `GitSpace ${this.env.TENANT_ID}`,
       url: this.env.ACCOUNT_URL,
@@ -317,7 +410,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** GitHub's redirect after the App was created: exchange the code for the App and its secrets, once. */
   async appCreated(code: string, state: string): Promise<void> {
-    if (!this.consumeState(state, 'create')) throw new Error('This GitHub App link expired or was already used; start again from Settings');
+    if (this.consumeState(state, 'create') === null) throw new Error('This GitHub App link expired or was already used; start again from Settings');
     if (!/^[A-Za-z0-9_-]{1,256}$/u.test(code)) throw new Error('GitHub sent an invalid App code');
     if (this.app() || this.creating) throw new Error('This account already has a GitHub App');
     this.creating = true;
@@ -338,31 +431,89 @@ export class GitHubAppDO extends BudgetedDurableObject {
     this.changed();
   }
 
-  /** The App's install page, carrying a state the setup callback must present. */
-  startInstall(): { url: string } {
+  /** The App's install page, carrying a state the setup callback must present. Started from a project, the state names
+   * the account owning the project's repository, and GitHub opens with that account chosen when its id can be read. */
+  async startInstall(projectId?: string): Promise<{ url: string }> {
     const app = this.app();
     if (!app) throw new Error('Create the GitHub App first');
-    return { url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new?state=${this.createState('install')}` };
+    const base = `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new`;
+    if (projectId === undefined) return { url: `${base}?state=${this.createState('install', null)}` };
+    const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
+    const repository = project?.repositoryReference ? githubRepositoryOf(project.repositoryReference) : null;
+    if (!project || repository === null) throw new Error('This project has no GitHub repository');
+    const organization = repository.slice(0, repository.indexOf('/'));
+    const state = this.createState('install', { organization, projectId, repository });
+    const target = await githubRequest(`/users/${encodeURIComponent(organization)}`, { token: await this.readToken(repository), schema: z.object({ id: z.number().int().positive() }) })
+      .catch((error: unknown) => { console.error(JSON.stringify({ event: 'github_install_target_unread', organization, message: error instanceof Error ? error.message : String(error) })); return null; });
+    return { url: target ? `${base}/permissions?target_id=${target.id}&state=${state}` : `${base}?state=${state}` };
   }
 
-  /** GitHub's setup redirect. Only a GitSpace-started install claims an installation; an update of a claimed one
-   * (GitHub sends those without state) refreshes it. Anything else is left to the webhook and alarm, which remove it. */
-  async installed(input: { installationId: number | null; setupAction: SetupAction; state: string | null }): Promise<'installed' | 'updated' | 'requested'> {
+  /** GitHub's setup redirect. An install GitSpace started is kept, and a request it started is recorded (one per
+   * organization; requests whose organization is unknown are one). An update of a kept installation refreshes it. Any
+   * other redirect (an owner approving elsewhere, or a link without state) changes nothing: the installation webhook
+   * decides. */
+  async installed(input: { installationId: number | null; setupAction: SetupAction; state: string | null }): Promise<'installed' | 'updated' | 'requested' | 'received'> {
     if (!this.app()) throw new Error('This account has no GitHub App');
     const started = this.consumeState(input.state, 'install');
     if (input.setupAction === 'request') {
-      if (!started) throw new Error('This install request did not start from GitSpace');
-      this.ctx.storage.sql.exec('INSERT INTO pending_requests(requested_at) VALUES (?)', Date.now());
+      if (started === null) throw new Error('This install request did not start from GitSpace');
+      this.recordRequest(started.target);
       this.changed();
       return 'requested';
     }
     if (input.installationId === null) throw new Error('GitHub did not say which installation changed');
-    const claimed = this.installation(input.installationId) !== undefined;
-    if (!started && !(input.setupAction === 'update' && claimed)) {
-      throw new Error('GitSpace keeps only installations started from Settings → GitHub; this one is removed');
+    if (started !== null) {
+      await this.syncInstallation(input.installationId, true);
+      return input.setupAction === 'update' ? 'updated' : 'installed';
     }
-    await this.syncInstallation(input.installationId, started);
-    return input.setupAction === 'update' ? 'updated' : 'installed';
+    if (input.setupAction === 'update' && this.installation(input.installationId)) {
+      await this.syncInstallation(input.installationId, false);
+      return 'updated';
+    }
+    return 'received';
+  }
+
+  /** Forgets a request. GitHub keeps its own until an organization owner answers or the requester cancels it there. */
+  async cancelRequest(requestId: string): Promise<GitHubState> {
+    this.ctx.storage.sql.exec('DELETE FROM install_requests WHERE id = ?', requestId);
+    this.changed();
+    return this.state();
+  }
+
+  /** Keeps an installation that waited for confirmation. It answers the request whose organization was unknown, which
+   * then counts one fewer. */
+  async confirmInstallation(installationId: number): Promise<GitHubState> {
+    const waiting = this.ctx.storage.sql.exec('SELECT 1 FROM unclaimed_installations WHERE installation_id = ? AND confirm = 1', installationId).toArray().length > 0;
+    if (!waiting) throw new Error('This installation is not waiting for confirmation');
+    await this.syncInstallation(installationId, true);
+    this.ctx.storage.sql.exec('DELETE FROM install_requests WHERE organization IS NULL AND times <= 1');
+    this.ctx.storage.sql.exec('UPDATE install_requests SET times = times - 1 WHERE organization IS NULL');
+    this.changed();
+    return this.state();
+  }
+
+  /** Uninstalls the App from an account on GitHub: a kept installation, or one waiting for confirmation. GitSpace stops
+   * using it first, so the deletion's webhook finds nothing to record. */
+  async uninstall(installationId: number): Promise<GitHubState> {
+    const known = this.installation(installationId) !== undefined
+      || this.ctx.storage.sql.exec('SELECT 1 FROM unclaimed_installations WHERE installation_id = ?', installationId).toArray().length > 0;
+    if (!known) throw new Error('GitSpace has no such installation');
+    await this.deleteOnGitHub(installationId);
+    await this.removeInstallation(installationId, null);
+    this.changed();
+    return this.state();
+  }
+
+  async dismissUninstalled(installationId: number): Promise<GitHubState> {
+    this.ctx.storage.sql.exec('DELETE FROM uninstalled_installations WHERE id = ?', installationId);
+    this.changed();
+    return this.state();
+  }
+
+  async clearRemoved(): Promise<GitHubState> {
+    this.ctx.storage.sql.exec('DELETE FROM removed_installations');
+    this.changed();
+    return this.state();
   }
 
   /** A delivery whose signature the vault verified. Its id is recorded once; a redelivery changes nothing. */
@@ -396,25 +547,26 @@ export class GitHubAppDO extends BudgetedDurableObject {
     this.changed();
   }
 
-  /** Uninstalls installations nobody claimed before their deadline. */
+  /** Uninstalls installations nobody claimed or confirmed before their deadline, and lists each one removed. */
   async alarm(): Promise<void> {
-    const due = this.ctx.storage.sql.exec<{ installation_id: number }>('SELECT installation_id FROM unclaimed_installations WHERE deadline <= ?', Date.now()).toArray();
-    for (const { installation_id: installationId } of due) {
-      if (!this.installation(installationId)) {
+    const due = this.ctx.storage.sql.exec<UnclaimedRow>('SELECT * FROM unclaimed_installations WHERE deadline <= ?', Date.now()).toArray();
+    for (const row of due) {
+      if (!this.installation(row.installation_id)) {
         try {
-          const token = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
-          await githubRequest(`/app/installations/${installationId}`, { method: 'DELETE', token, schema: z.null() });
+          await this.deleteOnGitHub(row.installation_id);
         } catch (error) {
-          // Already gone on GitHub counts as done; anything else is retried.
-          if (!(error instanceof GitHubApiError && error.status === 404)) {
-            console.error(JSON.stringify({ event: 'github_uninstall_failed', installationId, message: error instanceof Error ? error.message : String(error) }));
-            this.ctx.storage.sql.exec('UPDATE unclaimed_installations SET deadline = ? WHERE installation_id = ?', Date.now() + UNINSTALL_RETRY_MS, installationId);
-            continue;
-          }
+          console.error(JSON.stringify({ event: 'github_uninstall_failed', installationId: row.installation_id, message: error instanceof Error ? error.message : String(error) }));
+          this.ctx.storage.sql.exec('UPDATE unclaimed_installations SET deadline = ? WHERE installation_id = ?', Date.now() + UNINSTALL_RETRY_MS, row.installation_id);
+          continue;
+        }
+        if (row.account_login !== null) {
+          this.ctx.storage.sql.exec('INSERT INTO removed_installations(account_login, installed_by, removed_at) VALUES (?, ?, ?)', row.account_login, row.installed_by ?? 'unknown', Date.now());
+          this.ctx.storage.sql.exec('DELETE FROM removed_installations WHERE rowid NOT IN (SELECT rowid FROM removed_installations ORDER BY removed_at DESC, rowid DESC LIMIT ?)', GITHUB_REMOVED_KEPT);
         }
       }
-      this.ctx.storage.sql.exec('DELETE FROM unclaimed_installations WHERE installation_id = ?', installationId);
+      this.ctx.storage.sql.exec('DELETE FROM unclaimed_installations WHERE installation_id = ?', row.installation_id);
     }
+    if (due.length > 0) this.changed();
     // The alarm that fired is no longer set: arm the next deadline explicitly.
     await this.armAlarm();
   }
@@ -432,21 +584,25 @@ export class GitHubAppDO extends BudgetedDurableObject {
     return this.installationToken(repository, access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' });
   }
 
-  /**
-   * Whether anyone may read `repository`: GitHub serves a public repository's refs without credentials (the request the
-   * cloud already makes for origins; the REST API's anonymous limit is shared across Cloudflare's addresses). A private
-   * repository must be covered by an installation: a reader's user token sees only repositories the App is installed on.
-   */
+  /** Whether anyone may read `repository`. A private repository must be covered by an installation: a reader's user
+   * token sees only repositories the App is installed on. */
   async repositoryIsPublic(repository: string): Promise<boolean> {
+    if (await this.publicOnGitHub(repository)) return true;
+    if (this.coverage(repository) === null) {
+      throw new Error(`${repository} is private and the GitHub App is not installed on it, so GitSpace cannot check who may read it. Install the App on ${repository} in Settings → GitHub.`);
+    }
+    return false;
+  }
+
+  /** GitHub serves a public repository's refs without credentials (the request the cloud already makes for origins; the
+   * REST API's anonymous limit is shared across Cloudflare's addresses), and answers 401 or 404 for a private one. */
+  private async publicOnGitHub(repository: string): Promise<boolean> {
     const response = await fetch(`https://github.com/${repository}.git/info/refs?service=git-upload-pack`, {
       headers: { 'user-agent': 'GitSpace' }, redirect: 'manual', signal: AbortSignal.timeout(10_000),
     }).catch((error: unknown) => { throw new Error(`GitHub could not be reached: ${error instanceof Error ? error.message : String(error)}`); });
     await response.body?.cancel();
     if (response.ok) return true;
     if (response.status !== 401 && response.status !== 404) throw new Error(`GitHub answered ${response.status} for ${repository}`);
-    if (this.coverage(repository) === null) {
-      throw new Error(`${repository} is private and the GitHub App is not installed on it, so GitSpace cannot check who may read it. Install the App on ${repository} in Settings → GitHub.`);
-    }
     return false;
   }
 
@@ -608,18 +764,16 @@ export class GitHubAppDO extends BudgetedDurableObject {
     const unclaimed = this.ctx.storage.sql.exec('SELECT 1 FROM unclaimed_installations WHERE installation_id = ?', installationId).toArray().length > 0;
     if (event === 'installation' && action === 'created') {
       if (claimed) return 'recorded';
-      if (!unclaimed) {
-        this.ctx.storage.sql.exec('INSERT INTO unclaimed_installations(installation_id, deadline) VALUES (?, ?)', installationId, Date.now() + UNCLAIMED_GRACE_MS);
-        await this.armAlarm();
-      }
-      return 'not started from GitSpace: removed unless claimed within 10 minutes';
+      const created = InstallationCreatedSchema.safeParse(raw);
+      return created.success ? this.installationCreated(created.data) : 'dropped: unreadable installation';
     }
     if (!claimed && !unclaimed) return 'dropped: unknown installation';
     if (event === 'installation' && action === 'deleted') {
-      await this.removeInstallation(installationId);
-      return 'installation removed';
+      const by = payload.sender?.login ?? 'someone';
+      await this.removeInstallation(installationId, claimed ? by : null);
+      return claimed ? `installation removed on GitHub by ${by}` : 'installation removed';
     }
-    if (!claimed) return 'recorded: installation not started from GitSpace';
+    if (!claimed) return 'recorded: installation not kept';
     const routed = await this.routeToAutomations(event, deliveryId, raw);
     if (event === 'push') return routed === null ? this.recordPush(payload) : `${await this.recordPush(payload)}; ${routed}`;
     if (routed !== null) return routed;
@@ -632,6 +786,37 @@ export class GitHubAppDO extends BudgetedDurableObject {
       return 'installation refreshed';
     }
     return event === 'installation' && action === 'suspend' ? 'installation suspended on GitHub' : 'recorded';
+  }
+
+  /**
+   * Decides an installation GitSpace's setup callback has not claimed. Kept when the App's owner made it, or when a
+   * request names its account. Otherwise, while a request whose organization is unknown is pending, it waits for the
+   * account to confirm it; with none pending it is uninstalled after a grace a setup callback carrying GitSpace's state
+   * can still claim it in. Until kept, GitSpace uses none of it.
+   */
+  private async installationCreated(created: InstallationCreated): Promise<string> {
+    const { installation, sender } = created;
+    const account = installation.account.login;
+    const app = this.app();
+    if (app?.owner_kind === 'user' && sender.login.toLowerCase() === app.owner_login.toLowerCase()) {
+      await this.syncInstallation(installation.id, true);
+      return `kept: installed on ${account} by the App's owner`;
+    }
+    if (this.ctx.storage.sql.exec('SELECT 1 FROM install_requests WHERE lower(organization) = lower(?)', account).toArray().length > 0) {
+      await this.syncInstallation(installation.id, true);
+      return `kept: answers the request for ${account}`;
+    }
+    const confirm = this.ctx.storage.sql.exec('SELECT 1 FROM install_requests WHERE organization IS NULL').toArray().length > 0;
+    const now = Date.now();
+    this.ctx.storage.sql.exec(`
+      INSERT OR REPLACE INTO unclaimed_installations(installation_id, deadline, confirm, account_login, account_kind, installed_by, installed_at, repository_selection, repositories_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, installation.id, now + (confirm ? CONFIRM_MS : UNCLAIMED_GRACE_MS), confirm ? 1 : 0, account, installation.account.type === 'Organization' ? 'organization' : 'user',
+    sender.login, now, installation.repository_selection, JSON.stringify((created.repositories ?? []).map((repository) => repository.full_name)));
+    await this.armAlarm();
+    return confirm
+      ? `waiting for confirmation: installed on ${account} by ${sender.login} while a request of unknown organization is pending`
+      : `not expected: installed on ${account} by ${sender.login}; removed in 10 minutes unless GitSpace's setup callback claims it`;
   }
 
   /** An event automations start on is kept trimmed (Test with a past event replays it) and sent to the automations of
@@ -696,7 +881,8 @@ export class GitHubAppDO extends BudgetedDurableObject {
       }
       if (claim) {
         this.ctx.storage.sql.exec('DELETE FROM unclaimed_installations WHERE installation_id = ?', installationId);
-        this.ctx.storage.sql.exec('DELETE FROM pending_requests');
+        this.ctx.storage.sql.exec('DELETE FROM install_requests WHERE lower(organization) = lower(?)', installation.account.login);
+        this.ctx.storage.sql.exec('DELETE FROM uninstalled_installations WHERE lower(account_login) = lower(?)', installation.account.login);
       }
       return true;
     });
@@ -705,15 +891,83 @@ export class GitHubAppDO extends BudgetedDurableObject {
     this.changed();
   }
 
-  private async removeInstallation(installationId: number): Promise<void> {
+  /** Stops using an installation. `uninstalledBy` names who removed a kept one on GitHub: it stays listed, with the
+   * projects it covered, until dismissed or installed again. */
+  private async removeInstallation(installationId: number, uninstalledBy: string | null): Promise<void> {
     const projects = await this.repositoryProjects();
     const before = this.links(projects);
+    const kept = this.installation(installationId);
+    const covered = new Map(this.ctx.storage.sql.exec<{ full_name: string }>('SELECT full_name FROM installation_repositories WHERE installation_id = ?', installationId).toArray()
+      .map((row) => [row.full_name.toLowerCase(), row.full_name]));
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec('DELETE FROM installation_repositories WHERE installation_id = ?', installationId);
       this.ctx.storage.sql.exec('DELETE FROM installations WHERE id = ?', installationId);
       this.ctx.storage.sql.exec('DELETE FROM unclaimed_installations WHERE installation_id = ?', installationId);
+      if (kept && uninstalledBy !== null) {
+        const affected = projects.flatMap((project) => {
+          const repository = covered.get(project.repository);
+          return repository ? [{ id: project.id, name: project.name, repository }] : [];
+        });
+        this.ctx.storage.sql.exec('INSERT OR REPLACE INTO uninstalled_installations(id, account_login, account_kind, uninstalled_by, uninstalled_at, projects_json) VALUES (?, ?, ?, ?, ?, ?)',
+          installationId, kept.account_login, kept.account_kind, uninstalledBy, Date.now(), JSON.stringify(affected));
+      }
     });
     this.announce(before, this.links(projects));
+  }
+
+  /** Uninstalls the App from an installation's account; already gone counts as done. */
+  private async deleteOnGitHub(installationId: number): Promise<void> {
+    const token = await this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).githubAppJwt();
+    await githubRequest(`/app/installations/${installationId}`, { method: 'DELETE', token, schema: z.null() }).catch((error: unknown) => {
+      if (!(error instanceof GitHubApiError && error.status === 404)) throw error;
+    });
+  }
+
+  /** Records a request GitSpace started: one per organization, repeats counted; one for every unknown organization. */
+  private recordRequest(target: InstallTarget | null): void {
+    const now = Date.now();
+    const existing = target === null
+      ? this.ctx.storage.sql.exec<{ id: string }>('SELECT id FROM install_requests WHERE organization IS NULL').toArray()[0]
+      : this.ctx.storage.sql.exec<{ id: string }>('SELECT id FROM install_requests WHERE lower(organization) = lower(?)', target.organization).toArray()[0];
+    if (existing) {
+      this.ctx.storage.sql.exec('UPDATE install_requests SET last_requested_at = ?, times = times + 1, project_id = coalesce(?, project_id), repository = coalesce(?, repository) WHERE id = ?',
+        now, target?.projectId ?? null, target?.repository ?? null, existing.id);
+      return;
+    }
+    this.ctx.storage.sql.exec('INSERT INTO install_requests(id, organization, project_id, repository, first_requested_at, last_requested_at, times) VALUES (?, ?, ?, ?, ?, ?, 1)',
+      base64url(crypto.getRandomValues(new Uint8Array(12))), target?.organization ?? null, target?.projectId ?? null, target?.repository ?? null, now, now);
+  }
+
+  private installationViews(projects: RepositoryProject[]): GitHubInstallationView[] {
+    const repositories = new Map<number, string[]>();
+    for (const row of this.ctx.storage.sql.exec<{ installation_id: number; full_name: string }>('SELECT installation_id, full_name FROM installation_repositories ORDER BY full_name').toArray()) {
+      repositories.set(row.installation_id, [...repositories.get(row.installation_id) ?? [], row.full_name]);
+    }
+    return this.ctx.storage.sql.exec<InstallationRow>('SELECT * FROM installations ORDER BY installed_at, id').toArray().map((row) => {
+      const names = repositories.get(row.id) ?? [];
+      const covered = new Map(names.map((name) => [name.toLowerCase(), name]));
+      return {
+        id: row.id, account: { login: row.account_login, kind: row.account_kind === 'organization' ? 'organization' : 'user' },
+        repositorySelection: row.repository_selection === 'all' ? 'all' : 'selected', repositories: names,
+        permissions: z.record(z.string(), z.string()).parse(JSON.parse(row.permissions_json)), installedAt: new Date(row.installed_at).toISOString(),
+        projects: projects.flatMap((project) => {
+          const repository = covered.get(project.repository);
+          return repository ? [{ id: project.id, name: project.name, repository }] : [];
+        }),
+      };
+    });
+  }
+
+  private requestViews(projects: RepositoryProject[]): GitHubInstallRequestView[] {
+    const names = new Map(projects.map((project) => [project.id, project.name]));
+    return this.ctx.storage.sql.exec<RequestRow>('SELECT * FROM install_requests ORDER BY first_requested_at').toArray().map((row) => {
+      const name = row.project_id === null ? undefined : names.get(row.project_id);
+      return {
+        id: row.id, organization: row.organization, repository: row.repository,
+        project: row.project_id !== null && name !== undefined ? { id: row.project_id, name } : null,
+        firstRequestedAt: new Date(row.first_requested_at).toISOString(), lastRequestedAt: new Date(row.last_requested_at).toISOString(), times: row.times,
+      };
+    });
   }
 
   private async repositoryProjects(): Promise<RepositoryProject[]> {
@@ -770,19 +1024,23 @@ export class GitHubAppDO extends BudgetedDurableObject {
     return this.ctx.storage.sql.exec<InstallationRow>('SELECT * FROM installations WHERE id = ?', installationId).toArray()[0];
   }
 
-  private createState(purpose: StatePurpose): string {
+  private createState(purpose: StatePurpose, target: InstallTarget | null): string {
     const now = Date.now();
     const state = base64url(crypto.getRandomValues(new Uint8Array(32)));
     this.ctx.storage.sql.exec('DELETE FROM states WHERE expires_at <= ?', now);
-    this.ctx.storage.sql.exec('INSERT INTO states(state, purpose, expires_at) VALUES (?, ?, ?)', state, purpose, now + STATE_TTL_MS);
+    this.ctx.storage.sql.exec('INSERT INTO states(state, purpose, expires_at, organization, project_id, repository) VALUES (?, ?, ?, ?, ?, ?)',
+      state, purpose, now + STATE_TTL_MS, target?.organization ?? null, target?.projectId ?? null, target?.repository ?? null);
     return state;
   }
 
-  /** One use: the row is deleted whether or not it is still fresh. */
-  private consumeState(state: string | null, purpose: StatePurpose): boolean {
-    if (!state) return false;
-    const row = this.ctx.storage.sql.exec<{ expires_at: number }>('DELETE FROM states WHERE state = ? AND purpose = ? RETURNING expires_at', state, purpose).toArray()[0];
-    return row !== undefined && row.expires_at > Date.now();
+  /** One use: the row is deleted whether or not it is still fresh. Null when the state is unknown or expired. */
+  private consumeState(state: string | null, purpose: StatePurpose): { target: InstallTarget | null } | null {
+    if (!state) return null;
+    const row = this.ctx.storage.sql.exec<{ expires_at: number; organization: string | null; project_id: string | null; repository: string | null }>(
+      'DELETE FROM states WHERE state = ? AND purpose = ? RETURNING expires_at, organization, project_id, repository', state, purpose,
+    ).toArray()[0];
+    if (row === undefined || row.expires_at <= Date.now()) return null;
+    return { target: row.organization !== null && row.project_id !== null && row.repository !== null ? { organization: row.organization, projectId: row.project_id, repository: row.repository } : null };
   }
 
   private async armAlarm(): Promise<void> {

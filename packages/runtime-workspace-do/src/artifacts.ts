@@ -87,7 +87,7 @@ export function artifactsWorkspaceRepository(workspaceId: string): string {
 
 export type ProjectImportRequiresMachineReason = 'private' | 'too-large' | 'pending';
 const PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES: Record<ProjectImportRequiresMachineReason, string> = {
-  private: "This is a private repository, so GitSpace Cloud can't import it. Create a workspace in this project with a machine connected; the machine does the initial import.",
+  private: "This repository is private. GitSpace reads a private GitHub repository only through your GitHub App: install it on the repository's owner from this project's page.",
   'too-large': "This repository is larger than Cloudflare Artifacts' 40 MB import limit. Create a workspace in this project with a machine connected; the machine does the initial import.",
   pending: "The initial import from a machine hasn't finished yet. Keep that machine online and try again shortly.",
 };

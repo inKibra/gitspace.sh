@@ -72,20 +72,90 @@ export const GitHubDeliveryViewSchema = z.object({
 });
 export type GitHubDeliveryView = z.infer<typeof GitHubDeliveryViewSchema>;
 
+/** Who did something on GitHub, as its webhook names them (people, or Apps' `name[bot]` users). */
+const GitHubActorSchema = z.string().min(1).max(100);
+
+/** An install GitSpace sent to GitHub that an organization owner has not answered. Repeats for one organization are
+ * one request. */
+export const GitHubInstallRequestViewSchema = z.object({
+  id: z.string().min(1).max(100),
+  /** Known when the request started from a project; null from Install on GitHub, since GitHub does not say. */
+  organization: GitHubLoginSchema.nullable(),
+  project: z.object({ id: z.string().min(1), name: z.string() }).nullable(),
+  repository: GitHubRepositoryNameSchema.nullable(),
+  firstRequestedAt: z.string().datetime(),
+  lastRequestedAt: z.string().datetime(),
+  times: z.number().int().positive(),
+});
+export type GitHubInstallRequestView = z.infer<typeof GitHubInstallRequestViewSchema>;
+
+/** An installation that arrived while a request whose organization GitSpace does not know was pending. GitSpace does
+ * not use it until the account confirms it, and uninstalls it at `removeAt`. */
+export const GitHubUnconfirmedInstallationViewSchema = z.object({
+  id: z.number().int().positive(),
+  account: GitHubAccountSchema,
+  installedBy: GitHubActorSchema,
+  installedAt: z.string().datetime(),
+  removeAt: z.string().datetime(),
+  repositorySelection: z.enum(['all', 'selected']),
+  /** The selected repositories as the install reported them; empty for all repositories. */
+  repositories: z.array(GitHubRepositoryNameSchema),
+});
+export type GitHubUnconfirmedInstallationView = z.infer<typeof GitHubUnconfirmedInstallationViewSchema>;
+
+/** An installation GitSpace uninstalled because no request could be for it and the App's owner did not make it. */
+export const GitHubRemovedInstallationViewSchema = z.object({
+  account: GitHubLoginSchema,
+  installedBy: GitHubActorSchema,
+  removedAt: z.string().datetime(),
+});
+export type GitHubRemovedInstallationView = z.infer<typeof GitHubRemovedInstallationViewSchema>;
+
+/** A kept installation someone uninstalled on GitHub, shown until dismissed or installed again. */
+export const GitHubUninstalledInstallationViewSchema = z.object({
+  id: z.number().int().positive(),
+  account: GitHubAccountSchema,
+  uninstalledBy: GitHubActorSchema,
+  uninstalledAt: z.string().datetime(),
+  projects: z.array(GitHubLinkedProjectSchema),
+});
+export type GitHubUninstalledInstallationView = z.infer<typeof GitHubUninstalledInstallationViewSchema>;
+
 export const GitHubStateSchema = z.object({
   app: GitHubAppViewSchema.nullable(),
   installations: z.array(GitHubInstallationViewSchema),
-  /** Organizations where an install was requested and waits for an organization owner's approval on GitHub. */
-  pendingRequests: z.array(z.object({ requestedAt: z.string().datetime() })),
+  /** Oldest first. */
+  requests: z.array(GitHubInstallRequestViewSchema),
+  unconfirmed: z.array(GitHubUnconfirmedInstallationViewSchema),
+  /** Newest first; the latest `GITHUB_REMOVED_KEPT`. */
+  removed: z.array(GitHubRemovedInstallationViewSchema),
+  uninstalled: z.array(GitHubUninstalledInstallationViewSchema),
   /** The latest deliveries, newest first. */
   deliveries: z.array(GitHubDeliveryViewSchema),
 });
 export type GitHubState = z.infer<typeof GitHubStateSchema>;
+/** How many removed installations GitSpace keeps listed. */
+export const GITHUB_REMOVED_KEPT = 50;
+
+/** Whether a project's agent can read its repository, and if not, how it gets access. GitSpace reads a private GitHub
+ * repository only through the account's App, named by `appName` (null before the account creates one). */
+export const GitHubProjectAccessSchema = z.discriminatedUnion('state', [
+  /** Not on GitHub, public, or covered by an installation. */
+  z.object({ state: z.literal('ready') }),
+  /** Private, and the App is not installed on its owner. */
+  z.object({ state: z.literal('needs-app'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string().nullable() }),
+  /** Private, and an install on its owner waits for an organization owner. */
+  z.object({ state: z.literal('requested'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), request: GitHubInstallRequestViewSchema }),
+  /** Private, and the App is installed on its owner for other repositories only. */
+  z.object({ state: z.literal('not-selected'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), installation: GitHubInstallationViewSchema }),
+]);
+export type GitHubProjectAccess = z.infer<typeof GitHubProjectAccessSchema>;
 
 /** A browser form POST to GitHub: `action` with one hidden field `manifest`. */
 export const GitHubAppManifestFormSchema = z.object({ action: z.string().url(), manifest: z.string().min(2).max(16_384) });
 export type GitHubAppManifestForm = z.infer<typeof GitHubAppManifestFormSchema>;
 
-export const GitHubStateCodec = wire.serializable((value): value is GitHubState => GitHubStateSchema.safeParse(value).success, { id: 'gitspace/github-state/v1', jsonSchema: GitHubStateSchema });
+export const GitHubStateCodec = wire.serializable((value): value is GitHubState => GitHubStateSchema.safeParse(value).success, { id: 'gitspace/github-state/v2', jsonSchema: GitHubStateSchema });
+export const GitHubProjectAccessCodec = wire.serializable((value): value is GitHubProjectAccess => GitHubProjectAccessSchema.safeParse(value).success, { id: 'gitspace/github-project-access/v1', jsonSchema: GitHubProjectAccessSchema });
 export const GitHubAppOwnerCodec = wire.serializable((value): value is GitHubAppOwner => GitHubAppOwnerSchema.safeParse(value).success, { id: 'gitspace/github-app-owner/v1', jsonSchema: GitHubAppOwnerSchema });
 export const GitHubAppManifestFormCodec = wire.serializable((value): value is GitHubAppManifestForm => GitHubAppManifestFormSchema.safeParse(value).success, { id: 'gitspace/github-app-manifest-form/v1', jsonSchema: GitHubAppManifestFormSchema });
