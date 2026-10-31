@@ -439,6 +439,37 @@ exec '${realGit}' "$@"
   } finally { process.env.PATH = path; }
 });
 
+it('sends a checkpoint push Artifacts refuses as too large in smaller steps, keeping its history and no staging ref', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'base'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'base');
+  const base = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'update-ref', f.checkpointRef, base);
+  await f.publish();
+  // Artifacts takes at most 64 MiB a push; this remote takes at most 3 new commits, and says so the same way.
+  const log = join(f.root, 'received');
+  const hook = join(f.remote, 'hooks/pre-receive');
+  writeFileSync(hook, `#!/bin/sh
+while read old new ref; do
+  case "$new" in 0000000000000000000000000000000000000000) continue ;; esac
+  count=$(git rev-list --count "$new" --not --all)
+  echo "$ref $count" >> '${log}'
+  if [ "$count" -gt 3 ]; then echo "unpack artifacts_git_receive_pack_request_too_large: push carries $count commits, limit is 3" >&2; exit 1; fi
+done
+`);
+  chmodSync(hook, 0o755);
+  // A workspace merging a long-lived branch: many new commits descending from the HEAD the remote holds.
+  for (let index = 0; index < 20; index++) { writeFileSync(join(f.root, 'file'), `content ${index}`); git(f.root, 'commit', '-am', `commit ${index}`); }
+  const head = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'update-ref', f.checkpointRef, head);
+  await f.publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'test', repository: 'test' }, checkpointRef: f.checkpointRef, headCommit: head, remoteHead: base });
+  expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(head);
+  expect(git(f.remote, 'rev-list', '--count', f.checkpointRef, '--not', base)).toBe('20');
+  expect(git(f.remote, 'for-each-ref', 'refs/gitspace/staging/')).toBe('');
+  // All 20, then 5, were refused; 2 a push fit, and the checkpoint itself then carried nothing new.
+  const received = readFileSync(log, 'utf8').trim().split('\n').map(line => Number(line.split(' ')[1]));
+  expect(received).toEqual([20, 5, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0]);
+});
+
 it('sends history below the remote\'s unadvertised shallow boundary when a push merging it is refused', async () => {
   const f = fixture();
   // The boundary discovery fetches from a scratch repository, which needs the remote's address rewrite too.

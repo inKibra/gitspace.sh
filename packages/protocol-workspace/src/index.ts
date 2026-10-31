@@ -7,3 +7,4 @@ export * from './authority.js';
 export * from './lfs.js';
 export * from './lfs-origin.js';
 export * from './byte-stream.js';
+export * from './artifacts-push.js';

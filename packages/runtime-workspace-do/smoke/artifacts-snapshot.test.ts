@@ -1175,6 +1175,59 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects on
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
 }, 15_000);
 
+for (const protocolVersion of [0, 2] as const) test(`a transfer Artifacts refuses as too large is sent again with less history until it fits, over Git v${protocolVersion}`, async () => {
+  // Each commit rewrites one file with 48 KiB nothing compresses, so each commit of history adds 48 KiB to a push; the
+  // destination, like Artifacts with its 64 MiB, takes 300 KiB a push.
+  const root = await mkdtemp(join(tmpdir(), 'too-large-'));
+  const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+  const run = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, ...identity } });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const limit = 300 * 1024;
+  const work = join(root, 'work');
+  const source = join(root, 'source.git');
+  const destination = join(root, 'destination.git');
+  const pushes: number[] = [];
+  const line = (text: string) => (text.length + 4).toString(16).padStart(4, '0') + text;
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const body = advertise ? null : new Uint8Array(await new Response(init?.body).arrayBuffer());
+    if (service === 'receive-pack' && body) {
+      pushes.push(body.length);
+      if (body.length > limit) return new Response(line(`unpack artifacts_git_receive_pack_request_too_large: push is ${body.length} bytes, limit is ${limit}\n`) + line('ng refs/heads/main artifacts_git_receive_pack_request_too_large\n') + '0000');
+    }
+    const child = Bun.spawn(['git', '-c', 'receive.shallowUpdate=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), url.hostname === 'source.invalid' ? source : destination], {
+      stdin: body ?? 'ignore', stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? new Headers(init?.headers).get('git-protocol') ?? 'version=0' : 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) return new Response(error, { status: 500 });
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  try {
+    run(root, 'init', '-q', '-b', 'main', work);
+    for (let index = 0; index < 20; index++) {
+      await Bun.write(join(work, 'part.bin'), crypto.getRandomValues(new Uint8Array(48 * 1024)));
+      run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', `part ${index}`);
+    }
+    const head = run(work, 'rev-parse', 'HEAD');
+    run(root, 'clone', '-q', '--bare', work, source);
+    run(root, 'init', '-q', '--bare', '-b', 'main', destination);
+    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: null, commit: head });
+    expect(run(destination, 'rev-parse', 'refs/heads/main')).toBe(head);
+    // The whole history, then depth 256 (still all 20 commits), 64 and 16 were refused; 4 commits fit.
+    expect(pushes.filter(size => size > limit)).toHaveLength(4);
+    expect(pushes.at(-1)).toBeLessThanOrEqual(limit);
+    expect(run(destination, 'rev-list', '--count', 'refs/heads/main')).toBe('4');
+    expect(run(destination, 'fsck', '--strict', '--no-dangling')).toBe('');
+  } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
 test('native reconciliation preserves staged and working layers across a large directory change', async () => {
   const f = await fixture();
   try {

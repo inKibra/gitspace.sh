@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { artifactsPushRefusal, smallerArtifactsPush } from '@gitspace/protocol-workspace';
 
 export type ArtifactsRepositoryBinding = { projectId: string; repository: string };
 export type ArtifactsRepositoryCredentials = { remote: string; plaintext: string; expiresAt: string };
@@ -96,9 +97,6 @@ const PUSH = ['-c', 'core.hooksPath=/dev/null', 'push'];
 /** A pack of whole objects: no deltas computed or reused, none against objects the remote holds. */
 const WHOLE_OBJECTS = ['-c', 'pack.window=0', '-c', 'pack.depth=0', '-c', 'pack.allowPackReuse=false'];
 
-/** How a pushed pack (not a ref update) is refused when a second push, built as `pushToArtifacts` describes, can pass. */
-const PACK_REFUSAL = /\bHTTP 500\b|delta base is missing|OFS_DELTA base not found|reachable object is missing|missing necessary objects/u;
-
 /** The commits `remote` holds without their parents. Artifacts advertises none, but a fetch reports those of the
  * history it sends; it refuses a commits-only (filtered) fetch with HTTP 400, so this downloads the tips' trees. */
 async function remoteShallowBoundaries(remote: string, auth: Record<string, string>): Promise<string[]> {
@@ -111,22 +109,36 @@ async function remoteShallowBoundaries(remote: string, auth: Record<string, stri
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
+/** One push to Artifacts: `refspec` from the checkout at `repositoryPath`, with the lease's credentials (`auth`) and
+ * the publication's shallow boundaries (`shallow`), as git environment. */
+type ArtifactsPush = { repositoryPath: string; remote: string; refspec: string; force: boolean; auth: Record<string, string>; shallow: Record<string, string> };
+
 /**
- * Artifacts' receive-pack refuses some pushes that a second, differently built one passes:
+ * Artifacts' receive-pack refuses some pushes that a differently built one passes (`artifactsPushRefusal`):
  * - packs of deltas, which it accepts sent whole: with HTTP 500 (djmc, 2026-10-19: 164 objects, 146 deltas, refused
  *   every time), saying a delta's base is missing though it advertised that base (inkibra-cell-executor-sandbox-spike,
  *   2026-10-28), or saying an offset delta's base, always in the same pack, is not found (three inkibra-core workspaces
  *   since 2026-10-23);
  * - packs leaving out commits it lacks. It advertises no shallow boundaries, so git counts the history below them,
  *   which this checkout may hold, as the remote's and omits it: the executor-sandbox push, sent whole, was refused with
- *   `reachable object is missing` for a merged parent that the remote held only as the parent of a boundary.
- * A refused push is sent once more without deltas, with the remote's boundaries added to the push's own.
+ *   `reachable object is missing` for a merged parent that the remote held only as the parent of a boundary;
+ * - pushes over its 64 MiB limit (a 96.1 MiB base-branch import, 2026-10-31).
+ * A refused pack is sent once more without deltas, with the remote's boundaries added to the push's own (`pushPack`);
+ * a push too large is sent as several smaller ones (`pushInSteps`).
  */
-async function pushToArtifacts(input: { repositoryPath: string; remote: string; refspec: string; force: boolean; auth: Record<string, string>; shallow: Record<string, string> }): Promise<void> {
+async function pushToArtifacts(input: ArtifactsPush): Promise<void> {
+  try { await pushPack(input); }
+  catch (error) {
+    if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large') throw error;
+    await pushInSteps(input, error);
+  }
+}
+
+async function pushPack(input: ArtifactsPush): Promise<void> {
   const target = [...(input.force ? ['--force'] : []), input.remote, input.refspec];
   try { await git(input.repositoryPath, [...PUSH, ...target], { ...input.auth, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }); }
   catch (error) {
-    if (!(error instanceof ArtifactsGitError) || !PACK_REFUSAL.test(error.message)) throw error;
+    if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'pack') throw error;
     // The push's own boundaries: the one publication set, or the checkout's.
     const ownFile = input.shallow.GIT_SHALLOW_FILE ?? await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
     const own = existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n') : [];
@@ -137,6 +149,41 @@ async function pushToArtifacts(input: { repositoryPath: string; remote: string; 
       await writeFile(join(directory, 'shallow'), [...new Set([...own, ...remote].filter(Boolean))].map(commit => `${commit}\n`).join(''));
       await git(input.repositoryPath, [...WHOLE_OBJECTS, ...PUSH, '--no-thin', ...target], { ...input.auth, GIT_SHALLOW_FILE: join(directory, 'shallow'), GIT_LFS_SKIP_PUSH: '1' });
     } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+}
+
+/**
+ * A push Artifacts refused as too large, sent as several: the first-parent commits the remote lacks go to a staging
+ * ref in steps, each carrying fewer commits after a further refusal (`smallerArtifactsPush`), and then the ref itself
+ * moves, sending little more. The whole history stays linked. A single commit too large for one push is refused.
+ */
+async function pushInSteps(input: ArtifactsPush, refused: ArtifactsGitError): Promise<void> {
+  const source = input.refspec.slice(input.refspec.startsWith('+') ? 1 : 0, input.refspec.lastIndexOf(':'));
+  const commit = (await git(input.repositoryPath, ['rev-parse', '--verify', `${source}^{commit}`])).trim();
+  const held = (await git(input.repositoryPath, ['ls-remote', input.remote], input.auth)).split('\n')
+    .map(line => line.split('\t')[0] ?? '').filter(oid => /^[0-9a-f]{40}$/u.test(oid));
+  const commits = (await git(input.repositoryPath, ['rev-list', '--first-parent', '--reverse', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow))
+    .split('\n').filter(Boolean);
+  let size = smallerArtifactsPush(commits.length);
+  if (size === null) throw refused;
+  const staging = `refs/gitspace/staging/${crypto.randomUUID()}`;
+  try {
+    for (let sent = 0; sent < commits.length;) {
+      const reach = Math.min(sent + size, commits.length);
+      try {
+        await pushPack({ ...input, refspec: `${commits[reach - 1]}:${staging}`, force: true });
+        sent = reach;
+      } catch (error) {
+        if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large') throw error;
+        const smaller = smallerArtifactsPush(size);
+        if (smaller === null) throw error;
+        size = smaller;
+      }
+    }
+    await pushPack(input);
+  } finally {
+    // The staging ref holds only history the pushed ref holds too; one left behind changes nothing.
+    await git(input.repositoryPath, [...PUSH, input.remote, `:${staging}`], input.auth).catch(() => undefined);
   }
 }
 
