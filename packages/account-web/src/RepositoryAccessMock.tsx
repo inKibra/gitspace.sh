@@ -17,8 +17,9 @@ import { glyph } from './glyph.js';
 import { PageCanvas, PageHeader, StatusDot } from './GitSpaceShell.js';
 import { verticalSliceFixture } from './App.js';
 import { restoreAppearance } from './appearance.js';
+import { RepositoryAccessCard, type BlockedProjectAccess } from './GitHubAccess.js';
 
-type State = 'needs-app' | 'requested' | 'not-selected' | 'importing' | 'today';
+type State = 'needs-app' | 'requested' | 'not-selected' | 'importing' | 'today' | 'built';
 type View = 'project' | 'settings';
 
 const ORG = 'BrandByX';
@@ -30,6 +31,15 @@ const STATES: readonly { id: State; label: string }[] = [
   { id: 'not-selected', label: 'Installed, repository not selected' },
   { id: 'importing', label: 'Approved: importing' },
   { id: 'today', label: 'Today: dead-end message' },
+  { id: 'built', label: 'Built: the real cards, every state' },
+];
+const hoursAgo = (hours: number): string => new Date(Date.now() - hours * 3_600_000).toISOString();
+/** The built card for each state it shows, with this project's data. */
+const BUILT: readonly BlockedProjectAccess[] = [
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP },
+  { state: 'requested', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, request: { id: 'request', organization: ORG, project: { id: 'portal', name: 'Landscaping Portal' }, repository: `${ORG}/${REPO}`, firstRequestedAt: hoursAgo(17), lastRequestedAt: hoursAgo(8), times: 2 } },
+  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/brandbyx-site`, `${ORG}/golconda-ppva`], permissions: {}, installedAt: hoursAgo(3), projects: [] } },
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: null },
 ];
 
 const icon = (Icon: typeof Lock01, size = 16): ReactNode => <Icon width={size} height={size} strokeWidth={1.5} />;
@@ -141,9 +151,11 @@ function ProjectPage({ state }: { state: State }): ReactElement {
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-4 px-6 pb-48 pt-10">
-          {state === 'today'
-            ? <p role="alert" className="w-full whitespace-pre-wrap break-words text-caption text-destructive">Cloud session control: This is a private repository, so GitSpace Cloud can't import it. Create a workspace in this project with a machine connected; the machine does the initial import.</p>
-            : <AccessCard state={state} />}
+          {state === 'built'
+            ? BUILT.map((access, index) => <RepositoryAccessCard key={index} access={access} onInstall={async () => '#'} onOpenSettings={() => undefined} />)
+            : state === 'today'
+              ? <p role="alert" className="w-full whitespace-pre-wrap break-words text-caption text-destructive">Cloud session control: This is a private repository, so GitSpace Cloud can't import it. Create a workspace in this project with a machine connected; the machine does the initial import.</p>
+              : <AccessCard state={state} />}
         </div>
       </div>
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
