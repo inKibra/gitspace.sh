@@ -439,6 +439,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     if (!isSupportedBranchName(branch)) throw new Error('Invalid base branch');
     const projectId: string = identity.projectId;
     if (identity.workspaceId !== projectId) throw new Error('Base branch changes require the project base workspace');
+    const started = Date.now();
+    const step = (name: string) => console.log(JSON.stringify({ event: 'base_branch_step', projectId, branch, step: name, ms: Date.now() - started }));
+    step('start');
     const authority = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`);
     const project = await authority.getProject();
     if (!project) throw new Error('Project is unavailable');
@@ -459,12 +462,15 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
     const runtime = await this.loadRuntime(identity);
     const snapshot = await runtime.snapshot();
+    step('runtime');
     if (snapshot.conversations.some(conversation => conversation.status === 'running' || conversation.status === 'waiting')) throw new Error(`Stop the base workspace agent before ${action}`);
     await ensureProjectCodeRepository(this.env, code, project);
+    step('project-repository');
     const reference = project.repositoryReference;
     const head = await code.resolveRef(source, `refs/heads/${branch}`)
       ?? (reference === null ? null : await originAccess(this.env, reference).then(access => code.importSourceRef(project.id, access.remote, `refs/heads/${branch}`, originReadCredentials(access))));
     if (!head) throw new Error(`Branch ${branch} does not exist in the project repository`);
+    step('head');
     const metadata = await code.readCommit(source, head);
     if (!metadata) throw new Error('Base branch commit is unavailable');
     const target = RuntimeGitCheckpointSchema.parse({
@@ -476,6 +482,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const result = await runtime.cloudFiles.changeBranch({
       checkpoint: target,
       validate: async current => {
+        step('queue-entered');
         // A change that already switched the checkout and failed later finishes from there.
         if (current.worktreeCommit === target.worktreeCommit) return;
         const currentHead = current.headCommit ? await code.readCommit(repository, current.headCommit) : null;
@@ -490,8 +497,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       },
       publish: async () => {
         if (!previous) throw new Error('Base branch change has no prepared checkout');
+        step('copy-branch');
         await code.copyCommit(source, repository, `refs/heads/${branch}`, head, previousBranchTip);
+        step('copy-checkpoint');
         await code.copyCommit(source, repository, target.checkpointRef, head, previous.worktreeCommit);
+        step('copied');
       },
       commit: async () => {
         const latest = await authority.getProject();

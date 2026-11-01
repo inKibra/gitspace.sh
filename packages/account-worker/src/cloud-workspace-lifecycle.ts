@@ -124,11 +124,14 @@ async function runOperation<T>(authority: ProjectAuthority, input: { projectId: 
     steps: input.labels.map((label, index) => ({ id: `step-${index + 1}`, label })), createdBy: 'account',
   }));
   await progress.start(0);
+  const started = Date.now();
   try {
     const value = await run(progress.advance);
     await progress.advance();
+    console.log(JSON.stringify({ event: 'operation_done', kind: input.kind, projectId: input.projectId, workspaceId: input.workspaceId, ms: Date.now() - started }));
     return value;
   } catch (error) {
+    console.error(JSON.stringify({ event: 'operation_failed', kind: input.kind, projectId: input.projectId, workspaceId: input.workspaceId, ms: Date.now() - started, message: error instanceof Error ? error.message : String(error) }));
     await progress.fail(error);
     throw error;
   }
