@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ARTIFACTS_COPY_DEPTH, ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ARTIFACTS_COPY_DEPTH, ArtifactsSnapshotError, copyNegotiation, initializeArtifactsRepository, NEGOTIATION_WINDOW, publishRef, readAdvertisedRefs, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { changedSnapshotEntries, planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
@@ -325,12 +325,12 @@ export class ArtifactsCodeStore {
   private async fetchIntoRepository(repository: string, origin: { remote: string; auth: GitHttpAuth | null }, ref: string, commit: string, previous: string | null | 'replace'): Promise<void> {
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try {
-      const haves = (await repo.log({ limit: 32 })).map(entry => entry.hash);
+      const negotiation = copyNegotiation(await repo.log({ limit: NEGOTIATION_WINDOW }));
       const [info, token] = await Promise.all([repo.info(), repo.createToken('write', TRANSFER_LEASE_SECONDS)]);
       const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
       try {
         const from = previous === 'replace' ? (await readAdvertisedRefs({ remote: info.remote, auth, refPrefix: ref })).get(ref) ?? null : previous;
-        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, haves, held: async held => await repo.readCommit(held) !== null });
+        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, negotiation, held: async held => await repo.readCommit(held) !== null });
       } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
   }
@@ -439,8 +439,8 @@ export class ArtifactsCodeStore {
             const sourceInfo = await origin.info();
             const readToken = await origin.createToken('read', TRANSFER_LEASE_SECONDS);
             try {
-              const haves = (await target.log({ ...(previous === null ? {} : { ref: previous }), limit: 32 })).map(entry => entry.hash);
-              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, haves, held: async held => await target.readCommit(held) !== null });
+              const negotiation = copyNegotiation(await target.log({ ...(previous === null ? {} : { ref: previous }), limit: NEGOTIATION_WINDOW }));
+              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, negotiation, held: async held => await target.readCommit(held) !== null });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
         }
