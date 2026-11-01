@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ARTIFACTS_COPY_DEPTH, ArtifactsSnapshotError, initializeArtifactsRepository, publishRef, readAdvertisedRefs, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { changedSnapshotEntries, planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
@@ -282,7 +282,7 @@ export class ArtifactsCodeStore {
       await this.importCoveredProject(projectId, source, credentials, false);
       return this.info(name);
     }
-    const created = await this.binding.import({ source, target: { name } }).catch((error: unknown) => {
+    const created = await this.binding.import({ source: { ...source, depth: ARTIFACTS_COPY_DEPTH }, target: { name } }).catch((error: unknown) => {
       const refusal = ArtifactsImportRefusalSchema.safeParse(error);
       throw refusal.success ? new ProjectImportRequiresMachineError(IMPORT_REFUSAL_REASONS[refusal.data.code]) : error;
     });
@@ -330,7 +330,7 @@ export class ArtifactsCodeStore {
       const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
       try {
         const from = previous === 'replace' ? (await readAdvertisedRefs({ remote: info.remote, auth, refPrefix: ref })).get(ref) ?? null : previous;
-        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, haves });
+        await transferCommit({ source: origin, destination: { remote: info.remote, auth }, ref, previous: from, commit, haves, held: async held => await repo.readCommit(held) !== null });
       } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
   }
@@ -440,7 +440,7 @@ export class ArtifactsCodeStore {
             const readToken = await origin.createToken('read', TRANSFER_LEASE_SECONDS);
             try {
               const haves = (await target.log({ ...(previous === null ? {} : { ref: previous }), limit: 32 })).map(entry => entry.hash);
-              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, haves });
+              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, haves, held: async held => await target.readCommit(held) !== null });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
         }

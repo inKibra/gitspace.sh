@@ -301,14 +301,14 @@ function packStream(reader: PacketReader, chunks: AsyncGenerator<Uint8Array>, ve
 /** Requests the reachable graph of `commit` without thin packs. Each have is also declared a client shallow commit: the
  * destination holds the have and its tree but not necessarily its ancestry (a seed may omit old history, and Artifacts
  * advertises no shallow boundaries), so the source omits only objects reachable from the haves' own trees. A source
- * that cannot take shallow lines gets no haves. `depth` limits the history to that many commits from `commit`, and the
- * source reports where it cut. The source's shallow boundaries precede its pack, so they are known before the first
- * pack byte is forwarded. */
-async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; haves: readonly string[]; depth: number | null; signal: AbortSignal }, request: ArtifactsFetch): Promise<{ shallow: string[]; pack: ReadableStream<Uint8Array> }> {
+ * that cannot take shallow lines gets no haves. History is limited to `depth` commits from `commit` (`limited`) when the
+ * source takes shallow lines; any other source sends all of it. The source reports where it cut, and its shallow
+ * boundaries precede its pack, so they are known before the first pack byte is forwarded. */
+async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; haves: readonly string[]; depth: number; signal: AbortSignal }, request: ArtifactsFetch): Promise<{ shallow: string[]; limited: boolean; pack: ReadableStream<Uint8Array> }> {
   const remote = gitRemote(input.remote);
   if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new Error('Invalid Git commit');
   if (input.haves.length > 32 || input.haves.some(oid => !/^[0-9a-f]{40}$/u.test(oid))) throw new Error('Invalid Git negotiation commits');
-  if (input.depth !== null && (!Number.isSafeInteger(input.depth) || input.depth < 1)) throw new Error('Invalid Git history depth');
+  if (!Number.isSafeInteger(input.depth) || input.depth < 1) throw new Error('Invalid Git history depth');
   const discovery = await readGitDiscovery(remote, { ...gitAuthorizationHeaders(input.auth), 'Git-Protocol': 'version=2' }, request);
   const version2 = discovery[0]?.trimEnd() === 'version 2';
   const boundaries = new Set<string>();
@@ -325,10 +325,9 @@ async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null;
       if (boundary) boundaries.add(boundary[1]!);
     }
   }
-  if (input.depth !== null && !shallowCapable) throw new Error('The origin cannot send a history of limited depth');
   const haves = new Set(shallowCapable ? input.haves : []);
   const shallow = [...haves].map(oid => packet(`shallow ${oid}\n`));
-  const deepen = input.depth === null ? [] : [packet(`deepen ${input.depth}\n`)];
+  const deepen = shallowCapable ? [packet(`deepen ${input.depth}\n`)] : [];
   const parts = version2
     ? [packet('command=fetch\n'), encoder.encode('0001'), packet('no-progress\n'), packet(`want ${input.commit}\n`), ...shallow, ...deepen, ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n'), encoder.encode('0000')]
     : [packet(`want ${input.commit}${shallowCapable ? ' shallow' : ''}\n`), ...shallow, ...deepen, encoder.encode('0000'), ...[...haves].map(oid => packet(`have ${oid}\n`)), packet('done\n')];
@@ -347,30 +346,36 @@ async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null;
     await chunks.return(undefined);
     throw error;
   }
-  return { shallow: [...boundaries], pack: packStream(reader, chunks, version2) };
+  return { shallow: [...boundaries], limited: shallowCapable, pack: packStream(reader, chunks, version2) };
 }
 
 /** Wall time for one streamed transfer: no pack is held, so a repository's size bounds only how long it takes. */
 const TRANSFER_TIMEOUT_MS = 10 * 60_000;
-/** The history depth a transfer Artifacts refused as too large tries first; each further refusal takes less. */
-const FIRST_LIMITED_DEPTH = 256;
+/** History a cloud copy into Artifacts carries, in commits from the copied commit: Artifacts holds recent history only,
+ * checkouts read depth 1, and older history stays on the origin. Enough ancestry for comparisons to find where branches
+ * split; a whole divergent branch (458 commits, 96.1 MiB on 2026-10-31) is past Artifacts' 64 MiB a push. */
+export const ARTIFACTS_COPY_DEPTH = 64;
 
 /** Copies the graph of `commit` into a destination ref, streaming the source's upload-pack response straight into the
  * destination's receive-pack request: no pack is held in memory, so a history larger than a Worker's memory still
- * transfers. The ref moves only from `previous` (null: absent). Source shallow boundaries travel with the pack so a
- * copy never invents complete ancestry. No credentials follow redirects, and an interrupted download fails the push
- * (receive-pack verifies the pack before moving the ref), so it has no destination-side effect. A history larger than
- * Artifacts takes in one push is sent with less depth, as `smallerArtifactsPush` steps it, down to `commit` alone. */
-export async function transferCommit(input: { source: { remote: string; auth: GitHttpAuth | null }; destination: { remote: string; auth: GitHttpAuth }; ref: string; previous: string | null; commit: string; haves?: readonly string[] }, request: ArtifactsFetch = fetch): Promise<void> {
-  for (let depth: number | null = null; ;) {
+ * transfers. The ref moves only from `previous` (null: absent). At most `ARTIFACTS_COPY_DEPTH` commits of history are
+ * sent; a copy Artifacts still refuses as too large is sent with less, as `smallerArtifactsPush` steps it, down to
+ * `commit` alone. Source shallow boundaries travel with the pack so a copy never invents complete ancestry, except one
+ * the destination already `held`: declaring it would cut the destination's own history there. No credentials follow
+ * redirects, and an interrupted download fails the push (receive-pack verifies the pack before moving the ref), so it
+ * has no destination-side effect. */
+export async function transferCommit(input: { source: { remote: string; auth: GitHttpAuth | null }; destination: { remote: string; auth: GitHttpAuth }; ref: string; previous: string | null; commit: string; haves?: readonly string[]; held: (commit: string) => Promise<boolean> }, request: ArtifactsFetch = fetch): Promise<void> {
+  for (let depth = ARTIFACTS_COPY_DEPTH; ;) {
     const signal = AbortSignal.timeout(TRANSFER_TIMEOUT_MS);
     const opened = await openCommitPack({ ...input.source, commit: input.commit, haves: input.haves ?? [], depth, signal }, request);
     try {
-      await publishSnapshotPack({ ...input.destination, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack: opened.pack, shallow: opened.shallow, signal }, request);
+      const shallow: string[] = [];
+      for (const boundary of opened.shallow) if (!await input.held(boundary)) shallow.push(boundary);
+      await publishSnapshotPack({ ...input.destination, ref: input.ref, previous: input.previous ?? zero, commit: input.commit, pack: opened.pack, shallow, signal }, request);
       return;
     } catch (error) {
       if (artifactsPushRefusal(error instanceof Error ? error.message : String(error)) !== 'too-large') throw error;
-      const next: number | null = depth === null ? FIRST_LIMITED_DEPTH : smallerArtifactsPush(depth);
+      const next = opened.limited ? smallerArtifactsPush(depth) : null;
       if (next === null) throw error;
       depth = next;
     } finally {

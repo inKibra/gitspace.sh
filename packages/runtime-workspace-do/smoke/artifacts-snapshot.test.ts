@@ -1169,7 +1169,7 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects on
     run(root, 'init', '-q', '--bare', '-b', 'main', destination);
     run(destination, '-c', 'protocol.file.allow=always', 'fetch', '-q', '--depth', '1', `file://${source}`, `${b}:refs/heads/main`);
     expect(Bun.spawnSync(['git', 'cat-file', '-e', restored], { cwd: destination }).exitCode).not.toBe(0);
-    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: b, commit: c, haves: [b] });
+    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: b, commit: c, haves: [b], held: async commit => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: destination }).exitCode === 0 });
     expect(run(destination, 'rev-parse', 'refs/heads/main')).toBe(c);
     expect(run(destination, 'cat-file', '-t', restored)).toBe('tree');
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
@@ -1218,13 +1218,74 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer Artifacts refuse
     const head = run(work, 'rev-parse', 'HEAD');
     run(root, 'clone', '-q', '--bare', work, source);
     run(root, 'init', '-q', '--bare', '-b', 'main', destination);
-    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: null, commit: head });
+    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: null, commit: head, held: async commit => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: destination }).exitCode === 0 });
     expect(run(destination, 'rev-parse', 'refs/heads/main')).toBe(head);
-    // The whole history, then depth 256 (still all 20 commits), 64 and 16 were refused; 4 commits fit.
-    expect(pushes.filter(size => size > limit)).toHaveLength(4);
+    // Depth 64 (still all 20 commits) and 16 were refused; 4 commits fit.
+    expect(pushes.filter(size => size > limit)).toHaveLength(2);
     expect(pushes.at(-1)).toBeLessThanOrEqual(limit);
     expect(run(destination, 'rev-list', '--count', 'refs/heads/main')).toBe('4');
     expect(run(destination, 'fsck', '--strict', '--no-dangling')).toBe('');
+  } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+for (const protocolVersion of [0, 2] as const) test(`a copy carries 64 commits of history and never cuts history the destination holds, over Git v${protocolVersion}`, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'copy-depth-'));
+  const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+  const run = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, ...identity } });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const work = join(root, 'work');
+  const repositories: Record<string, string> = { source: join(root, 'source.git'), fresh: join(root, 'fresh.git'), full: join(root, 'full.git') };
+  // Artifacts records every boundary a push declares, even at a commit it holds with its parents (git records only the needed ones).
+  const declared: Record<string, string[]> = { fresh: [], full: [] };
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const name = url.hostname.split('.')[0]!;
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const body = advertise ? null : new Uint8Array(await new Response(init?.body).arrayBuffer());
+    if (service === 'receive-pack' && body) {
+      const commands = new TextDecoder('latin1').decode(body).split('PACK')[0]!;
+      declared[name]!.push(...[...commands.matchAll(/shallow ([0-9a-f]{40})/gu)].map(match => match[1]!));
+    }
+    const child = Bun.spawn(['git', '-c', 'receive.shallowUpdate=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), repositories[name]!], {
+      stdin: body ?? 'ignore', stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? new Headers(init?.headers).get('git-protocol') ?? 'version=0' : 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) return new Response(error, { status: 500 });
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  try {
+    run(root, 'init', '-q', '-b', 'main', work);
+    for (let index = 0; index < 100; index++) {
+      await Bun.write(join(work, 'count.txt'), `${index}\n`);
+      run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', `commit ${index}`);
+    }
+    const [head, base] = [run(work, 'rev-parse', 'HEAD'), run(work, 'rev-parse', 'HEAD~3')];
+    run(root, 'clone', '-q', '--bare', work, repositories.source!);
+    const copy = (destination: string, previous: string | null, haves: string[]) => transferCommit({
+      source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: `https://${destination}.invalid/repo.git`, auth: { kind: 'bearer', token: 'write' } },
+      ref: 'refs/heads/main', previous, commit: head, haves, held: async commit => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: repositories[destination] }).exitCode === 0,
+    });
+
+    // A first copy: the newest 64 commits, the oldest of them declared a boundary.
+    run(root, 'init', '-q', '--bare', '-b', 'main', repositories.fresh!);
+    await copy('fresh', null, []);
+    expect(declared.fresh).toEqual([run(work, 'rev-parse', 'HEAD~63')]);
+    expect(run(repositories.fresh!, 'rev-list', '--count', 'refs/heads/main')).toBe('64');
+    expect(run(repositories.fresh!, 'fsck', '--strict', '--no-dangling')).toBe('');
+
+    // An update onto a destination holding the whole history: the depth-64 cut falls on a commit it holds, so no boundary is declared.
+    run(root, 'init', '-q', '--bare', '-b', 'main', repositories.full!);
+    run(repositories.full!, '-c', 'protocol.file.allow=always', 'fetch', '-q', `file://${repositories.source}`, `${base}:refs/heads/main`);
+    await copy('full', base, run(repositories.full!, 'rev-list', '--max-count=32', 'refs/heads/main').split('\n'));
+    expect(declared.full).toEqual([]);
+    expect(run(repositories.full!, 'rev-parse', 'refs/heads/main')).toBe(head);
+    expect(run(repositories.full!, 'rev-list', '--count', 'refs/heads/main')).toBe('100');
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
 }, 30_000);
 
