@@ -76,12 +76,14 @@ export async function watchGitWorktree(options: {
   };
   let previousMetadata = await metadata();
   const invalidate = () => { generation++; cache.clear(); };
+  /** Starts a `git` sync when Git's index or ignore configuration changed since the last look; true when it did. */
   const refresh = async () => {
     const next = await metadata();
-    if (closed || next === previousMetadata) return;
+    if (closed || next === previousMetadata) return false;
     previousMetadata = next;
     invalidate();
     options.changed('git');
+    return true;
   };
   const poll = () => {
     pollCancel = options.clock.schedule(5000, () => {
@@ -123,8 +125,10 @@ export async function watchGitWorktree(options: {
       invalidate();
       // Refresh the external ignore baseline now, so subsequent external edits
       // are compared to this config, not to a stale path from watcher startup.
-      await refresh();
-      if (!closed) { if (!name.endsWith('.gitignore')) gitEvent(name); options.changed(name.endsWith('.gitignore') ? 'worktree' : 'git'); }
+      // macOS reports `.git/index` changed when nothing in it did, for git commands that only read it (capture's own
+      // among them, so each capture started the next): only a real change, which `refresh` compares, starts a sync.
+      if (await refresh()) gitEvent(name);
+      if (!closed && name.endsWith('.gitignore')) options.changed('worktree');
       return;
     }
     if (name.startsWith('.git/')) { gitEvent(name); options.changed('git'); return; }

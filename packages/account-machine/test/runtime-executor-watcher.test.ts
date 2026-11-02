@@ -268,6 +268,19 @@ test('ignored churn cannot reset the tracked edit debounce', async () => {
   });
 });
 
+test('a .git/index event without a change to the index starts no sync; staging a file does', async () => {
+  await watcherProof(async ({ checkout, clock, event, runtime }) => {
+    await clock.until(runtime.sync());
+    // macOS reports the index changed for git commands that only read it, the capture's own among them.
+    await event('.git/index');
+    expect(clock.remaining(200)).toBeUndefined();
+    await writeFile(join(checkout, 'tracked.txt'), 'staged\n');
+    await git(checkout, 'add', 'tracked.txt');
+    await event('.git/index');
+    expect(clock.remaining(200)).toBe(200);
+  });
+});
+
 test('tracked and untracked lock files trigger publication outside Git bookkeeping', async () => {
   await watcherProof(async ({ checkout, clock, event, uploads, runtime }) => {
     await writeFile(join(checkout, 'tracked.lock'), 'base\n');
