@@ -55,6 +55,9 @@ function signingKey(): Uint8Array {
 
 export async function startMachineRuntime() {
   const processStartedAt = new Date().toISOString();
+  const started = Date.now();
+  // A host waits 120 s for "GitSpace RPC ready"; each step says how far startup got and when.
+  const startup = (step: string) => console.info(JSON.stringify({ event: 'machine_startup', step, ms: Date.now() - started }));
   // A bundle runs from its generation's directory; the CommonJS bundle has import.meta.dir fixed at the build's source.
   const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? (import.meta.main ? dirname(Bun.main) : import.meta.dir);
   const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
@@ -66,6 +69,7 @@ export async function startMachineRuntime() {
   // Hosts already start this process with the tool directory; this also covers source runs and older hosts
   // for children spawned from process.env (OMP sessions, terminals, lifecycle scripts).
   Object.assign(process.env, machineToolEnvironment(process.env, native));
+  startup('native-tools');
   // Process brokers outlive machine processes: keep those running something, end the rest before any is used.
   const brokers = await reconcileBrokers();
   if (brokers.length) {
@@ -77,6 +81,7 @@ export async function startMachineRuntime() {
       pruned: brokers.filter(broker => broker.outcome === 'pruned').length,
     }));
   }
+  startup('process-brokers');
   const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
   const machineId = requiredEnvironment('GITSPACE_MACHINE_ID');
   const controlOptions = {
@@ -104,6 +109,7 @@ export async function startMachineRuntime() {
   // Every checkout this machine holds, so a covered origin's credential helper answers only for a live grant.
   const machineCheckouts = () => executorRuntime?.journal.attachments() ?? [];
   const github = await createGitHubCredentialHelper(join(environmentRoot, 'github-credentials'), cloudRuntime, machineCheckouts);
+  startup('github-credentials');
   const gitIdentity = new SharedGitIdentityCoordinator(
     authority,
     environmentRoot,
@@ -112,7 +118,9 @@ export async function startMachineRuntime() {
     github,
   );
   await gitIdentity.start();
+  startup('git-identity');
   await installDefaultGitSpaceSkills(join(environmentRoot, 'agent'));
+  startup('skills');
   const mcp = new MachineMcpCoordinator(authority, machineId);
   const machineReleaseSha = process.env.GITSPACE_MACHINE_RELEASE_SHA || null;
   const releases = new ReleaseFollower({
@@ -132,6 +140,7 @@ export async function startMachineRuntime() {
     (userSettings) => gitIdentity.apply(userSettings),
   );
   const existingMachine = (await authority.listMachineDefinitions()).find((machine) => machine.id === machineId);
+  startup('machine-definition');
   const browserEnabled = existingMachine?.kind === 'physical' && existingMachine.provider === 'physical';
   const browserRelay = new BrowserRelaySupervisor({
     environmentRoot, machineId, enabled: browserEnabled, accountUrl: controlOptions.baseUrl,
@@ -346,6 +355,7 @@ export async function startMachineRuntime() {
       return Response.json({ offset: event.offset });
     },
   });
+  startup('rpc-server');
   executorRuntime = await createMachineExecutor({
     environmentRoot, managedSpaceRoot, machineId, cloud: cloudRuntime, gitRemote, lfs,
     browser: { enabled: true, services: {
@@ -372,9 +382,11 @@ export async function startMachineRuntime() {
       return accepted.checkpoint;
     },
   });
+  startup('executor');
   // After the journal is restored: checkouts that survived a restart get the account's Git identity and origin access
   // (a new release may configure them differently, e.g. a repository that became reachable through the GitHub App).
   await settings.start();
+  startup('settings');
 
   let stopping = false;
   const stop = async (): Promise<void> => {

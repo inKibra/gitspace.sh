@@ -2,7 +2,7 @@ import { copyFile, lstat, mkdtemp, open, readFile, rename, rm } from 'node:fs/pr
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { sameGitLfsSnapshot, spaceGitCheckpointRef, spaceGitSnapshotRef, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
 import { captureGitLfs, checkoutGitLfs, gitLfsRestoreReceipt, gitLfsWorktreeTree, hydrateGitLfs, restoredGitLfsPaths, type MachineGitLfs, type MachineGitLfsPublication } from './git-lfs.js';
 import { gitWorktreeClock, gitWorktreeDelay, type GitWorktreeClock } from './git-worktree-watch.js';
@@ -97,6 +97,16 @@ export async function readGitCheckpointInputStamp(repositoryPath: string): Promi
     }
   }));
   return JSON.stringify([await readGitCheckpointHead(repositoryPath), stamps]);
+}
+
+const StampSchema = z.tuple([z.unknown(), z.array(z.tuple([z.string()]).rest(z.unknown()))]);
+
+/** The paths whose stamp differs between two `readGitCheckpointInputStamp` results (`HEAD` for the head), at most 8. */
+function changedStampPaths(before: string, after: string): string[] {
+  const [[beforeHead, beforePaths], [afterHead, afterPaths]] = [StampSchema.parse(JSON.parse(before)), StampSchema.parse(JSON.parse(after))];
+  const [was, now] = [beforePaths, afterPaths].map(paths => new Map(paths.map(([path, ...rest]) => [path, JSON.stringify(rest)])));
+  const changed = [...new Set([...was!.keys(), ...now!.keys()])].filter(path => was!.get(path) !== now!.get(path));
+  return [...(JSON.stringify(beforeHead) === JSON.stringify(afterHead) ? [] : ['HEAD']), ...changed].slice(0, 8);
 }
 
 export async function createGitIntermediateCheckpoint(input: {
@@ -389,10 +399,12 @@ export class IncrementalGitSnapshots {
         this.options.signal?.throwIfAborted();
         let stable = await readGitCheckpointInputStamp(this.options.repositoryPath);
         if (this.options.settleWindowMs !== undefined) {
-          for (;;) {
+          for (let rounds = 1; ; rounds++) {
             await gitWorktreeDelay(this.options.clock ?? gitWorktreeClock, this.options.settleWindowMs, this.options.signal);
             const next = await readGitCheckpointInputStamp(this.options.repositoryPath);
             if (next === stable) break;
+            // Each unsettled window reads git again: say what keeps changing.
+            if (rounds === 1 || rounds % 30 === 0) console.info(JSON.stringify({ event: 'worktree_unsettled', repository: this.options.repositoryPath, rounds, changed: changedStampPaths(stable, next) }));
             stable = next;
           }
         }

@@ -110,6 +110,13 @@ export async function watchGitWorktree(options: {
       if (relevant) options.changed('worktree');
     }
   };
+  // What under `.git/` starts syncs, at most once a minute: an editor's `git status` rewrites the index, for one.
+  let gitLogged = 0;
+  const gitEvent = (name: string) => {
+    if (Date.now() - gitLogged < 60_000) return;
+    gitLogged = Date.now();
+    console.info(JSON.stringify({ event: 'worktree_git_event', root: options.root, name }));
+  };
   const stopEvents = options.events(options.root, async name => {
     if (closed || name.startsWith('.git/objects/') || name.startsWith('.git/refs/gitspace/') || name.startsWith('.git/logs/refs/gitspace/') || (name.startsWith('.git/') && name.endsWith('.lock'))) return;
     if (!name || name === '.git' || name === '.git/index' || name === '.git/config' || name === '.git/info/exclude' || name === '.gitignore' || name.endsWith('/.gitignore')) {
@@ -117,10 +124,10 @@ export async function watchGitWorktree(options: {
       // Refresh the external ignore baseline now, so subsequent external edits
       // are compared to this config, not to a stale path from watcher startup.
       await refresh();
-      if (!closed) options.changed(name.endsWith('.gitignore') ? 'worktree' : 'git');
+      if (!closed) { if (!name.endsWith('.gitignore')) gitEvent(name); options.changed(name.endsWith('.gitignore') ? 'worktree' : 'git'); }
       return;
     }
-    if (name.startsWith('.git/')) { options.changed('git'); return; }
+    if (name.startsWith('.git/')) { gitEvent(name); options.changed('git'); return; }
     pending.add(name);
     do {
       if (!processing) {
