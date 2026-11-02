@@ -2406,10 +2406,11 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
 }).catch(error => respond({ error: error.message })); return true; });
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
 /** A folder the `gitspace` command keeps (`gitspace browser install`) gets each machine release's files in place,
- * `build.txt` last (`extensionFiles`). Once no agent acts here, nothing records and you hold no tab, the extension
- * reloads into the files there when their build is not the one this worker runs. A downloaded copy never changes. */
+ * `build.txt` last (`extensionFiles`). Once no agent acts here, nothing records, you hold no tab and no tab's debugger
+ * is in use (a share someone watches, the comment tool: `debuggerUsed`), the extension reloads into the files there
+ * when their build is not the one this worker runs. A downloaded copy never changes. */
 async function reloadIfReplaced() {
-  if (runs.size || captures.size || holders.size || actingGroups().size) return;
+  if (runs.size || captures.size || holders.size || debuggees.size || actingGroups().size) return;
   const response = await fetch(chrome.runtime.getURL('build.txt'), { cache: 'no-store' });
   if (!response.ok) return;
   const build = (await response.text()).trim();
