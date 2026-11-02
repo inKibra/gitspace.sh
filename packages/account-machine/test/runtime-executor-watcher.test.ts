@@ -281,6 +281,19 @@ test('a .git/index event without a change to the index starts no sync; staging a
   });
 });
 
+test('GitSpace writing its own records under .git starts no sync; Git moving HEAD does', async () => {
+  await watcherProof(async ({ clock, event, runtime }) => {
+    await clock.until(runtime.sync());
+    // Each sync ends by recording the accepted version, through a temporary file renamed into place.
+    await event('.git/gitspace-replica-base.json.0b7c1d2e-temp.tmp');
+    await event('.git/gitspace-replica-base.json');
+    await event('.git/gitspace-lfs-inventory.json');
+    expect(clock.remaining(200)).toBeUndefined();
+    await event('.git/HEAD');
+    expect(clock.remaining(200)).toBe(200);
+  });
+});
+
 test('tracked and untracked lock files trigger publication outside Git bookkeeping', async () => {
   await watcherProof(async ({ checkout, clock, event, uploads, runtime }) => {
     await writeFile(join(checkout, 'tracked.lock'), 'base\n');

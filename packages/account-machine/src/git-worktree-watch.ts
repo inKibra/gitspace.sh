@@ -120,7 +120,9 @@ export async function watchGitWorktree(options: {
     console.info(JSON.stringify({ event: 'worktree_git_event', root: options.root, name }));
   };
   const stopEvents = options.events(options.root, async name => {
-    if (closed || name.startsWith('.git/objects/') || name.startsWith('.git/refs/gitspace/') || name.startsWith('.git/logs/refs/gitspace/') || (name.startsWith('.git/') && name.endsWith('.lock'))) return;
+    // GitSpace's own records under `.git/` (`gitspace-replica-base.json` after each sync, LFS inventories and receipts)
+    // are not changes to the checkout: each one started a capture that found nothing.
+    if (closed || name.startsWith('.git/objects/') || name.startsWith('.git/refs/gitspace/') || name.startsWith('.git/logs/refs/gitspace/') || name.startsWith('.git/gitspace-') || (name.startsWith('.git/') && name.endsWith('.lock'))) return;
     if (!name || name === '.git' || name === '.git/index' || name === '.git/config' || name === '.git/info/exclude' || name === '.gitignore' || name.endsWith('/.gitignore')) {
       invalidate();
       // Refresh the external ignore baseline now, so subsequent external edits
