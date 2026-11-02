@@ -13,7 +13,10 @@ import { platformObjectStorage } from './storage-quarantine.js';
  *   cost reaches `WATCHDOG_ALERT_DAILY_USD`;
  * - reports an object awake at least `WATCHDOG_AWAKE_HOURS` of the last 24 hours, or that read at least
  *   `WATCHDOG_READ_ROWS` rows in them. An idle workspace sleeps: one that does not holds an alarm, timer or request
- *   open, and is billed for every hour of it;
+ *   open, and is billed for every hour of it. Cloudflare reports each copy of an object awake (one left from before a
+ *   release kept a GitSpace workspace awake doing nothing for 23 hours beside the working one), so its 24-hour sum
+ *   read 42 hours; hours are counted by the minute, at most a minute each, and the minutes two copies were awake are
+ *   named;
  * - reports an object that ran more than `WATCHDOG_ALARMS_PER_HOUR` alarms in the last hour. An object should wake
  *   only for a deadline, the heartbeat that resumes in-flight work, or a retry with backoff. The limit sits above a
  *   running conversation's 30 s heartbeat (about 120 alarms an hour) and below the slowest polling loop seen in
@@ -61,6 +64,11 @@ const daySchema = z.object({
 });
 const objectDayGroupsSchema = z.array(z.object({ dimensions: z.object({ namespaceId: z.string(), objectId: z.string() }), sum: z.object({ activeTime: z.number(), rowsRead: z.number() }) }));
 const objectDaySchema = z.object({ awake: objectDayGroupsSchema, reading: objectDayGroupsSchema });
+const objectMinutesSchema = z.object({ minutes: z.array(z.object({ sum: z.object({ activeTime: z.number() }) })) });
+/** Awake time one minute holds, in microseconds. */
+const MINUTE_US = 60_000_000;
+/** A minute's samples land on 60 s, give or take; one summing past this held a second copy of the object. */
+const SECOND_COPY_US = 90_000_000;
 const breakerStatusSchema = z.object({ quarantined: z.boolean(), resumedAt: z.string().nullable() });
 const stateSchema = z.object({
   reported: z.record(z.string(), z.number()),
@@ -195,15 +203,34 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
     }
   }
 
+  const awakeUs = WATCHDOG_AWAKE_HOURS * HOUR_MS * 1000;
   const sleepless = new Map(lastDay.awake.concat(lastDay.reading)
-    .filter(({ sum }) => sum.activeTime >= WATCHDOG_AWAKE_HOURS * HOUR_MS * 1000 || sum.rowsRead >= WATCHDOG_READ_ROWS)
+    .filter(({ sum }) => sum.activeTime >= awakeUs || sum.rowsRead >= WATCHDOG_READ_ROWS)
     .map(group => [group.dimensions.objectId, group]));
   for (const { dimensions: { namespaceId, objectId }, sum } of sleepless.values()) {
+    // The sum adds every copy of the object; its minutes, at most a minute each, are the hours it was awake.
+    let awake = sum.activeTime, copies = 0;
+    if (sum.activeTime >= awakeUs) {
+      try {
+        const { minutes } = await queryAccount({ ...request, window: { start: new Date(scheduledTime - DAY_MS).toISOString(), end } }, `query StorageWatchdogMinutes($accountTag: string!, $start: Time!, $end: Time!, $objectId: string!) {
+          viewer { accounts(filter: { accountTag: $accountTag }) {
+            minutes: durableObjectsPeriodicGroups(limit: 1500, filter: { datetime_geq: $start, datetime_lt: $end, objectId: $objectId }) { dimensions { datetimeMinute } sum { activeTime } }
+          } }
+        }`, { objectId }, objectMinutesSchema);
+        awake = minutes.reduce((total, minute) => total + Math.min(minute.sum.activeTime, MINUTE_US), 0);
+        copies = minutes.filter(minute => minute.sum.activeTime > SECOND_COPY_US).length;
+      } catch (error) {
+        // Reported on the sum, which may count a second copy.
+        console.error(JSON.stringify({ event: 'storage-watchdog-failed', objectId, namespaceId, message: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    if (awake < awakeUs && sum.rowsRead < WATCHDOG_READ_ROWS) continue;
     over.add(objectId);
     const who = await owner(namespaceId);
-    const hours = (sum.activeTime / (HOUR_MS * 1000)).toFixed(1);
-    const reason = `was awake ${hours} of the last 24 hours and read ${integer.format(sum.rowsRead)} rows (alert at ${WATCHDOG_AWAKE_HOURS} hours or ${integer.format(WATCHDOG_READ_ROWS)} rows); an idle object should sleep`;
-    console.error(JSON.stringify({ event: 'storage-watchdog-sleepless', objectId, namespaceId, className: who.className, script: who.script, ...sum }));
+    const hours = (awake / (HOUR_MS * 1000)).toFixed(1);
+    const twice = copies ? `, two copies of it for ${integer.format(copies)} of those minutes,` : '';
+    const reason = `was awake ${hours} of the last 24 hours${twice} and read ${integer.format(sum.rowsRead)} rows (alert at ${WATCHDOG_AWAKE_HOURS} hours or ${integer.format(WATCHDOG_READ_ROWS)} rows); an idle object should sleep`;
+    console.error(JSON.stringify({ event: 'storage-watchdog-sleepless', objectId, namespaceId, className: who.className, script: who.script, ...sum, awakeTime: awake, secondCopyMinutes: copies }));
     findings.push({ key: `sleepless:${objectId}`, line: `${describe(who, objectId)}: ${reason}.`, inbox: { objectId, owner: who, reason } });
   }
 

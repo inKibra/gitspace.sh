@@ -14,14 +14,20 @@ const HOUR = 3_600_000;
 const object = (letter: string) => letter.repeat(64);
 
 /** Cloudflare's API: the account's namespaces, the last hour's writes and alarms per object (descending), today's
- * totals, and the last 24 hours of each object's waking and reading. */
-function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: number }, lastDay: Record<string, { activeHours: number; rowsRead: number }> = {}, alarms: Record<string, number> = {}) {
+ * totals, the last 24 hours of each object's waking and reading, and an object's waking minute by minute: `minutes`
+ * gives each awake minute's seconds (more than 60 when two copies of it were awake), else each is 60. */
+function mockCloudflare(hour: Record<string, number>, today: { rowsWritten: number }, lastDay: Record<string, { activeHours: number; rowsRead: number; minutes?: number[] }> = {}, alarms: Record<string, number> = {}) {
   globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     if (new URL(request.url).pathname.endsWith('/workers/durable_objects/namespaces')) {
       return Response.json({ success: true, result: [{ id: tenantNamespace, class: 'SpaceAuthorityDO', script: `${env.DISPATCH_NAMESPACE}-tenant-${tenant}` }] });
     }
-    const body: { query: string } = await request.json();
+    const body: { query: string; variables: { objectId?: string } } = await request.json();
+    if (body.query.includes('StorageWatchdogMinutes')) {
+      const usage = lastDay[body.variables.objectId ?? ''];
+      const seconds = usage?.minutes ?? Array.from({ length: Math.round((usage?.activeHours ?? 0) * 60) }, () => 60);
+      return Response.json({ data: { viewer: { accounts: [{ minutes: seconds.map(second => ({ sum: { activeTime: second * 1_000_000 } })) }] } } });
+    }
     const groups = Object.entries(hour).map(([objectId, rowsWritten]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { rowsWritten } }));
     if (body.query.includes('StorageWatchdogHour')) {
       const alarmGroups = Object.entries(alarms).map(([objectId, requests]) => ({ dimensions: { namespaceId: tenantNamespace, objectId }, sum: { requests } }));
@@ -155,6 +161,21 @@ test('the watchdog reports an object awake 20 of the last 24 hours, or reading 2
   expect(emails).toEqual([expect.objectContaining({ subject: 'GitSpace watchdog: 2 Durable Object alerts' })]);
   await run(scheduledTime + 10 * 60_000);
   expect(emails).toHaveLength(1);
+});
+
+test('awake hours count each minute once: a second copy of an object neither doubles them nor goes unnamed', async () => {
+  // Each minute reports both the working copy and an idle one left from before a release.
+  mockCloudflare({}, { rowsWritten: 0 }, {
+    // 21.7 hours, summed as 43.3.
+    [object('8')]: { activeHours: 1_300 * 120 / 3600, rowsRead: 0, minutes: Array.from({ length: 1_300 }, () => 120) },
+    // 12 hours, summed as 24.
+    [object('9')]: { activeHours: 720 * 120 / 3600, rowsRead: 0, minutes: Array.from({ length: 720 }, () => 120) },
+  });
+  const { asked, run } = platform();
+  await run();
+  expect(asked).toEqual([
+    { objectId: object('8'), className: 'SpaceAuthorityDO', action: 'alert', reason: expect.stringContaining('awake 21.7 of the last 24 hours, two copies of it for 1,300 of those minutes, and read 0 rows') },
+  ]);
 });
 
 test('the watchdog reports an object running more than 300 alarms an hour to its tenant, and again only if it still does six hours later', async () => {
