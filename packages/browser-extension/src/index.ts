@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { BACKGROUND_SOURCE, OFFSCREEN_SOURCE, POPUP_FONT_ORIGIN, POPUP_SOURCE, POPUP_STYLES } from './bundle.generated.js';
 import { PAGE_SCRIPT } from './page.js';
 
@@ -10,12 +11,17 @@ export { browserCaptureRecorderFunction, CaptureTrackRecorder, captureTrackEvent
  * dark with Chrome. */
 const POPUP_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace</title><link rel="stylesheet" href="popup.css"></head><body><div id="root"></div><script src="popup.js"></script></body></html>';
 
+/** The file naming the build of the files beside it. The service worker runs with its build stamped in
+ * (`GITSPACE_EXTENSION_BUILD`); a folder written after it started names another, and the worker reloads into it
+ * (`reloadIfReplaced`). Writers put it last. */
+export const EXTENSION_BUILD_FILE = 'build.txt';
+
 /** The unpacked extension for one account: the service worker reaches the account it was downloaded from; the
  * offscreen document records the tabs you capture; the page script draws GitSpace's UI in the tabs it is on; the
- * popup's font comes from the account. */
+ * popup's font comes from the account. Its build is a hash of every file. */
 export function extensionFiles(accountUrl: string): Record<string, string> {
   const origin = new URL(accountUrl).origin;
-  return {
+  const files: Record<string, string> = {
     'background.js': `const GITSPACE_ACCOUNT_URL = ${JSON.stringify(accountUrl)};\n${BACKGROUND_SOURCE}`,
     'popup.js': POPUP_SOURCE,
     'popup.css': POPUP_STYLES.replaceAll(POPUP_FONT_ORIGIN, origin),
@@ -25,4 +31,8 @@ export function extensionFiles(accountUrl: string): Record<string, string> {
     'offscreen.html': '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace recorder</title></head><body><script src="offscreen.js"></script></body></html>',
     'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.13.1', minimum_chrome_version: '124', permissions: ['debugger', 'scripting', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen', 'favicon'], host_permissions: ['<all_urls>', `${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
   };
+  const build = createHash('sha256').update(JSON.stringify(files)).digest('hex').slice(0, 32);
+  files['background.js'] = `const GITSPACE_EXTENSION_BUILD = ${JSON.stringify(build)};\n${files['background.js']}`;
+  files[EXTENSION_BUILD_FILE] = build;
+  return files;
 }

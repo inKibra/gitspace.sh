@@ -1,5 +1,5 @@
-// The extension's service worker. Bundled by `src/build.ts`; the download prepends the account it belongs to as
-// `const GITSPACE_ACCOUNT_URL = "https://<account>"`.
+// The extension's service worker. Bundled by `src/build.ts`; `extensionFiles` prepends the account it belongs to as
+// `const GITSPACE_ACCOUNT_URL = "https://<account>"` and its build as `const GITSPACE_EXTENSION_BUILD = "<hash>"`.
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { CAPTURE_MAX_MS, CAPTURE_SCREENCAST, jpegSize, ScreencastRecorder } from '@gitspace/runtime-machine/browser-screencast';
 import { remoteInputCommand } from '@gitspace/runtime-machine/browser-remote-input';
@@ -2405,6 +2405,16 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
   } finally { managingIdentity = false; await connect(); }
 }).catch(error => respond({ error: error.message })); return true; });
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
+/** A folder the `gitspace` command keeps (`gitspace browser install`) gets each machine release's files in place,
+ * `build.txt` last (`extensionFiles`). Once no agent acts here, nothing records and you hold no tab, the extension
+ * reloads into the files there when their build is not the one this worker runs. A downloaded copy never changes. */
+async function reloadIfReplaced() {
+  if (runs.size || captures.size || holders.size || actingGroups().size) return;
+  const response = await fetch(chrome.runtime.getURL('build.txt'), { cache: 'no-store' });
+  if (!response.ok) return;
+  const build = (await response.text()).trim();
+  if (/^[a-f0-9]{32}$/.test(build) && build !== GITSPACE_EXTENSION_BUILD) chrome.runtime.reload();
+}
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === ENABLE_ALARM) { void setEnabled(true).catch(() => {}); return; }
   if (alarm.name === EVERYTHING_ALARM) { void everything.expire().catch(() => {}); return; }
@@ -2412,7 +2422,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
   for (const [attemptId, run] of runs) if (!live(run)) void endRun(attemptId, 'deadline').catch(() => {});
   // Keeps each overlay from expiring, and takes down that of a single step that has ended.
   for (const targetId of pages.keys()) void overlay(targetId);
-  void collapseIdle().catch(() => {}); void connect();
+  void collapseIdle().catch(() => {}); void connect(); void reloadIfReplaced().catch(() => {});
 });
 // A group marked while scripts ran before this worker started has none running now.
 void groupRecords().then(records => { for (const { record } of records) void markRunning(record.groupId); }).catch(() => {});

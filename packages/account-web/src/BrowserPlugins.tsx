@@ -312,11 +312,13 @@ export function PairChromeDialog({ request, projects, browsers, onClose }: { req
     <ol className="flex max-h-[60dvh] flex-col gap-2 overflow-y-auto">
       <PairStep number={1} title="Install the GitSpace extension" done={pairingId !== null}>
         <div className="flex flex-col gap-2">
+          <p className="text-caption text-muted-foreground">On a computer linked to GitSpace, run this. It prints a folder: open Chrome&apos;s extensions page (paste this in the address bar), turn on Developer mode, then Load unpacked and choose that folder. That computer keeps the extension up to date.</p>
+          <InputCopy value="gitspace browser install" label="Install command" size="compact" className="max-w-xs" />
+          <ChromeExtensionsCopy />
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" size="compact" disabled={pending !== null} loading={pending === 'download'} onClick={() => void run('download', browsers.downloadExtension)}>Download extension</Button>
-            <p className="text-caption text-muted-foreground">Unzip it, open Chrome&apos;s extensions page (paste this in the address bar), turn on Developer mode, then Load unpacked.</p>
+            <p className="text-caption text-muted-foreground">Elsewhere, download it, unzip it and load that folder the same way. A download is not kept up to date.</p>
           </div>
-          <ChromeExtensionsCopy />
         </div>
       </PairStep>
       <PairStep number={2} title="Type this code into the extension's popup" done={answered !== null}>

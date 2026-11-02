@@ -145,8 +145,9 @@ export async function startMachineRuntime() {
   const browserRelay = new BrowserRelaySupervisor({
     environmentRoot, machineId, enabled: browserEnabled, accountUrl: controlOptions.baseUrl,
   });
+  // An installed extension folder gets this release's extension; the extension reloads into it once idle.
   if (browserEnabled && !process.env.GITSPACE_UPDATE_OWNER && (await browserRelay.status()).installed) {
-    void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
+    void browserRelay.setup().catch((error) => console.error('[gitspace-browser-relay]', error));
   }
   const repositoryCredentialsSchema = z.object({ remote: z.url(), plaintext: z.string().min(1), expiresAt: z.iso.datetime() });
   const gitRemote = new ArtifactsGitRemote({
@@ -436,8 +437,8 @@ export async function startMachineRuntime() {
     }
     if (stopping) return { environmentRoot, settings, http, stop };
     await rehydrateServices();
-    if ((await browserRelay.status()).installed) {
-      void browserRelay.start().catch((error) => console.error('[gitspace-browser-relay]', error));
+    if (browserEnabled && (await browserRelay.status()).installed) {
+      void browserRelay.setup().catch((error) => console.error('[gitspace-browser-relay]', error));
     }
     startupCommitted = true;
     preparingReplacement = false;

@@ -8,7 +8,7 @@ import { MACHINE_PAIRING_TTL_MS, createRelayAuthorization, createServerClock, de
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
-import { CloudDataCheckpointBlobStore } from '@gitspace/account-machine';
+import { BrowserRelaySupervisor, CloudDataCheckpointBlobStore } from '@gitspace/account-machine';
 import { installRuntime } from './bootstrap.js';
 
 const CONFIG_ROOT = process.env.GITSPACE_CONFIG_HOME ?? join(homedir(), '.config', 'gitspace');
@@ -269,6 +269,7 @@ machine.command('setup').description('Link using the pairing command from your a
         await rm(PAIRING_PATH, { force: true });
         console.log(`Linked ${pending.label} to ${result.handle}. No account recovery key was stored on this machine.`);
         await startMachine();
+        console.log('To let agents use Chrome on this computer, run: gitspace browser install');
         return;
       }
       await Bun.sleep(2_000);
@@ -350,6 +351,21 @@ program.command('open').description('Open your account in the browser').option('
   const config = await requireConfig();
   if (!options.print) await openBrowser(config.accountUrl);
   console.log(config.accountUrl);
+});
+const browser = program.command('browser').description('The GitSpace extension for Chrome on this computer');
+browser.command('install').description('Put the extension where Chrome loads it from; this machine keeps it up to date').action(async () => {
+  const config = await requireConfig();
+  const relay = new BrowserRelaySupervisor({ environmentRoot: join(CONFIG_ROOT, 'machine'), machineId: config.machine.id, accountUrl: config.accountUrl, enabled: true });
+  const { chromeExtensionPath } = await relay.setup();
+  console.log(`The GitSpace extension is in ${chromeExtensionPath}
+
+Load it in Chrome once:
+  1. Open chrome://extensions (paste it in the address bar) and turn on Developer mode.
+  2. Choose Load unpacked and select that folder.
+  3. Pair it in ${config.accountUrl}: Plugins, Browsers, Pair a Chrome.
+
+Each machine update writes its release's extension there, and the extension reloads into it while no agent is using
+Chrome. A copy loaded from a download is a separate extension with its own pairing: remove it.`);
 });
 program.command('doctor').description('Check this machine installation and account connection').action(async () => {
   const config = await loadConfig();
