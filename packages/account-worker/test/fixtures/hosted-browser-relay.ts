@@ -22,7 +22,7 @@ export function drivenBrowserRelay(relay: Driven): HostedBrowserRelay {
       if (!redeemed.ok) throw new Error(redeemed.message);
       return redeemed.value;
     },
-    start: trust => relay.pair(trust),
+    start: (trust, machineId) => relay.pair(trust, machineId),
     redeem: (code, ip, endpoint) => relay.redeemPairingCode(code, ip, endpoint),
     status: () => relay.status(),
     confirm: (pairingId, fingerprint) => relay.confirm(pairingId, fingerprint),
@@ -44,7 +44,7 @@ export function drivenBrowserRelay(relay: Driven): HostedBrowserRelay {
 export function hostedBrowserRelay(relay: UserRelayDO): HostedBrowserRelay {
   return drivenBrowserRelay({
     fetch: request => relay.fetch(request),
-    pair: trust => relay.browserRelayPair(trust),
+    pair: (trust, machineId) => relay.browserRelayPair(trust, machineId),
     redeemPairingCode: (code, ip, endpoint) => relay.browserRelayRedeemPairingCode(code, ip, endpoint),
     status: () => relay.browserRelayStatus(),
     confirm: (pairingId, fingerprint) => relay.browserRelayConfirm(pairingId, fingerprint),

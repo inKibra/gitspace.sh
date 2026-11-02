@@ -422,6 +422,15 @@ test('text that cannot be a pairing code is refused without counting against the
   expect(await relay.redeem(started.code, '192.0.2.30', endpoint)).toMatchObject({ ok: true, value: { pairingId: started.pairingId } });
 }));
 
+test('a pairing a machine starts replaces that machine\'s pairing still waiting for its Chrome; yours and other machines\' stay', () => fixture(async relay => {
+  const yours = await relay.start(trust);
+  const replaced = await relay.start(trust, 'machine-a');
+  const other = await relay.start(trust, 'machine-b');
+  const latest = await relay.start(trust, 'machine-a');
+  expect(await relay.redeem(replaced.code, '192.0.2.50', endpoint)).toMatchObject({ ok: false, status: 404 });
+  for (const kept of [yours, other, latest]) expect(await relay.redeem(kept.code, '192.0.2.51', endpoint)).toMatchObject({ ok: true, value: { pairingId: kept.pairingId } });
+}));
+
 test('the extension redeems a pairing code through the public route, from an extension origin only', async () => {
   const started = await env.RELAY.getByName(env.RELAY_NAME).browserRelayPair(trust);
   const post = (supplied: string) => SELF.fetch(new URL('/api/browser-relay/pairing-code', env.ACCOUNT_URL), { method: 'POST', headers: { 'content-type': 'application/json', origin: supplied, 'cf-connecting-ip': '192.0.2.40' }, body: JSON.stringify({ code: started.code }) });

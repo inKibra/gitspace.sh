@@ -312,7 +312,7 @@ export function PairChromeDialog({ request, projects, browsers, onClose }: { req
     <ol className="flex max-h-[60dvh] flex-col gap-2 overflow-y-auto">
       <PairStep number={1} title="Install the GitSpace extension" done={pairingId !== null}>
         <div className="flex flex-col gap-2">
-          <p className="text-caption text-muted-foreground">On the computer with that Chrome, run this. It puts your extension in the gitspace/chrome-extension folder in your home folder and shows it to you. Then in Chrome: ⋮ menu, Extensions, Manage Extensions, turn on Developer mode, Load unpacked, and choose that folder. That computer keeps it up to date.</p>
+          <p className="text-caption text-muted-foreground">On the computer with that Chrome, run this. It puts your extension in the gitspace/chrome-extension folder in your home folder and shows it to you. Then in Chrome: ⋮ menu, Extensions, Manage Extensions, turn on Developer mode, Load unpacked, and choose that folder. The extension pairs itself and opens GitSpace for you to confirm it, and that computer keeps it up to date.</p>
           <InputCopy value="gitspace browser install" label="Install command" size="compact" className="max-w-xs" />
           <ChromeExtensionsCopy />
           <div className="flex flex-wrap items-center gap-2">

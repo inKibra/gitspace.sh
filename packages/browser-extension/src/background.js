@@ -2374,9 +2374,14 @@ const request = popupRequest(message);
 if (request) { void request.then(respond, error => respond({ error: error.message })); return true; }
 // A short pairing code (`pairCode`), redeemed with GitSpace for the pairing's details.
 if (typeof message.pairCode !== 'string' && message.resetIdentity !== true) return;
-identityOperations = identityOperations.catch(() => {}).then(async () => {
-  // A code that GitSpace refuses changes nothing here.
-  const details = message.resetIdentity === true ? null : await redeemPairingCode(message.pairCode);
+// A code that GitSpace refuses changes nothing here.
+void changeIdentity(() => message.resetIdentity === true ? null : redeemPairingCode(message.pairCode)).then(() => respond({ ok: true }), error => respond({ error: error.message }));
+return true; });
+/** Replaces this Chrome's pairing with the one `pairing` answers (`redeemPairingCode`'s details), or clears it (`null`),
+ * after the identity operation in flight. */
+function changeIdentity(pairing) {
+  const operation = identityOperations.catch(() => {}).then(async () => {
+  const details = await pairing();
   // Captures are saved under this identity before it changes.
   await Promise.all([...captures.values()].map(capture => endCapture(capture, 'This Chrome’s GitSpace pairing changed', true)));
   managingIdentity = true;
@@ -2388,11 +2393,11 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
     await Promise.allSettled([...queues.values()]);
     await reset();
     await chrome.storage.local.remove('pairingCode');
-    if (message.resetIdentity === true) {
+    if (details === null) {
       const db = await database; const deleted = Promise.withResolvers(); const tx = db.transaction('state', 'readwrite');
       // Keep replay and attachment-generation records: resetting transport identity does not renew old grants.
       tx.objectStore('state').delete('identity'); tx.oncomplete = deleted.resolve; tx.onerror = () => deleted.reject(tx.error); tx.onabort = () => deleted.reject(tx.error);
-      await deleted.promise; paired = false; updateToolbar(); respond({ ok: true }); return;
+      await deleted.promise; paired = false; updateToolbar(); return;
     }
   const { code, trust, pairingId, generation } = details;
   if (typeof code !== 'string' || typeof pairingId !== 'string' || !pairingId || !Number.isSafeInteger(generation) || !trust || trust.algorithm !== 'Ed25519' || !trust.accountId || typeof trust.publicKey !== 'string') throw new Error('Invalid human pairing');
@@ -2401,9 +2406,25 @@ identityOperations = identityOperations.catch(() => {}).then(async () => {
   if (identity && (identity.pairingId !== pairingId || identity.generation !== generation || identity.trust.accountId !== trust.accountId || identity.trust.publicKey !== trust.publicKey)) throw new Error('Clear extension identity before changing account relay authority');
   if (!identity) { const keys = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']); identity = { privateKey: keys.privateKey, publicKey: encode64(await crypto.subtle.exportKey('raw', keys.publicKey)), trust, pairingId, generation }; await persist('identity', identity); }
   await chrome.storage.local.remove('pairingCode'); pairingCode = code;
-    respond({ ok: true });
   } finally { managingIdentity = false; await connect(); }
-}).catch(error => respond({ error: error.message })); return true; });
+  });
+  identityOperations = operation.catch(() => {});
+  return operation;
+}
+/** A pairing `gitspace browser install` left in this extension's folder (`pairing.json`): a Chrome with no pairing
+ * takes it once, as if you had typed its code, then opens GitSpace where you compare its fingerprint. Each code is tried
+ * once: GitSpace counts a used or expired one as a wrong guess. */
+async function pairFromFolder() {
+  if (await stored('identity')) return;
+  const response = await fetch(chrome.runtime.getURL('pairing.json'), { cache: 'no-store' }).catch(() => null);
+  if (!response?.ok) return;
+  const code = (await response.json().catch(() => null))?.code;
+  if (typeof code !== 'string' || (await chrome.storage.local.get('folderPairing')).folderPairing === code) return;
+  await chrome.storage.local.set({ folderPairing: code });
+  await changeIdentity(() => redeemPairingCode(code));
+  const identity = await stored('identity');
+  if (identity) await chrome.tabs.create({ url: new URL(`/plugins?tab=browsers&resume=${encodeURIComponent(identity.pairingId)}`, GITSPACE_ACCOUNT_URL).href });
+}
 chrome.alarms.create('relay-reconnect', { periodInMinutes: 0.5 });
 /** A folder the `gitspace` command keeps (`gitspace browser install`) gets each machine release's files in place,
  * `build.txt` last (`extensionFiles`). Once no agent acts here, nothing records, you hold no tab and no tab's debugger
@@ -2436,3 +2457,4 @@ async function showHeld() {
 // Tabs you held before this worker started stay yours while they are in their group.
 void holdersRestored.then(reconcileHolders).then(showHeld).catch(() => {});
 connect();
+void pairFromFolder().catch(() => {});

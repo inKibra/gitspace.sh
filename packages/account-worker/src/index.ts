@@ -435,7 +435,7 @@ export class UserRelayDO extends BudgetedDurableObject {
     if (!service || machine?.readyState !== 1) return;
     machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.websocket.close', requestId: service.requestId, code: 1000, reason: '' } satisfies TunnelRequestMessage));
   }
-  browserRelayPair(trust: RuntimeBrowserTrust) { return this.browserRelay.pair(trust); }
+  browserRelayPair(trust: RuntimeBrowserTrust, machineId?: string) { return this.browserRelay.pair(trust, machineId); }
   /** A short pairing code your Chrome's extension redeems (public `/api/browser-relay/pairing-code`), limited per address and code. */
   browserRelayRedeemPairingCode(code: string, ip: string, endpoint: string) { return this.browserRelay.redeemPairingCode(code, ip, endpoint); }
   browserRelayStatus() { return this.browserRelay.status(); }

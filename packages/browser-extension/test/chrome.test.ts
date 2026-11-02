@@ -250,6 +250,35 @@ describe('the popup', () => {
     expect(chrome.stored.has('identity')).toBe(false);
     expect(chrome.sockets.length).toBe(opened);
   });
+
+  it('takes the pairing `gitspace browser install` left in its folder once, then opens GitSpace where you confirm it', async () => {
+    const chrome = await installed({ live: true });
+    await chrome.popup({ resetIdentity: true });
+    const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const pairingId = crypto.randomUUID(), trust = { algorithm: 'Ed25519', accountId: 'account', publicKey: browserBase64(new Uint8Array(await crypto.subtle.exportKey('raw', root.publicKey))) };
+    chrome.pairingCodes.set('K7P2QX', { code: 'long-secret', pairingId, generation: 1, trust, endpoint: 'wss://account.gitspace.test/api/browser-relay/extension', expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    chrome.folder.set('pairing.json', JSON.stringify({ code: 'K7P2QX' }));
+    await chrome.restart();
+    for (let turn = 0; turn < 20 && !chrome.opened.length; turn++) await settle();
+    expect(chrome.opened).toEqual([`https://account.gitspace.test/plugins?tab=browsers&resume=${pairingId}`]);
+    expect(chrome.stored.get('identity')).toMatchObject({ pairingId, generation: 1, trust });
+    await chrome.relay();
+    expect(chrome.sent.find(message => message.pairing === 'client')).toMatchObject({ pairingId, code: 'long-secret' });
+    // Started again, a paired Chrome leaves the folder's pairing alone.
+    await chrome.restart();
+    expect(chrome.requests.filter(request => request.pathname === '/api/browser-relay/pairing-code')).toHaveLength(1);
+  });
+
+  it('tries a folder pairing the account refuses once: a used or expired code counts as a wrong guess', async () => {
+    const chrome = await installed({ live: true });
+    await chrome.popup({ resetIdentity: true });
+    chrome.folder.set('pairing.json', JSON.stringify({ code: 'WRONG2' }));
+    await chrome.restart();
+    await chrome.restart();
+    expect(chrome.requests.filter(request => request.pathname === '/api/browser-relay/pairing-code')).toHaveLength(1);
+    expect(chrome.stored.has('identity')).toBe(false);
+    expect(chrome.opened).toEqual([]);
+  });
 });
 
 describe('what the agent is doing', () => {

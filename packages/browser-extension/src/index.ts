@@ -15,6 +15,9 @@ const POPUP_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>GitS
  * (`GITSPACE_EXTENSION_BUILD`); a folder written after it started names another, and the worker reloads into it
  * (`reloadIfReplaced`). Writers put it last. */
 export const EXTENSION_BUILD_FILE = 'build.txt';
+/** A pairing `gitspace browser install` leaves beside the files (`{ "code": "<short code>" }`, from the machine's
+ * `browser.pair`): an extension with no pairing redeems it once (`pairFromFolder`), as if you had typed the code. */
+export const EXTENSION_PAIRING_FILE = 'pairing.json';
 
 /** The unpacked extension for one account: the service worker reaches the account it was downloaded from; the
  * offscreen document records the tabs you capture; the page script draws GitSpace's UI in the tabs it is on; the

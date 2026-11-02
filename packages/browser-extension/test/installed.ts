@@ -175,6 +175,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const shares = new Map<string, RuntimeBrowserShare>();
   /** Pairing details by the short code GitSpace showed for them; the account answers each code once. */
   const pairingCodes = new Map<string, object>();
+  /** Files beside the extension's own in its folder, by name (`pairing.json` from `gitspace browser install`). */
+  const folder = new Map<string, string>();
   const held: Array<{ matches: (request: AccountRequest) => boolean; release: Promise<void> }> = [];
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
   /** Chrome's favicon store as `_favicon` serves it, by page; a page it has none of gets `DEFAULT_FAVICON`. */
@@ -237,6 +239,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   const fetch = async (input: URL | string, init: { method?: string; headers?: Record<string, string>; body?: Uint8Array<ArrayBuffer> | string; credentials?: string } = {}) => {
     const url = new URL(String(input));
     if (url.protocol === 'chrome-extension:' && url.pathname === '/_favicon/') return new Response(favicons.get(url.searchParams.get('pageUrl') ?? '') ?? DEFAULT_FAVICON);
+    if (url.protocol === 'chrome-extension:' && folder.has(url.pathname.slice(1))) return new Response(folder.get(url.pathname.slice(1)));
     if (url.origin !== 'https://account.gitspace.test') throw new Error(`Unexpected fetch of ${url.href}`);
     if (url.pathname.startsWith('/files/')) {
       const bytes = files.get(url.pathname);
@@ -607,7 +610,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
   };
   return {
     grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, pageScripts, fromPage, page: pageOf, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, opened, stored: state,
-    requests, uploads, uploaded, files, shares, pairingCodes, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
+    requests, uploads, uploaded, files, shares, pairingCodes, folder, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
     commentThreads, commentRequests, workspaces, workspaceRequests, pairingId,
     execute, authorize, begin, signGrant, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor, restart,
     /** You bring a tab to the front of its window, as Chrome reports it (`chrome.tabs.onActivated`). */

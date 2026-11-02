@@ -364,6 +364,7 @@ browser.command('install').description('Put your account\'s Chrome extension in 
   const config = await requireConfig();
   const relay = new BrowserRelaySupervisor({ environmentRoot: join(CONFIG_ROOT, 'machine'), machineId: config.machine.id, accountUrl: config.accountUrl, enabled: true });
   const { chromeExtensionPath } = await relay.setup();
+  await relay.offerPairing({ baseUrl: config.apiUrl, userId: config.userId, machineId: config.machine.id, signingPrivateKey: credentialProtocolBase64.decode(config.machine.signingPrivateKey), clock: accountClock });
   // Chrome opens no chrome:// page it is handed from outside, so the steps go through its menu.
   const mac = process.platform === 'darwin';
   const windows = Boolean(process.env.WSL_DISTRO_NAME);
@@ -377,12 +378,12 @@ browser.command('install').description('Put your account\'s Chrome extension in 
   console.log(`Your GitSpace Chrome extension is ready: ${chromeExtensionPath}
 ${shown ? `${mac ? 'Finder' : windows ? 'File Explorer' : 'Your file manager'} shows it. ` : ''}${copied ? 'Its path is on your clipboard.' : ''}
 
-Add it to Chrome once:
+Add it to Chrome now (its pairing waits 10 minutes; run this again after that):
   1. In Chrome, open the ⋮ menu, Extensions, Manage Extensions, and turn on Developer mode (top right).
   2. Click Load unpacked and choose the chrome-extension folder (${paste}).
-  3. Pair it: Plugins, Browsers, Pair a Chrome in GitSpace.
+  3. GitSpace opens in a new tab: check the fingerprint matches the one in the extension, then choose its projects.
 
-This computer keeps it up to date.`);
+This computer keeps the extension up to date.`);
 });
 program.command('doctor').description('Check this machine installation and account connection').action(async () => {
   const config = await loadConfig();

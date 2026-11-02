@@ -135,16 +135,18 @@ export function PluginsPage(props: PluginsPageProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [target, setTarget] = useState<Target>('workspace');
-  // `?tab=browsers` opens Browsers; `&pair=<project>` also opens the pairing dialog with that project chosen, and
-  // `&manage=<pairingId>` (Approve… in a Chrome's popup) that Chrome's Manage Chrome.
+  // `?tab=browsers` opens Browsers; `&pair=<project>` also opens the pairing dialog with that project chosen,
+  // `&resume=<pairingId>` (an extension that paired itself from its folder) that pairing's dialog where Resume opens it,
+  // and `&manage=<pairingId>` (Approve… in a Chrome's popup) that Chrome's Manage Chrome.
   const [linked] = useState(() => typeof window === 'undefined' ? new URLSearchParams() : new URLSearchParams(window.location.search));
   const [tab, setTab] = useState(() => linked.get('tab') === 'browsers' ? 2 : props.connections.some((connection) => connection.transport.type !== 'composio') ? 1 : 0);
-  const [pairing, setPairing] = useState<PairChromeRequest | null>(() => linked.has('pair') ? { projectId: linked.get('pair') || null } : null);
+  const [pairing, setPairing] = useState<PairChromeRequest | null>(() => linked.get('resume') ? { projectId: null, pairingId: linked.get('resume')! } : linked.has('pair') ? { projectId: linked.get('pair') || null } : null);
   useEffect(() => {
-    if (!linked.has('pair') && !linked.has('manage')) return;
+    if (!linked.has('pair') && !linked.has('manage') && !linked.has('resume')) return;
     const url = new URL(window.location.href);
     url.searchParams.delete('pair');
     url.searchParams.delete('manage');
+    url.searchParams.delete('resume');
     window.history.replaceState(window.history.state, '', url);
   }, [linked]);
   const [machineId, setMachineId] = useState('');

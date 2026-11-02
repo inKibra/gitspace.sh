@@ -62,6 +62,9 @@ export const controlOperationSchema = z.enum([
   'project.routes.ingress',
   'project.events.append',
   'devices.list',
+  /** Starts pairing a Chrome for `gitspace browser install`: the short code Pair a Chrome makes, one waiting per
+   *  machine. It confirms nothing: the Chrome stays unconfirmed until you compare its fingerprint on a signed-in device. */
+  'browser.pair',
   /** Issues people filed with GitSpace from their workspaces, read and resolved by the GitSpace agent. */
   'account.issues.list',
   'account.issues.resolve',

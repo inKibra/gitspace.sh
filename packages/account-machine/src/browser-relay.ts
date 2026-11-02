@@ -1,8 +1,11 @@
 import { mkdir, readdir, rename, rm, writeFile, lstat } from 'node:fs/promises';
 import { dirname, join, resolve, relative } from 'node:path';
 import { homedir } from 'node:os';
+import { z } from 'zod';
 import type { BrowserRelayStatus } from '@gitspace/protocol';
-import { EXTENSION_BUILD_FILE, extensionFiles } from '@gitspace/browser-extension';
+import { EXTENSION_BUILD_FILE, EXTENSION_PAIRING_FILE, extensionFiles } from '@gitspace/browser-extension';
+import { CloudRuntimeClient } from './cloud-runtime-client.js';
+import type { SignedCloudRequestOptions } from './cloud-space-authority.js';
 
 type BrowserRelaySupervisorOptions = { environmentRoot: string; machineId: string; accountUrl: string; extensionPath?: string; enabled: boolean };
 /** Installs the extension only. Pairing, transport and browser effects belong to the account worker. */
@@ -41,8 +44,18 @@ export class BrowserRelaySupervisor {
       await writeFile(temporary, files[name]!, { mode: 0o600 });
       await rename(temporary, join(this.extensionPath, name));
     }
-    for (const name of await readdir(this.extensionPath)) if (!(name in files)) await rm(join(this.extensionPath, name), { recursive: true, force: true });
+    // A pairing left for the extension (`offerPairing`) stays until the extension takes it.
+    for (const name of await readdir(this.extensionPath)) if (!(name in files) && name !== EXTENSION_PAIRING_FILE) await rm(join(this.extensionPath, name), { recursive: true, force: true });
     return this.status();
+  }
+  /** Asks the account to start pairing this computer's Chrome (`browser.pair`, signed as this machine) and leaves the
+   *  pairing's short code in the folder: the extension, loaded from it with no pairing yet, takes the code itself and
+   *  opens GitSpace where you confirm its fingerprint. The code is good for 10 minutes. */
+  async offerPairing(cloud: SignedCloudRequestOptions): Promise<void> {
+    const { code } = await new CloudRuntimeClient(cloud).call('browser.pair', {}, z.object({ code: z.string() }));
+    const temporary = join(this.extensionPath, `.${EXTENSION_PAIRING_FILE}.${process.pid}.tmp`);
+    await writeFile(temporary, JSON.stringify({ code }), { mode: 0o600 });
+    await rename(temporary, join(this.extensionPath, EXTENSION_PAIRING_FILE));
   }
   async stop(): Promise<BrowserRelayStatus> { throw new Error('Disconnect the browser in account Browser settings; machines do not own Chrome transport'); }
   async unpair(): Promise<BrowserRelayStatus> { throw new Error('Forget the paired browser in authenticated account Browser settings'); }

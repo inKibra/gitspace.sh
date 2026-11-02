@@ -3778,6 +3778,14 @@ const worker = {
         if (body.operation === 'devices.list') {
           return Response.json({ status: 'ok', value: await credentialVault(env, body.userId).listDeviceGrants() }, { headers: { 'cache-control': 'private, no-store' } });
         }
+        if (body.operation === 'browser.pair') {
+          // `gitspace browser install`: the code Pair a Chrome makes, left in the extension's folder; you still confirm
+          // the Chrome's fingerprint on a signed-in device.
+          z.object({}).strict().parse(body.payload);
+          if (body.userId !== env.ACCOUNT_ID) throw new Error('Browser pairing account identity mismatch');
+          const value = await env.RELAY.getByName(env.RELAY_NAME).browserRelayPair(await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust(), body.machineId);
+          return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'private, no-store' } });
+        }
         if (body.operation === 'account.issues.list' || body.operation === 'account.issues.resolve') {
           // Read from the account object alone: listing never opens a workspace or project object.
           const state = env.ACCOUNT_STATE.getByName('account');

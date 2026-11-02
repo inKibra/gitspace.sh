@@ -36,8 +36,8 @@ const identity = { pairingId: z.string().uuid(), generation: z.number().int().no
   chromeVersion: z.number().int().positive().optional(), platform: RuntimeBrowserPlatformSchema.optional(), seenAt: z.iso.datetime().optional(), pairedAt: z.iso.datetime().optional() };
 const Pairing = z.discriminatedUnion('state', [
   /** `shortCode` redeems the pairing's details once (`redeemPairingCode`), then is null; `misses` counts the wrong codes
-   * tried while it was live. */
-  z.object({ ...identity, state: z.literal('awaiting-key'), code: z.string(), expiresAt: z.iso.datetime(), publicKey: z.null(), shortCode: z.string().nullable().default(null), misses: z.number().int().nonnegative().default(0) }),
+   * tried while it was live; `machineId` names the machine that started it (`gitspace browser install`). */
+  z.object({ ...identity, state: z.literal('awaiting-key'), code: z.string(), expiresAt: z.iso.datetime(), publicKey: z.null(), shortCode: z.string().nullable().default(null), misses: z.number().int().nonnegative().default(0), machineId: z.string().optional() }),
   z.object({ ...identity, state: z.literal('pending-confirmation'), code: z.null(), expiresAt: z.null(), publicKey: z.string() }),
   z.object({ ...identity, state: z.literal('confirmed'), code: z.null(), expiresAt: z.null(), publicKey: z.string() }),
 ]);
@@ -479,17 +479,18 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     }
     return approval;
   }
-  /** Starts pairing a Chrome: its short single-use code, which the extension redeems for the pairing's details. */
-  async pair(trust: RuntimeBrowserTrust) {
+  /** Starts pairing a Chrome: its short single-use code, which the extension redeems for the pairing's details. One a
+   *  machine starts (`machineId`) replaces that machine's pairing still waiting for its Chrome. */
+  async pair(trust: RuntimeBrowserTrust, machineId?: string) {
     if (trust.accountId !== this.env.ACCOUNT_ID) throw new Error('Browser pairing account mismatch');
     const result = await this.ctx.blockConcurrencyWhile(async () => {
       const registry = await this.registry();
-      registry.pairings = registry.pairings.filter(item => item.state !== 'awaiting-key' || Date.parse(item.expiresAt) > Date.now());
+      registry.pairings = registry.pairings.filter(item => item.state !== 'awaiting-key' || (Date.parse(item.expiresAt) > Date.now() && (machineId === undefined || item.machineId !== machineId)));
       if (registry.pairings.length >= 32) return null;
       const live = new Set(registry.pairings.flatMap(item => item.state === 'awaiting-key' && item.shortCode ? [item.shortCode] : []));
       let shortCode = shortPairingCode();
       while (live.has(shortCode)) shortCode = shortPairingCode();
-      const pairing = Pairing.parse({ pairingId: crypto.randomUUID(), generation: 1, state: 'awaiting-key', code: crypto.randomUUID() + crypto.randomUUID(), expiresAt: new Date(Date.now() + PAIRING_CODE_MS).toISOString(), publicKey: null, trust, note: '', shortCode, misses: 0 });
+      const pairing = Pairing.parse({ pairingId: crypto.randomUUID(), generation: 1, state: 'awaiting-key', code: crypto.randomUUID() + crypto.randomUUID(), expiresAt: new Date(Date.now() + PAIRING_CODE_MS).toISOString(), publicKey: null, trust, note: '', shortCode, misses: 0, machineId });
       registry.pairings.push(pairing); await this.ctx.storage.put('browser.relay.pairings', registry);
       return RuntimeAccountBrowserPairingCodeSchema.parse({ pairingId: pairing.pairingId, code: shortCode, expiresAt: pairing.expiresAt });
     });
