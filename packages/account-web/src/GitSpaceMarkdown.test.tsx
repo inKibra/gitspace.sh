@@ -39,15 +39,20 @@ $$E = mc^2$$`}</GitSpaceMarkdown>);
     expect(html).not.toContain('<script');
   });
 
-  it('renders images that name loaded artifacts from their object URLs and still blocks remote images', () => {
-    const objectUrl = 'blob:https://gitspace.local/3f1c';
-    const html = renderToStaticMarkup(<GitSpaceMarkdown resolveImage={(src) => src === 'accounts.svg' ? objectUrl : null}>{`![Proposed accounts](accounts.svg)
+  it('shows and links files relative to the drive document it renders, still blocks remote images, and leaves a message\'s relative link as text', () => {
+    const html = renderToStaticMarkup(<GitSpaceMarkdown documentUri="drive://workspace/plans/review.md">{`![Proposed accounts](diagrams/accounts.svg)
+
+[Notes](../notes.md)
 
 ![tracker](https://tracker.invalid/pixel.png)`}</GitSpaceMarkdown>);
-    expect(html).toContain(`src="${objectUrl}"`);
-    expect(html).not.toContain('Image blocked: Proposed accounts');
-    expect(html).not.toContain('__gitspace-artifact-image');
+    // The image shows by its drive address (here, with no file source, as that file's card).
+    expect(html).toContain(`href="#gitspace-resource=${encodeURIComponent('drive://workspace/plans/diagrams/accounts.svg')}"`);
+    expect(html).toContain(`href="#gitspace-resource=${encodeURIComponent('drive://workspace/notes.md')}"`);
     expect(html).not.toContain('tracker.invalid');
+    const message = renderToStaticMarkup(<GitSpaceMarkdown>{'The screenshots are in [live-photon/](live-photon/).'}</GitSpaceMarkdown>);
+    expect(message).toContain('live-photon/');
+    // Neither a link nor Streamdown's link button: a path with no folder to name opens nothing.
+    expect(message).not.toMatch(/<a\b[^>]*>live-photon\/|data-streamdown="link"|\[blocked\]/u);
   });
 
   it('accepts incomplete streaming Markdown without discarding content', () => {

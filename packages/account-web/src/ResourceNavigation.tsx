@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, type MouseEvent, type ReactNode } from 'react';
-import { resourceLinkHref, resourceUriFromHref } from '@gitspace/protocol/resource-uri';
+import { resolveResourceReference, resourceLinkHref, resourceUriFromHref } from '@gitspace/protocol/resource-uri';
 
 export interface ResourceRequest { uri: string }
 export const ResourceNavigation = createContext<((request: ResourceRequest) => void) | null>(null);
@@ -46,13 +46,18 @@ interface MarkdownNode {
   children?: MarkdownNode[];
 }
 
-/** Rewrites only parsed anchors, before sanitization. Code samples and image URLs are untouched. */
-export function rehypeResourceLinks() {
+/** Rewrites only parsed anchors, before sanitization: a resource address, or a path relative to the document at
+ * `documentUri`, becomes an internal link. A relative path that names no resource (in a message, which has no folder;
+ * a folder) stays as its text rather than a blocked link. Code samples and image URLs are untouched. Give it as
+ * `[rehypeResourceLinks, { documentUri }]`: Streamdown caches a processor by each plugin's name and options. */
+export function rehypeResourceLinks({ documentUri }: { documentUri?: string } = {}) {
   return (tree: MarkdownNode): void => {
     const visit = (node: MarkdownNode): void => {
-      if (node.tagName === 'a' && typeof node.properties?.href === 'string') {
-        const href = resourceLinkHref(node.properties.href);
-        if (href) node.properties.href = href;
+      if (node.tagName === 'a' && node.properties && typeof node.properties.href === 'string') {
+        const href = node.properties.href;
+        const uri = resolveResourceReference(href, documentUri);
+        if (uri) node.properties.href = resourceLinkHref(uri) ?? href;
+        else if (!/^[a-z][a-z0-9+.-]*:/iu.test(href) && !href.startsWith('/') && !href.startsWith('#')) { node.tagName = 'span'; node.properties = {}; }
       }
       node.children?.forEach(visit);
     };

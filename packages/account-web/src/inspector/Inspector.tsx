@@ -90,7 +90,6 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type C
 import { glyph } from '../glyph.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { artifactImageUrl, markdownImageSources } from '../markdown-artifact-images.js';
 import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus, type InspectorProviderUsageState } from './UsageView.js';
@@ -561,26 +560,9 @@ function ThreadPanel({ thread, selection, onClose, onCreate, onReply, onResolve 
   </Elevated>;
 }
 
-/** Images naming other artifacts load through the Inspector's artifact reads and render from their object URLs. */
-function MarkdownArtifact({ source, documentUrl, artifactReferences, artifactContent, onRequest }: {
-  source: string;
-  documentUrl: string;
-  artifactReferences: readonly ArtifactReference[];
-  artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
-  onRequest(reference: ArtifactReference): Promise<void>;
-}) {
-  const findImage = (src: string): ArtifactReference | undefined => {
-    const url = artifactImageUrl(src, documentUrl);
-    return url ? artifactReferences.find((reference) => reference.url === url) : undefined;
-  };
-  const images = markdownImageSources(source).flatMap((src) => findImage(src) ?? []);
-  const imageKey = images.map(artifactId).join('\n');
-  useEffect(() => { for (const image of images) void onRequest(image); }, [imageKey]);
-  const resolveImage = (src: string): string | null => {
-    const image = findImage(src);
-    return image ? artifactContent[artifactId(image)]?.previewUrl ?? null : null;
-  };
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><article className="mx-auto w-full max-w-3xl px-6 py-6"><GitSpaceMarkdown resolveImage={resolveImage}>{source}</GitSpaceMarkdown></article></ScrollArea>;
+/** A Markdown drive or repository file: links and images relative to it name the files beside it. */
+function MarkdownArtifact({ source, documentUrl }: { source: string; documentUrl: string }) {
+  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><article className="mx-auto w-full max-w-3xl px-6 py-6"><GitSpaceMarkdown documentUri={documentUrl}>{source}</GitSpaceMarkdown></article></ScrollArea>;
 }
 function SourceArtifact({ source }: { source: string }) {
   // FLUID-GAP: code viewer — the registry has no read-only code block; plain <pre> on Fluid tokens.
@@ -653,7 +635,7 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
     try { pretty = JSON.stringify(JSON.parse(content.source), null, 2); } catch { /* Render original text. */ }
     return <SourceArtifact source={pretty} />;
   }
-  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} documentUrl={reference.url} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequest} />;
+  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} documentUrl={reference.url} />;
   return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." action={download} /></Padded>;
 }
 

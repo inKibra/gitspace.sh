@@ -88,6 +88,25 @@ export function resourceUriFromHref(href: string): string | null {
   } catch { return null; }
 }
 
+/** A Markdown link or image `reference` as a resource address: one already, or a path relative to the drive or
+ * repository file at `base` (the document it is written in), resolved within that drive mount or repository version.
+ * Null for web, data and in-page references, for folders, for paths that leave the mount, and without a `base`. */
+export function resolveResourceReference(reference: string, base: string | null | undefined): string | null {
+  const own = parseResourceUri(reference);
+  if (own) return own.kind === 'drive' || own.kind === 'repo' ? reference : null;
+  const document = base ? parseResourceUri(base) : null;
+  if (!document || (document.kind !== 'drive' && document.kind !== 'repo')) return null;
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(reference) || reference.startsWith('/') || reference.startsWith('#') || !reference) return null;
+  const folder = document.path.split('/').slice(0, -1).map(encodeURIComponent).join('/');
+  let path: string;
+  try { path = new URL(reference.split(/[?#]/u)[0]!, `https://resource.invalid/${folder ? `${folder}/` : ''}`).pathname.slice(1); } catch { return null; }
+  const scope = document.kind === 'drive' ? [document.mount, document.workspaceId].flatMap((part) => part ? [encodeURIComponent(part)] : []) : [];
+  const resolved = parseResourceUri(document.kind === 'drive'
+    ? `drive://${[...scope, path].join('/')}`
+    : `repo://${path}${document.commit ? `@${document.commit}` : ''}`);
+  return resolved?.url ?? null;
+}
+
 export type ResourcePreviewFrame =
   | { type: 'metadata'; url: string; mediaType: string | null; text: boolean; size: number }
   | { type: 'chunk'; base64: string };

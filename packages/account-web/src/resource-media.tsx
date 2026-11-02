@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { parseResourceUri, resourceMediaType, resourceUriFromHref } from '@gitspace/protocol/resource-uri';
+import { parseResourceUri, resolveResourceReference, resourceMediaType, resourceUriFromHref } from '@gitspace/protocol/resource-uri';
 import { Dialog, DialogContent, DialogTitle, Tooltip, useShape } from '@gitspace/ui';
 import { Download01, File06, PlayCircle } from '@untitledui/icons';
 import { formatBytes } from './inspector/artifact-upload.js';
@@ -77,7 +77,7 @@ export function ResourceMedia({ uri, alt }: { uri: string; alt?: string }) {
   const resource = parseResourceUri(uri);
   const label = alt || fileName(uri);
   const named = resource?.kind === 'drive' || resource?.kind === 'repo' ? resourceMediaType(resource.path) : null;
-  if (resource?.kind === 'repo' && resource.commit && named?.startsWith('image/') && named !== 'image/svg+xml') return <RepositoryImageComparison uri={uri} path={resource.path} commit={resource.commit} label={label} />;
+  if (resource?.kind === 'repo' && resource.commit && named?.startsWith('image/')) return <RepositoryImageComparison uri={uri} path={resource.path} commit={resource.commit} label={label} />;
   return <ResourceFileView uri={uri} label={label} named={named} />;
 }
 
@@ -89,7 +89,8 @@ function ResourceFileView({ uri, label, named }: { uri: string; label: string; n
     {error ? <span role="alert" className="text-caption text-destructive">{error}</span> : null}
   </span>;
   if (!file) return <span aria-busy="true" aria-label={`Loading ${label}`} className="block h-24 w-40 animate-pulse rounded-md bg-surface-2" />;
-  if (mediaType?.startsWith('image/') && mediaType !== 'image/svg+xml') return <TranscriptImage alt={label} label={`Open ${label}`} src={file.url} />;
+  // In an <img>, an SVG runs no script and loads nothing else.
+  if (mediaType?.startsWith('image/')) return <TranscriptImage alt={label} label={`Open ${label}`} src={file.url} />;
   if (mediaType?.startsWith('video/')) return <VideoPoster label={label} src={file.url} />;
   if (mediaType?.startsWith('audio/')) return <audio aria-label={label} className="block w-full max-w-md" controls preload="metadata" src={file.url} />;
   return <FileCard uri={uri} label={label} size={file.size} downloadUrl={file.downloadUrl} />;
@@ -139,18 +140,21 @@ export function MarkdownResourceAnchor(props: Record<string, unknown> & { href?:
   const resource = uri ? parseResourceUri(uri) : null;
   const mediaType = resource?.kind === 'drive' || resource?.kind === 'repo' ? resourceMediaType(resource.path) : null;
   const link = <MarkdownResourceLink {...props} />;
-  return uri && mediaType?.startsWith('image/') && mediaType !== 'image/svg+xml' ? <Tooltip content={<ImageHoverPreview uri={uri} />} delayDuration={300}><span className="inline">{link}</span></Tooltip> : link;
+  return uri && mediaType?.startsWith('image/') ? <Tooltip content={<ImageHoverPreview uri={uri} />} delayDuration={300}><span className="inline">{link}</span></Tooltip> : link;
 }
 
 // Same-origin placeholder: the sanitizer and URL hardener keep it, then it becomes a media element.
 const MEDIA_PATH = '/__gitspace-resource-media/';
 
-/** Before sanitization: marks images whose source is a resource address. */
-export function rehypeResourceMediaMarkers() {
+/** Before sanitization: marks images whose source is a resource address, or a path relative to the drive or repository
+ * document at `documentUri`, by the address it names. Give it as `[rehypeResourceMediaMarkers, { documentUri }]`:
+ * Streamdown caches a processor by each plugin's name and options. */
+export function rehypeResourceMediaMarkers({ documentUri }: { documentUri?: string } = {}) {
   return (tree: MarkdownNode): void => {
     const visit = (node: MarkdownNode): void => {
       const src = node.properties?.src;
-      if (node.tagName === 'img' && typeof src === 'string' && (parseResourceUri(src)?.kind === 'drive' || parseResourceUri(src)?.kind === 'repo')) node.properties = { ...node.properties, src: `${MEDIA_PATH}${encodeURIComponent(src)}` };
+      const uri = node.tagName === 'img' && typeof src === 'string' ? resolveResourceReference(src, documentUri) : null;
+      if (uri) node.properties = { ...node.properties, src: `${MEDIA_PATH}${encodeURIComponent(uri)}` };
       node.children?.forEach(visit);
     };
     visit(tree);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { canonicalDriveResourceUrl, parseResourceUri, resourceLinkHref, resourceUriFromHref, selectResourceText } from '../src/resource-uri.js';
+import { canonicalDriveResourceUrl, parseResourceUri, resolveResourceReference, resourceLinkHref, resourceUriFromHref, selectResourceText } from '../src/resource-uri.js';
 
 describe('OMP resource URIs', () => {
   it('preserves unqualified filename case and distinguishes artifact IDs from mounted files', () => {
@@ -48,5 +48,21 @@ describe('OMP resource URIs', () => {
     expect(selectResourceText('a\nb\nc\nd\ne\nf', resource.selector)).toBe('b\nc\ne');
     expect(selectResourceText('a\nb\nc', parseResourceUri('drive://workspace/a.txt:-2')!.selector)).toBe('b\nc');
     expect(parseResourceUri('drive://workspace/name%3Araw.txt')).toMatchObject({ path: 'name:raw.txt', selector: { raw: false, ranges: [] } });
+  });
+
+  it('resolves a document\'s relative links and images within its drive mount or repository version', () => {
+    const summary = 'drive://workspace/ux-review/zerbly/SUMMARY.md';
+    expect(resolveResourceReference('3-invited-teammate/mockups/J3-1A invite.jpg', summary)).toBe('drive://workspace/ux-review/zerbly/3-invited-teammate/mockups/J3-1A%20invite.jpg');
+    expect(resolveResourceReference('./shots/a%20b.png', summary)).toBe('drive://workspace/ux-review/zerbly/shots/a%20b.png');
+    expect(resolveResourceReference('../notes.md#round-6b', summary)).toBe('drive://workspace/ux-review/notes.md');
+    // A path cannot climb out of the mount it is written in.
+    expect(resolveResourceReference('../../../../x.png', summary)).toBe('drive://workspace/x.png');
+    expect(resolveResourceReference('shared.png', 'drive://workspaces/w1/plans/a.md')).toBe('drive://workspaces/w1/plans/shared.png');
+    const commit = 'a'.repeat(40);
+    expect(resolveResourceReference('img/logo.svg', `repo://docs/README.md@${commit}`)).toBe(`repo://docs/img/logo.svg@${commit}`);
+    // Addresses stand on their own; web, data, in-page and folder references, and any reference without a document, name no file.
+    expect(resolveResourceReference('drive://base/shared.png', summary)).toBe('drive://base/shared.png');
+    for (const reference of ['https://example.com/a.png', 'data:image/png;base64,AA', '#top', '/absolute.png', 'live-photon/', 'artifact://12']) expect(resolveResourceReference(reference, summary)).toBeNull();
+    expect(resolveResourceReference('live-photon/live-07.jpg', null)).toBeNull();
   });
 });
