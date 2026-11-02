@@ -1,14 +1,16 @@
-import { watch } from 'node:fs';
-import { lstat, readFile } from 'node:fs/promises';
+import { watch, type FSWatcher } from 'node:fs';
+import { lstat, readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { coalesced } from './coalesced.js';
 
 export type GitWorktreeClock = { schedule(milliseconds: number, action: () => void): () => void };
 export const gitWorktreeClock: GitWorktreeClock = {
   schedule(milliseconds, action) { const timer = setTimeout(action, milliseconds); return () => clearTimeout(timer); },
 };
 export type GitWorktreeEvents = (root: string, changed: (path: string) => Promise<void>, failed: (error: Error) => void) => () => void;
-export const gitWorktreeEvents: GitWorktreeEvents = (root, changed, failed) => {
+/** One watch over the whole checkout: macOS reports a folder tree as one stream, whatever it holds. */
+const recursiveWorktreeEvents: GitWorktreeEvents = (root, changed, failed) => {
   const watcher = watch(root, { recursive: true }, (_event, filename) => { void changed(filename?.toString().replaceAll('\\', '/') ?? '').catch(failed); });
   watcher.on('error', failed);
   return () => watcher.close();
@@ -30,6 +32,70 @@ async function watchGit(root: string, args: string[], input?: string): Promise<s
   if (code !== 0 && !(code === 1 && (args[0] === 'config' || args[0] === 'check-ignore'))) throw new Error(`git ${args[0]}: ${error.trim()}`);
   return output;
 }
+
+/** Under a `.git` folder, the folders of Git's objects, LFS files, logs and refs other than branch heads: many (objects
+ *  alone has 256), and nothing written there starts a sync (`GIT_STATE`). */
+const GIT_BULK = /(?:^|\/)\.git\/(?:.+\/)?(?:objects|lfs|logs|refs\/(?:remotes|tags|gitspace))$/u;
+
+/**
+ * Linux watches each folder on its own (inotify), so one recursive `fs.watch` of a checkout held a watch for every
+ * folder in it, `node_modules`, build output and Git's objects included: Darktop held 751,731 of the 1,048,576 its user
+ * may, and a checkout whose watch then failed stopped noticing edits (2026-11-02). This watches only the folders where
+ * Git sees a change: none Git lists as ignored (`--directory` names a folder only when nothing in it is tracked), and
+ * none of Git's bulk folders (`GIT_BULK`). A
+ * folder that appears is watched; an ignore file's change (`.gitignore`, `.git/info/exclude`, `.git/config`) asks Git
+ * again and lets go of what it now ignores. A folder only a global excludes file stops ignoring is watched from the next
+ * look.
+ */
+export const linuxWorktreeEvents: GitWorktreeEvents = (root, changed, failed) => {
+  const watchers = new Map<string, FSWatcher>();
+  let closed = false;
+  let ignored = new Set<string>();
+  const skipped = (path: string) => GIT_BULK.test(path) || ignored.has(path);
+  const fail = (error: unknown) => failed(error instanceof Error ? error : new Error(String(error)));
+  const drop = (path: string) => {
+    for (const [watched, watcher] of watchers) if (watched === path || watched.startsWith(`${path}/`)) { watcher.close(); watchers.delete(watched); }
+  };
+  /** Watches `path` and each folder under it that is not skipped. */
+  const walk = async (path: string): Promise<void> => {
+    if (closed || skipped(path)) return;
+    const absolute = path ? join(root, path) : root;
+    if (!watchers.has(path)) {
+      try {
+        const watcher = watch(absolute, (_event, name) => { if (name) void event(path ? `${path}/${name}` : name.toString()); });
+        watcher.on('error', fail);
+        watchers.set(path, watcher);
+      } catch (error) {
+        // Gone before it was watched: its parent's event already said so.
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return;
+        throw error;
+      }
+    }
+    const entries = await readdir(absolute, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) if (entry.isDirectory()) await walk(path ? `${path}/${entry.name}` : entry.name);
+  };
+  const look = coalesced(async () => {
+    const others = await watchGit(root, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z']);
+    if (closed) return;
+    ignored = new Set(others.split('\0').filter(path => path.endsWith('/')).map(path => path.slice(0, -1)));
+    for (const path of [...watchers.keys()]) if (watchers.has(path) && skipped(path)) drop(path);
+    await walk('');
+  });
+  const event = async (name: string) => {
+    if (closed) return;
+    void changed(name).catch(fail);
+    try {
+      if (name === '.gitignore' || name.endsWith('/.gitignore') || name === '.git/info/exclude' || name === '.git/config') { await look(); return; }
+      const stat = await lstat(join(root, name)).catch(() => null);
+      if (stat?.isDirectory()) await walk(name);
+      else if (!stat) drop(name);
+    } catch (error) { fail(error); }
+  };
+  void look().catch(fail);
+  return () => { closed = true; for (const watcher of watchers.values()) watcher.close(); watchers.clear(); };
+};
+
+export const gitWorktreeEvents: GitWorktreeEvents = process.platform === 'linux' ? linuxWorktreeEvents : recursiveWorktreeEvents;
 
 /** Under `.git/`, what a checkpoint records besides the index: where HEAD points and the branch heads (a submodule's
  * too). Everything else there is Git's or GitSpace's own work (objects, LFS temporary files, logs, fetched refs, GitSpace
