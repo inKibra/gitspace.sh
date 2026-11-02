@@ -89,11 +89,11 @@ export function resourceUriFromHref(href: string): string | null {
 }
 
 /** A Markdown link or image `reference` as a resource address: one already, or a path relative to the drive or
- * repository file at `base` (the document it is written in), resolved within that drive mount or repository version.
- * Null for web, data and in-page references, for folders, for paths that leave the mount, and without a `base`. */
+ * repository file at `base` (the document it is written in), resolved within that drive mount or repository version (a
+ * path cannot climb out of it). Null for web, data and in-page references, for folders, and for a relative path
+ * without a `base`. */
 export function resolveResourceReference(reference: string, base: string | null | undefined): string | null {
-  const own = parseResourceUri(reference);
-  if (own) return own.kind === 'drive' || own.kind === 'repo' ? reference : null;
+  if (parseResourceUri(reference)) return reference;
   const document = base ? parseResourceUri(base) : null;
   if (!document || (document.kind !== 'drive' && document.kind !== 'repo')) return null;
   if (/^[a-z][a-z0-9+.-]*:/iu.test(reference) || reference.startsWith('/') || reference.startsWith('#') || !reference) return null;

@@ -47,9 +47,10 @@ interface MarkdownNode {
 }
 
 /** Rewrites only parsed anchors, before sanitization: a resource address, or a path relative to the document at
- * `documentUri`, becomes an internal link. A relative path that names no resource (in a message, which has no folder;
- * a folder) stays as its text rather than a blocked link. Code samples and image URLs are untouched. Give it as
- * `[rehypeResourceLinks, { documentUri }]`: Streamdown caches a processor by each plugin's name and options. */
+ * `documentUri`, becomes an internal link. One that names no resource (a relative path in a message, which has no
+ * folder; a folder's address, which has no view) stays as its text rather than a blocked link. Code samples and image
+ * URLs are untouched. Give it as `[rehypeResourceLinks, { documentUri }]`: Streamdown caches a processor by each
+ * plugin's name and options. */
 export function rehypeResourceLinks({ documentUri }: { documentUri?: string } = {}) {
   return (tree: MarkdownNode): void => {
     const visit = (node: MarkdownNode): void => {
@@ -57,7 +58,7 @@ export function rehypeResourceLinks({ documentUri }: { documentUri?: string } = 
         const href = node.properties.href;
         const uri = resolveResourceReference(href, documentUri);
         if (uri) node.properties.href = resourceLinkHref(uri) ?? href;
-        else if (!/^[a-z][a-z0-9+.-]*:/iu.test(href) && !href.startsWith('/') && !href.startsWith('#')) { node.tagName = 'span'; node.properties = {}; }
+        else if (/^(?:drive|repo|artifact|browser-artifact):/iu.test(href) || (!/^[a-z][a-z0-9+.-]*:/iu.test(href) && !href.startsWith('/') && !href.startsWith('#'))) { node.tagName = 'span'; node.properties = {}; }
       }
       node.children?.forEach(visit);
     };

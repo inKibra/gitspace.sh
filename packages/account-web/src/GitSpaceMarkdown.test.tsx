@@ -49,10 +49,11 @@ $$E = mc^2$$`}</GitSpaceMarkdown>);
     expect(html).toContain(`href="#gitspace-resource=${encodeURIComponent('drive://workspace/plans/diagrams/accounts.svg')}"`);
     expect(html).toContain(`href="#gitspace-resource=${encodeURIComponent('drive://workspace/notes.md')}"`);
     expect(html).not.toContain('tracker.invalid');
-    const message = renderToStaticMarkup(<GitSpaceMarkdown>{'The screenshots are in [live-photon/](live-photon/).'}</GitSpaceMarkdown>);
+    const message = renderToStaticMarkup(<GitSpaceMarkdown>{'The screenshots are in [live-photon/](live-photon/) and [the folder](drive://workspace/ux-review/live-photon/); the run is [artifact 12](artifact://12).'}</GitSpaceMarkdown>);
     expect(message).toContain('live-photon/');
-    // Neither a link nor Streamdown's link button: a path with no folder to name opens nothing.
-    expect(message).not.toMatch(/<a\b[^>]*>live-photon\/|data-streamdown="link"|\[blocked\]/u);
+    // Neither a link nor Streamdown's link button: a path with no folder to name, or a folder, opens nothing.
+    expect(message).not.toMatch(/<a\b[^>]*>(?:live-photon\/|the folder)|data-streamdown="link"|\[blocked\]/u);
+    expect(message).toContain(`href="#gitspace-resource=${encodeURIComponent('artifact://12')}"`);
   });
 
   it('accepts incomplete streaming Markdown without discarding content', () => {

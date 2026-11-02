@@ -62,7 +62,8 @@ describe('OMP resource URIs', () => {
     expect(resolveResourceReference('img/logo.svg', `repo://docs/README.md@${commit}`)).toBe(`repo://docs/img/logo.svg@${commit}`);
     // Addresses stand on their own; web, data, in-page and folder references, and any reference without a document, name no file.
     expect(resolveResourceReference('drive://base/shared.png', summary)).toBe('drive://base/shared.png');
-    for (const reference of ['https://example.com/a.png', 'data:image/png;base64,AA', '#top', '/absolute.png', 'live-photon/', 'artifact://12']) expect(resolveResourceReference(reference, summary)).toBeNull();
+    expect(resolveResourceReference('artifact://12', summary)).toBe('artifact://12');
+    for (const reference of ['https://example.com/a.png', 'data:image/png;base64,AA', '#top', '/absolute.png', 'live-photon/', 'drive://workspace/ux-review/live-photon/']) expect(resolveResourceReference(reference, summary)).toBeNull();
     expect(resolveResourceReference('live-photon/live-07.jpg', null)).toBeNull();
   });
 });

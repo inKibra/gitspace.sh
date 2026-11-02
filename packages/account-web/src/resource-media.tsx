@@ -154,7 +154,8 @@ export function rehypeResourceMediaMarkers({ documentUri }: { documentUri?: stri
     const visit = (node: MarkdownNode): void => {
       const src = node.properties?.src;
       const uri = node.tagName === 'img' && typeof src === 'string' ? resolveResourceReference(src, documentUri) : null;
-      if (uri) node.properties = { ...node.properties, src: `${MEDIA_PATH}${encodeURIComponent(uri)}` };
+      const kind = uri ? parseResourceUri(uri)?.kind : null;
+      if (uri && (kind === 'drive' || kind === 'repo')) node.properties = { ...node.properties, src: `${MEDIA_PATH}${encodeURIComponent(uri)}` };
       node.children?.forEach(visit);
     };
     visit(tree);
