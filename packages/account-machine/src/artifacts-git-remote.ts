@@ -153,26 +153,36 @@ async function pushPack(input: ArtifactsPush): Promise<void> {
 }
 
 /**
- * A push Artifacts refused as too large, sent as several: the first-parent commits the remote lacks go to a staging
- * ref in steps, each carrying fewer commits after a further refusal (`smallerArtifactsPush`), and then the ref itself
- * moves, sending little more. The whole history stays linked. A single commit too large for one push is refused.
+ * A push Artifacts refused as too large, sent as several: the commits the remote lacks, parents before children and
+ * every parent's history included (a merge brings the merged branch's), go in steps, each carrying fewer commits after a
+ * further refusal (`smallerArtifactsPush`), and then the ref itself moves, sending little more. A step reaches the
+ * remote through staging refs at its commits that no other commit of the step descends from; every staging ref stays
+ * until the ref has moved, so each push sends only what earlier ones did not. The whole history stays linked. A single
+ * commit too large for one push is refused.
  */
 async function pushInSteps(input: ArtifactsPush, refused: ArtifactsGitError): Promise<void> {
   const source = input.refspec.slice(input.refspec.startsWith('+') ? 1 : 0, input.refspec.lastIndexOf(':'));
   const commit = (await git(input.repositoryPath, ['rev-parse', '--verify', `${source}^{commit}`])).trim();
   const held = (await git(input.repositoryPath, ['ls-remote', input.remote], input.auth)).split('\n')
     .map(line => line.split('\t')[0] ?? '').filter(oid => /^[0-9a-f]{40}$/u.test(oid));
-  const commits = (await git(input.repositoryPath, ['rev-list', '--first-parent', '--reverse', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow))
-    .split('\n').filter(Boolean);
+  // Each line: a commit, then its parents.
+  const commits = (await git(input.repositoryPath, ['rev-list', '--topo-order', '--reverse', '--parents', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow))
+    .split('\n').filter(Boolean).map(line => line.split(' '));
   let size = smallerArtifactsPush(commits.length);
   if (size === null) throw refused;
   const staging = `refs/gitspace/staging/${crypto.randomUUID()}`;
+  const refs: string[] = [];
   try {
     for (let sent = 0; sent < commits.length;) {
-      const reach = Math.min(sent + size, commits.length);
+      const step = commits.slice(sent, sent + size);
+      const parents = new Set(step.flatMap(([, ...of]) => of));
       try {
-        await pushPack({ ...input, refspec: `${commits[reach - 1]}:${staging}`, force: true });
-        sent = reach;
+        for (const [tip] of step.filter(([oid]) => !parents.has(oid!))) {
+          const ref = `${staging}/${refs.length}`;
+          await pushPack({ ...input, refspec: `${tip}:${ref}`, force: true });
+          refs.push(ref);
+        }
+        sent += step.length;
       } catch (error) {
         if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large') throw error;
         const smaller = smallerArtifactsPush(size);
@@ -182,8 +192,8 @@ async function pushInSteps(input: ArtifactsPush, refused: ArtifactsGitError): Pr
     }
     await pushPack(input);
   } finally {
-    // The staging ref holds only history the pushed ref holds too; one left behind changes nothing.
-    await git(input.repositoryPath, [...PUSH, input.remote, `:${staging}`], input.auth).catch(() => undefined);
+    // Staging refs hold only history the pushed ref holds too; one left behind changes nothing.
+    if (refs.length) await git(input.repositoryPath, [...PUSH, input.remote, ...refs.map(ref => `:${ref}`)], input.auth).catch(() => undefined);
   }
 }
 

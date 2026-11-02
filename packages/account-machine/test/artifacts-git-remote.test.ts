@@ -470,6 +470,36 @@ done
   expect(received).toEqual([20, 5, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0]);
 });
 
+it('sends a merge Artifacts refuses as too large in steps that split the merged branch\'s history too', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'base'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'base');
+  const base = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'update-ref', f.checkpointRef, base);
+  await f.publish();
+  const hook = join(f.remote, 'hooks/pre-receive');
+  writeFileSync(hook, `#!/bin/sh
+while read old new ref; do
+  case "$new" in 0000000000000000000000000000000000000000) continue ;; esac
+  count=$(git rev-list --count "$new" --not --all)
+  if [ "$count" -gt 3 ]; then echo "unpack artifacts_git_receive_pack_request_too_large: push carries $count commits, limit is 3" >&2; exit 1; fi
+done
+`);
+  chmodSync(hook, 0o755);
+  // The workspace merges main, which gained 12 commits (QA screenshots, on Workers port); its own branch has 3.
+  const branch = git(f.root, 'rev-parse', '--abbrev-ref', 'HEAD');
+  git(f.root, 'checkout', '-qb', 'main-line');
+  for (let index = 0; index < 12; index++) { writeFileSync(join(f.root, `shot-${index}`), `${index}`); git(f.root, 'add', '-A'); git(f.root, 'commit', '-qm', `shot ${index}`); }
+  git(f.root, 'checkout', '-q', branch);
+  for (let index = 0; index < 3; index++) { writeFileSync(join(f.root, 'file'), `port ${index}`); git(f.root, 'commit', '-qam', `port ${index}`); }
+  git(f.root, 'merge', '-q', '--no-edit', 'main-line');
+  const head = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'update-ref', f.checkpointRef, head);
+  await f.publication.publishCheckpoint({ repositoryPath: f.root, binding: { projectId: 'test', repository: 'test' }, checkpointRef: f.checkpointRef, headCommit: head, remoteHead: base });
+  expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(head);
+  expect(git(f.remote, 'rev-list', '--count', f.checkpointRef, '--not', base)).toBe('16');
+  expect(git(f.remote, 'for-each-ref', 'refs/gitspace/staging/')).toBe('');
+});
+
 it('sends history below the remote\'s unadvertised shallow boundary when a push merging it is refused', async () => {
   const f = fixture();
   // The boundary discovery fetches from a scratch repository, which needs the remote's address rewrite too.
