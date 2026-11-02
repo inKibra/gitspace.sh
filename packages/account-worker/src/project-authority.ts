@@ -1,6 +1,7 @@
 import { Result } from 'better-result';
 import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_BRANCH, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, hostedServicePointerSchema, hostedServiceUrlKind, isGitSpaceSourceRepository, normalizeRemoteRepositoryUrl, ORIGIN_CHECK_INTERVAL_MS, originCheckIntervalSchema, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type HostedServicePointer, type OriginCheckInterval, type RemoteBranchState } from '@gitspace/protocol';
 import { readOriginHeads } from './project-remote.js';
+import { runQueuedOperation } from './cloud-workspace-lifecycle.js';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -131,6 +132,10 @@ interface OperationRow extends Record<string, SqlStorageValue> {
   state: ProjectOperationState;
   steps_json: string;
   error: string | null;
+  /** The request a background operation runs with (JSON); null for one a request ran itself. */
+  input_json: string | null;
+  summary: string | null;
+  dismissed_at: string | null;
   revision: number;
   created_by: string;
   created_at: string;
@@ -271,6 +276,8 @@ function projectOperation(row: OperationRow): CloudProjectOperation {
     state: row.state,
     steps: JSON.parse(row.steps_json) as CloudProjectOperation['steps'],
     error: row.error,
+    summary: row.summary,
+    dismissedAt: row.dismissed_at,
     revision: row.revision,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -615,7 +622,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     for (const key of [...this.sentSlices.keys()]) {
       if (slices.has(key)) continue;
       this.sentSlices.delete(key);
-      messages.push(JSON.stringify({ type: 'directory.project', projectId: key.slice('project:'.length), revision: null, workspaces: [], placements: [] } satisfies AccountDirectoryMessage));
+      messages.push(JSON.stringify({ type: 'directory.project', projectId: key.slice('project:'.length), revision: null, workspaces: [], placements: [], operations: [] } satisfies AccountDirectoryMessage));
     }
     if (messages.length === 0) return;
     for (const socket of this.ctx.getWebSockets()) this.ctx.waitUntil(this.sendDirectory(socket, messages));
@@ -960,6 +967,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       // One-time: operations no longer record target machines, a claim token or a lease.
       const operationColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(operations)').toArray().map(column => column.name);
       for (const column of ['target_machines_json', 'claim_token', 'lease_expires_at']) if (operationColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE operations DROP COLUMN ${column}`);
+      for (const column of ['input_json', 'summary', 'dismissed_at']) if (!operationColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE operations ADD COLUMN ${column} TEXT`);
       // Conversation numbers belong to a space. Older authorities enforced a
       // project-wide UNIQUE column, whose SQLite autoindex cannot be dropped.
       const sessionIndexes = this.ctx.storage.sql.exec<{ name: string; unique: number }>('PRAGMA index_list(canonical_sessions)').toArray();
@@ -1063,7 +1071,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
 
   directoryPublication(): Extract<DirectoryPublication, { source: 'project' }> | null {
     const project = this.getProject();
-    return project ? { source: 'project', cursor: this.directory.version(), project, workspaces: this.listWorkspaces() } : null;
+    return project ? { source: 'project', cursor: this.directory.version(), project, workspaces: this.listWorkspaces(), operations: this.visibleOperations() } : null;
   }
 
   /** Check the origin: how often this project reads its origin on its own. */
@@ -1094,14 +1102,34 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return !this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length;
   }
 
-  /** The alarm wakes for the earliest of the legacy purge's next batch and the next origin check, or not at all. */
+  /** The alarm wakes at once for a background operation, else for the earliest of the legacy purge's next batch and the
+   * next origin check, or not at all. */
   private async armAlarm(purgeAt: number | null = null): Promise<void> {
+    if (this.nextQueuedOperation()) { await this.ctx.storage.setAlarm(Date.now()); return; }
     const due = Math.min(purgeAt ?? (this.legacyEventsPending() ? Date.now() + 1_000 : Infinity), this.nextOriginCheck() ?? Infinity);
     if (due === Infinity) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, due));
   }
 
+  /** True while this instance's alarm runs background operations. */
+  private drainingOperations = false;
+
   async alarm(): Promise<void> {
+    // Background operations first, one at a time, oldest first: a request only recorded them. One cut off by a release
+    // or reset is still `running` and runs again from its first step (every step is safe to repeat). An alarm runs at
+    // most 15 minutes, so a run stops starting operations after `OPERATION_SLICE_MS` and leaves the rest to the next.
+    // An alarm run directly (as a test does) while another drains would run the same operation twice at once.
+    if (!this.drainingOperations) {
+      this.drainingOperations = true;
+      try {
+        const sliceStarted = Date.now();
+        const ran = new Set<string>();
+        for (let next = this.nextQueuedOperation(); next && !ran.has(next.id) && Date.now() - sliceStarted < OPERATION_SLICE_MS; next = this.nextQueuedOperation()) {
+          ran.add(next.id);
+          await runQueuedOperation(this.env, next, this.operationRequest(next.id));
+        }
+      } finally { this.drainingOperations = false; }
+    }
     let purgeAt: number | null = null;
     // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
     // log; the cloud runtime reads none of it. Delete it in batches of 1,000 every 10 seconds: each event is about two
@@ -1138,8 +1166,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         return value;
       } finally { this.committing = false; }
     });
-    // Only project and workspace records are in the directory.
-    if (entity === 'project' || entity === 'workspace') this.directory.publish({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces() });
+    // Project, workspace and operation records are in the directory.
+    if (entity === 'project' || entity === 'workspace' || entity === 'operation') this.directory.publish({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces(), operations: this.visibleOperations() });
     this.changes.wake();
     return result;
   }
@@ -1690,6 +1718,58 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
   }
 
+  /** Records an operation that runs in the background with `request`, and wakes the alarm that runs it: the caller's
+   * request returns with it queued. */
+  async queueOperation(input: { projectId: string; workspaceId: string | null; kind: string; steps: Array<{ id: string; label: string }>; summary: string | null; request: unknown; createdBy: string }): Promise<CloudProjectOperation> {
+    const operation = this.commit('operation', input.workspaceId, () => {
+      const now = new Date().toISOString();
+      const id = crypto.randomUUID();
+      const steps: CloudProjectOperation['steps'] = input.steps.map(step => ({ ...step, state: 'queued', message: null, updatedAt: now }));
+      this.ctx.storage.sql.exec(
+        'INSERT INTO operations(operation_id,project_id,workspace_id,kind,state,steps_json,error,input_json,summary,revision,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        id, input.projectId, input.workspaceId, input.kind, 'queued', JSON.stringify(steps), null, JSON.stringify(input.request ?? null), input.summary, 1, input.createdBy, now, now,
+      );
+      return this.getOperation(id);
+    });
+    await this.armAlarm();
+    return operation;
+  }
+
+  /** The request a background operation runs with; null for one a request ran itself. */
+  operationRequest(id: string): unknown {
+    const row = this.ctx.storage.sql.exec<{ input_json: string | null }>('SELECT input_json FROM operations WHERE operation_id=?', id).toArray()[0];
+    return row?.input_json ? JSON.parse(row.input_json) : null;
+  }
+
+  /** The oldest background operation still to run: queued, or running when its run was cut off (a release, a reset). */
+  nextQueuedOperation(): CloudProjectOperation | null {
+    const row = this.ctx.storage.sql.exec<OperationRow>("SELECT * FROM operations WHERE input_json IS NOT NULL AND state IN ('queued','running') ORDER BY created_at LIMIT 1").toArray()[0];
+    return row ? projectOperation(row) : null;
+  }
+
+  /** The operations views show: queued or running, failed and not dismissed nor run again since, or finished within
+   * `RECENT_OPERATION_MS`. Only background operations: ones a request ran itself ended with that request. */
+  visibleOperations(): CloudProjectOperation[] {
+    const recent = new Date(Date.now() - RECENT_OPERATION_MS).toISOString();
+    const rows = this.ctx.storage.sql.exec<OperationRow>(
+      "SELECT * FROM operations WHERE input_json IS NOT NULL AND dismissed_at IS NULL AND (state != 'succeeded' OR updated_at >= ?) ORDER BY created_at DESC LIMIT 100", recent,
+    ).toArray().map(projectOperation);
+    // A failure that a later operation of its kind on its target followed is superseded.
+    const later = new Set<string>();
+    return rows.filter(operation => {
+      const target = `${operation.kind}:${operation.workspaceId ?? ''}`;
+      const superseded = operation.state === 'failed' && later.has(target);
+      later.add(target);
+      return !superseded;
+    });
+  }
+
+  dismissOperation(id: string): void {
+    this.commit('operation', id, () => {
+      this.ctx.storage.sql.exec('UPDATE operations SET dismissed_at=?,revision=revision+1,updated_at=? WHERE operation_id=? AND dismissed_at IS NULL', new Date().toISOString(), new Date().toISOString(), id);
+    });
+  }
+
   getCanonicalSession(sessionId: string): CanonicalSession | null {
     const row = this.ctx.storage.sql.exec<CanonicalSessionRow>(
       'SELECT * FROM canonical_sessions WHERE session_id=?',
@@ -2096,6 +2176,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
 const PROJECT_EVENT_PAGE = 500;
 /** Entities the cloud app writes to `project_events`; every other entity is legacy machine history. */
 const CURRENT_EVENT_ENTITIES = ['qa', 'goal', 'workflow', 'rubric', 'journal', 'change-guide', 'review-thread', 'agent-incident', 'artifact', 'mcp-grant'];
+/** How long a background operation that ended stays in the views (the base branch row's "Switched from … just now"). */
+const RECENT_OPERATION_MS = 10 * 60_000;
+/** How long one alarm keeps starting background operations; Cloudflare stops an alarm after 15 minutes. */
+const OPERATION_SLICE_MS = 10 * 60_000;
 
 function projectEventRecord(row: ProjectEventRow): ProjectEvent {
   return {

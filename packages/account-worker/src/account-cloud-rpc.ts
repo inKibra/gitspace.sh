@@ -40,7 +40,7 @@ import { runtimeCloudProcedures } from './account-runtime-rpc.js';
 import { providerCloudProcedures } from './account-provider-rpc.js';
 import { githubCloudProcedures } from './account-github-rpc.js';
 import { storageIncidentProcedures } from './storage-quarantine.js';
-import { createCloudProject, readCloudSpaceView } from './cloud-project.js';
+import { createCloudProject, projectOperationView, readCloudSpaceView } from './cloud-project.js';
 import { readCloudStackStatus } from './cloud-stack-status.js';
 import { refreshProjectRemote } from './project-remote.js';
 import { workspaceLifecycleCloudProcedures } from './account-workspace-rpc.js';
@@ -289,11 +289,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       const { project, operation } = await createCloudProject(env, userId, input);
       return ok({
         project: { ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null },
-        operation: {
-          id: operation.id, projectId: operation.projectId, workspaceId: operation.workspaceId, kind: operation.kind, state: operation.state,
-          error: operation.error, revision: operation.revision,
-          createdAt: new Date(operation.createdAt), updatedAt: new Date(operation.updatedAt),
-        },
+        operation: projectOperationView(operation),
       });
     } catch (error) { return err(errors.OperationFailed({ operation: 'create project', message: message(error) })); }
   });

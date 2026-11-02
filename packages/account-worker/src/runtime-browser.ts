@@ -22,6 +22,7 @@ import type { RuntimeTakeoverTab } from '@gitspace/protocol-runtime';
 import type { RuntimeBrowserToolArguments } from '@gitspace/protocol-runtime';
 import { capturesText, readCaptureSummary, replayPreface, replayRun, saveCaptureSkill } from './browser-capture-agent.js';
 import { localhostPort, localhostRefusal, machineBrowserNote, type WorkspaceServiceUrl } from './workspace-service-urls.js';
+import { driveAddress } from './workspace-drive.js';
 // Browser powers and Everything (`browser-powers.ts`).
 import { BROWSER_HEAP_ON_CHROME, BROWSER_POWERS_UPDATE, browserGrantPower, browserPowerRefusal, browserStorageSiteRefusal, type BrowserEverything, type BrowserPower } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
@@ -314,7 +315,7 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
   async function comments(input: Input, status: RuntimeBrowserCommentStatus, limit: number): Promise<RuntimeToolResult> {
     const list = (await workspaceCommentThreads(storage, { status, limit })).map(({ root, replies }) => ({
       threadId: root.id, page: root.page, source: root.source, resolved: root.resolved,
-      on: root.anchor === null ? null : { role: root.anchor.role, name: root.anchor.name, selector: root.anchor.selector, area: root.anchor.area === true, box: root.anchor.box, crop: root.anchor.cropFile === undefined ? null : `drive://workspace/${root.anchor.cropFile}` },
+      on: root.anchor === null ? null : { role: root.anchor.role, name: root.anchor.name, selector: root.anchor.selector, area: root.anchor.area === true, box: root.anchor.box, crop: root.anchor.cropFile === undefined ? null : driveAddress(identity, root.anchor.cropFile) },
       comments: [root, ...replies].map(comment => ({ by: comment.by.kind === 'agent' ? comment.by.conversation === 'main' ? 'you (the main agent)' : `subagent ${comment.by.conversation}` : `${comment.by.name}${comment.by.guest ? ' (guest)' : ''}`, text: comment.text, at: comment.createdAt })),
     }));
     return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify(list) }] };

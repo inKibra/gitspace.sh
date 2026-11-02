@@ -53,6 +53,7 @@ import { RuntimeServices } from './RuntimeServices.js';
 import { browserActivity, RuntimeBrowserTab, useWorkspaceBrowsers } from './RuntimeBrowserTab.js';
 import { RuntimeSubagentHistory } from './RuntimeSubagentHistory.js';
 import { CloudCreationProgress } from './CloudCreationProgress.js';
+import { latestOperation, useAccountOperations } from './OperationProgress.js';
 import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
 
 
@@ -464,9 +465,11 @@ function AccountFrame({ children }: { children: ReactNode }) {
   const { directory, acceptRuntime } = useWorkspaceProjection(projectValues);
   // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
   const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
+  const operations = useAccountOperations();
   const sidebarProjects: SidebarProject[] = projectValues.map((project) => ({
     id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote,
     ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [],
+    operations: operations.filter((operation) => operation.projectId === project.id),
   }));
   const frameView = route === 'agent' && !projectId ? 'projects' : route;
   useEffect(() => { if (frameView !== 'projects') setSettingsProjectId(null); }, [frameView]);
@@ -548,13 +551,18 @@ function LiveWorkspace(props: LiveWorkspaceProps) {
   const workspaceId = location.searchParams.get('workspace');
   const projectValues = useRetainedQueryValue(projects, 'projects');
   const account = useContext(AccountDirectoryContext);
+  const projectSettings = useContext(ProjectSettingsContext);
+  const operations = useAccountOperations();
   useOriginCheck(projectValues?.find((project) => project.id === projectId) ?? null);
   if (!projectId) return <AccountWork view="projects" />;
   if (!projectValues && projects.state === 'failure') return <PageCanvas><EmptyState title="Project directory unavailable" description={rpcErrorMessage(projects.error, 'Load project directory')} action={<Button variant="ghost" onClick={() => void projects.refetch()}>Retry</Button>} /></PageCanvas>;
   if (!projectValues) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading projects…" description="Reading your account without starting a machine." /></PageCanvas>;
   const selectedProject = projectValues.find((project) => project.id === projectId);
   if (!selectedProject) return <PageCanvas><EmptyState title="Project not found" description="Choose another project from your account sidebar." /></PageCanvas>;
-  return <RuntimeWorkspace key={JSON.stringify([projectId, workspaceId])} projectId={projectId} workspaceId={workspaceId ?? projectId} onOpenSettings={props.onOpenSettings} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(id) => selectInspection(projectId, id)} renderInspector={(context) => <RuntimeInspector context={context} />} creation={workspaceId ? <CloudCreationProgress projectId={projectId} workspaceId={workspaceId} onDeleted={() => selectInspection(projectId, null)} /> : null} />;
+  const projectOperation = latestOperation(operations.filter((operation) => operation.projectId === projectId), null);
+  return <RuntimeWorkspace key={JSON.stringify([projectId, workspaceId])} projectId={projectId} workspaceId={workspaceId ?? projectId} onOpenSettings={props.onOpenSettings} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(id) => selectInspection(projectId, id)} renderInspector={(context) => <RuntimeInspector context={context} />} creation={workspaceId ? <CloudCreationProgress projectId={projectId} workspaceId={workspaceId} onDeleted={() => selectInspection(projectId, null)} /> : null}
+    projectOperation={projectOperation && projectOperation.state !== 'succeeded' ? projectOperation : null}
+    onOpenProjectSettings={() => { projectSettings?.onChange(projectId); navigateProductUrl(setProductRoute(new URL(window.location.href), 'projects')); }} />;
 }
 
 export function RuntimeInspector({ context }: { context: RuntimeInspectorContext }) {
@@ -1300,8 +1308,9 @@ function AccountWork({ view }: { view: 'kanban' | 'projects' }) {
   const account = useContext(AccountDirectoryContext);
   const actions = useContext(AccountWorkActionsContext);
   const projectSettings = useContext(ProjectSettingsContext);
+  const operations = useAccountOperations();
   if (!account || !actions || !projectSettings) throw new Error('Account work pages require the account directory, actions, and project settings');
-  return <AccountWorkPages view={view} projects={account.projects} directory={account.directory} loading={account.loading} onRefresh={account.refresh} onOpenWorkspace={selectInspection} onOpenProject={(projectId) => selectInspection(projectId, null)} actions={actions} settingsProjectId={projectSettings.projectId} onSettingsProjectChange={projectSettings.onChange} />;
+  return <AccountWorkPages view={view} projects={account.projects} directory={account.directory} loading={account.loading} onRefresh={account.refresh} onOpenWorkspace={selectInspection} onOpenProject={(projectId) => selectInspection(projectId, null)} actions={actions} settingsProjectId={projectSettings.projectId} onSettingsProjectChange={projectSettings.onChange} operations={operations} />;
 }
 
 function AccountConfiguration({ view }: { view: ConfigurationView }) {

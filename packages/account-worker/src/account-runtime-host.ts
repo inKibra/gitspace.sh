@@ -12,7 +12,7 @@ import { matchAstPatterns } from './ast-match.js';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
-import { setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
+import { importedProjectRepository, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceReport, storeWorkspaceStatus } from './workspace-metadata.js';
 import { projectWatchHooks, reconcileProjectWatch } from './project-watch.js';
 import { automationTurnHooks, reconcileAutomationTurns } from './automation-turns.js';
@@ -35,16 +35,16 @@ export async function ensureProjectCodeRepository(env: Env, code: ArtifactsCodeS
   return code.importProject(project.id, { url: access.remote, branch }, originReadCredentials(access));
 }
 
-/** Repository identities and origins come only from canonical project metadata. */
+/** Repository identities and origins come only from canonical project metadata. The project repository's first import
+ * runs as a project operation this waits on. */
 export async function ensureRuntimeCodeRepository(env: Env, userId: string, identity: RuntimeIdentity) {
   if (userId !== env.ACCOUNT_ID) throw new Error('Repository lease belongs to a different account');
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
   const project = await authority.getProject();
   if (!project || project.id !== identity.projectId) throw new Error('Project is unavailable');
   if (identity.workspaceId !== project.id && !await authority.getWorkspace(identity.workspaceId)) throw new Error('Workspace is not owned by this project');
-  const code = new ArtifactsCodeStore(env.ARTIFACTS);
-  await ensureProjectCodeRepository(env, code, project);
-  return code.forkWorkspace(project.id, identity.workspaceId);
+  await importedProjectRepository(env, project);
+  return new ArtifactsCodeStore(env.ARTIFACTS).forkWorkspace(project.id, identity.workspaceId);
 }
 
 /** Resolves the workspace branch ref once its code repository exists. A failed preparation

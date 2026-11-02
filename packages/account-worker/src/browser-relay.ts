@@ -13,6 +13,7 @@ import { extensionFiles, SCRIPT_TAKEN_REFUSAL } from '@gitspace/browser-extensio
 import { zipSync, strToU8 } from 'fflate';
 import { captureName, readCapture, writeCapture, type CaptureDrive } from './browser-capture.js';
 import { BROWSER_DOWNLOAD, BrowserUploads, browserRequestSigner, type BrowserDownloadUpload, type BrowserRequestFailure, type BrowserSignedRequest, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
+import type { WorkspaceDrive } from './workspace-drive.js';
 import { DownloadList, StepDownloads, type DownloadOutcome, type ScriptDownload, type ScriptDownloads } from './browser-downloads.js';
 import { BrowserShareEventSchema, BrowserShareFrameSchema, BrowserShares, closeOpenSocket, equalSecret, type BrowserShareAccount } from './browser-share.js';
 import { BrowserWatches } from './browser-watch.js';
@@ -84,8 +85,8 @@ const CaptureStarted = z.object({ url: z.string(), title: z.string() });
 /** What the extension answers the Browser tab's `captureStop` of frames: the frames, and from 5.11 the steps, layout
  * and comments tracks and the name you gave the capture. */
 const CaptureStopped = z.object({ count: z.number().int().nonnegative(), width: z.number().int().nonnegative(), height: z.number().int().nonnegative(), tracks: RuntimeBrowserCaptureTracksSchema, name: RuntimeBrowserCaptureNameSchema }).partial();
-/** The drive as the relay uses it: capture records and the files your Chrome uploads. */
-export type BrowserRelayDrive = CaptureDrive & BrowserUploadDrive;
+/** The drive as the relay uses it: capture records, the files your Chrome uploads, and debug files' addresses. */
+export type BrowserRelayDrive = CaptureDrive & BrowserUploadDrive & Pick<WorkspaceDrive, 'address'>;
 /** Where a workspace's groups are kept for its `gitspace.browsers` document, and its comment threads. */
 export type BrowserWorkspaces = { getByName(name: string): {
   browserGroupReported(identity: { projectId: string; workspaceId: string }, group: RuntimeBrowsersDocumentGroup): Promise<void>;

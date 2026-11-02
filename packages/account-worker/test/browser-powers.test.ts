@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { BROWSER_TRACE_READ_BYTES, RuntimeBrowserDebugResultSchema, browserCookieRead, browserCookieUrl, browserTraceStart, type RuntimeAccountBrowserGrant, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { performBrowserPower } from '../src/browser-powers.js';
+import { driveAddress } from '../src/workspace-drive.js';
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -19,10 +20,13 @@ function fakeTab(answer: (method: string, params: Record<string, unknown>) => un
   };
   return { tab, sent, emit };
 }
-/** The workspace's drive, reading each file as it is written. */
+/** A workspace's drive, reading each file as it is written. */
 function fakeDrive() {
   const files = new Map<string, string>();
-  return { files, drive: { async write(path: string, _mediaType: string | null, body: Uint8Array | ReadableStream<Uint8Array>) { const bytes = body instanceof Uint8Array ? body : new Uint8Array(await new Response(body).arrayBuffer()); files.set(path, new TextDecoder().decode(bytes)); return { path, size: bytes.byteLength, blobHash: `sha256:${path}` }; } } };
+  return { files, drive: {
+    async write(path: string, _mediaType: string | null, body: Uint8Array | ReadableStream<Uint8Array>) { const bytes = body instanceof Uint8Array ? body : new Uint8Array(await new Response(body).arrayBuffer()); files.set(path, new TextDecoder().decode(bytes)); return { path, size: bytes.byteLength, blobHash: `sha256:${path}` }; },
+    address: (path: string) => driveAddress({ projectId: 'project', workspaceId: 'workspace' }, path),
+  } };
 }
 /** `text` in pieces of `size` characters, splitting tokens and objects anywhere. */
 const pieces = (text: string, size: number) => Array.from({ length: Math.ceil(text.length / size) }, (_, index) => text.slice(index * size, (index + 1) * size));

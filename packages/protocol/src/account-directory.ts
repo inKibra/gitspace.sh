@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { InputOf } from 'result-rpc';
 import { streamCursorSchema, streamEventSchema } from '@gitspace/protocol-sync';
-import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
+import { cloudProjectOperationSchema, cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
 import { WorkspaceStatusSummarySchema } from '@gitspace/protocol-workspace';
 import { FleetMachineViewCodec, SpacePlacementViewCodec, type SpacePlacementView } from './rpc-contract.js';
 
@@ -13,6 +13,8 @@ export const accountDirectorySnapshotSchema = z.object({
   placements: z.array(z.custom<SpacePlacementView>((value) => SpacePlacementViewCodec.decode(value).ok)),
   machines: z.array(z.custom<FleetMachineDefinition>((value) => FleetMachineViewCodec.decode(value).ok)),
   projectRevisions: z.record(z.string(), streamCursorSchema),
+  /** Each project's operations its views show: running, failed until dismissed, finished within minutes. */
+  operations: z.array(cloudProjectOperationSchema).default([]),
 });
 export type AccountDirectorySnapshot = z.infer<typeof accountDirectorySnapshotSchema>;
 export const accountDirectoryEventSchema = streamEventSchema(accountDirectorySnapshotSchema)
@@ -24,7 +26,7 @@ export const accountDirectoryMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('directory.projects'), projects: accountDirectorySnapshotSchema.shape.projects }),
   z.object({ type: z.literal('directory.machines'), machines: accountDirectorySnapshotSchema.shape.machines }),
   /** `revision` null: the project left the directory. */
-  z.object({ type: z.literal('directory.project'), projectId: z.string().min(1), revision: streamCursorSchema.nullable(), workspaces: accountDirectorySnapshotSchema.shape.workspaces, placements: accountDirectorySnapshotSchema.shape.placements }),
+  z.object({ type: z.literal('directory.project'), projectId: z.string().min(1), revision: streamCursorSchema.nullable(), workspaces: accountDirectorySnapshotSchema.shape.workspaces, placements: accountDirectorySnapshotSchema.shape.placements, operations: accountDirectorySnapshotSchema.shape.operations }),
 ]);
 export type AccountDirectoryMessage = z.infer<typeof accountDirectoryMessageSchema>;
 
@@ -36,7 +38,8 @@ export function accountDirectorySlices(snapshot: AccountDirectorySnapshot): Map<
   ]);
   for (const [projectId, revision] of Object.entries(snapshot.projectRevisions)) {
     slices.set(`project:${projectId}`, { type: 'directory.project', projectId, revision,
-      workspaces: snapshot.workspaces.filter(workspace => workspace.projectId === projectId), placements: snapshot.placements.filter(placement => placement.projectId === projectId) });
+      workspaces: snapshot.workspaces.filter(workspace => workspace.projectId === projectId), placements: snapshot.placements.filter(placement => placement.projectId === projectId),
+      operations: snapshot.operations.filter(operation => operation.projectId === projectId) });
   }
   return slices;
 }
@@ -52,6 +55,7 @@ export function applyAccountDirectoryMessage(current: AccountDirectorySnapshot |
     ...current,
     workspaces: [...current.workspaces.filter(workspace => workspace.projectId !== message.projectId), ...message.workspaces],
     placements: [...current.placements.filter(placement => placement.projectId !== message.projectId), ...message.placements],
+    operations: [...current.operations.filter(operation => operation.projectId !== message.projectId), ...message.operations],
     projectRevisions: message.revision === null ? revisions : { ...revisions, [message.projectId]: message.revision },
   };
 }

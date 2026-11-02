@@ -51,7 +51,7 @@ function fixture(): Fixture {
     projects: projects.map((project) => ({ ...project, repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 1, remote: null, archivedAt: null, updatedAt: savedMetadata.updatedAt })),
     workspaces: [...saved.a, ...saved.b].map((space) => ({ ...space, cloudRuntime: cloud.has(space.id) })), placements,
     machines: machines.map((machine) => ({ ...machine, rpcEndpoint: `/machine/${machine.id}/rpc`, kind: 'physical', notes: '', provider: 'physical', lifecycleRevision: 1, operationId: null, error: null })),
-    projectRevisions: revisions,
+    projectRevisions: revisions, operations: [],
   });
   let cursor = 0;
   let notify = () => {};

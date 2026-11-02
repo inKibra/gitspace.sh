@@ -3,7 +3,7 @@ import { rpcClient } from './rpc-client.js';
 import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, TabsSubtle, TabsSubtleItem, Tooltip } from '@gitspace/ui';
 import { Archive, Plus, RefreshCcw01, Trash01, XClose } from '@untitledui/icons';
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { isGitSpaceSourceRepository, type OriginCheckInterval } from '@gitspace/protocol';
+import { isGitSpaceSourceRepository, type CloudProjectOperation, type OriginCheckInterval } from '@gitspace/protocol';
 import { AccountSidebarContext, type SidebarSpaceSummary } from './AppSidebar.js';
 import { CreateProjectDialog, CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, PHASE_LABEL, PHASES, spaceHolderLabel, workspacePhaseLabel, workspaceStatusLabel, WorkspaceStatusDot, type GitSpaceShellProps, type ProjectLifecycleView, type SpaceHolderView, type WorkspaceView } from './GitSpaceShell.js';
 import { WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
@@ -12,6 +12,7 @@ import { glyph } from './glyph.js';
 import { browserPluginsUrl, navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
+import { latestOperation, OperationCardActions, operationActive, OperationProgress, OperationStatusLine } from './OperationProgress.js';
 
 export interface AccountWorkPagesProps {
   view: 'kanban' | 'projects';
@@ -29,6 +30,8 @@ export interface AccountWorkPagesProps {
   /** Controls which project's Settings dialog is open; omit to let the Projects view own it. */
   settingsProjectId?: string | null;
   onSettingsProjectChange?(projectId: string | null): void;
+  /** Every project's operations its views show (the account directory's), newest first. */
+  operations?: readonly CloudProjectOperation[];
 }
 
 interface AccountWorkspace extends WorkspaceGraphItem {
@@ -90,7 +93,7 @@ function DirectoryCoverage({ projects, directory, loading, onRefresh }: Pick<Acc
 }
 
 export function AccountWorkPages(props: AccountWorkPagesProps) {
-  const { view, projects, directory, loading, onRefresh, onOpenWorkspace, onOpenProject, actions, settingsProjectId, onSettingsProjectChange } = props;
+  const { view, projects, directory, loading, onRefresh, onOpenWorkspace, onOpenProject, actions, settingsProjectId, onSettingsProjectChange, operations = [] } = props;
   const accountSidebar = useContext(AccountSidebarContext);
   const current = useRef(props);
   current.current = props;
@@ -123,7 +126,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <DirectoryCoverage projects={projects} directory={directory} loading={loading} onRefresh={onRefresh} />
     {view === 'kanban' ? <KanbanView workspaces={activeWorkspaces} onOpen={open} onSetRelations={actions.onSetWorkspaceRelations} onNewWorkspace={actions.onCreateWorkspace ? setNewWorkspacePhase : undefined} />
-      : <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />}
+      : <ProjectsView projects={projects} workspaces={workspaces} directory={directory} operations={operations} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />}
     <Dialog open={newWorkspacePhase !== null && newWorkspaceProject === null} onOpenChange={(next) => { if (!next) clearCreate(); }}>
       <DialogContent><DialogHeader><DialogTitle>Choose a project</DialogTitle><DialogDescription>Choose which project the new {newWorkspacePhase ? PHASE_LABEL[newWorkspacePhase].toLowerCase() : ''} workspace belongs to.</DialogDescription></DialogHeader>
         <CardGroup orientation="inline" border="outlined" separated>{activeProjects.filter((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only').map((project, index) => <Card key={project.id} index={index} onClick={() => setNewWorkspaceProject(project.id)} label={`Create workspace in ${project.name}`}><CardHeader><CardTitle>{project.name}</CardTitle><CardDescription>{project.baseBranch}</CardDescription></CardHeader></Card>)}</CardGroup>
@@ -189,10 +192,11 @@ function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { wo
     {!workspaces.length ? <EmptyState title="No active workspaces in the available directory" description="Create a workspace in a project, or refresh if project coverage is incomplete." /> : null}
   </PageCanvas>;
 }
-function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, onReleaseMachines, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onSetProjectBaseBranch, settingsProjectId: requestedSettingsProjectId, onSettingsProjectChange }: {
+function ProjectsView({ projects, workspaces, directory, operations, onOpen, onOpenProject, onReleaseMachines, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onSetProjectBaseBranch, settingsProjectId: requestedSettingsProjectId, onSettingsProjectChange }: {
   projects: readonly ProjectLifecycleView[];
   workspaces: readonly AccountWorkspace[];
   directory: Directory;
+  operations: readonly CloudProjectOperation[];
   onOpen: (workspace: AccountWorkspace) => void;
   onOpenProject?: (projectId: string) => void;
   onReleaseMachines?: AccountWorkPagesProps['actions']['onReleaseMachines'];
@@ -240,6 +244,15 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
         const items = workspaces.filter((workspace) => workspace.projectId === project.id);
         const open = items.filter((workspace) => !workspace.closedAt);
         const archived = items.filter((workspace) => !!workspace.closedAt);
+        const projectOperations = operations.filter((operation) => operation.projectId === project.id);
+        const projectOperation = latestOperation(projectOperations, null);
+        // One project change at a time: its lifecycle actions wait while one runs.
+        const busy = projectOperation !== null && operationActive(projectOperation);
+        const lifecycleOperation = latestOperation(projectOperations, null, ['project.archive', 'project.restore', 'project.delete']);
+        const workspaceOperation = (workspace: AccountWorkspace) => {
+          const operation = latestOperation(projectOperations, workspace.id, ['workspace.archive', 'workspace.restore', 'workspace.delete']);
+          return operation && operation.state !== 'succeeded' ? operation : null;
+        };
         return <section key={project.id} className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
             <button type="button" className="flex min-h-10 min-w-0 items-center gap-2 text-left" onClick={() => onOpenProject?.(project.id)}>
@@ -250,36 +263,47 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
             <div className="flex items-center gap-1">
               {project.lifecycle !== 'deleting' ? <Button variant="ghost" size="compact" aria-label={`Settings for ${project.name}`} onClick={() => setSettingsProjectId(project.id)}>Settings</Button> : null}
               {project.lifecycle === 'active' && onCreateWorkspace ? <Button variant="secondary" size="compact" onClick={() => setWorkspaceDialog(project.id)} leadingIcon={glyph(Plus)}>Workspace</Button> : null}
-              {project.role !== 'gitspace-source' && project.lifecycle === 'active' && onArchiveProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onArchiveProject(project.id, project.revision))} leadingIcon={glyph(Archive)}>Archive</Button> : null}
-              {project.lifecycle === 'archived' && onRestoreProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onRestoreProject(project.id, project.revision))} leadingIcon={glyph(RefreshCcw01)}>Restore</Button> : null}
-              {project.role !== 'gitspace-source' && project.lifecycle !== 'deleting' && onDeleteProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onDeleteProject(project.id, project.revision))} leadingIcon={glyph(Trash01)}>Delete</Button> : null}
+              {!busy && project.role !== 'gitspace-source' && project.lifecycle === 'active' && onArchiveProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onArchiveProject(project.id, project.revision))} leadingIcon={glyph(Archive)}>Archive</Button> : null}
+              {!busy && project.lifecycle === 'archived' && onRestoreProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onRestoreProject(project.id, project.revision))} leadingIcon={glyph(RefreshCcw01)}>Restore</Button> : null}
+              {!busy && project.role !== 'gitspace-source' && project.lifecycle !== 'deleting' && onDeleteProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onDeleteProject(project.id, project.revision))} leadingIcon={glyph(Trash01)}>Delete</Button> : null}
             </div>
           </div>
-          <ProjectOrigin project={project} />
+          {lifecycleOperation && lifecycleOperation.state !== 'succeeded' ? <OperationProgress operation={lifecycleOperation} /> : null}
+          <ProjectOrigin project={project} operations={projectOperations} />
           <CardGroup orientation="inline" border="outlined" separated>
-            {open.map((workspace, index) => <Card key={workspace.id} index={index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader>
-                <CardTitle>{workspace.name}</CardTitle>
-                <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
-                <WorkspaceStatus workspace={workspace} />
-              </CardHeader>
-              <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>
-              <CardFooter>
-                {onReleaseMachines && !workspace.creation ? <Tooltip content="Release machine caches; keep the cloud workspace and conversations" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Release machine caches for ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReleaseMachines(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onArchiveWorkspace && !workspace.creation ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-              </CardFooter>
-            </Card>)}
-            {archived.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader>
-                <CardTitle><span className="flex items-center gap-2 text-muted-foreground"><Archive width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle>
-                <CardDescription>Archived</CardDescription>
-              </CardHeader>
-              <CardFooter>
-                {onRestoreWorkspace ? <Tooltip content="Restore workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Restore ${workspace.name}`} disabled={pending} onClick={() => void run(() => onRestoreWorkspace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-              </CardFooter>
-            </Card>)}
+            {open.map((workspace, index) => {
+              const operation = workspaceOperation(workspace);
+              return <Card key={workspace.id} index={index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
+                <CardHeader>
+                  <CardTitle>{workspace.name}</CardTitle>
+                  <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
+                  {operation ? <span className="text-caption text-muted-foreground"><OperationStatusLine operation={operation} /></span> : <WorkspaceStatus workspace={workspace} />}
+                </CardHeader>
+                <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>
+                <CardFooter>
+                  {operation?.state === 'failed' ? <OperationCardActions operation={operation} /> : operation ? null : <>
+                    {onReleaseMachines && !workspace.creation ? <Tooltip content="Release machine caches; keep the cloud workspace and conversations" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Release machine caches for ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReleaseMachines(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                    {onArchiveWorkspace && !workspace.creation ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                    {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                  </>}
+                </CardFooter>
+              </Card>;
+            })}
+            {archived.map((workspace, index) => {
+              const operation = workspaceOperation(workspace);
+              return <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
+                <CardHeader>
+                  <CardTitle><span className="flex items-center gap-2 text-muted-foreground"><Archive width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle>
+                  <CardDescription>{operation ? <OperationStatusLine operation={operation} /> : 'Archived'}</CardDescription>
+                </CardHeader>
+                <CardFooter>
+                  {operation?.state === 'failed' ? <OperationCardActions operation={operation} /> : operation ? null : <>
+                    {onRestoreWorkspace ? <Tooltip content="Restore workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Restore ${workspace.name}`} disabled={pending} onClick={() => void run(() => onRestoreWorkspace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                    {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                  </>}
+                </CardFooter>
+              </Card>;
+            })}
           </CardGroup>
           {!items.length ? <p className="text-caption text-muted-foreground">{!directory[project.id] || directory[project.id]?.error ? 'Saved workspaces are unavailable. Refresh to check this project.' : 'No saved workspaces.'}</p> : null}
         </section>;
@@ -290,8 +314,8 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
       <DialogHeader><DialogTitle>{settingsProject?.name} settings</DialogTitle><DialogDescription>Settings shared by every workspace in this project.</DialogDescription></DialogHeader>
       {settingsProject ? <div className="flex flex-col">
         <ProjectRepositoryRow key={`repository-${settingsProject.id}`} project={settingsProject} />
-        <ProjectBaseBranchRow key={`branch-${settingsProject.id}`} project={settingsProject} onSetBaseBranch={onSetProjectBaseBranch} />
-        <SettingRow label="Origin" hint={`Whether this project's copy of ${settingsProject.baseBranch} is behind origin/${settingsProject.baseBranch}.`} value={<ProjectOrigin project={settingsProject} />} />
+        <ProjectBaseBranchRow key={`branch-${settingsProject.id}`} project={settingsProject} operations={operations.filter((operation) => operation.projectId === settingsProject.id)} onSetBaseBranch={onSetProjectBaseBranch} />
+        <SettingRow label="Origin" hint={`Whether this project's copy of ${settingsProject.baseBranch} is behind origin/${settingsProject.baseBranch}.`} value={<ProjectOrigin project={settingsProject} operations={operations.filter((operation) => operation.projectId === settingsProject.id)} />} />
         <ProjectOriginCheckRow key={`origin-check-${settingsProject.id}`} project={settingsProject} />
         {inference ? <SettingRow label="Inference" hint="The canonical inference profile for every workspace in this project. Running work keeps its admitted profile; new work uses the new assignment. Manage models, agents, and credentials under Navigate → Inference."
           value={<ProjectInferenceSelector key={settingsProject.id} projectId={settingsProject.id} projectName={settingsProject.name} />} /> : null}
@@ -362,14 +386,23 @@ function ProjectRepositoryRow({ project }: { project: ProjectLifecycleView }) {
     actions={change.editing || project.lifecycle !== 'active' || project.repositoryReference === null ? null : <Button variant="ghost" size="compact" onClick={change.open}>Change</Button>} />;
 }
 
-function ProjectBaseBranchRow({ project, onSetBaseBranch }: { project: ProjectLifecycleView; onSetBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'] }) {
+/** The base branch, and its switch while it runs: Save queues the switch, which shows here until it ends. */
+function ProjectBaseBranchRow({ project, operations, onSetBaseBranch }: { project: ProjectLifecycleView; operations: readonly CloudProjectOperation[]; onSetBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'] }) {
   const change = useSettingChange('Change base branch');
+  const projectOperation = latestOperation(operations, null);
+  const busy = projectOperation !== null && operationActive(projectOperation);
+  const switching = latestOperation(operations, null, ['project.setBaseBranch']);
+  const minutes = switching?.state === 'succeeded' ? Math.floor((Date.now() - Date.parse(switching.updatedAt)) / 60_000) : null;
   return <SettingRow label="Base branch"
     value={change.editing && onSetBaseBranch
-      ? <SettingEditor label="New base branch" placeholder={project.baseBranch} help="Existing workspaces keep their branches; stack status will compare against the new base. The project’s base space must be open and have no uncommitted changes." valid={(value) => value !== '' && value !== project.baseBranch} pending={change.pending} error={change.error}
+      ? <SettingEditor label="New base branch" placeholder={project.baseBranch} help="Existing workspaces keep their branches; stack status will compare against the new base. The base workspace must have no uncommitted changes. The switch runs in the background: you can close this dialog." valid={(value) => value !== '' && value !== project.baseBranch} pending={change.pending} error={change.error}
         onSave={(branch) => void change.save(async () => { await onSetBaseBranch(project.id, project.revision, branch); })} onCancel={change.cancel} />
-      : <span className="font-mono text-caption">{project.baseBranch}</span>}
-    actions={change.editing || !onSetBaseBranch || project.lifecycle !== 'active' ? null : <Button variant="ghost" size="compact" onClick={change.open}>Change</Button>} />;
+      : <div className="flex flex-col gap-2">
+          <span className="font-mono text-caption">{project.baseBranch}</span>
+          {switching && switching.state !== 'succeeded' ? <OperationProgress operation={switching} /> : null}
+        </div>}
+    note={change.editing || minutes === null || !switching?.summary ? undefined : `Switched ${switching.summary} ${minutes === 0 ? 'just now' : `${minutes} min ago`}.`}
+    actions={change.editing || busy || !onSetBaseBranch || project.lifecycle !== 'active' ? null : <Button variant="ghost" size="compact" onClick={change.open}>Change</Button>} />;
 }
 
 const ORIGIN_CHECK_LABEL: Record<OriginCheckInterval, string> = { daily: 'Once a day', 'every-6-hours': 'Every 6 hours', hourly: 'Every hour', manual: 'Only when I ask' };
@@ -405,13 +438,17 @@ function ProjectOriginCheckRow({ project }: { project: ProjectLifecycleView }) {
 }
 
 /** The base branch against its origin: whether GitSpace's copy is behind, when the origin was last checked, Update base
- * and Check origin. Results arrive through the project list like any other project change. */
-function ProjectOrigin({ project }: { project: ProjectLifecycleView }) {
+ * and Check origin. Update base runs in the background and shows here until it ends; results arrive through the
+ * project list like any other project change. */
+function ProjectOrigin({ project, operations }: { project: ProjectLifecycleView; operations: readonly CloudProjectOperation[] }) {
   const [pending, setPending] = useState<'update' | 'check' | null>(null);
   const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   if (project.repositoryReference === null || project.lifecycle === 'deleting') return null;
   const remote = project.remote;
+  const projectOperation = latestOperation(operations, null);
+  const busy = projectOperation !== null && operationActive(projectOperation);
+  const updating = latestOperation(operations, null, ['project.updateBase']);
   const run = async (action: 'update' | 'check') => {
     if (pendingRef.current) return;
     pendingRef.current = true; setPending(action); setError(null);
@@ -421,11 +458,14 @@ function ProjectOrigin({ project }: { project: ProjectLifecycleView }) {
     } catch (failure) { setError(rpcErrorMessage(failure, action === 'update' ? 'Update base' : 'Check origin')); }
     finally { pendingRef.current = false; setPending(null); }
   };
-  return <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
-    {remote?.behind ? <Badge size="compact" color="amber">Behind origin</Badge> : null}
-    <span>{remote === null ? 'Origin not checked yet' : remote.head === null ? `origin/${project.baseBranch} does not exist · checked ${new Date(remote.checkedAt).toLocaleString()}` : `origin/${project.baseBranch} checked ${new Date(remote.checkedAt).toLocaleString()}`}</span>
-    {remote?.behind && project.lifecycle === 'active' ? <Button variant="secondary" size="compact" loading={pending === 'update'} disabled={pending !== null} onClick={() => void run('update')}>Update base</Button> : null}
-    <Button variant="ghost" size="compact" loading={pending === 'check'} disabled={pending !== null} onClick={() => void run('check')} leadingIcon={glyph(RefreshCcw01)}>Check origin</Button>
-    {error ? <p role="alert" className="w-full text-caption text-destructive">{error}</p> : null}
+  return <div className="flex flex-col gap-2">
+    <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+      {remote?.behind ? <Badge size="compact" color="amber">Behind origin</Badge> : null}
+      <span>{remote === null ? 'Origin not checked yet' : remote.head === null ? `origin/${project.baseBranch} does not exist · checked ${new Date(remote.checkedAt).toLocaleString()}` : `origin/${project.baseBranch} checked ${new Date(remote.checkedAt).toLocaleString()}`}</span>
+      {!busy && remote?.behind && project.lifecycle === 'active' ? <Button variant="secondary" size="compact" loading={pending === 'update'} disabled={pending !== null} onClick={() => void run('update')}>Update base</Button> : null}
+      {busy ? null : <Button variant="ghost" size="compact" loading={pending === 'check'} disabled={pending !== null} onClick={() => void run('check')} leadingIcon={glyph(RefreshCcw01)}>Check origin</Button>}
+      {error ? <p role="alert" className="w-full text-caption text-destructive">{error}</p> : null}
+    </div>
+    {updating && updating.state !== 'succeeded' ? <OperationProgress operation={updating} /> : null}
   </div>;
 }

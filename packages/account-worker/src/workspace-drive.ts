@@ -1,4 +1,5 @@
 import { collectBytes, streamBytes } from '@gitspace/protocol-workspace';
+import { parseResourceUri } from '@gitspace/protocol/resource-uri';
 import { InspectorCloudArtifacts, readInspectorContext } from './account-inspector-data.js';
 import type { DriveUpload } from './drive-files.js';
 import type { TenantRange } from './tenant-store.js';
@@ -43,6 +44,17 @@ export interface WorkspaceDrive {
   /** Names the file at `from` at `to` too, replacing a file there: the same stored object under its type, so no bytes
    * move whatever its size. */
   copy(from: string, to: string): Promise<WorkspaceDriveWritten>;
+  /** `path`'s address in this drive: `drive://base/<path>` in the project's base space, else `drive://workspace/<path>`. */
+  address(path: string): string;
+  /** The path an address names in this drive; another drive's address, or one with a selector, is refused. `use` says
+   * what wanted it, for the refusal. */
+  pathOf(url: string, use: string): string;
+}
+
+/** A path in a space's own drive as its address, each segment encoded: the project's base space (whose id is the
+ * project's) writes `drive://base/…`, a workspace `drive://workspace/…`. */
+export function driveAddress(space: { projectId: string; workspaceId: string }, path: string): string {
+  return `drive://${space.workspaceId === space.projectId ? 'base' : 'workspace'}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 export function workspaceDrive(env: Env, workspace: { projectId: string; workspaceId: string }): WorkspaceDrive {
@@ -114,6 +126,13 @@ export function workspaceDrive(env: Env, workspace: { projectId: string; workspa
       const entry = (await drive.writableEntries()).entries.find(candidate => candidate.path === from);
       if (!entry) throw new Error(`${from} does not exist`);
       return written(await drive.write(drive.writableUrl(to), { stored: { blobHash: entry.blobHash, size: entry.size, ...(entry.object ? { object: entry.object } : {}) }, mediaType: entry.mediaType }));
+    },
+    address: path => driveAddress(workspace, path),
+    pathOf(url, use) {
+      const mount = workspace.workspaceId === workspace.projectId ? 'base' : 'workspace';
+      const resource = parseResourceUri(url);
+      if (resource?.kind !== 'drive' || resource.mount !== mount || resource.suffix) throw new Error(`${url} is not a file of this ${mount === 'base' ? 'project' : 'workspace'}'s drive: ${use} takes drive://${mount}/<path>`);
+      return resource.path;
     },
   };
 }

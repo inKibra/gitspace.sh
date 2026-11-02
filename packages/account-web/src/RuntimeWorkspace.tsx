@@ -3,7 +3,7 @@ import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '
 import type { ResourceFile } from './resource-files.js';
 import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
-import type { InspectorView, LaunchSourceView } from '@gitspace/protocol';
+import type { CloudProjectOperation, InspectorView, LaunchSourceView } from '@gitspace/protocol';
 import { RuntimeIdentitySchema, type RuntimeAnswerInput, type RuntimeApprovalAnswer, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
@@ -31,6 +31,7 @@ import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useLiveChanges } from './live-notices.js';
 import { useEventRefresh } from './SynchronizationProvider.js';
 import { RepositoryAccessCard, rememberGitHubInstall } from './GitHubAccess.js';
+import { operationActive, OperationStatusLine } from './OperationProgress.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -57,6 +58,10 @@ export interface RuntimeWorkspaceProps {
   onSelectProject(id: string): void;
   renderInspector(context: RuntimeInspectorContext): ReactNode;
   creation?: ReactNode;
+  /** The project change running or failed, shown in the project page's top bar. */
+  projectOperation?: CloudProjectOperation | null;
+  /** Opens the project's settings, where the change shows its steps. */
+  onOpenProjectSettings?(): void;
 }
 
 export function RuntimeWorkspace(props: RuntimeWorkspaceProps) {
@@ -225,7 +230,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
-      onUpdateBase={() => perform(async () => {
+      projectOperation={props.projectOperation
+        ? <Button variant="ghost" size="compact" onClick={props.onOpenProjectSettings}><span className="flex min-w-0 items-center gap-1 text-caption text-muted-foreground"><OperationStatusLine operation={props.projectOperation} /><span className="shrink-0">· Details</span></span></Button>
+        : undefined}
+      onUpdateBase={props.projectOperation && operationActive(props.projectOperation) ? undefined : () => perform(async () => {
         const result = await rpcClient.project.updateBase({ projectId: inspection.project.id });
         if (result.status === 'error') throw result.error;
       })}

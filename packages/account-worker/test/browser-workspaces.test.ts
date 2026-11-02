@@ -35,7 +35,7 @@ async function project(name: string, workspaces: string[], archived: string[] = 
     const lifecycle: 'archived' | 'active' = archived.includes(workspace) ? 'archived' : 'active';
     definitions.push({ ...definition, lifecycle, updatedAt: new Date(Date.UTC(2026, 9, 1, 12, changed++)).toISOString() });
   }
-  await index.publishDirectory({ source: 'project', cursor: 1_000_000, project: summary, workspaces: definitions });
+  await index.publishDirectory({ source: 'project', cursor: 1_000_000, project: summary, workspaces: definitions, operations: [] });
   return { projectId, id: (workspace: string) => definitions.find(definition => definition.name === workspace)?.id ?? '' };
 }
 

@@ -169,6 +169,10 @@ export const cloudProjectOperationSchema = z.object({
   state: projectOperationStateSchema,
   steps: z.array(projectOperationStepSchema).max(128),
   error: z.string().max(8_192).nullable(),
+  /** What the operation changes, as people read it (`feat/x → develop`); null for one that says nothing more. */
+  summary: z.string().max(512).nullable(),
+  /** When someone dismissed it; a dismissed operation is no longer shown. */
+  dismissedAt: z.string().datetime().nullable(),
   revision: z.number().int().positive(),
   createdBy: z.string().min(1).max(160),
   createdAt: z.string().datetime(),

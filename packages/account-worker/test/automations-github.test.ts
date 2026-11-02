@@ -8,7 +8,7 @@ import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import type { AutomationDraft } from '@gitspace/protocol/automations-contract';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
-import { archiveCloudWorkspace } from '../src/cloud-workspace-lifecycle.js';
+import { archiveCloudWorkspace, completedOperation } from '../src/cloud-workspace-lifecycle.js';
 import { ProjectAutomationsDO, automationValue } from '../src/project-automations.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { network } from './network.js';
@@ -300,7 +300,8 @@ describe('automations on GitHub events', () => {
     // Each turn ends as its workspace reports, freeing its slot.
     await automations.runTurnChanged({ projectId, workspaceId: reviewId, requestId: `automation:${review?.id}`, state: 'ended', outcome: 'finished', text: 'Reviewed.' });
     const placement = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${reviewId}`).get();
-    expect(await archiveCloudWorkspace(env, env.ACCOUNT_ID, { projectId, spaceId: reviewId, expectedGeneration: placement?.generation ?? null })).toMatchObject({ lifecycle: 'archived' });
+    await completedOperation(env, await archiveCloudWorkspace(env, env.ACCOUNT_ID, { projectId, spaceId: reviewId, expectedGeneration: placement?.generation ?? null }));
+    expect(await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).getWorkspace(reviewId)).toMatchObject({ lifecycle: 'archived' });
 
     const reviewComment = (number: number, head: string, body: string) => ({ action: 'created', sender: { login: 'dana' }, pull_request: pull(number, { author: 'bradleat', head }), comment: { html_url: `https://github.com/inKibra/pantry/pull/${number}#discussion_r3`, body, user: { login: 'dana' } } });
     await send('pull_request_review_comment', reviewComment(12, 'fix-pantry', 'One more case.'));

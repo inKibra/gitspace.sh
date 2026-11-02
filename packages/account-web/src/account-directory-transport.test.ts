@@ -13,7 +13,7 @@ const device: BrowserDevice = {
   deviceId: '123e4567-e89b-42d3-a456-426614174001', label: 'Browser', publicKey: '', keyPair, enrolledAt: 0,
   userId: 'user', enrollUrl: 'https://account.test', canDelegate: false,
 };
-const value: AccountDirectorySnapshot = { projects: [], workspaces: [], placements: [], machines: [], projectRevisions: {} };
+const value: AccountDirectorySnapshot = { projects: [], workspaces: [], placements: [], machines: [], projectRevisions: {}, operations: [] };
 class Socket extends EventTarget {
   readyState = 0;
   constructor(readonly url: string, readonly protocols: string[]) { super(); }

@@ -13,6 +13,7 @@ import { ScriptRunFiles } from '../src/browser-script-files.js';
 import { CdpBrowserShim } from '../src/browser-shim.js';
 import type { UserRelayDO } from '../src/index.js';
 import { workspaceDrive } from '../src/workspace-drive.js';
+import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
 import { tenantRootPrivateKey } from './setup.js';
 
 type Identity = { key: CryptoKeyPair; publicKey: string };
@@ -169,6 +170,20 @@ test('on the cloud browser upload() gets the drive file’s bytes, and a run sav
   const records = (await drive.list('browser/captures/')).filter(entry => entry.path.endsWith('/capture.json'));
   expect(records).toHaveLength(5);
   expect((await files.report([])).content.filter(part => part.type === 'image')).toHaveLength(5);
+});
+
+test('in the project session a capture is named in the project drive, and the project page opens a drive://workspace/ link to it as older captures were named', async () => {
+  const { projectId } = await workspace();
+  await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).ensureBaseWorkspace({ userId: env.ACCOUNT_ID, projectId });
+  const files = new ScriptRunFiles(workspaceDrive(env, { projectId, workspaceId: projectId }), { source: 'headless', groupId: crypto.randomUUID() }, projectId);
+  const { captureId, url } = await files.capture({ name: null, targetId: 'page', page: { url: 'https://example.com/', title: 'Example' }, image: browserBase64(jpeg(1280, 720)), thumbnail: browserBase64(jpeg(480, 270)) });
+  expect(url).toBe(`drive://base/browser/captures/${captureId}/image.jpg`);
+  expect(await files.uploadFiles([url])).toMatchObject({ kind: 'bytes', files: [{ name: 'image.jpg', mediaType: 'image/jpeg' }] });
+  const older = `drive://workspace/browser/captures/${captureId}/image.jpg`;
+  await expect(files.uploadFiles([older])).rejects.toThrow(`${older} is not a file of this project's drive: upload() takes drive://base/<path>`);
+  const project = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, projectId, projectId));
+  const image = await project.file(url);
+  expect(await project.file(older)).toMatchObject({ size: image.size, mediaType: 'image/jpeg' });
 });
 
 test('a cloud download is saved to the day’s downloads folder in the drive and listed for the run, and the browser’s own download is cancelled', async () => {

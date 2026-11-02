@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
+import { cloudProjectOperationSchema, cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema, type CloudProjectOperation, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { accountDirectorySnapshotSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
 import { SpaceAuthorityRecordSchema } from '@gitspace/protocol-workspace';
@@ -8,7 +8,7 @@ import type { CloudProjectSummary } from '@gitspace/protocol';
 import type { UserProjectIndexDO } from './project-authority.js';
 
 export const directoryPublicationSchema = z.discriminatedUnion('source', [
-  z.object({ source: z.literal('project'), cursor: streamCursorSchema, project: cloudProjectSummarySchema, workspaces: z.array(cloudWorkspaceDefinitionSchema) }),
+  z.object({ source: z.literal('project'), cursor: streamCursorSchema, project: cloudProjectSummarySchema, workspaces: z.array(cloudWorkspaceDefinitionSchema), operations: z.array(cloudProjectOperationSchema).default([]) }),
   /** `runtime` is set once the space has cloud runtime state; such a workspace lives in the cloud and its legacy placement is ignored. */
   z.object({ source: z.literal('space'), cursor: streamCursorSchema, state: SpaceAuthorityRecordSchema.nullable(), runtime: RuntimeIdentitySchema.nullable().default(null) }),
   z.object({ source: z.literal('fleet'), cursor: streamCursorSchema, machines: accountDirectorySnapshotSchema.shape.machines }),
@@ -64,6 +64,7 @@ export class AccountDirectoryProjection {
     const sources = this.storage.sql.exec<SourceRow>('SELECT cursor,value_json FROM directory_sources ORDER BY source,source_id').toArray()
       .map((row) => JSON.parse(row.value_json) as DirectoryPublication);
     const definitions: CloudWorkspaceDefinition[] = [];
+    const operations: CloudProjectOperation[] = [];
     const projectRevisions: Record<string, number> = Object.fromEntries(visible.map((project) => [project.id, 0]));
     let machines: AccountDirectorySnapshot['machines'] = [];
     for (const source of sources) {
@@ -71,6 +72,8 @@ export class AccountDirectoryProjection {
       if (source.source === 'project' && ids.has(source.project.id)) {
         projectRevisions[source.project.id] = source.cursor;
         definitions.push(...source.workspaces.filter((workspace) => workspace.projectId === source.project.id));
+        // Rows stored before `operations` existed decode without it.
+        operations.push(...(source.operations ?? []));
       }
     }
     // Rows stored before `runtime` existed decode without it.
@@ -89,6 +92,6 @@ export class AccountDirectoryProjection {
       placements.push({ spaceId: state.spaceId, projectId: state.projectId, kind: definition.kind, holderId: state.machineId ?? 'unassigned', state: state.state, generation: state.generation,
         endpoint: machine?.state === 'online' && machine.desiredState === 'online' ? machine.rpcEndpoint : null });
     }
-    return { projects: visible, workspaces, placements, machines, projectRevisions };
+    return { projects: visible, workspaces, placements, machines, projectRevisions, operations };
   }
 }

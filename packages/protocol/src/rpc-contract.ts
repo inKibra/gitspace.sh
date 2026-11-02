@@ -187,13 +187,18 @@ export const ProjectLifecycleViewCodec = wire.object({
   updatedAt: wire.date,
 });
 
+const ProjectOperationStateCodec = wire.enum(['queued', 'claimed', 'running', 'blocked', 'failed', 'succeeded', 'canceled']);
+/** A recorded project or workspace operation: it runs in the background, and each step says where it stands. */
 export const ProjectOperationViewCodec = wire.object({
   id: wire.string,
   projectId: wire.string,
   workspaceId: wire.nullable(wire.string),
   kind: wire.string,
-  state: wire.enum(['queued', 'claimed', 'running', 'blocked', 'failed', 'succeeded', 'canceled']),
+  state: ProjectOperationStateCodec,
+  steps: wire.array(wire.object({ id: wire.string, label: wire.string, state: ProjectOperationStateCodec, message: wire.nullable(wire.string), updatedAt: wire.date })),
   error: wire.nullable(wire.string),
+  /** What it changes, as people read it (`feat/x → develop`), or null. */
+  summary: wire.nullable(wire.string),
   revision: wire.number,
   createdAt: wire.date,
   updatedAt: wire.date,
@@ -516,6 +521,8 @@ export const SpaceViewCodec = wire.object({
   baseSpace: BaseSpaceViewCodec,
   /** Why statuses are unknown in this view (their read failed), or null. Workspaces and relations are still current. */
   statusError: wire.nullable(wire.string),
+  /** The project's operations still to show: running or queued, failed and not dismissed, or finished moments ago. */
+  operations: wire.array(ProjectOperationViewCodec),
 });
 export type SpaceView = InputOf<typeof SpaceViewCodec>;
 
@@ -603,15 +610,17 @@ export const spaceViewContract = gitspaceRpc
 
 
 
+/** Each lifecycle change below is checked at once and then runs in the background: the reply is its queued operation,
+ * which `project.operation` reads and the space view lists while it runs, fails or has just finished. */
 export const archiveWorkspaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, spaceId: wire.string, expectedGeneration: wire.nullable(wire.number) }))
-  .output(InspectorWorkspaceCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
+  .output(ProjectOperationViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const restoreWorkspaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
-  .output(SpaceLifecycleViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
+  .output(ProjectOperationViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const listProjectsContract = gitspaceRpc
   .procedure()
@@ -638,21 +647,21 @@ export const ensureGitSpaceProjectContract = gitspaceRpc.procedure()
 export const archiveProjectContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, expectedRevision: wire.number }))
-  .output(ProjectLifecycleViewCodec)
+  .output(ProjectOperationViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const restoreProjectContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, expectedRevision: wire.number }))
-  .output(ProjectLifecycleViewCodec)
+  .output(ProjectOperationViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const setProjectBaseBranchContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, expectedRevision: wire.number, baseBranch: wire.string }))
-  .output(ProjectLifecycleViewCodec)
+  .output(ProjectOperationViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 /** Point the project at another repository address (a fork, a moved repository); workspaces keep their branches. */
@@ -689,14 +698,36 @@ export const refreshProjectRemoteContract = gitspaceRpc
 export const updateProjectBaseContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string }))
-  .output(wire.object({}))
+  .output(ProjectOperationViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const deleteProjectContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, expectedRevision: wire.number }))
-  .output(wire.object({ projectId: wire.string, deleted: wire.boolean }))
+  .output(ProjectOperationViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** One of the project's operations, to follow it. */
+export const projectOperationContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, operationId: wire.string }))
+  .output(ProjectOperationViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+/** Runs a failed operation again from its first step, as a new operation with the same request. */
+export const retryProjectOperationContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, operationId: wire.string }))
+  .output(ProjectOperationViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+/** Stops showing a failed or finished operation. */
+export const dismissProjectOperationContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, operationId: wire.string }))
+  .output(wire.object({}))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
@@ -727,7 +758,7 @@ export const retryCreateWorkspaceContract = gitspaceRpc
 export const deleteWorkspaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ workspaceId: wire.string }))
-  .output(wire.object({ workspaceId: wire.string, deleted: wire.boolean }))
+  .output(ProjectOperationViewCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
@@ -2526,6 +2557,8 @@ export const gitspaceContract = gitspaceRpc.contract({
     updateBase: updateProjectBaseContract,
     remote: { refresh: refreshProjectRemoteContract, checkInterval: projectOriginCheckContract, setCheckInterval: setProjectOriginCheckContract },
     delete: deleteProjectContract,
+    operation: projectOperationContract,
+    operations: { retry: retryProjectOperationContract, dismiss: dismissProjectOperationContract },
   },
   space: {
     view: spaceViewContract,

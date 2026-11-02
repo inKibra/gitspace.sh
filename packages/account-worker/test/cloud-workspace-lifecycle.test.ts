@@ -31,6 +31,8 @@ function cloudArtifacts() {
   const ref = (name: string, value: string) => `${name} ${value === 'HEAD' || value.startsWith('refs/') ? value : `refs/heads/${value}`}`;
   vi.spyOn(ArtifactsCodeStore.prototype, 'ensureEmptyProject').mockImplementation(async (projectId) => repository(`project-${projectId}`));
   vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockImplementation(async projectId => repository(`project-${projectId}`));
+  // A project repository holding any ref holds its import.
+  vi.spyOn(ArtifactsCodeStore.prototype, 'projectImported').mockImplementation(async projectId => [...refs.keys()].some(key => key.startsWith(`project-${projectId} `)));
   vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockImplementation(async (projectId, workspaceId, source) => {
     const name = `workspace-${workspaceId}`;
     if (!forks.some(fork => fork.workspaceId === workspaceId)) {
@@ -96,6 +98,8 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
   return { userId, client };
 }
 
+type CallResult<T> = { status: 'ok'; value: T } | { status: 'error'; error: unknown };
+
 async function cloudProject(name: string, repositoryUrl: string | null = null) {
   const artifacts = cloudArtifacts();
   const { userId, client } = await account();
@@ -103,16 +107,33 @@ async function cloudProject(name: string, repositoryUrl: string | null = null) {
   if (created.status === 'error') throw created.error;
   const project = created.value.project;
   artifacts.refs.set(`project-${project.id} refs/heads/main`, commit('1'));
-  return { userId, client, project, artifacts, authority: env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`), index: env.USER_PROJECTS.getByName(userId) };
+  const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`);
+  // Lifecycle calls queue their change; the project's alarm runs it.
+  const settle = (operationId: string) => vi.waitFor(async () => {
+    await runDurableObjectAlarm(authority);
+    const operation = await authority.getOperation(operationId);
+    if (operation.state !== 'succeeded' && operation.state !== 'failed') throw new Error(`Operation ${operationId} is ${operation.state}`);
+    return operation;
+  }, { timeout: 10_000, interval: 20 });
+  const run = async (call: Promise<CallResult<{ id: string }>>) => {
+    const queued = await call;
+    if (queued.status === 'error') throw queued.error;
+    return settle(queued.value.id);
+  };
+  const ready = async <T extends { workspace: { id: string }; operation: { id: string } }>(call: Promise<CallResult<T>>) => {
+    const queued = await call;
+    if (queued.status === 'error') throw queued.error;
+    return { ...queued.value, operation: await settle(queued.value.operation.id) };
+  };
+  return { userId, client, project, artifacts, authority, index: env.USER_PROJECTS.getByName(userId), settle, run, ready };
 }
 
 describe('cloud workspace lifecycle with no machines', () => {
   it('creates a workspace from the project base, opens its cloud runtime, and stacks another on it', async () => {
-    const { userId, client, project, artifacts, authority, index } = await cloudProject('Create in cloud');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Cloud feature', branch: 'feature/cloud', phase: 'plan', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const workspaceId = created.value.workspace.id;
-    expect(created.value).toMatchObject({
+    const { userId, client, project, artifacts, authority, index, ready } = await cloudProject('Create in cloud');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Cloud feature', branch: 'feature/cloud', phase: 'plan', sourceKind: 'base', sourceRef: '' }));
+    const workspaceId = created.workspace.id;
+    expect(created).toMatchObject({
       workspace: { projectId: project.id, name: 'Cloud feature', branch: 'feature/cloud', phase: 'plan', closedAt: null },
       operation: { projectId: project.id, workspaceId, kind: 'workspace.create', state: 'succeeded', error: null },
     });
@@ -135,19 +156,18 @@ describe('cloud workspace lifecycle with no machines', () => {
     // A workspace source is a dependency: its phase is the ceiling, and its repository holds the commit the child starts from.
     const ahead = await client.workspace.create({ projectId: project.id, name: 'Too far', branch: 'too-far', phase: 'code', sourceKind: 'workspace', sourceRef: workspaceId });
     expect(ahead).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('cannot pass the phase') } } });
-    const stacked = await client.workspace.create({ projectId: project.id, name: 'Stacked', branch: 'stacked', phase: 'plan', sourceKind: 'workspace', sourceRef: 'Cloud feature' });
-    if (stacked.status === 'error') throw stacked.error;
-    expect(stacked.value.workspace).toMatchObject({ phase: 'plan', relations: { dependsOn: [workspaceId], stackedOn: workspaceId } });
-    expect(artifacts.forks).toContainEqual({ workspaceId: stacked.value.workspace.id, source: `workspace-${workspaceId}` });
-    expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${stacked.value.workspace.id}`, 'stacked', commit('1'));
+    const stacked = await ready(client.workspace.create({ projectId: project.id, name: 'Stacked', branch: 'stacked', phase: 'plan', sourceKind: 'workspace', sourceRef: 'Cloud feature' }));
+    expect(stacked.workspace).toMatchObject({ phase: 'plan', relations: { dependsOn: [workspaceId], stackedOn: workspaceId } });
+    expect(stacked.operation.state).toBe('succeeded');
+    expect(artifacts.forks).toContainEqual({ workspaceId: stacked.workspace.id, source: `workspace-${workspaceId}` });
+    expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${stacked.workspace.id}`, 'stacked', commit('1'));
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree').map(workspace => workspace.name).sort()).toEqual(['Cloud feature', 'Stacked']);
   });
 
   it('notices each runtime publication once and reads only the events after the cursor', async () => {
-    const { userId, client, project } = await cloudProject('Runtime notices');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Noticed', branch: 'noticed', phase: 'plan', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.value.workspace.id });
+    const { userId, client, project, ready } = await cloudProject('Runtime notices');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Noticed', branch: 'noticed', phase: 'plan', sourceKind: 'base', sourceRef: '' }));
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.workspace.id });
     const first = await client.runtime.watch({ ...identity, after: null });
     if (first.status === 'error') throw first.error;
     expect(first.value).toMatchObject([{ type: 'snapshot', snapshot: identity }]);
@@ -176,10 +196,9 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('indexes an existing snapshot for code_search from the runtime alarm, with no request searching first', async () => {
-    const { userId, client, project } = await cloudProject('Indexed in cloud');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Indexed', branch: 'indexed', phase: 'plan', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.value.workspace.id });
+    const { userId, client, project, ready } = await cloudProject('Indexed in cloud');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Indexed', branch: 'indexed', phase: 'plan', sourceKind: 'base', sourceRef: '' }));
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.workspace.id });
     const trees = new Map<string, ArtifactsTreeEntry[]>([
       [commit('9'), [{ name: 'README.md', type: 'blob', mode: '100644', hash: commit('a') }, { name: 'src', type: 'tree', mode: '40000', hash: commit('b') }]],
       [commit('b'), [{ name: 'main.ts', type: 'blob', mode: '100644', hash: commit('c') }]],
@@ -212,42 +231,48 @@ describe('cloud workspace lifecycle with no machines', () => {
     });
   });
 
-  it('refuses invalid branches and unresolvable sources before anything enters the catalog', async () => {
-    const { client, project, authority } = await cloudProject('Refusals');
+  it('refuses malformed branches and sources before anything enters the catalog, and fails the creation of a source that does not resolve', async () => {
+    const { client, project, authority, ready } = await cloudProject('Refusals');
     const create = (change: Partial<Parameters<typeof client.workspace.create>[0]>) => client.workspace.create({ projectId: project.id, name: 'Refused', branch: 'refused', sourceKind: 'base', sourceRef: '', ...change });
     for (const branch of ['bad..name', '-flag', 'with space', 'trailing/', 'part.lock', 'HEAD', '.hidden']) {
       expect(await create({ branch })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('is not a valid branch name') } } });
     }
-    expect(await create({ sourceKind: 'branch', sourceRef: 'origin/missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Branch missing does not exist') } } });
     expect(await create({ sourceKind: 'commit', sourceRef: 'abc123' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('40-character') } } });
-    expect(await create({ sourceKind: 'commit', sourceRef: commit('7') })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('does not exist') } } });
     expect(await create({ sourceKind: 'workspace', sourceRef: 'nobody' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Source workspace nobody does not exist') } } });
     expect(await create({ dependsOn: ['nobody'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Dependency workspace nobody does not exist') } } });
     expect(await create({ projectId: 'missing-project' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/project-not-found' } });
     // A ref with the base source names another source; it is refused rather than silently started from the base.
     expect(await create({ sourceKind: 'base', sourceRef: 'staging' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('use sourceKind branch with sourceRef staging') } } });
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
-    expect(await create({ sourceKind: 'branch', sourceRef: 'refs/remotes/origin/main' })).toMatchObject({ status: 'ok', value: { workspace: { branch: 'refused' } } });
-    expect(await create({ name: 'From commit', branch: 'from-commit', sourceKind: 'commit', sourceRef: commit('1') })).toMatchObject({ status: 'ok' });
-    expect(await create({ name: 'Base by name', branch: 'base-by-name', sourceKind: 'base', sourceRef: 'origin/main' })).toMatchObject({ status: 'ok' });
+    // A well-formed source is read in the background: one that does not resolve fails its creation on the source step,
+    // and the workspace stays for Retry or Delete.
+    const missingBranch = await ready(create({ name: 'Missing branch', branch: 'missing-branch', sourceKind: 'branch', sourceRef: 'origin/missing' }));
+    expect(missingBranch.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('Branch missing does not exist'), steps: [{ id: 'source', state: 'failed' }, { state: 'queued' }, { state: 'queued' }, { state: 'queued' }] });
+    expect(await authority.getWorkspace(missingBranch.workspace.id)).toMatchObject({ lifecycle: 'failed', sourceCommit: null });
+    const missingCommit = await ready(create({ name: 'Missing commit', branch: 'missing-commit', sourceKind: 'commit', sourceRef: commit('7') }));
+    expect(missingCommit.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('does not exist') });
+    expect(await ready(create({ sourceKind: 'branch', sourceRef: 'refs/remotes/origin/main' }))).toMatchObject({ workspace: { branch: 'refused' }, operation: { state: 'succeeded' } });
+    expect(await ready(create({ name: 'From commit', branch: 'from-commit', sourceKind: 'commit', sourceRef: commit('1') }))).toMatchObject({ operation: { state: 'succeeded' } });
+    expect(await ready(create({ name: 'Base by name', branch: 'base-by-name', sourceKind: 'base', sourceRef: 'origin/main' }))).toMatchObject({ operation: { state: 'succeeded' } });
   });
 
   it('imports a branch a private origin refuses through a machine holding the base checkout, and says so when none is ready', async () => {
-    const { client, project, authority } = await cloudProject('Private branches', 'https://github.com/Deedible/Private.git');
+    const { client, project, authority, ready } = await cloudProject('Private branches', 'https://github.com/Deedible/Private.git');
     const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockRejectedValue(new GitDiscoveryError(401));
     try {
-      const created = await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' });
-      expect(created).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('The project repository is private') } } });
+      const created = await ready(client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' }));
+      expect(created.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('The project repository is private') });
       expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/Deedible/Private.git', 'refs/heads/staging', null);
-      expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
+      expect(await authority.getWorkspace(created.workspace.id)).toMatchObject({ lifecycle: 'failed', sourceCommit: null });
       // Any other refusal is the origin's answer, not a reason to involve a machine.
       importRef.mockRejectedValue(new GitDiscoveryError(500));
-      expect(await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Git discovery failed (500)') } } });
+      const retried = await ready(client.workspace.retryCreate({ workspaceId: created.workspace.id }));
+      expect(retried.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('Git discovery failed (500)') });
     } finally { importRef.mockRestore(); }
   });
 
   it('reads a covered origin only with an installation token and never asks a machine when it refuses', async () => {
-    const { client, project, authority } = await cloudProject('Covered branches', 'git@github.com:acme/private.git');
+    const { client, project, authority, ready } = await cloudProject('Covered branches', 'git@github.com:acme/private.git');
     const tokens = coveredRepositories();
     const credentials: Array<unknown> = [];
     const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockImplementation(async (_projectId, _url, _ref, read) => {
@@ -255,98 +280,93 @@ describe('cloud workspace lifecycle with no machines', () => {
       throw new GitDiscoveryError(404);
     });
     const machine = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeImportRef');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' });
-    expect(created).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Git discovery failed (404)') } } });
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' }));
+    expect(created.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('Git discovery failed (404)') });
     expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/acme/private.git', 'refs/heads/staging', expect.any(Function));
     expect(credentials).toEqual([{ kind: 'basic', username: 'x-access-token', password: 'ghs_read_acme/private' }]);
     expect(tokens).toHaveBeenCalledWith('acme/private', 'read');
     expect(machine).not.toHaveBeenCalled();
-    expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree')).toEqual([]);
+    expect(await authority.getWorkspace(created.workspace.id)).toMatchObject({ lifecycle: 'failed' });
   });
 
   it('imports missing public branches for workspace sources and base switches without refreshing cached refs', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Public branches', 'https://github.com/octocat/Hello-World.git');
+    const { userId, client, project, artifacts, authority, run, ready } = await cloudProject('Public branches', 'https://github.com/octocat/Hello-World.git');
     const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockImplementation(async (projectId, _url, ref) => {
       const hash = ref === 'refs/heads/feature/public' ? commit('2') : ref === 'refs/heads/release/public' ? commit('3') : null;
       if (!hash) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
       artifacts.refs.set(`project-${projectId} ${ref}`, hash);
       return hash;
     });
-    const created = await client.workspace.create({ projectId: project.id, name: 'Public feature', branch: 'work', sourceKind: 'branch', sourceRef: 'origin/feature/public' });
-    if (created.status === 'error') throw created.error;
-    expect((await authority.listWorkspaces()).find(workspace => workspace.id === created.value.workspace.id)).toMatchObject({ sourceRef: 'feature/public', sourceCommit: commit('2'), lifecycle: 'active' });
-    expect(await env.SPACE_AUTHORITY.getByName(`${userId}:${created.value.workspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: created.value.workspace.id })).toMatchObject({ branch: 'work', headCommit: commit('2') });
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Public feature', branch: 'work', sourceKind: 'branch', sourceRef: 'origin/feature/public' }));
+    expect(await authority.getWorkspace(created.workspace.id)).toMatchObject({ sourceRef: 'feature/public', sourceCommit: commit('2'), lifecycle: 'active' });
+    expect(await env.SPACE_AUTHORITY.getByName(`${userId}:${created.workspace.id}`).runtimeRepositoryCheckpoint({ projectId: project.id, workspaceId: created.workspace.id })).toMatchObject({ branch: 'work', headCommit: commit('2') });
 
     const identity = { projectId: project.id, workspaceId: project.id };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
     const current = await authority.getProject();
     if (!current) throw new Error('Missing project');
-    const beforeMissing = await authority.listWorkspaces();
-    expect(await client.workspace.create({ projectId: project.id, name: 'Missing public branch', branch: 'missing', sourceKind: 'branch', sourceRef: 'missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('not advertised by the public origin') } } });
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('not advertised by the public origin') } } });
-    expect(await authority.getProject()).toEqual(current);
-    expect(await authority.listWorkspaces()).toEqual(beforeMissing);
+    const baseBefore = (await authority.listWorkspaces()).find(workspace => workspace.kind === 'base');
+    const missing = await ready(client.workspace.create({ projectId: project.id, name: 'Missing public branch', branch: 'missing', sourceKind: 'branch', sourceRef: 'missing' }));
+    expect(missing.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('not advertised by the public origin') });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'missing' }))).toMatchObject({ state: 'failed', error: expect.stringContaining('not advertised by the public origin') });
+    expect(await authority.getProject()).toMatchObject({ baseBranch: 'main', revision: current.revision });
+    expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toEqual(baseBefore);
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
     expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision - 1, baseBranch: 'release/public' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('revision conflict') } } });
     expect(artifacts.refs.has(`project-${project.id} refs/heads/release/public`)).toBe(false);
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'release/public' })).toMatchObject({ status: 'ok', value: { baseBranch: 'release/public' } });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'release/public' }))).toMatchObject({ state: 'succeeded', summary: 'main → release/public' });
+    expect(await authority.getProject()).toMatchObject({ baseBranch: 'release/public' });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'release/public', headCommit: commit('3'), indexCommit: commit('3'), worktreeCommit: commit('3') });
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'release/public', sourceCommit: commit('3') });
-    expect((await authority.listWorkspaces()).find(workspace => workspace.id === created.value.workspace.id)?.branch).toBe('work');
+    expect((await authority.getWorkspace(created.workspace.id))?.branch).toBe('work');
 
     importRef.mockRejectedValue(new Error('Origin unavailable'));
-    const cached = await client.workspace.create({ projectId: project.id, name: 'Cached public feature', branch: 'cached', sourceKind: 'branch', sourceRef: 'refs/heads/feature/public' });
-    if (cached.status === 'error') throw cached.error;
-    expect((await authority.listWorkspaces()).find(workspace => workspace.id === cached.value.workspace.id)?.sourceCommit).toBe(commit('2'));
+    const cached = await ready(client.workspace.create({ projectId: project.id, name: 'Cached public feature', branch: 'cached', sourceKind: 'branch', sourceRef: 'refs/heads/feature/public' }));
+    expect((await authority.getWorkspace(cached.workspace.id))?.sourceCommit).toBe(commit('2'));
     const latest = await authority.getProject();
     if (!latest) throw new Error('Missing project');
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: latest.revision, baseBranch: 'feature/public' })).toMatchObject({ status: 'ok' });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: latest.revision, baseBranch: 'feature/public' }))).toMatchObject({ state: 'succeeded' });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'feature/public', headCommit: commit('2') });
   });
 
-  it('leaves the workspace catalog intact when the source import is refused and permits explicit recovery', async () => {
-    const { client, project, artifacts, authority } = await cloudProject('Refused import', 'https://github.com/example/source.git');
-    const definitions = await authority.listWorkspaces();
+  it('fails a creation whose source import is refused, keeping the workspace, and Retry finishes it', async () => {
+    const { client, project, artifacts, authority, ready } = await cloudProject('Refused import', 'https://github.com/example/source.git');
     const imports = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject');
     const importProject = imports.getMockImplementation();
     imports.mockRejectedValue(new Error('Artifacts refused repository history'));
     const input = { projectId: project.id, name: 'Not yet admitted', branch: 'review', sourceKind: 'base' as const, sourceRef: '' };
-    expect(await client.workspace.create(input)).toMatchObject({ status: 'error' });
-    expect(await authority.listWorkspaces()).toEqual(definitions);
+    const refused = await ready(client.workspace.create(input));
+    expect(refused.operation).toMatchObject({ state: 'failed', error: 'Artifacts refused repository history' });
+    expect(await authority.getWorkspace(refused.workspace.id)).toMatchObject({ lifecycle: 'failed' });
     expect(artifacts.forks).toEqual([]);
     expect(artifacts.setBranch).not.toHaveBeenCalled();
     if (!importProject) throw new Error('Missing import fixture');
     imports.mockImplementation(importProject);
-    const admitted = await client.workspace.create(input);
-    if (admitted.status === 'error') throw admitted.error;
-    expect((await authority.listWorkspaces()).find(workspace => workspace.id === admitted.value.workspace.id)).toMatchObject({ name: input.name, branch: input.branch, lifecycle: 'active', sourceCommit: commit('1') });
+    expect(await ready(client.workspace.retryCreate({ workspaceId: refused.workspace.id }))).toMatchObject({ operation: { state: 'succeeded' } });
+    expect(await authority.getWorkspace(refused.workspace.id)).toMatchObject({ name: input.name, branch: input.branch, lifecycle: 'active', sourceCommit: commit('1') });
   });
 
   it('resumes a failed creation from the cloud and refuses to retry a finished one', async () => {
-    const { client, project, artifacts, authority } = await cloudProject('Retry');
+    const { client, project, artifacts, authority, ready } = await cloudProject('Retry');
     artifacts.setBranch.mockRejectedValueOnce(new Error('Artifacts push unavailable'));
-    const failed = await client.workspace.create({ projectId: project.id, name: 'Retried', branch: 'retried', sourceKind: 'base', sourceRef: '' });
-    expect(failed).toMatchObject({ status: 'error', error: { data: { message: 'Artifacts push unavailable' } } });
-    const definition = (await authority.listWorkspaces()).find(workspace => workspace.name === 'Retried');
-    if (!definition) throw new Error('A failed creation keeps its definition for Retry and Delete');
-    expect(definition).toMatchObject({ lifecycle: 'failed', sourceCommit: commit('1') });
-    expect((await authority.listOperations()).find(operation => operation.workspaceId === definition.id)).toMatchObject({
+    const failed = await ready(client.workspace.create({ projectId: project.id, name: 'Retried', branch: 'retried', sourceKind: 'base', sourceRef: '' }));
+    expect(failed.operation).toMatchObject({
       kind: 'workspace.create', state: 'failed', error: 'Artifacts push unavailable',
       steps: [{ id: 'source', state: 'succeeded' }, { id: 'repository', state: 'succeeded' }, { id: 'branch', state: 'failed', message: 'Artifacts push unavailable' }, { id: 'activate', state: 'queued' }],
     });
-    const retried = await client.workspace.retryCreate({ workspaceId: definition.id });
-    expect(retried).toMatchObject({ status: 'ok', value: { workspace: { id: definition.id, branch: 'retried' }, operation: { kind: 'workspace.create', state: 'succeeded' } } });
-    expect((await authority.listWorkspaces()).find(workspace => workspace.id === definition.id)).toMatchObject({ lifecycle: 'active', sourceCommit: commit('1') });
-    expect(await client.workspace.retryCreate({ workspaceId: definition.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('only a failed or unfinished creation can be retried') } } });
+    expect(await authority.getWorkspace(failed.workspace.id)).toMatchObject({ lifecycle: 'failed', sourceCommit: commit('1') });
+    const retried = await ready(client.workspace.retryCreate({ workspaceId: failed.workspace.id }));
+    expect(retried).toMatchObject({ workspace: { id: failed.workspace.id, branch: 'retried' }, operation: { kind: 'workspace.create', state: 'succeeded' } });
+    expect(await authority.getWorkspace(failed.workspace.id)).toMatchObject({ lifecycle: 'active', sourceCommit: commit('1') });
+    expect(await client.workspace.retryCreate({ workspaceId: failed.workspace.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('only a failed or unfinished creation can be retried') } } });
     expect(await client.workspace.retryCreate({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
   });
 
   it('archives, restores and deletes a workspace, stopping its runtime and detaching its caches in the cloud', async () => {
-    const { userId, client, project, artifacts, authority, index } = await cloudProject('Archive');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Archived', branch: 'archived', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const workspaceId = created.value.workspace.id;
+    const { userId, client, project, artifacts, authority, index, run, ready } = await cloudProject('Archive');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Archived', branch: 'archived', sourceKind: 'base', sourceRef: '' }));
+    const workspaceId = created.workspace.id;
     const identity = { projectId: project.id, workspaceId };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
     await space.runtimeSnapshot(identity);
@@ -360,19 +380,19 @@ describe('cloud workspace lifecycle with no machines', () => {
       if (!definition) throw new Error('Workspace definition is missing');
       return definition;
     };
-    const archive = async () => client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null });
-    expect(await archive()).toMatchObject({ status: 'ok', value: { id: workspaceId, lifecycle: 'archived' } });
+    const archive = () => run(client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null }));
+    expect(await archive()).toMatchObject({ kind: 'workspace.archive', workspaceId, state: 'succeeded' });
+    expect(await current()).toMatchObject({ lifecycle: 'archived' });
     expect(await space.runtimeAttachmentRecords(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
-    expect((await authority.listOperations()).find(operation => operation.kind === 'workspace.archive' && operation.workspaceId === workspaceId)).toMatchObject({ state: 'succeeded' });
     expect(await client.space.view({ projectId: project.id, workspaceId })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, closedAt: expect.any(Date) }] } });
 
     expect(await client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 3 })).toMatchObject({ status: 'error' });
-    expect(await client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 0 })).toMatchObject({ status: 'ok', value: { id: workspaceId, projectId: project.id, kind: 'worktree', state: 'active', machineId: null, generation: 0 } });
+    expect(await run(client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 0 }))).toMatchObject({ kind: 'workspace.restore', state: 'succeeded' });
     expect(await current()).toMatchObject({ lifecycle: 'active', archivedAt: null });
     expect(await client.workspace.delete({ workspaceId: project.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('base workspace') } } });
 
-    expect(await archive()).toMatchObject({ status: 'ok' });
-    expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'ok', value: { workspaceId, deleted: true } });
+    expect(await archive()).toMatchObject({ state: 'succeeded' });
+    expect(await run(client.workspace.delete({ workspaceId }))).toMatchObject({ kind: 'workspace.delete', state: 'succeeded' });
     expect((await authority.listWorkspaces()).some(workspace => workspace.id === workspaceId)).toBe(false);
     expect(await index.locateWorkspace(workspaceId)).toBeNull();
     expect(artifacts.deleted).toEqual([`workspace-${workspaceId}`]);
@@ -381,13 +401,12 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('deletes a workspace in any state: an active one and a creation that never finished', async () => {
-    const { userId, client, project, authority, index } = await cloudProject('Delete in any state');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Active', branch: 'active', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const active = created.value.workspace.id;
+    const { userId, client, project, authority, index, run, ready } = await cloudProject('Delete in any state');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Active', branch: 'active', sourceKind: 'base', sourceRef: '' }));
+    const active = created.workspace.id;
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${active}`);
     await space.runtimeSnapshot({ projectId: project.id, workspaceId: active });
-    expect(await client.workspace.delete({ workspaceId: active })).toMatchObject({ status: 'ok', value: { workspaceId: active, deleted: true } });
+    expect(await run(client.workspace.delete({ workspaceId: active }))).toMatchObject({ state: 'succeeded' });
     expect(await authority.getWorkspace(active)).toBeNull();
     expect(await space.hasCloudRuntime()).toBe(false);
 
@@ -396,15 +415,14 @@ describe('cloud workspace lifecycle with no machines', () => {
       sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'provisioning', goalId: null, expectedRevision: 0,
     });
     await index.putWorkspaceLocation(unfinished.id, project.id);
-    expect(await client.workspace.delete({ workspaceId: unfinished.id })).toMatchObject({ status: 'ok', value: { workspaceId: unfinished.id, deleted: true } });
+    expect(await run(client.workspace.delete({ workspaceId: unfinished.id }))).toMatchObject({ state: 'succeeded' });
     expect(await index.locateWorkspace(unfinished.id)).toBeNull();
   });
 
   it('archives and deletes workspace first, and the project records it even after a project-side write the workspace never saw', async () => {
-    const { userId, client, project, authority } = await cloudProject('Workspace first');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Recorded', branch: 'recorded', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const workspaceId = created.value.workspace.id;
+    const { userId, client, project, authority, run, ready } = await cloudProject('Workspace first');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Recorded', branch: 'recorded', sourceKind: 'base', sourceRef: '' }));
+    const workspaceId = created.workspace.id;
     const identity = { projectId: project.id, workspaceId };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
     await space.runtimeSnapshot(identity);
@@ -425,16 +443,15 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await definition()).toMatchObject({ lifecycle: 'archived' });
 
     await bypass();
-    expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'ok', value: { workspaceId, deleted: true } });
+    expect(await run(client.workspace.delete({ workspaceId }))).toMatchObject({ state: 'succeeded' });
     expect(await space.hasCloudRuntime()).toBe(false);
     expect(await authority.getWorkspace(workspaceId)).toBeNull();
   });
 
   it('stores the status its runtime publishes and serves it without opening the runtime or reading the project', async () => {
-    const { userId, client, project } = await cloudProject('Stored status');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Status', branch: 'status', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const workspaceId = created.value.workspace.id;
+    const { userId, client, project, ready } = await cloudProject('Stored status');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Status', branch: 'status', sourceKind: 'base', sourceRef: '' }));
+    const workspaceId = created.workspace.id;
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
     expect(await space.publishedStatus()).toBeNull();
     expect(await client.runtime.snapshot(RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }))).toMatchObject({ status: 'ok' });
@@ -461,31 +478,29 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('reads a project view without reaching any workspace object, statuses from the account rows', async () => {
-    const { userId, client, project, index } = await cloudProject('Asleep');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Idle', branch: 'idle', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
+    const { userId, client, project, index, ready } = await cloudProject('Asleep');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Idle', branch: 'idle', sourceKind: 'base', sourceRef: '' }));
     const status = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
-    await index.setWorkspaceStatus({ projectId: project.id, workspaceId: created.value.workspace.id, status });
+    await index.setWorkspaceStatus({ projectId: project.id, workspaceId: created.workspace.id, status });
     // Every workspace object is unreachable: a view that read one would fail (and would have woken it).
     const asleep = { ...env, SPACE_AUTHORITY: new Proxy(env.SPACE_AUTHORITY, { get() { throw new Error('A workspace object was read'); } }) };
     const view = await readCloudSpaceView(asleep, userId, project.id);
-    expect(view.workspaces).toMatchObject([{ id: created.value.workspace.id, name: 'Idle', status }]);
+    expect(view.workspaces).toMatchObject([{ id: created.workspace.id, name: 'Idle', status }]);
     expect(view.baseSpace).toMatchObject({ id: project.id, kind: 'base' });
     expect(view.statusError).toBeNull();
   });
 
   it('still lists workspaces and relations when statuses cannot be read, and says why', async () => {
-    const { userId, client, project } = await cloudProject('Status outage');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Listed', branch: 'listed', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
+    const { userId, client, project, ready } = await cloudProject('Status outage');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Listed', branch: 'listed', sourceKind: 'base', sourceRef: '' }));
     const failing = { ...env, USER_PROJECTS: new Proxy(env.USER_PROJECTS, { get() { throw new Error('Internal error in Durable Object storage caused object to be reset'); } }) };
     const view = await readCloudSpaceView(failing, userId, project.id);
-    expect(view.workspaces).toMatchObject([{ id: created.value.workspace.id, name: 'Listed', status: { primaryColor: 'dim' }, relations: { dependsOn: [] } }]);
+    expect(view.workspaces).toMatchObject([{ id: created.workspace.id, name: 'Listed', status: { primaryColor: 'dim' }, relations: { dependsOn: [] } }]);
     expect(view.statusError).toContain('Internal error in Durable Object storage');
   });
 
   it('switches an opened clean base checkout and keeps the new branch after reopening', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Opened base');
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Opened base');
     // A branch introduced after the base fork must bring its objects into that existing repository.
     const identity = { projectId: project.id, workspaceId: project.id };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
@@ -493,7 +508,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const current = await authority.getProject();
     if (!current) throw new Error('Missing project');
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'ok' });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' }))).toMatchObject({ state: 'succeeded' });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2'), indexCommit: commit('2'), worktreeCommit: commit('2') });
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceRef: 'develop', sourceCommit: commit('2') });
     expect(artifacts.refs.get(`workspace-${project.id} refs/heads/develop`)).toBe(commit('2'));
@@ -506,7 +521,7 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('rejects dirty base checkout before changing its branch, refs or canonical metadata', async () => {
-    const { userId, client, project, artifacts, authority, index } = await cloudProject('Dirty base');
+    const { userId, client, project, artifacts, authority, index, run } = await cloudProject('Dirty base');
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const identity = { projectId: project.id, workspaceId: project.id };
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
@@ -519,7 +534,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     if (!current) throw new Error('Missing project');
     const before = await authority.listWorkspaces();
     const refs = [...artifacts.refs];
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('uncommitted changes') } } });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' }))).toMatchObject({ state: 'failed', error: expect.stringContaining('uncommitted changes') });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toEqual(dirty);
     expect(await authority.getProject()).toEqual(current);
     expect(await authority.listWorkspaces()).toEqual(before);
@@ -528,7 +543,7 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('reports an interrupted ref publication and finishes it on retry without exposing partial metadata', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Branch recovery');
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Branch recovery');
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
@@ -538,18 +553,60 @@ describe('cloud workspace lifecycle with no machines', () => {
     const copy = artifacts.copyCommit.getMockImplementation();
     if (!copy) throw new Error('Missing copy fixture');
     artifacts.copyCommit.mockImplementationOnce(copy).mockRejectedValueOnce(new Error('Checkpoint push interrupted'));
-    const input = { projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' };
-    expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Checkpoint push interrupted') } } });
+    const failed = await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' }));
+    expect(failed).toMatchObject({ state: 'failed', error: expect.stringContaining('Checkpoint push interrupted'), steps: [{ state: 'succeeded' }, { state: 'failed' }] });
     expect((await authority.getProject())?.baseBranch).toBe('main');
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')?.branch).toBe('main');
     expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok' });
-    expect(await client.project.setBaseBranch(input)).toMatchObject({ status: 'ok', value: { baseBranch: 'develop' } });
+    // The project view shows the failure until it is retried or dismissed.
+    expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { operations: [{ id: failed.id, state: 'failed', error: expect.stringContaining('Checkpoint push interrupted') }] } });
+    // Retry runs the same request again as a new operation, and the failure it replaces leaves the view.
+    const retried = await run(client.project.operations.retry({ projectId: project.id, operationId: failed.id }));
+    expect(retried).toMatchObject({ kind: 'project.setBaseBranch', state: 'succeeded', summary: 'main → develop' });
+    expect(retried.id).not.toBe(failed.id);
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2') });
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceCommit: commit('2') });
+    const view = await client.space.view({ projectId: project.id, workspaceId: null });
+    if (view.status === 'error') throw view.error;
+    expect(view.value.operations.map(operation => operation.id)).toEqual([retried.id]);
+    expect(await client.project.operations.retry({ projectId: project.id, operationId: retried.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('only a failed operation can be retried') } } });
+  });
+
+  it('queues a project change: the call returns before it runs, a second change waits for it, and the view shows it until dismissed', async () => {
+    const { userId, client, project, artifacts, authority, settle } = await cloudProject('Queued change');
+    artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    await env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`).runtimeRepositoryCheckpoint(identity);
+    const current = await authority.getProject();
+    if (!current) throw new Error('Missing project');
+    const copy = artifacts.copyCommit.getMockImplementation();
+    if (!copy) throw new Error('Missing copy fixture');
+    // The switch holds at its ref publication until released.
+    const release = Promise.withResolvers<void>();
+    artifacts.copyCommit.mockImplementationOnce(async (...args) => { await release.promise; return copy(...args); });
+    const queued = await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' });
+    if (queued.status === 'error') throw queued.error;
+    expect(queued.value).toMatchObject({ kind: 'project.setBaseBranch', summary: 'main → develop', steps: [{ label: 'Copy develop from the origin' }, { label: 'Switch the base checkout and record the branch' }] });
+    expect(['queued', 'running']).toContain(queued.value.state);
+    expect((await authority.getProject())?.baseBranch).toBe('main');
+    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'main' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('still running') } } });
+    const pending = await client.space.view({ projectId: project.id, workspaceId: null });
+    if (pending.status === 'error') throw pending.error;
+    expect(pending.value.operations).toMatchObject([{ id: queued.value.id, state: expect.stringMatching(/^(queued|running)$/) }]);
+    expect(await client.project.operations.dismiss({ projectId: project.id, operationId: queued.value.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('still') } } });
+
+    release.resolve();
+    expect(await settle(queued.value.id)).toMatchObject({ state: 'succeeded' });
+    expect((await authority.getProject())?.baseBranch).toBe('develop');
+    expect(await client.project.operation({ projectId: project.id, operationId: queued.value.id })).toMatchObject({ status: 'ok', value: { state: 'succeeded', steps: [{ state: 'succeeded' }, { state: 'succeeded' }] } });
+    // A finished change stays in the view (the base branch row's "just now") until dismissed.
+    expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { operations: [{ id: queued.value.id, state: 'succeeded' }] } });
+    expect(await client.project.operations.dismiss({ projectId: project.id, operationId: queued.value.id })).toMatchObject({ status: 'ok' });
+    expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { operations: [] } });
   });
 
   it('answers other requests while a base-branch change waits on the git store', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Unblocked branch change');
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Unblocked branch change');
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
@@ -565,27 +622,26 @@ describe('cloud workspace lifecycle with no machines', () => {
       answered = [await workspace.directoryPublication(), await workspace.runtimeSnapshot(identity).then(() => 'opened', (error: unknown) => error instanceof Error ? error.message : String(error))];
       return copy(...args);
     });
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' })).toMatchObject({ status: 'ok', value: { baseBranch: 'develop' } });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'develop' }))).toMatchObject({ state: 'succeeded' });
     expect(answered).toEqual([expect.objectContaining({ source: 'space' }), 'opened']);
     expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok' });
   });
 
   it('creates from advertised tags and pull request heads without a machine', async () => {
-    const { client, project, artifacts, authority } = await cloudProject('Imported refs');
+    const { client, project, artifacts, authority, ready } = await cloudProject('Imported refs');
     artifacts.refs.set(`project-${project.id} refs/tags/v1`, commit('3'));
     artifacts.refs.set(`project-${project.id} refs/pull/12/head`, commit('4'));
-    expect(await client.workspace.create({ projectId: project.id, name: 'Tag', branch: 'tag-work', sourceKind: 'tag', sourceRef: 'refs/tags/v1' })).toMatchObject({ status: 'ok' });
-    expect(await client.workspace.create({ projectId: project.id, name: 'PR', branch: 'pr-work', sourceKind: 'pull-request', sourceRef: '12' })).toMatchObject({ status: 'ok' });
+    expect(await ready(client.workspace.create({ projectId: project.id, name: 'Tag', branch: 'tag-work', sourceKind: 'tag', sourceRef: 'refs/tags/v1' }))).toMatchObject({ operation: { state: 'succeeded' } });
+    expect(await ready(client.workspace.create({ projectId: project.id, name: 'PR', branch: 'pr-work', sourceKind: 'pull-request', sourceRef: '12' }))).toMatchObject({ operation: { state: 'succeeded' } });
     const workspaces = await authority.listWorkspaces();
     expect(workspaces.find(workspace => workspace.name === 'Tag')).toMatchObject({ sourceKind: 'tag', sourceRef: 'v1', sourceCommit: commit('3') });
     expect(workspaces.find(workspace => workspace.name === 'PR')).toMatchObject({ sourceKind: 'pull-request', sourceRef: '12', sourceCommit: commit('4') });
   });
 
   it('preserves explicit phases and approved plan transitions across runtime reopening', async () => {
-    const { userId, client, project } = await cloudProject('Durable phase');
-    const created = await client.workspace.create({ projectId: project.id, name: 'Reviewed', branch: 'reviewed', phase: 'review', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
-    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.value.workspace.id });
+    const { userId, client, project, ready } = await cloudProject('Durable phase');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Reviewed', branch: 'reviewed', phase: 'review', sourceKind: 'base', sourceRef: '' }));
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.workspace.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`);
     await runInDurableObject(space, async (_instance, state) => {
       const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`);
@@ -614,33 +670,34 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('archives, restores, rebases and deletes a project in the cloud; the GitSpace project refuses archive and delete', async () => {
-    const { userId, client, project, artifacts, authority, index } = await cloudProject('Project lifecycle');
+    const { userId, client, project, artifacts, authority, index, run, ready } = await cloudProject('Project lifecycle');
     artifacts.refs.set(`project-${project.id} refs/heads/develop`, commit('2'));
-    const created = await client.workspace.create({ projectId: project.id, name: 'Child', branch: 'child', sourceKind: 'base', sourceRef: '' });
-    if (created.status === 'error') throw created.error;
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Child', branch: 'child', sourceKind: 'base', sourceRef: '' }));
     const revision = async () => (await authority.getProject())?.revision ?? -1;
-    const child = env.SPACE_AUTHORITY.getByName(`${userId}:${created.value.workspace.id}`);
-    const childIdentity = { projectId: project.id, workspaceId: created.value.workspace.id };
+    const child = env.SPACE_AUTHORITY.getByName(`${userId}:${created.workspace.id}`);
+    const childIdentity = { projectId: project.id, workspaceId: created.workspace.id };
 
     expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'bad..branch' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('not a valid branch name') } } });
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'missing' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Branch missing does not exist') } } });
-    expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'develop' })).toMatchObject({ status: 'ok', value: { id: project.id, baseBranch: 'develop', lifecycle: 'active' } });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'missing' }))).toMatchObject({ state: 'failed', error: expect.stringContaining('Branch missing does not exist') });
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: await revision(), baseBranch: 'develop' }))).toMatchObject({ state: 'succeeded' });
+    expect(await authority.getProject()).toMatchObject({ id: project.id, baseBranch: 'develop', lifecycle: 'active' });
     expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { project: { baseBranch: 'develop' }, baseSpace: { branch: 'develop' } } });
-    const fromBase = await client.workspace.create({ projectId: project.id, name: 'From develop', branch: 'from-develop', sourceKind: 'base', sourceRef: '' });
-    expect(fromBase).toMatchObject({ status: 'ok' });
+    expect(await ready(client.workspace.create({ projectId: project.id, name: 'From develop', branch: 'from-develop', sourceKind: 'base', sourceRef: '' }))).toMatchObject({ operation: { state: 'succeeded' } });
     expect(artifacts.setBranch).toHaveBeenLastCalledWith(expect.any(String), 'from-develop', commit('2'));
 
-    expect(await client.project.archive({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { lifecycle: 'archived', archivedAt: expect.any(Date) } });
+    expect(await run(client.project.archive({ projectId: project.id, expectedRevision: await revision() }))).toMatchObject({ kind: 'project.archive', state: 'succeeded' });
+    expect(await authority.getProject()).toMatchObject({ lifecycle: 'archived', archivedAt: expect.any(String) });
     // Each workspace object learned the archive from the worker and refuses writes on its own.
     await expect(runInDurableObject(child, (instance: SpaceAuthorityDO) => instance.runtimeAccess(childIdentity, true))).rejects.toThrow('Archived runtime state is read-only');
     expect((await index.list('archived')).map(entry => entry.id)).toContain(project.id);
-    expect(await client.project.restore({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { lifecycle: 'active', archivedAt: null } });
+    expect(await run(client.project.restore({ projectId: project.id, expectedRevision: await revision() }))).toMatchObject({ kind: 'project.restore', state: 'succeeded' });
+    expect(await authority.getProject()).toMatchObject({ lifecycle: 'active', archivedAt: null });
     await expect(child.runtimeAccess(childIdentity, true)).resolves.toMatchObject({ projectLifecycle: 'active' });
-    expect(await client.project.archive({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok' });
+    expect(await run(client.project.archive({ projectId: project.id, expectedRevision: await revision() }))).toMatchObject({ state: 'succeeded' });
     const workspaces = (await authority.listWorkspaces()).map(workspace => workspace.id);
-    expect(await client.project.delete({ projectId: project.id, expectedRevision: await revision() })).toMatchObject({ status: 'ok', value: { projectId: project.id, deleted: true } });
+    expect(await run(client.project.delete({ projectId: project.id, expectedRevision: await revision() }))).toMatchObject({ kind: 'project.delete', state: 'succeeded' });
     expect((await index.list()).some(entry => entry.id === project.id)).toBe(false);
-    expect(await index.locateWorkspace(created.value.workspace.id)).toBeNull();
+    expect(await index.locateWorkspace(created.workspace.id)).toBeNull();
     expect((await authority.getProject())?.lifecycle).toBe('deleting');
     expect(artifacts.deleted.sort()).toEqual([`project-${project.id}`, ...workspaces.map(id => `workspace-${id}`)].sort());
     expect(await client.project.archive({ projectId: project.id, expectedRevision: 1 })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/project-not-found' } });
@@ -655,7 +712,7 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('updates the base from a covered origin: the project copy fast-forwards and the clean idle base checkout follows', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Update base', 'https://github.com/acme/app.git');
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Update base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
@@ -668,24 +725,23 @@ describe('cloud workspace lifecycle with no machines', () => {
       return commit('2');
     });
     const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
-    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
+    expect(await run(client.project.updateBase({ projectId: project.id }))).toMatchObject({ kind: 'project.updateBase', state: 'succeeded' });
     expect(read).toEqual([['https://github.com/acme/app.git', 'main', { kind: 'basic', username: 'x-access-token', password: 'ghs_read_acme/app' }]]);
     expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('2'));
     expect(artifacts.refs.get(`workspace-${project.id} refs/heads/main`)).toBe(commit('2'));
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), indexCommit: commit('2'), worktreeCommit: commit('2') });
     expect(notices.mock.calls.map(call => call[1])).toEqual(['Base branch main updated to 2222222 from origin.']);
     expect((await authority.getProject())?.remote).toMatchObject({ head: commit('2'), behind: false });
-    expect((await authority.listOperations()).find(operation => operation.kind === 'project.updateBase')).toMatchObject({ state: 'succeeded' });
 
     // Nothing new on origin: the copy and the checkout already hold its head, and nothing moves.
     const copies = artifacts.copyCommit.mock.calls.length;
-    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
+    expect(await run(client.project.updateBase({ projectId: project.id }))).toMatchObject({ state: 'succeeded' });
     expect(artifacts.copyCommit.mock.calls.length).toBe(copies);
     expect(notices.mock.calls.at(-1)?.[1]).toBe("Base branch main already holds origin's 2222222.");
   });
 
   it('moves the base checkout while a machine is attached to it; the machine follows like any cloud change', async () => {
-    const { userId, client, project, artifacts } = await cloudProject('Attached base', 'https://github.com/acme/app.git');
+    const { userId, client, project, artifacts, run } = await cloudProject('Attached base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     await space.runtimeRepositoryCheckpoint(identity);
@@ -700,7 +756,7 @@ describe('cloud workspace lifecycle with no machines', () => {
       return commit('2');
     });
     const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
-    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'ok' });
+    expect(await run(client.project.updateBase({ projectId: project.id }))).toMatchObject({ state: 'succeeded' });
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), worktreeCommit: commit('2') });
     expect(notices.mock.calls.map(call => call[1])).toEqual(['Base branch main updated to 2222222 from origin.']);
     expect(await space.runtimeAttachmentRecords(identity)).toMatchObject([{ attachmentId: 'base-cache', state: 'ready' }]);
@@ -730,7 +786,7 @@ describe('cloud workspace lifecycle with no machines', () => {
   }, 30_000);
 
   it('refuses to move a project copy holding commits the origin lacks', async () => {
-    const { userId, client, project, artifacts, authority } = await cloudProject('Diverged base', 'https://github.com/acme/app.git');
+    const { userId, client, project, artifacts, run } = await cloudProject('Diverged base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     await space.runtimeRepositoryCheckpoint(identity);
@@ -740,15 +796,14 @@ describe('cloud workspace lifecycle with no machines', () => {
       return commit('3');
     });
     const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
-    expect(await client.project.updateBase({ projectId: project.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining("The project's main has 1 commit that origin's main (3333333) lacks") } } });
+    expect(await run(client.project.updateBase({ projectId: project.id }))).toMatchObject({ state: 'failed', error: expect.stringContaining("The project's main has 1 commit that origin's main (3333333) lacks") });
     expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('1'));
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ headCommit: commit('1') });
     expect(notices).not.toHaveBeenCalled();
-    expect((await authority.listOperations()).find(operation => operation.kind === 'project.updateBase')).toMatchObject({ state: 'failed' });
   });
 
   it('updates the project copy but leaves a dirty base workspace for later, saying so', async () => {
-    const { userId, client, project, artifacts } = await cloudProject('Busy base', 'https://github.com/acme/app.git');
+    const { userId, client, project, artifacts, run } = await cloudProject('Busy base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     const clean = await space.runtimeRepositoryCheckpoint(identity);
@@ -762,9 +817,9 @@ describe('cloud workspace lifecycle with no machines', () => {
       return commit('2');
     });
     const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
-    const result = await client.project.updateBase({ projectId: project.id });
-    expect(result).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('Base branch main updated to 2222222 from origin. The base workspace was left for later') } } });
-    expect(result).toMatchObject({ error: { data: { message: expect.stringContaining('uncommitted changes') } } });
+    const result = await run(client.project.updateBase({ projectId: project.id }));
+    expect(result).toMatchObject({ state: 'failed', error: expect.stringContaining('Base branch main updated to 2222222 from origin. The base workspace was left for later') });
+    expect(result.error).toContain('uncommitted changes');
     expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('2'));
     expect(await space.runtimeRepositoryCheckpoint(identity)).toEqual(dirty);
     expect(notices.mock.calls.map(call => call[1])).toEqual([expect.stringContaining('The base workspace was left for later')]);

@@ -44,7 +44,7 @@ export class AccountBrowserRuntime {
   /** `cloud` opens this workspace's view of its cloud browser (a client of the browser session object);
    * `drive`: the workspace's drive, where debug files go (`browser-powers.ts`); `downloads`: what a single step's result
    * lists of the downloads single steps started on its browser (`StepDownloads.report`). */
-  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices; drive?: (workspace: { projectId: string; workspaceId: string }) => Pick<WorkspaceDrive, 'write'>; downloads?: (scope: RuntimeAccountBrowserAuthorizationBody['scope']) => Promise<ListedDownload[]> }) {}
+  constructor(private readonly options: { storage: { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; delete(key: string): Promise<boolean> }; cloud?: (signal: AbortSignal) => Promise<BrowserChannel>; relay?: AccountBrowserTransport; services?: AccountBrowserServices; drive?: (workspace: { projectId: string; workspaceId: string }) => Pick<WorkspaceDrive, 'write' | 'address'>; downloads?: (scope: RuntimeAccountBrowserAuthorizationBody['scope']) => Promise<ListedDownload[]> }) {}
   async execute(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization;
     // Stop never waits behind the step it stops, nor Close tab and Focus in Chrome behind the workspace's step.

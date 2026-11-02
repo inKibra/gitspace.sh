@@ -131,14 +131,16 @@ export class InspectorCloudArtifacts {
     const isBase = this.source.workspace.kind === 'base';
     let spaceId: string;
     if (parsed.hostname === 'base') spaceId = this.source.project.id;
-    else if (parsed.hostname === 'workspace' && !isBase) spaceId = this.source.workspace.id;
+    // The project session's own drive is drive://base/; drive://workspace/ there names it too, for reading: its browser
+    // tools handed the project agent such addresses until 2026-11-02, and its conversations keep them.
+    else if (parsed.hostname === 'workspace') spaceId = isBase ? this.source.project.id : this.source.workspace.id;
     else if (parsed.hostname === 'workspaces' && isBase) {
       const [id, ...rest] = path.split('/');
       spaceId = id ?? '';
       path = rest.join('/');
     } else throw new Error('Artifact scope is not accessible from this workspace');
     const workspace = this.source.workspaces.find((candidate) => candidate.id === spaceId);
-    if (!workspace || (parsed.hostname === 'base' ? workspace.kind !== 'base' : workspace.kind !== 'worktree')) throw new Error('Artifact scope does not exist');
+    if (!workspace || (spaceId === this.source.project.id ? workspace.kind !== 'base' : workspace.kind !== 'worktree')) throw new Error('Artifact scope does not exist');
     return { spaceId, path };
   }
 

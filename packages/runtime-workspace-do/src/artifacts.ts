@@ -257,20 +257,33 @@ export class ArtifactsCodeStore {
       return await repo.info();
     } finally { await disposeArtifactsRepository(repo); }
   }
+
+  /** Whether the project repository is `absent`, `pending` (created, its base branch never landed: an interrupted import
+   * or a machine seed still pushing) or `complete`. A resolvable default branch keeps a completed import usable after
+   * the project's base branch changes. */
+  private async importState(projectId: string, branch: string | undefined): Promise<'absent' | 'pending' | 'complete'> {
+    const name = artifactsProjectRepository(projectId);
+    const existing = await this.find(name);
+    if (!existing) return 'absent';
+    const base = branch === undefined || branch === 'HEAD' ? 'HEAD' : `refs/heads/${branch}`;
+    // An explicitly migrated unborn base is complete without a branch, not a pending machine seed.
+    const migratedUnborn = branch !== undefined && existing.description?.startsWith(`GitSpace legacy-migrated unborn project ${projectId} (${branch}) from sha256:`);
+    return !migratedUnborn && await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null) ? 'pending' : 'complete';
+  }
+
+  /** Whether the project repository holds its origin's history, so a workspace can fork it without importing. */
+  async projectImported(projectId: string, branch: string): Promise<boolean> {
+    return await this.importState(projectId, branch) === 'complete';
+  }
+
   /** The project repository with its origin's history. Artifacts' native import reads a public origin and cannot send
    * credentials, so a covered origin's repository is created empty and its base branch streamed in over authenticated
    * smart HTTP; an empty repository whose branch never landed (an interrupted import) is filled the same way. */
   async importProject(projectId: string, source: { url: string; branch?: string }, credentials: OriginCredentials) {
     const name = artifactsProjectRepository(projectId);
-    const existing = await this.find(name);
-    if (existing) {
-      // A machine seed creates the repository before pushing history: until the base
-      // branch exists it is not an import a workspace may fork. A resolvable default
-      // branch keeps a completed import usable after the project's base branch changes.
-      const base = source.branch === undefined || source.branch === 'HEAD' ? 'HEAD' : `refs/heads/${source.branch}`;
-      // An explicitly migrated unborn base is complete without a branch, not a pending machine seed.
-      const migratedUnborn = source.branch !== undefined && existing.description?.startsWith(`GitSpace legacy-migrated unborn project ${projectId} (${source.branch}) from sha256:`);
-      if (!migratedUnborn && await this.resolveRef(name, base) === null && (base === 'HEAD' || await this.resolveRef(name, 'HEAD') === null)) {
+    const state = await this.importState(projectId, source.branch);
+    if (state !== 'absent') {
+      if (state === 'pending') {
         if (credentials === null) throw new ProjectImportRequiresMachineError('pending');
         await this.importCoveredProject(projectId, source, credentials, true);
       }

@@ -25,7 +25,7 @@ type StorageArgs = Extract<RuntimeBrowserArguments, { action: 'storage' }>;
 type Content = RuntimeToolResult['content'];
 
 /** Runs a debug or storage step on `tab`, after the checks your Chrome needs. */
-export async function performBrowserPower(input: { grant: RuntimeAccountBrowserGrant; args: DebugArgs | StorageArgs; tab: PowerTab; drive: Pick<WorkspaceDrive, 'write'> | undefined; signal: AbortSignal }): Promise<Content> {
+export async function performBrowserPower(input: { grant: RuntimeAccountBrowserGrant; args: DebugArgs | StorageArgs; tab: PowerTab; drive: Pick<WorkspaceDrive, 'write' | 'address'> | undefined; signal: AbortSignal }): Promise<Content> {
   const { grant, args } = input;
   if (grant.placement.kind === 'account-relay') {
     const power = args.action === 'debug' ? 'debug' : 'storage';
@@ -86,7 +86,7 @@ function driveFile(drive: Pick<WorkspaceDrive, 'write'>, path: string, mediaType
   return { writer: writable.getWriter(), written };
 }
 
-async function debug(tab: PowerTab, args: DebugArgs, drive: Pick<WorkspaceDrive, 'write'>, signal: AbortSignal): Promise<Content> {
+async function debug(tab: PowerTab, args: DebugArgs, drive: Pick<WorkspaceDrive, 'write' | 'address'>, signal: AbortSignal): Promise<Content> {
   const debugId = crypto.randomUUID(), file = BROWSER_DEBUG_FILES[args.kind], path = `${BROWSER_DEBUG_PREFIX}${debugId}.${file.extension}`;
   let bytes: number, summary: RuntimeBrowserDebugSummary;
   if (args.kind === 'heap') ({ bytes, summary } = await heapSnapshot(tab, drive, path, file.mediaType, signal));
@@ -124,7 +124,7 @@ async function debug(tab: PowerTab, args: DebugArgs, drive: Pick<WorkspaceDrive,
       summary = reader.summary(durationMs);
     }
   }
-  const result = RuntimeBrowserDebugResultSchema.parse({ debugId, file: `drive://workspace/${path}`, bytes, summary });
+  const result = RuntimeBrowserDebugResultSchema.parse({ debugId, file: drive.address(path), bytes, summary });
   return [{ type: 'text', text: JSON.stringify(result) }, { type: 'text', text: debugText(summary) }];
 }
 

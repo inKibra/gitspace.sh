@@ -598,6 +598,9 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
+  "project.operation": { readOnlyHint: true, openWorldHint: false },
+  "project.operations.retry": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  "project.operations.dismiss": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   "workspace.create": {
     "readOnlyHint": false,
     "destructiveHint": false,

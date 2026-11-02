@@ -42,7 +42,7 @@ describe('public Git transport in Workers', () => {
     );
     const result = operation === 'discovery'
       ? readAdvertisedRefs({ remote, auth: installation })
-      : transferCommit({ source: { remote, auth: installation }, destination: { remote: artifacts, auth: { kind: 'bearer', token: 'artifacts-write' } }, ref: 'refs/heads/main', previous: null, commit });
+      : transferCommit({ source: { remote, auth: installation }, destination: { remote: artifacts, auth: { kind: 'bearer', token: 'artifacts-write' } }, ref: 'refs/heads/main', previous: null, commit, negotiation: { haves: [], boundaries: [] }, held: async () => false });
     await expect(result).rejects.toThrow(operation === 'discovery' ? 'Git discovery failed (302)' : 'Git fetch failed (302)');
     expect(redirectedRequests).toBe(0);
   });
@@ -72,7 +72,7 @@ describe('public Git transport in Workers', () => {
         return new HttpResponse(packet('unpack ok\n') + packet('ok refs/heads/main\n') + '0000');
       }),
     );
-    await transferCommit({ source: { remote, auth: installation }, destination: { remote: artifacts, auth: { kind: 'bearer', token: 'artifacts-write' } }, ref: 'refs/heads/main', previous: null, commit });
+    await transferCommit({ source: { remote, auth: installation }, destination: { remote: artifacts, auth: { kind: 'bearer', token: 'artifacts-write' } }, ref: 'refs/heads/main', previous: null, commit, negotiation: { haves: [], boundaries: [] }, held: async () => false });
     expect(requests).toEqual([
       `origin discovery ${basic}`, `origin pack ${basic}`,
       'artifacts discovery Bearer artifacts-write', 'artifacts push Bearer artifacts-write',

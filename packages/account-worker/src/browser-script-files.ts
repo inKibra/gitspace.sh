@@ -4,7 +4,6 @@ import { parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource
 import { browserUnbase64, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { captureFolder, captureName, writeCapture } from './browser-capture.js';
 import { DOWNLOAD_WAIT_MS, DownloadList, listedDownload, type BrowserDownload, type ListedDownload, type ScriptDownload, type ScriptDownloads } from './browser-downloads.js';
-import { browserDriveFile } from './browser-upload.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
 
 /** The browser a run drives, as its files need it: the cloud browser, or your Chrome with its name and extension
@@ -72,7 +71,7 @@ export class ScriptRunFiles {
   private relayed: ScriptDownloads = { version: 0, ended: false, downloads: [] };
   private chrome: Promise<{ name: string }> | undefined;
 
-  constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url' | 'copy'>, readonly browser: ScriptRunBrowser, private readonly workspaceId: string) {}
+  constructor(private readonly drive: Pick<WorkspaceDrive, 'write' | 'list' | 'read' | 'url' | 'copy' | 'address' | 'pathOf'>, readonly browser: ScriptRunBrowser, private readonly workspaceId: string) {}
 
   /** Whether the run is still live: the cloud browser's downloads go to live runs only. */
   get running(): boolean { return !this.ended; }
@@ -100,20 +99,16 @@ export class ScriptRunFiles {
       page: { url: shot.page.url.slice(0, 8192), title: shot.page.title.slice(0, 500) }, target: { groupId: this.browser.groupId, targetId: shot.targetId },
       startedAt: at, endedAt: at, state: 'saved', reason: null, tracks: { image: { path: 'image.jpg', ...size } },
     });
-    const url = `drive://workspace/${folder}image.jpg`;
+    const url = this.drive.address(`${folder}image.jpg`);
     this.captures.push({ url, image: imageReference({ workspaceId: this.workspaceId, size: written.size, ...size, sha256: written.blobHash.slice('sha256:'.length) }) });
     return { captureId, url };
   }
 
-  /** The files `drive://workspace/<path>` addresses name, for one upload: never a file outside this workspace's drive. */
+  /** The files this drive's addresses name, for one upload: never a file outside this space's drive. */
   async uploadFiles(input: unknown): Promise<ScriptUploadFiles> {
     const urls = z.array(z.string().max(8192)).parse(input);
     if (!urls.length || urls.length > UPLOAD_FILES) throw new Error(`upload() sets 1 to ${UPLOAD_FILES} files`);
-    const paths = urls.map(url => {
-      const resource = parseResourceUri(url);
-      if (resource?.kind !== 'drive' || resource.mount !== 'workspace' || resource.suffix) throw new Error(`${url} is not a file of this workspace's drive: upload() takes drive://workspace/<path>`);
-      return resource.path;
-    });
+    const paths = urls.map(url => this.drive.pathOf(url, 'upload()'));
     const listed = await this.drive.list('');
     const entries = paths.map((path, index) => {
       const entry = listed.find(candidate => candidate.path === path);
@@ -126,7 +121,7 @@ export class ScriptRunFiles {
       kind: 'bytes',
       files: await Promise.all(entries.map(async ({ path, name, mediaType }) => {
         const bytes = await this.drive.read(path);
-        if (!bytes) throw new Error(`drive://workspace/${path} does not exist`);
+        if (!bytes) throw new Error(`${this.drive.address(path)} does not exist`);
         return { name, mediaType, bytes };
       })),
     };
@@ -155,13 +150,12 @@ export class ScriptRunFiles {
     return answered;
   }
 
-  /** Copies the run's saved download `id` to `drive://workspace/<path>`, replacing a file there, without moving its
+  /** Copies the run's saved download `id` to an address in this space's drive, replacing a file there, without moving its
    * bytes; answers the copy's address. A download still being saved is waited for while the run lasts. */
   async saveDownload(idInput: unknown, urlInput: unknown): Promise<{ file: string }> {
     const id = z.string().max(256).parse(idInput), url = z.string().max(8192).parse(urlInput);
     if (this.ended) throw new Error(RUN_ENDED);
-    const target = parseResourceUri(url);
-    if (target?.kind !== 'drive' || target.mount !== 'workspace' || target.suffix) throw new Error(`${url} is not a file of this workspace's drive: saveAs() takes drive://workspace/<path>`);
+    const target = this.drive.pathOf(url, 'saveAs()');
     // -1 is never a version, so the first look answers at once; each later one waits for the next change.
     let version = -1;
     for (;;) {
@@ -173,7 +167,7 @@ export class ScriptRunFiles {
       if (outcome) {
         const source = parseResourceUri(outcome.file);
         if (source?.kind !== 'drive') throw new Error(`${outcome.file} is not a drive file`);
-        return { file: browserDriveFile((await this.drive.copy(source.path, target.path)).path) };
+        return { file: this.drive.address((await this.drive.copy(source.path, target)).path) };
       }
       if (state.ended) throw new Error(`${download.name} was still being saved when the run ended`);
       version = state.version;

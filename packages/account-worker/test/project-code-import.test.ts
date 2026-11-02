@@ -144,15 +144,18 @@ describe('runtime workspace code ref', () => {
     const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
     await project.bootstrap({ id: projectId, name: 'Imported', repositoryReference: origin.url, baseBranch: 'main', createdBy: 'machine' });
     await project.putWorkspace({ id: 'imported-feature', projectId, kind: 'worktree', name: 'Feature', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'projectImported').mockResolvedValue(false);
     const importProject = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject')
       .mockRejectedValueOnce(new ProjectImportRequiresMachineError(reason))
       .mockResolvedValue(info);
     const forkWorkspace = vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(info);
     const ref = runtimeWorkspaceCodeRef(env, RuntimeIdentitySchema.parse({ projectId, workspaceId: 'imported-feature' }), () => 'feature');
-    await expect(ref()).rejects.toMatchObject({ reason });
+    // The first import runs as a project operation; its failure reaches the runtime as the operation's reason.
+    await expect(ref()).rejects.toThrow(new ProjectImportRequiresMachineError(reason).message);
     expect(forkWorkspace).not.toHaveBeenCalled();
     await expect(ref()).resolves.toBe('refs/heads/feature');
     await expect(ref()).resolves.toBe('refs/heads/feature');
     expect(importProject).toHaveBeenCalledTimes(2);
+    expect((await project.listOperations()).filter(operation => operation.kind === 'project.import').map(operation => operation.state).sort()).toEqual(['failed', 'succeeded']);
   });
 });

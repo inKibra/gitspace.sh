@@ -110,6 +110,16 @@ async function readOnceMore<T>(read: () => Promise<T>): Promise<T> {
   }
 }
 
+/** An operation as views and lifecycle calls return it. */
+export function projectOperationView(operation: CloudProjectOperation) {
+  return {
+    id: operation.id, projectId: operation.projectId, workspaceId: operation.workspaceId, kind: operation.kind, state: operation.state,
+    steps: operation.steps.map(step => ({ id: step.id, label: step.label, state: step.state, message: step.message, updatedAt: new Date(step.updatedAt) })),
+    error: operation.error, summary: operation.summary, revision: operation.revision,
+    createdAt: new Date(operation.createdAt), updatedAt: new Date(operation.updatedAt),
+  };
+}
+
 /**
  * The project's workspaces, relations, stack and statuses, from two stored sources: the project object and the account's
  * status rows (each workspace pushes its own on change). No workspace object is read, so opening a project wakes none,
@@ -117,8 +127,8 @@ async function readOnceMore<T>(read: () => Promise<T>): Promise<T> {
  */
 export async function readCloudSpaceView(env: Env, userId: string, projectId: string): Promise<SpaceView> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
-  const [[project, definitions, relations], statusRead] = await Promise.all([
-    readOnceMore(() => Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()])),
+  const [[project, definitions, relations, operations], statusRead] = await Promise.all([
+    readOnceMore(() => Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations(), authority.visibleOperations()])),
     readOnceMore(() => env.USER_PROJECTS.getByName(userId).projectWorkspaceStatuses(projectId))
       .then(statuses => ({ statuses, error: null }), (error: unknown) => ({ statuses: Object.fromEntries<WorkspaceStatusSummary>([]), error: error instanceof Error ? error.message : String(error) })),
   ]);
@@ -141,5 +151,6 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
     })),
     baseSpace: { ...listed(base), id: base.id, projectId, kind: 'base', name: base.name, branch: base.branch },
     statusError: statusRead.error,
+    operations: operations.map(projectOperationView),
   };
 }

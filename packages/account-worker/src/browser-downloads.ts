@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { browserUnbase64 } from '@gitspace/protocol-runtime';
-import { browserDownloadPath, browserDriveFile } from './browser-upload.js';
+import { browserDownloadPath } from './browser-upload.js';
 import type { CdpBrowserShim, CdpEvent, CdpShimClient } from './browser-shim.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
 
 /** A download as a run or a step follows it (docs/APERTURE-DESIGN.md §6.1): `id` is stable within its run (the cloud
  * browser's own id; on your Chrome the upload id), `targetId` the tab that started it (null when unknown: an older
  * extension), `url` where it came from ('' when unknown), `name` the file name it asked for. `outcome` is null while
- * it is being saved, then its drive address (`drive://workspace/<path>`, each segment encoded), size and type, or why
+ * it is being saved, then its drive address (`drive://workspace/<path>`, `drive://base/<path>` on the project, each segment encoded), size and type, or why
  * it was not saved. */
 export const ScriptDownloadSchema = z.object({
   id: z.string(), targetId: z.string().nullable(), url: z.string(), name: z.string(),
@@ -204,9 +204,9 @@ export class CloudDownloads {
    * a time, so two downloads of one name never choose the same path. */
   private readonly saving = new Set<string>();
   private naming: Promise<unknown> = Promise.resolve();
-  private constructor(private readonly drive: Pick<WorkspaceDrive, 'list' | 'write'>, private readonly started: (download: BrowserDownload) => void) {}
+  private constructor(private readonly drive: Pick<WorkspaceDrive, 'list' | 'write' | 'address'>, private readonly started: (download: BrowserDownload) => void) {}
 
-  static async open(shim: CdpBrowserShim, drive: Pick<WorkspaceDrive, 'list' | 'write'>, started: (download: BrowserDownload) => void): Promise<CloudDownloads> {
+  static async open(shim: CdpBrowserShim, drive: Pick<WorkspaceDrive, 'list' | 'write' | 'address'>, started: (download: BrowserDownload) => void): Promise<CloudDownloads> {
     const downloads = new CloudDownloads(drive, started);
     const client = shim.client(event => { void downloads.route(event).catch(() => {}); });
     downloads.client = client;
@@ -233,7 +233,7 @@ export class CloudDownloads {
     if (!saved) { await client.send('Fetch.continueRequest', { requestId: paused.requestId }, sessionId); return; }
     const name = downloadName(disposition, paused.request.url), url = paused.request.url;
     const outcome = this.download(client, sessionId, paused.requestId, name, mediaType || 'application/octet-stream').then(
-      (saved): DownloadOutcome => ({ file: browserDriveFile(saved.path), size: saved.size, mediaType: saved.mediaType }),
+      (saved): DownloadOutcome => ({ file: this.drive.address(saved.path), size: saved.size, mediaType: saved.mediaType }),
       (error: unknown): DownloadOutcome => ({ error: error instanceof Error ? error.message.slice(0, 1024) : String(error) }),
     );
     // An address too long to carry (a large data: URL) is left out.

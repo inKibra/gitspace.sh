@@ -45,7 +45,7 @@ import { cloudResourceId, type CloudWorkspaceDefinition } from '@gitspace/protoc
 import { profileModelRoles } from '@gitspace/runtime-core/inference';
 import { z } from 'zod';
 import { AutomationEventSchema, automationEventName, describeAutomationEvent, globMatches, triggerMatches, watchedEvent, type AutomationEvent } from './automation-events.js';
-import { createCloudWorkspace, restoreCloudWorkspace, retryCloudWorkspaceCreation } from './cloud-workspace-lifecycle.js';
+import { completedOperation, createCloudWorkspace, restoreCloudWorkspace, retryCloudWorkspaceCreation } from './cloud-workspace-lifecycle.js';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
@@ -949,8 +949,9 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       }
     }
     const existing = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getWorkspace(workspaceId);
-    if (!existing) await createCloudWorkspace(this.env, this.env.ACCOUNT_ID, { id: workspaceId, projectId, name: start.name, branch: start.name, phase: start.mode, sourceKind: start.sourceKind, sourceRef: start.sourceRef });
-    else if (existing.lifecycle === 'provisioning' || existing.lifecycle === 'failed') await retryCloudWorkspaceCreation(this.env, this.env.ACCOUNT_ID, workspaceId);
+    // The run sends its first turn next, so it waits for the creation to finish.
+    if (!existing) await completedOperation(this.env, (await createCloudWorkspace(this.env, this.env.ACCOUNT_ID, { id: workspaceId, projectId, name: start.name, branch: start.name, phase: start.mode, sourceKind: start.sourceKind, sourceRef: start.sourceRef })).operation);
+    else if (existing.lifecycle === 'provisioning' || existing.lifecycle === 'failed') await completedOperation(this.env, (await retryCloudWorkspaceCreation(this.env, this.env.ACCOUNT_ID, workspaceId)).operation);
     else if (existing.lifecycle !== 'active') throw new Error(`Workspace ${existing.name} is ${existing.lifecycle}`);
     const now = Date.now();
     const current = this.run(run.id);
@@ -967,7 +968,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const workspace = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getWorkspace(workspaceId);
     if (workspace?.lifecycle !== 'archived') return;
     const placement = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).get();
-    await restoreCloudWorkspace(this.env, this.env.ACCOUNT_ID, { spaceId: workspaceId, expectedGeneration: placement?.generation ?? 0 });
+    await completedOperation(this.env, await restoreCloudWorkspace(this.env, this.env.ACCOUNT_ID, { spaceId: workspaceId, expectedGeneration: placement?.generation ?? 0 }));
     const current = run ? this.run(run.id) : undefined;
     if (current) this.ctx.storage.sql.exec('UPDATE automation_runs SET timeline_json=? WHERE id=?', timelineWith(current, Date.now(), `Reopened ${workspace.name}`), current.id);
   }

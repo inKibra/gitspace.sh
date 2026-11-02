@@ -16,7 +16,7 @@ afterEach(() => vi.restoreAllMocks());
 const timestamp = '2026-09-01T00:00:00.000Z';
 const project: CloudProjectSummary = { id: 'directory-project', name: 'Directory', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, remote: null, archivedAt: null, updatedAt: timestamp, role: null, source: null };
 const workspace: CloudWorkspaceDefinition = { id: 'directory-space', projectId: project.id, kind: 'worktree', name: 'Directory space', branch: 'feature', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: timestamp, updatedAt: timestamp };
-const source: DirectorySource = { source: 'project', project, workspaces: [workspace] };
+const source: DirectorySource = { source: 'project', project, workspaces: [workspace], operations: [] };
 const machine = { id: 'machine-a', label: 'Machine A', state: 'online' as const, desiredState: 'online' as const, kind: 'physical' as const, provider: 'physical' as const, rpcEndpoint: '/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null };
 
 async function browserDevice(rights: Partial<Pick<DeviceInvite, 'scope' | 'capabilities'>> = {}) {
@@ -167,11 +167,11 @@ describe('directory WebSocket authentication', () => {
     const messages = [await opened.events.next(), await opened.events.next()];
     expect(messages).toEqual(expect.arrayContaining([
       { type: 'message', value: { type: 'directory.projects', projects: [{ ...project, updatedAt: expect.any(String) }] } },
-      { type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 1, workspaces: [{ ...workspace, cloudRuntime: false }], placements: [] } },
+      { type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 1, workspaces: [{ ...workspace, cloudRuntime: false }], placements: [], operations: [] } },
     ]));
     await index.publishDirectory({ ...source, cursor: 2, workspaces: [] });
     // The project list did not change: only the project's slice is sent.
-    expect(await opened.events.next()).toEqual({ type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 2, workspaces: [], placements: [] } });
+    expect(await opened.events.next()).toEqual({ type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 2, workspaces: [], placements: [], operations: [] } });
     opened.socket.close(1000, 'done');
   });
 

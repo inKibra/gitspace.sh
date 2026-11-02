@@ -4,7 +4,7 @@ import { BROWSER_DRIVE_PREFIX, browserUnbase64 } from '@gitspace/protocol-runtim
 import { CAPTURE_FILES, captureFolder } from './browser-capture.js';
 import { DriveUploadSchema } from './drive-files.js';
 import type { DownloadOutcome } from './browser-downloads.js';
-import type { WorkspaceDrive } from './workspace-drive.js';
+import { driveAddress, type WorkspaceDrive } from './workspace-drive.js';
 
 /**
  * Files from your Chrome into the workspace's drive (docs/APERTURE-DESIGN.md §11, Batch 16): downloads a script or step
@@ -61,11 +61,6 @@ const Upload = z.object({
 export type BrowserUpload = z.infer<typeof Upload>;
 /** The upload of a download: its run or step's attempt, file name, tab and address. */
 export type BrowserDownloadUpload = BrowserUpload & { target: Extract<BrowserUpload['target'], { kind: 'download' }> };
-
-/** A workspace-relative drive path as its `drive://workspace/` address, each segment encoded. */
-export function browserDriveFile(path: string): string {
-  return `drive://workspace/${path.split('/').map(encodeURIComponent).join('/')}`;
-}
 
 /** A request signed with a pairing key, as the route saw it. */
 export type BrowserSignedRequest = { method: string; pathname: string; header: string | null; bodySha256: string };
@@ -153,7 +148,7 @@ export function browserRouteReply(reply: { ok: true; value: unknown } | BrowserR
 }
 
 /**
- * Where a download lands in the workspace's drive (`drive://workspace/<path>`): `browser/downloads/<YYYY-MM-DD>/<name>`
+ * Where a download lands in the space's drive (`drive://workspace/<path>`, `drive://base/<path>` on the project): `browser/downloads/<YYYY-MM-DD>/<name>`
  * under the day it finished, its name made one safe file name, and a name taken there (or `reserved` by an upload still
  * running) getting ` (2)`, ` (3)`… before its extension. Downloads on either browser are named this way.
  */
@@ -230,7 +225,7 @@ export class BrowserUploads {
     const row: BrowserUpload = { uploadId, pairingId, ...group, groupId: input.groupId, target, path, mediaType: input.mediaType, parts: 0, size: 0, drive: await drive.upload(), expiresAt };
     await this.storage.put(`${UPLOAD}${uploadId}`, row);
     if (target.kind === 'download') await this.authority.download({ ...row, target }, null);
-    return { ok: true, value: { uploadId, pairingId, expiresAt: new Date(expiresAt).toISOString(), path: browserDriveFile(path) } satisfies z.infer<typeof BrowserUploadBegunSchema> };
+    return { ok: true, value: { uploadId, pairingId, expiresAt: new Date(expiresAt).toISOString(), path: driveAddress(group, path) } satisfies z.infer<typeof BrowserUploadBegunSchema> };
   }
 
   /** The link's route stored part `index` in the drive; the session moves on to the next. */
@@ -251,7 +246,7 @@ export class BrowserUploads {
     if (parsed.data.parts !== row.parts || parsed.data.size !== row.size) return fail(409, 'UPLOAD_INCOMPLETE', `Received ${row.parts} parts, ${row.size} bytes`);
     const file = await this.drive(row).finish(row.drive, row.path, row.mediaType);
     await this.storage.delete(`${UPLOAD}${row.uploadId}`);
-    const saved = { file: browserDriveFile(row.path), size: file.size, mediaType: row.mediaType };
+    const saved = { file: driveAddress(row, row.path), size: file.size, mediaType: row.mediaType };
     if (row.target.kind === 'download') await this.authority.download({ ...row, target: row.target }, saved);
     else await this.authority.captured(row.target.captureId, row.target.file, file.size);
     return { ok: true, value: { path: saved.file, size: saved.size, mediaType: saved.mediaType } };

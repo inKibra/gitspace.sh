@@ -1,5 +1,5 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
-import type { CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
+import type { CloudProjectOperation, CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
 import type { IconComponentProps } from '@gitspace/ui';
 import {
   DropdownContent,
@@ -35,6 +35,7 @@ import { createContext, useContext, useState, type Dispatch, type SetStateAction
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
+import { operationActive } from './OperationProgress.js';
 import { StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
@@ -132,6 +133,8 @@ export interface SidebarProject {
   baseSummary?: SidebarSpaceSummary;
   workspaces: SidebarWorkspace[];
   error?: string | null;
+  /** The project's operations its views show: a dot after its name says some run or failed. */
+  operations?: readonly CloudProjectOperation[];
 }
 
 /** A running pane contributes runtime controls; the account owns navigation and lifecycle actions. */
@@ -212,6 +215,15 @@ function BehindOriginGlyph({ branch }: { branch: string | null }) {
   return <span className="ml-1 inline-flex shrink-0 items-center text-muted-foreground" role="img" title={branch ? `Behind origin/${branch}` : 'Behind origin'} aria-label="Behind origin"><ArrowDown width={12} height={12} strokeWidth={1.5} /></span>;
 }
 
+/** Blue and pulsing while the project's operations run, red once one failed until it is retried or dismissed. */
+function ProjectOperationsGlyph({ operations }: { operations: readonly CloudProjectOperation[] }) {
+  const failed = operations.filter((operation) => operation.state === 'failed').length;
+  const running = operations.filter(operationActive).length;
+  if (!failed && !running) return null;
+  const summary = `Operations: ${[running ? `${running} running` : null, failed ? `${failed} failed` : null].filter(Boolean).join(', ')}`;
+  return <span className="ml-1.5 inline-flex shrink-0 items-center" role="img" title={summary} aria-label={summary}><StatusDot color={failed ? 'red' : 'blue'} pulse={!failed} /></span>;
+}
+
 /**
  * Source pill: what this machine runs, or the launch phase while one is in
  * flight. Failures stick until the next launch replaces the track.
@@ -275,7 +287,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, machines, deplo
   };
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
+      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
     </SpaceSummaryContext.Provider>
     {running ? <SidebarMenuBadge title={`${running} ${running === 1 ? 'workspace' : 'workspaces'} last reported working`}>{running}</SidebarMenuBadge> : null}
     <SidebarMenuActions showOnHover={open}>
