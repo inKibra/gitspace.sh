@@ -31,6 +31,11 @@ async function watchGit(root: string, args: string[], input?: string): Promise<s
   return output;
 }
 
+/** Under `.git/`, what a checkpoint records besides the index: where HEAD points and the branch heads (a submodule's
+ * too). Everything else there is Git's or GitSpace's own work (objects, LFS temporary files, logs, fetched refs, GitSpace
+ * records) and starts no sync; a denylist kept missing new ones, `.git/lfs/tmp` last (2026-11-02). */
+const GIT_STATE = /^\.git\/(?:modules\/.+\/)?(?:HEAD|packed-refs|refs\/heads\/.+)(?<!\.lock)$/u;
+
 /** Git is the authority for untracked inclusion, both here and during capture.
  * Cache exact paths only: an ignored directory can still contain tracked files.
  * Metadata polling covers external/global config and excludes files, including
@@ -56,28 +61,38 @@ export async function watchGitWorktree(options: {
       throw error;
     }
   };
+  // The index and this checkout's exclude file stay where they are; the excludes file moves only with configuration, so
+  // it is looked up again when `.git/config` changes and once a minute for global configuration, which nothing watches.
+  // The 5 s poll then only reads files: it ran three `git` processes per checkout (2026-11-02).
+  const [info, index] = await Promise.all([
+    watchGit(options.root, ['rev-parse', '--git-path', 'info/exclude']),
+    watchGit(options.root, ['rev-parse', '--git-path', 'index']),
+  ]);
+  const infoPath = resolve(options.root, info.trim());
+  const indexPath = resolve(options.root, index.trim());
+  const excludesFile = async () => {
+    const configured = await watchGit(options.root, ['config', '--path', '--get', 'core.excludesFile']);
+    return configured === '' ? join(Bun.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'git', 'ignore') : configured.replace(/\n$/, '');
+  };
+  let excludes = await excludesFile();
   const metadata = async () => {
-    const [configured, infoPath, indexPath] = await Promise.all([
-      watchGit(options.root, ['config', '--path', '--get', 'core.excludesFile']),
-      watchGit(options.root, ['rev-parse', '--git-path', 'info/exclude']),
-      watchGit(options.root, ['rev-parse', '--git-path', 'index']),
-    ]);
-    const excludes = configured === '' ? join(Bun.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'git', 'ignore') : configured.replace(/\n$/, '');
-    const index = await lstat(resolve(options.root, indexPath.trim()), { bigint: true }).catch(error => {
+    const index = await lstat(indexPath, { bigint: true }).catch(error => {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
       throw error;
     });
     return JSON.stringify([
       excludes,
       excludes === '' ? null : await readOptional(resolve(options.root, excludes)),
-      await readOptional(resolve(options.root, infoPath.trim())),
+      await readOptional(infoPath),
       index && [index.ino.toString(), index.size.toString(), index.mtimeNs.toString(), index.ctimeNs.toString()],
     ]);
   };
   let previousMetadata = await metadata();
   const invalidate = () => { generation++; cache.clear(); };
-  /** Starts a `git` sync when Git's index or ignore configuration changed since the last look; true when it did. */
-  const refresh = async () => {
+  /** Starts a `git` sync when Git's index or ignore configuration changed since the last look; true when it did. With
+   *  `configuration`, the excludes file is looked up again first. */
+  const refresh = async (configuration: boolean) => {
+    if (configuration) excludes = await excludesFile();
     const next = await metadata();
     if (closed || next === previousMetadata) return false;
     previousMetadata = next;
@@ -85,9 +100,10 @@ export async function watchGitWorktree(options: {
     options.changed('git');
     return true;
   };
+  let polls = 0;
   const poll = () => {
     pollCancel = options.clock.schedule(5000, () => {
-      void refresh().catch(error => options.failed(error instanceof Error ? error : new Error(String(error))))
+      void refresh(++polls % 12 === 0).catch(error => options.failed(error instanceof Error ? error : new Error(String(error))))
         .finally(() => { if (!closed) poll(); });
     });
   };
@@ -120,20 +136,21 @@ export async function watchGitWorktree(options: {
     console.info(JSON.stringify({ event: 'worktree_git_event', root: options.root, name }));
   };
   const stopEvents = options.events(options.root, async name => {
-    // GitSpace's own records under `.git/` (`gitspace-replica-base.json` after each sync, LFS inventories and receipts)
-    // are not changes to the checkout: each one started a capture that found nothing.
-    if (closed || name.startsWith('.git/objects/') || name.startsWith('.git/refs/gitspace/') || name.startsWith('.git/logs/refs/gitspace/') || name.startsWith('.git/gitspace-') || (name.startsWith('.git/') && name.endsWith('.lock'))) return;
+    if (closed) return;
     if (!name || name === '.git' || name === '.git/index' || name === '.git/config' || name === '.git/info/exclude' || name === '.gitignore' || name.endsWith('/.gitignore')) {
       invalidate();
       // Refresh the external ignore baseline now, so subsequent external edits
       // are compared to this config, not to a stale path from watcher startup.
       // macOS reports `.git/index` changed when nothing in it did, for git commands that only read it (capture's own
       // among them, so each capture started the next): only a real change, which `refresh` compares, starts a sync.
-      if (await refresh()) gitEvent(name);
+      if (await refresh(!name || name === '.git' || name === '.git/config')) gitEvent(name);
       if (!closed && name.endsWith('.gitignore')) options.changed('worktree');
       return;
     }
-    if (name.startsWith('.git/')) { gitEvent(name); options.changed('git'); return; }
+    if (name.startsWith('.git/')) {
+      if (GIT_STATE.test(name)) { gitEvent(name); options.changed('git'); }
+      return;
+    }
     pending.add(name);
     do {
       if (!processing) {

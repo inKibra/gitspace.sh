@@ -294,6 +294,17 @@ test('GitSpace writing its own records under .git starts no sync; Git moving HEA
   });
 });
 
+test('Git LFS, fetches and logs writing under .git start no sync; a branch head moving does', async () => {
+  await watcherProof(async ({ clock, event, runtime }) => {
+    await clock.until(runtime.sync());
+    // `git ls-files` hashing an LFS file writes Git LFS's temporary files; fetches and reflogs write their own.
+    for (const name of ['.git/lfs/tmp/123456789', '.git/lfs/objects/aa/bb/aabb', '.git/FETCH_HEAD', '.git/refs/remotes/origin/main', '.git/logs/HEAD', '.git/refs/heads/main.lock']) await event(name);
+    expect(clock.remaining(200)).toBeUndefined();
+    await event('.git/refs/heads/main');
+    expect(clock.remaining(200)).toBe(200);
+  });
+});
+
 test('tracked and untracked lock files trigger publication outside Git bookkeeping', async () => {
   await watcherProof(async ({ checkout, clock, event, uploads, runtime }) => {
     await writeFile(join(checkout, 'tracked.lock'), 'base\n');

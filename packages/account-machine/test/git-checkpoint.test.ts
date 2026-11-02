@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
+import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, readGitCacheBase, readGitCheckpointInputStamp, IncrementalGitSnapshots } from '../src/git-checkpoint.js';
 import type { GitIntermediateCheckpoint, PendingGitSnapshot } from '../src/git-checkpoint.js';
 import { ArtifactsGitRemote, ArtifactsRepositoryIncompatibleError } from '../src/artifacts-git-remote.js';
 import { GitLfsObjectSchema } from '@gitspace/protocol-workspace';
@@ -123,6 +123,51 @@ describe('Git intermediate checkpoint', () => {
     expect(await snapshots.capture()).toEqual(committed);
     expect(publications).toEqual([]);
     expect(pending).toBeNull();
+  });
+
+  it('reads what a capture would take without running the LFS filter, even for a file whose index stat is stale', async () => {
+    const { root, source } = fixture();
+    const marker = join(root, 'lfs-filter-ran');
+    // Only this repository's filter: a `git lfs install` global setup names a process filter, which Git prefers.
+    const globalConfig = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = join(root, 'global.gitconfig');
+    writeFileSync(process.env.GIT_CONFIG_GLOBAL, '');
+    try {
+      // A clean filter that leaves a mark each time Git runs it.
+      git(source, 'config', 'filter.lfs.clean', `sh -c 'touch "${marker}"; cat'`);
+      writeFileSync(join(source, '.gitattributes'), '*.bin filter=lfs\n');
+      writeFileSync(join(source, 'large.bin'), 'payload\n');
+      git(source, 'add', '.gitattributes', 'large.bin');
+      rmSync(marker, { force: true });
+      // The same bytes with a newer time: Git re-reads the file to compare it, through the filter when it is on.
+      utimesSync(join(source, 'large.bin'), new Date(), new Date(Date.now() + 5_000));
+      await readGitCheckpointInputStamp(source);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (globalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = globalConfig;
+    }
+  });
+
+  it('answers a trigger with nothing changed since the last unchanged capture without waiting out a settle window; an edit is captured', async () => {
+    const { source } = fixture();
+    let committed = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: 'idle', revision: 1 });
+    let settles = 0;
+    const published: GitIntermediateCheckpoint[] = [];
+    const snapshots = new IncrementalGitSnapshots({
+      repositoryPath: source, spaceId: 'idle', settleWindowMs: 1_000, allocateRevision: async () => 2,
+      clock: { schedule(_milliseconds, action) { settles++; queueMicrotask(action); return () => {}; } },
+      loadPending: async () => null, loadCommitted: async () => committed, savePending: async () => {}, clearPending: async () => {},
+      publish: async checkpoint => { published.push(checkpoint); }, commit: async checkpoint => { committed = checkpoint; return checkpoint; },
+    });
+    expect(await snapshots.capture()).toEqual(committed);
+    const first = settles;
+    expect(await snapshots.capture()).toEqual(committed);
+    expect(settles).toBe(first);
+    writeFileSync(join(source, 'unstaged.txt'), 'edited again\n');
+    await snapshots.capture();
+    expect(settles).toBeGreaterThan(first);
+    expect(published).toHaveLength(1);
   });
 
   it('an unchanged checkout is not published again when the committed snapshot lists its LFS objects in another order', async () => {

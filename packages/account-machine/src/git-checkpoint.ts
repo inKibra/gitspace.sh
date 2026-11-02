@@ -77,10 +77,17 @@ export async function readGitCheckpointHead(repositoryPath: string): Promise<Pic
 }
 
 
+/** GitSpace's snapshots and deltas carry an LFS file's real bytes (`gitLfsWorktreeTree`), so the commands that read or
+ * write them switch off the LFS filter Git LFS's own setup configures; with it, Git would compare and write pointers.
+ * The input stamp reads with it off too: `ls-files --modified` re-hashes every entry whose index stat is stale and never
+ * stores the result, so with the filter on each stamp started `git-lfs filter-process`, whose `.git/lfs/tmp` writes
+ * started the next capture (seen on a MacBook, 2026-11-02). */
+const rawFilters = ['-c', 'filter.lfs.process=', '-c', 'filter.lfs.clean=cat', '-c', 'filter.lfs.smudge=cat', '-c', 'filter.lfs.required=false'];
+
 export async function readGitCheckpointInputStamp(repositoryPath: string): Promise<string> {
   const [tracked, untracked] = await Promise.all([
-    runGit(repositoryPath, ['ls-files', '--modified', '--deleted', '-z'], { raw: true }),
-    runGit(repositoryPath, ['ls-files', '--others', '--exclude-standard', '-z'], { raw: true }),
+    runGit(repositoryPath, [...rawFilters, 'ls-files', '--modified', '--deleted', '-z'], { raw: true }),
+    runGit(repositoryPath, [...rawFilters, 'ls-files', '--others', '--exclude-standard', '-z'], { raw: true }),
   ]);
   const paths = [...new Set([
     ...tracked.stdout.split('\0').filter(Boolean),
@@ -277,10 +284,6 @@ export async function mergeGitBackupIntoWorktree(input: { repositoryPath: string
   return { changes, conflicts };
 }
 
-/** GitSpace's snapshots and deltas carry an LFS file's real bytes (`gitLfsWorktreeTree`), so the commands that read or
- * write them switch off the LFS filter Git LFS's own setup configures; with it, Git would compare and write pointers. */
-const rawFilters = ['-c', 'filter.lfs.process=', '-c', 'filter.lfs.clean=cat', '-c', 'filter.lfs.smudge=cat', '-c', 'filter.lfs.required=false'];
-
 /** Apply only the portable delta. Git checks preimages before writing, so concurrent
  * human edits reject reconciliation rather than being reset out of the checkout. */
 export async function applyGitCacheCheckpoint(input: {
@@ -340,6 +343,10 @@ export interface PendingGitSnapshot { checkpoint: GitIntermediateCheckpoint; bas
 export class IncrementalGitSnapshots {
   private pending: Promise<GitIntermediateCheckpoint> | undefined;
   private unpublished: PendingGitSnapshot | undefined;
+  /** The inputs (`readGitCheckpointInputStamp`) of the last capture that matched the committed snapshot, and that
+   *  snapshot. While both still hold, a trigger has nothing to capture: one stamp read answers it, where a capture reads
+   *  the stamp at least four times. */
+  private unchanged: { stamp: string; worktreeCommit: string } | undefined;
 
   constructor(private readonly options: {
     repositoryPath: string;
@@ -394,10 +401,12 @@ export class IncrementalGitSnapshots {
     let checkpoint = stored?.checkpoint ?? null;
     // Only a snapshot this call captured may be dropped on rejection; a reused pending one may already be on the remote.
     const fresh = !checkpoint;
+    let captured: string | undefined;
     if (!checkpoint) {
       for (;;) {
         this.options.signal?.throwIfAborted();
         let stable = await readGitCheckpointInputStamp(this.options.repositoryPath);
+        if (committed && this.unchanged?.worktreeCommit === committed.worktreeCommit && this.unchanged.stamp === stable) return committed;
         if (this.options.settleWindowMs !== undefined) {
           for (let rounds = 1; ; rounds++) {
             await gitWorktreeDelay(this.options.clock ?? gitWorktreeClock, this.options.settleWindowMs, this.options.signal);
@@ -433,6 +442,7 @@ export class IncrementalGitSnapshots {
         }
         this.options.signal?.throwIfAborted();
         checkpoint.branch = this.options.normalizeBranch?.(checkpoint.branch, committed) ?? checkpoint.branch;
+        captured = stable;
         break;
       }
     }
@@ -445,6 +455,7 @@ export class IncrementalGitSnapshots {
       // be gone already: it is dropped, not replayed, or every later capture would fail on it.
       if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit], { allowMissingRef: true });
       if (!fresh) { this.unpublished = undefined; await this.options.clearPending(); }
+      if (captured !== undefined) this.unchanged = { stamp: captured, worktreeCommit: committed.worktreeCommit };
       await (await this.options.lfs?.(checkpoint.checkpointRef))?.releasePublication?.();
       return committed;
     }
