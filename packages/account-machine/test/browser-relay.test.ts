@@ -8,7 +8,7 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 it('installs account-targeted extension without opening a localhost relay or creating machine pairing credentials', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-browser-extension-')); roots.push(root);
-  const installer = new BrowserRelaySupervisor({ environmentRoot: join(root, 'environment'), privateRoot: join(root, 'private'), machineId: 'machine', accountUrl: 'https://account.gitspace.test', enabled: true });
+  const installer = new BrowserRelaySupervisor({ environmentRoot: join(root, 'environment'), extensionPath: join(root, 'chrome-extension'), machineId: 'machine', accountUrl: 'https://account.gitspace.test', enabled: true });
   const status = await installer.setup();
   expect(status.endpoint).toBe('https://account.gitspace.test');
   expect(status.owned).toBe(false); expect(status.pairingCode).toBeNull();
@@ -18,7 +18,7 @@ it('installs account-targeted extension without opening a localhost relay or cre
 });
 it('rewrites an installed folder to exactly the release\'s files, its build file naming the build its service worker runs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-browser-extension-')); roots.push(root);
-  const installer = new BrowserRelaySupervisor({ environmentRoot: join(root, 'environment'), privateRoot: join(root, 'private'), machineId: 'machine', accountUrl: 'https://account.gitspace.test', enabled: true });
+  const installer = new BrowserRelaySupervisor({ environmentRoot: join(root, 'environment'), extensionPath: join(root, 'chrome-extension'), machineId: 'machine', accountUrl: 'https://account.gitspace.test', enabled: true });
   await installer.setup();
   // A file an earlier release had, and that one's build.
   await writeFile(join(installer.extensionPath, 'retired.js'), 'retired');

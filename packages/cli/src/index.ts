@@ -352,20 +352,37 @@ program.command('open').description('Open your account in the browser').option('
   if (!options.print) await openBrowser(config.accountUrl);
   console.log(config.accountUrl);
 });
+/** Runs a desktop helper (the file manager, the clipboard) when this computer has it; answers whether it ran. Exit
+ * codes are not read: Windows' explorer.exe answers 1 after opening its window. */
+async function desktop(command: string[], input?: string): Promise<boolean> {
+  if (!Bun.which(command[0]!)) return false;
+  await Bun.spawn(command, { cwd: homedir(), stdin: input === undefined ? 'ignore' : new Blob([input]), stdout: 'ignore', stderr: 'ignore' }).exited;
+  return true;
+}
 const browser = program.command('browser').description('The GitSpace extension for Chrome on this computer');
-browser.command('install').description('Put the extension where Chrome loads it from; this machine keeps it up to date').action(async () => {
+browser.command('install').description('Put your account\'s Chrome extension in ~/gitspace/chrome-extension and show it; this computer keeps it up to date').action(async () => {
   const config = await requireConfig();
   const relay = new BrowserRelaySupervisor({ environmentRoot: join(CONFIG_ROOT, 'machine'), machineId: config.machine.id, accountUrl: config.accountUrl, enabled: true });
   const { chromeExtensionPath } = await relay.setup();
-  console.log(`The GitSpace extension is in ${chromeExtensionPath}
+  // Chrome opens no chrome:// page it is handed from outside, so the steps go through its menu.
+  const mac = process.platform === 'darwin';
+  const windows = Boolean(process.env.WSL_DISTRO_NAME);
+  const shown = mac ? await desktop(['open', '-R', relay.extensionPath])
+    : windows ? await desktop(['explorer.exe', `/select,${chromeExtensionPath}`])
+    : await desktop(['xdg-open', dirname(relay.extensionPath)]);
+  const copied = mac ? await desktop(['pbcopy'], chromeExtensionPath)
+    : windows ? await desktop(['clip.exe'], chromeExtensionPath)
+    : await desktop(['wl-copy', chromeExtensionPath]) || await desktop(['xclip', '-selection', 'clipboard'], chromeExtensionPath);
+  const paste = mac ? 'press ⌘⇧G and paste its path' : windows ? 'paste its path into the folder box' : 'paste its path';
+  console.log(`Your GitSpace Chrome extension is ready: ${chromeExtensionPath}
+${shown ? `${mac ? 'Finder' : windows ? 'File Explorer' : 'Your file manager'} shows it. ` : ''}${copied ? 'Its path is on your clipboard.' : ''}
 
-Load it in Chrome once:
-  1. Open chrome://extensions (paste it in the address bar) and turn on Developer mode.
-  2. Choose Load unpacked and select that folder.
-  3. Pair it in ${config.accountUrl}: Plugins, Browsers, Pair a Chrome.
+Add it to Chrome once:
+  1. In Chrome, open the ⋮ menu, Extensions, Manage Extensions, and turn on Developer mode (top right).
+  2. Click Load unpacked and choose the chrome-extension folder (${paste}).
+  3. Pair it: Plugins, Browsers, Pair a Chrome in GitSpace.
 
-Each machine update writes its release's extension there, and the extension reloads into it while no agent is using
-Chrome. A copy loaded from a download is a separate extension with its own pairing: remove it.`);
+This computer keeps it up to date.`);
 });
 program.command('doctor').description('Check this machine installation and account connection').action(async () => {
   const config = await loadConfig();

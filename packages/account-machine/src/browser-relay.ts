@@ -1,25 +1,24 @@
-import { mkdir, readdir, rename, rm, writeFile, chmod, lstat } from 'node:fs/promises';
-import { join, resolve, relative } from 'node:path';
+import { mkdir, readdir, rename, rm, writeFile, lstat } from 'node:fs/promises';
+import { dirname, join, resolve, relative } from 'node:path';
 import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
 import type { BrowserRelayStatus } from '@gitspace/protocol';
 import { EXTENSION_BUILD_FILE, extensionFiles } from '@gitspace/browser-extension';
 
-type BrowserRelaySupervisorOptions = { environmentRoot: string; machineId: string; accountUrl: string; privateRoot?: string; enabled: boolean };
+type BrowserRelaySupervisorOptions = { environmentRoot: string; machineId: string; accountUrl: string; extensionPath?: string; enabled: boolean };
 /** Installs the extension only. Pairing, transport and browser effects belong to the account worker. */
 export class BrowserRelaySupervisor {
   readonly extensionPath: string;
   readonly endpoint: string;
   readonly chromeExtensionPath: string;
-  private readonly privateRoot: string;
   constructor(private readonly options: BrowserRelaySupervisorOptions) {
     const endpoint = new URL(options.accountUrl);
     if (endpoint.protocol !== 'https:') throw new Error('Browser extension requires a secure account endpoint');
     this.endpoint = endpoint.origin;
-    this.privateRoot = resolve(options.privateRoot ?? join(homedir(), '.gitspace-browser-relay', createHash('sha256').update(this.endpoint).digest('hex')));
-    const inside = relative(resolve(options.environmentRoot), this.privateRoot);
+    // A folder you can find when Chrome asks for it, beside the workspaces (`~/gitspace/spaces`); a computer is linked
+    // to one account, whose extension it holds.
+    this.extensionPath = resolve(options.extensionPath ?? join(homedir(), 'gitspace', 'chrome-extension'));
+    const inside = relative(resolve(options.environmentRoot), this.extensionPath);
     if (!inside || !inside.startsWith('..') && !inside.startsWith('/')) throw new Error('Browser extension storage must be outside the environment root');
-    this.extensionPath = join(this.privateRoot, 'extension');
     const distro = process.env.WSL_DISTRO_NAME?.trim();
     this.chromeExtensionPath = distro ? `\\\\wsl.localhost\\${distro}${this.extensionPath.replaceAll('/', '\\')}` : this.extensionPath;
   }
@@ -32,10 +31,9 @@ export class BrowserRelaySupervisor {
    *  the build file goes last, so the extension, which reloads when that file names another build, never loads a
    *  half-written folder (`reloadIfReplaced`). */
   async setup(): Promise<BrowserRelayStatus> {
-    await mkdir(this.privateRoot, { recursive: true, mode: 0o700 });
-    if ((await lstat(this.privateRoot)).isSymbolicLink()) throw new Error('Unsafe extension storage');
-    await chmod(this.privateRoot, 0o700);
+    await mkdir(dirname(this.extensionPath), { recursive: true });
     await mkdir(this.extensionPath, { recursive: true, mode: 0o700 });
+    if ((await lstat(this.extensionPath)).isSymbolicLink()) throw new Error('Unsafe extension storage');
     const files = extensionFiles(this.endpoint);
     const names = [...Object.keys(files).filter(name => name !== EXTENSION_BUILD_FILE), EXTENSION_BUILD_FILE];
     for (const name of names) {
