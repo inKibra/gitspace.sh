@@ -30,9 +30,9 @@ const sshOrigins: GitHubCheckoutAccess = {
   access: async () => ({ kind: 'ssh' }),
   helper: () => { throw new Error('An uncovered checkout has no GitHub credential helper'); },
 };
-function checkout(rootPath: string, state: 'attaching' | 'ready' = 'ready', generation = 3): LocalAttachment {
+function checkout(rootPath: string, state: 'attaching' | 'ready' = 'ready', generation = 3, workspaceId = 'workspace'): LocalAttachment {
   return {
-    attachment: RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', attachmentId: 'attachment', machineId: 'machine', generation, checkout: { kind: 'shared', branch: 'main' }, state, capabilities: [], updatedAt: new Date().toISOString() }),
+    attachment: RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId, attachmentId: 'attachment', machineId: 'machine', generation, checkout: { kind: 'shared', branch: 'main' }, state, capabilities: [], updatedAt: new Date().toISOString() }),
     rootPath, executionSecret: 'secret', prerequisitesComplete: true,
   };
 }
@@ -178,6 +178,7 @@ async function coveredFixture() {
   const cloud = {
     async call<S extends z.ZodType>(operation: ControlOperation, payload: Record<string, unknown>, schema: S): Promise<z.output<S>> {
       requests.push({ operation, payload });
+      if (operation === 'runtime.repository.originAccess' && payload.workspaceId === 'unreachable') throw new Error('The control request failed; try again');
       if (operation === 'runtime.repository.originAccess') return schema.parse(state.covered ? { kind: 'github-app', repository: 'Owner/Repo' } : { kind: 'ssh' });
       if (operation === 'runtime.repository.githubToken') return schema.parse({ token: TOKEN, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
       throw new Error(`Unexpected control operation ${operation}`);
@@ -238,6 +239,17 @@ describe('checkout origin routes', () => {
     expect(await f.local('url.git@github.com:.insteadOf')).toEqual(['https://github.com/']);
     expect(await f.local('credential.https://github.com.helper')).toEqual([]);
     expect(await f.local('credential.https://github.com.useHttpPath')).toEqual([]);
+  });
+
+  it('routes every other checkout when one checkout\'s origin access cannot be read', async () => {
+    const f = await coveredFixture();
+    const unreachable = join(f.root, 'unreachable');
+    mkdirSync(unreachable);
+    await f.run(unreachable, ['init', '-q']);
+    f.state.held = [checkout(unreachable, 'ready', 3, 'unreachable'), ...f.state.held];
+    await expect(f.coordinator.apply(settings)).rejects.toThrow(`Git identity was not applied to 1 of 2 checkouts: ${unreachable}: The control request failed; try again`);
+    expect(await f.local('remote.origin.url')).toEqual(['https://github.com/Owner/Repo.git']);
+    expect(await f.local('user.email')).toEqual(['brad@example.com']);
   });
 
   it('never writes an installation token to git config, a credential store or any file', async () => {

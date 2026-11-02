@@ -2220,6 +2220,7 @@ export const ReleaseRecordWireCodec = wire.object({
   status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec), omps: wire.optional(wire.record(ReleaseStatusWireCodec)) }),
   error: wire.nullable(wire.string),
   machineErrors: wire.optional(wire.record(wire.string)),
+  machineLaunchedAt: wire.optional(wire.string),
 });
 /** The account's latest launch, as the building machine (or, for a release it holds, the account) reported it; phases
  * also arrive as `deployment` fact events. */

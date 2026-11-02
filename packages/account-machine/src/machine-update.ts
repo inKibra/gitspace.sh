@@ -420,6 +420,12 @@ async function startHost(
   throw new Error('Complete successor host failed readiness');
 }
 
+/** The updater's own record in machine.log. On 2026-11-02 an updater ended while its candidate failed readiness, before
+ * its rollback, and left nothing saying how: each phase it enters and any signal it receives are logged. */
+function updateEvent(stage: string, detail: Record<string, unknown> = {}): void {
+  console.info(JSON.stringify({ event: 'machine_update', at: new Date().toISOString(), pid: process.pid, stage, ...detail }));
+}
+
 export async function runMachineUpdate(): Promise<void> {
   const root = process.env.GITSPACE_ENVIRONMENT_ROOT!;
   const path = join(root, 'machine-update.json');
@@ -446,6 +452,7 @@ export async function runMachineUpdate(): Promise<void> {
     if (transaction.pid !== process.pid && alive(transaction.pid))
       throw new Error('An updater still owns the transaction');
     await verifyMachine(transaction.candidate);
+    updateEvent('begin', { phase: transaction.phase, candidate: transaction.candidate.releaseSha, predecessor: transaction.predecessor.releaseSha });
     transaction.pid = process.pid;
     await atomicJson(path, transaction);
     const migration = transaction.migration
@@ -475,6 +482,7 @@ export async function runMachineUpdate(): Promise<void> {
         await stopHost(root, transaction.hostPid, transaction.machinePid);
         transaction.phase = 'stopped';
         await atomicJson(path, transaction);
+        updateEvent('stopped');
       }
       if (transaction.phase === 'stopped') {
         await rm(transaction.checkpoint, { recursive: true, force: true });
@@ -482,6 +490,7 @@ export async function runMachineUpdate(): Promise<void> {
         transaction.checkpointComplete = true;
         transaction.phase = 'checkpointed';
         await atomicJson(path, transaction);
+        updateEvent('checkpointed');
       }
       if (transaction.phase === 'starting' || transaction.phase === 'rollback')
         throw new Error(transaction.error ?? 'Recovering interrupted complete machine activation');
@@ -489,17 +498,20 @@ export async function runMachineUpdate(): Promise<void> {
         transaction.phase = 'starting';
         await atomicJson(path, transaction);
         await atomicJson(join(root, 'machine-selection.json'), transaction.candidate);
+        updateEvent('starting');
         await startHost(root, transaction.candidate, transaction);
         await atomicJson(join(root, 'host-selection.json'), transaction.candidate);
         await migration?.commit();
         transaction.phase = 'committed';
         await atomicJson(path, transaction);
+        updateEvent('committed');
       }
       if (transaction.phase === 'committed' && (!transaction.successorPid || !alive(transaction.successorPid))) {
         await startHost(root, transaction.candidate, transaction);
       }
     } catch (error) {
       transaction.error = String(error);
+      updateEvent('failed', { phase: transaction.phase, error: transaction.error });
       // Retirement failure must never turn a still-running predecessor into a second writer.
       if (transaction.phase === 'prepared' && !transaction.stopRequested) {
         await migration?.rollback();
@@ -507,6 +519,7 @@ export async function runMachineUpdate(): Promise<void> {
           sha: transaction.candidate.releaseSha,
           hash: transaction.candidate.hash,
           error: String(error),
+          at: new Date().toISOString(),
         });
         await rm(path, { force: true });
         return;
@@ -524,8 +537,11 @@ export async function runMachineUpdate(): Promise<void> {
         sha: transaction.candidate.releaseSha,
         hash: transaction.candidate.hash,
         error: String(error),
+        at: new Date().toISOString(),
       });
+      updateEvent('rollback');
       await startHost(root, transaction.predecessor, transaction, Boolean(transaction.legacyHostEntry));
+      updateEvent('rolled-back');
     }
     await rm(path, { force: true });
     await rm(transaction.checkpoint, { recursive: true, force: true });
@@ -535,7 +551,13 @@ export async function runMachineUpdate(): Promise<void> {
 }
 // No top-level await: the machine bundle that imports this module is CommonJS so that it can carry bytecode. A failed
 // update ends the process, as an awaited one did.
-if (import.meta.main) runMachineUpdate().catch((error: unknown) => {
-  console.error(error);
-  process.exit(1);
-});
+if (import.meta.main) {
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGHUP', 129], ['SIGINT', 130]] satisfies Array<[NodeJS.Signals, number]>) {
+    process.on(signal, () => { updateEvent('signal', { signal }); process.exit(code); });
+  }
+  runMachineUpdate().catch((error: unknown) => {
+    console.error(error);
+    updateEvent('crashed', { error: error instanceof Error ? error.message : String(error) });
+    process.exit(1);
+  });
+}

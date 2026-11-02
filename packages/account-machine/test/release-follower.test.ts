@@ -494,6 +494,37 @@ describe('release follower', () => {
     expect(status.releases[0]!.status.machines['machine-a']).toBe('failed');
   });
 
+  it('tries a failed release again once a launch clears the failure, without reporting the earlier failure again', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-'));
+    roots.push(root);
+    const sha = 'def457';
+    const { artifact, objects } = await executable(sha, 'machine', { 'machine.js': 'machine' });
+    const status: DeploymentStatus = {
+      launch: null, desired: { worker: null, machine: sha, frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} },
+      releases: [release(sha, artifact, null)],
+    };
+    const authority = fakeAuthority(status);
+    const host = fakeHost('failed');
+    const generation = 'sha256:' + 'a'.repeat(64);
+    const follower = new ReleaseFollower({
+      authority, blobs: { get: async (key) => objects[key] ?? null },
+      machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
+      runningMachineSha: null, generation, onError: (error) => { throw error; },
+    });
+    await follower.nudge();
+    // The updater's record of that failed attempt outlives it.
+    await writeFile(join(root, 'machine-update-failure.json'), JSON.stringify({ sha, hash: generation, error: 'did not become ready', at: new Date(Date.now() - 1_000).toISOString() }));
+    // The release is launched to machines again.
+    delete status.releases[0]!.status.machines['machine-a'];
+    status.releases[0]!.machineLaunchedAt = new Date().toISOString();
+    host.answer = 'applied';
+    await follower.nudge();
+    follower.stop();
+    expect(host.launches.map(launch => launch.sha)).toEqual([sha, sha]);
+    expect(authority.reports).toEqual([{ sha, target: 'machine', generation, status: 'failed', error: 'health probe failed' }]);
+  });
+
   it('materializes the frontend tree from its manifest and launches it by tree hash', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-'));
     roots.push(root);

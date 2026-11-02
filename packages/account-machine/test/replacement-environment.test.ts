@@ -78,7 +78,7 @@ describe('replacement environment host routes', () => {
     expect(launched.status).toBe(200);
     expect(environmentLaunchResponseSchema.parse(await launched.json())).toEqual({ status: 'applied', hash, error: null });
     const after = environmentStatusSchema.parse(await (await fetch(`${environment.hostUrl}/__environment/status`, { headers: { authorization: 'Bearer control-token' } })).json());
-    expect(after).toEqual({ machineHash: null, frontendHash: hash, machineReleaseSha: null, frontendReleaseSha: 'rel-1', lastLaunch: { sha: 'rel-1', entrypoint: 'frontend', target: 'frontend', status: 'applied', error: null } });
+    expect(after).toEqual({ machineHash: null, frontendHash: hash, machineReleaseSha: null, frontendReleaseSha: 'rel-1', lastLaunch: { sha: 'rel-1', entrypoint: 'frontend', target: 'frontend', status: 'applied', error: null, at: expect.any(String) } });
     expect(await (await fetch(`${environment.hostUrl}/index.html`)).text()).toBe('<html>release 1</html>');
 
     // A tampered artifact fails verification at stage; the engine reports the failure instead of throwing.

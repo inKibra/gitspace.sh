@@ -112,6 +112,8 @@ export const environmentStatusSchema = z.object({
     target: z.enum(['machine', 'frontend']),
     status: z.enum(['applied', 'failed']),
     error: z.string().nullable(),
+    /** When it ended; absent from hosts older than it. */
+    at: z.string().optional(),
   }).nullable(),
 });
 export type EnvironmentStatus = z.infer<typeof environmentStatusSchema>;
@@ -809,7 +811,7 @@ export class ReplacementEnvironment {
           dependsOn: input.entrypoint === 'frontend' && this.machineHash ? ['machine-daemon'] : [],
         };
         await this.deploy({ artifacts: [artifact], releaseSha: input.sha, releaseTargets: input.applies, revision: input.sha, dirty: false });
-        this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'applied', error: null };
+        this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'applied', error: null, at: new Date().toISOString() };
         return { status: 'applied', hash: input.hash, error: null };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -818,7 +820,7 @@ export class ReplacementEnvironment {
           entrypoint: input.entrypoint, releaseSha: input.sha, target: input.target,
           stage: 'launch', outcome: 'failure', error: deploymentSqliteErrorDetails(error),
         }));
-        this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'failed', error: message };
+        this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'failed', error: message, at: new Date().toISOString() };
         return { status: 'failed', hash: input.hash, error: message };
       }
     });
@@ -841,11 +843,11 @@ export class ReplacementEnvironment {
           revision: `channel:${retained.hash}`,
           dirty: false,
         });
-        this.lastLaunch = { sha: null, entrypoint, target: input.target, status: 'applied', error: null };
+        this.lastLaunch = { sha: null, entrypoint, target: input.target, status: 'applied', error: null, at: new Date().toISOString() };
         return { status: 'applied', hash: retained.hash, error: null };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.lastLaunch = { sha: null, entrypoint, target: input.target, status: 'failed', error: message };
+        this.lastLaunch = { sha: null, entrypoint, target: input.target, status: 'failed', error: message, at: new Date().toISOString() };
         return { status: 'failed', hash: retained?.hash ?? null, error: message };
       }
     });

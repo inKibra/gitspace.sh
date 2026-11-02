@@ -209,7 +209,7 @@ describe('tenant releases', () => {
     expect(deploymentStatusSchema.parse(await control('deploy.status', {})).launch).toMatchObject({ launchId: launching.launchId, phase: 'launched', status: 'succeeded', message: 'worker=applied machine=skipped frontend=applied' });
   });
 
-  it('keeps each machine\'s reason it failed a release, which the Worker applying it does not clear, until that machine applies it', async () => {
+  it('keeps each machine\'s reason it failed a release, which the Worker applying it does not clear, until that machine applies it or the release is launched to machines again', async () => {
     const { userId, control } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);
     const input = stageInput('machine-errors');
@@ -222,6 +222,10 @@ describe('tenant releases', () => {
     expect((await record())?.machineErrors).toEqual({ 'machine-a': 'Executable platform linux is incompatible with host darwin', 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
     await releases.machineApplied('machine-a', { sha: input.sha, target: 'machine', generation: 'generation-a2', status: 'applied' });
     expect((await record())?.machineErrors).toEqual({ 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
+    // Launching it to machines again asks the machine that failed it to try again.
+    await releases.launch({ sha: input.sha, targets: ['machine'] });
+    expect(await record()).toMatchObject({ status: { machines: { 'machine-a': 'applied' } }, machineErrors: {}, machineLaunchedAt: expect.any(String) });
+    expect((await record())?.status.machines['machine-b']).toBeUndefined();
   });
 
   it('machines and new computers follow the default release, never a newer release a machine applied', async () => {

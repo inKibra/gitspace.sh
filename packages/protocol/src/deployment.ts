@@ -250,6 +250,9 @@ export const releaseRecordSchema = z.object({
   error: z.string().max(4_096).nullable(),
   /** Each machine's reason it failed to apply the release, until it applies it. */
   machineErrors: z.record(idSchema, z.string().max(4_096)).optional(),
+  /** When a launch last selected this release for machines. Each launch asks the machines that failed it to try again:
+   * a failure a machine recorded before it belongs to an earlier launch and is not reported again. */
+  machineLaunchedAt: z.string().datetime().optional(),
 });
 export type ReleaseRecord = z.infer<typeof releaseRecordSchema>;
 

@@ -325,6 +325,12 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     if (targets.includes('frontend')) record.status.frontend = 'applied';
     else if (record.status.frontend === 'pending') record.status.frontend = 'skipped';
     record.error = null;
+    // Launching to machines again asks every machine that failed this release to try it again.
+    if (targets.includes('machine')) {
+      for (const [machineId, status] of Object.entries(record.status.machines)) if (status === 'failed') delete record.status.machines[machineId];
+      record.machineErrors = {};
+      record.machineLaunchedAt = new Date().toISOString();
+    }
     this.saveRecord(record);
     const desired = this.desired();
     for (const target of targets) desired[target] = record.sha;

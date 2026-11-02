@@ -385,8 +385,9 @@ export async function startMachineRuntime() {
   startup('executor');
   // After the journal is restored: checkouts that survived a restart get the account's Git identity and origin access
   // (a new release may configure them differently, e.g. a repository that became reachable through the GitHub App).
-  await settings.start();
-  startup('settings');
+  // It reads each checkout's origin access from the account, so it runs after startup instead of holding readiness:
+  // a release's readiness limit (120 s) was spent on it on 2026-11-02.
+  void settings.start().then(() => startup('settings'));
 
   let stopping = false;
   const stop = async (): Promise<void> => {

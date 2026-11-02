@@ -6,12 +6,16 @@ import type { GitIdentityDocument, UserSettings } from '@gitspace/protocol';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
 import type { GitHubCheckoutAccess } from './github-credential-helper.js';
+import { forEachConcurrent } from './release-objects.js';
 
 const SSH_REWRITE = 'url.git@github.com:.insteadOf';
 /** A covered checkout's only credential helper for github.com, asked per repository path. An empty value first drops
  * the helpers configured before it: a keychain or `gh` helper would answer with someone's own token, or store this one. */
 const GITHUB_HELPER = 'credential.https://github.com.helper';
 const GITHUB_HTTP_PATH = 'credential.https://github.com.useHttpPath';
+/** Checkouts routed at once: each reads its origin access from its workspace's cloud object, then runs a few `git
+ *  config` processes. One at a time, Darktop's 77 checkouts took 51.6 s (2026-11-02). */
+const APPLY_CONCURRENCY = 8;
 
 export interface GitIdentityCloud {
   getGitIdentity(): Promise<GitIdentityDocument | null>;
@@ -173,38 +177,53 @@ export class SharedGitIdentityCoordinator {
 
   private applying: Promise<void> = Promise.resolve();
 
-  /** Applies the identity and each checkout's origin route to every checkout. Calls are serialized:
-   *  startup, a settings save, and a cloud settings event can all arrive
-   *  together, and two `git config` writers on one repo collide on its lock. */
+  /** Applies the identity and each checkout's origin route. Every apply reads each origin's access again: a relay
+   *  reconnect replays every notice topic because notices sent while it was away are lost, and a GitHub App change
+   *  arrives only as a `settings` notice. Calls are serialized: startup, a settings save, and a cloud settings event
+   *  can all arrive together, and two `git config` writers on one repo collide on its lock. */
   apply(settings: UserSettings, checkouts?: readonly LocalAttachment[]): Promise<void> {
     const run = this.applying.then(() => this.applyNow(settings, checkouts ?? this.checkouts()));
     this.applying = run.catch(() => undefined);
     return run;
   }
 
+  /** `APPLY_CONCURRENCY` checkouts at a time; one that fails does not stop the others. */
   private async applyNow(settings: UserSettings, checkouts: readonly LocalAttachment[]): Promise<void> {
     if (!this.identity) throw new Error('Shared Git identity is not initialized');
     const sshCommand = this.sshCommand();
-    for (const checkout of checkouts) {
+    const failures: string[] = [];
+    await forEachConcurrent(checkouts, APPLY_CONCURRENCY, async (checkout) => {
       const repository = checkout.rootPath;
-      const access = await this.github.access(checkout.attachment);
-      if (access.kind === 'github-app') {
-        // Agents' plain fetch, push and LFS reach a covered origin over HTTPS with installation tokens only.
-        await unsetConfig(repository, 'core.sshCommand');
-        await unsetConfig(repository, SSH_REWRITE);
-        const origin = await git(['-C', repository, 'config', '--local', '--get', 'remote.origin.url']);
-        const url = `https://github.com/${access.repository}.git`;
-        if (origin.code === 0 && origin.stdout !== url) await writeConfig(repository, ['remote.origin.url', url]);
-        await setConfigValues(repository, GITHUB_HELPER, ['', this.github.helper(checkout.attachment)]);
-        await setConfig(repository, GITHUB_HTTP_PATH, 'true');
-      } else {
-        await unsetConfig(repository, GITHUB_HELPER);
-        await unsetConfig(repository, GITHUB_HTTP_PATH);
-        await setConfig(repository, 'core.sshCommand', sshCommand);
-        await setConfig(repository, SSH_REWRITE, 'https://github.com/');
+      try {
+        await this.route(checkout, sshCommand);
+        if (settings.git.authorName) await setConfig(repository, 'user.name', settings.git.authorName);
+        if (settings.git.authorEmail) await setConfig(repository, 'user.email', settings.git.authorEmail);
+      } catch (error) {
+        failures.push(`${repository}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (settings.git.authorName) await setConfig(repository, 'user.name', settings.git.authorName);
-      if (settings.git.authorEmail) await setConfig(repository, 'user.email', settings.git.authorEmail);
+    });
+    if (failures.length) throw new Error(`Git identity was not applied to ${failures.length} of ${checkouts.length} checkouts: ${failures.slice(0, 3).join('; ')}`);
+  }
+
+  /** The checkout's origin route: a covered origin over HTTPS with installation tokens only, any other through the
+   *  account SSH key. */
+  private async route(checkout: LocalAttachment, sshCommand: string): Promise<void> {
+    const repository = checkout.rootPath;
+    const access = await this.github.access(checkout.attachment);
+    if (access.kind === 'github-app') {
+      // Agents' plain fetch, push and LFS reach a covered origin over HTTPS with installation tokens only.
+      await unsetConfig(repository, 'core.sshCommand');
+      await unsetConfig(repository, SSH_REWRITE);
+      const origin = await git(['-C', repository, 'config', '--local', '--get', 'remote.origin.url']);
+      const url = `https://github.com/${access.repository}.git`;
+      if (origin.code === 0 && origin.stdout !== url) await writeConfig(repository, ['remote.origin.url', url]);
+      await setConfigValues(repository, GITHUB_HELPER, ['', this.github.helper(checkout.attachment)]);
+      await setConfig(repository, GITHUB_HTTP_PATH, 'true');
+    } else {
+      await unsetConfig(repository, GITHUB_HELPER);
+      await unsetConfig(repository, GITHUB_HTTP_PATH);
+      await setConfig(repository, 'core.sshCommand', sshCommand);
+      await setConfig(repository, SSH_REWRITE, 'https://github.com/');
     }
   }
 
