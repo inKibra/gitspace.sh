@@ -266,9 +266,18 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     return mutations;
   };
   const headChanged = machine.headCommit !== base.headCommit, branchChanged = machine.branch !== base.branch;
-  const objects = new Map([...cloud.lfs?.objects ?? [], ...machine.lfs?.objects ?? []].map(object => [object.oid, object]));
-  const heldBack = new Map([...cloud.lfs?.heldBack ?? [], ...machine.lfs?.heldBack ?? []].map(entry => [entry.path, entry]));
-  const merged = { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: [...objects.values()], heldBack: [...heldBack.values()] } } : {}) };
+  // The machine's additions and removals since its base apply to the cloud's entries. A union kept every entry a machine
+  // had since resolved (a held-back file it now sends): the cloud then called the publication unchanged and answered its
+  // old version, which the machine installed, which rewrote its index and started the next sync (SIMPLIFICATION 142).
+  const lfsEntries = <T>(read: (lfs: NonNullable<RuntimeGitCheckpoint['lfs']>) => readonly T[], key: (entry: T) => string): T[] => {
+    const dropped = new Set((base.lfs ? read(base.lfs) : []).map(key));
+    const incoming = machine.lfs ? read(machine.lfs) : [];
+    for (const entry of incoming) dropped.delete(key(entry));
+    const merged = new Map((cloud.lfs ? read(cloud.lfs) : []).filter(entry => !dropped.has(key(entry))).map(entry => [key(entry), entry]));
+    for (const entry of incoming) merged.set(key(entry), entry);
+    return [...merged.values()];
+  };
+  const merged = { ...machine, headCommit: headChanged && cloud.headCommit === base.headCommit ? machine.headCommit : cloud.headCommit, branch: branchChanged && cloud.branch === base.branch ? machine.branch : cloud.branch, ...(cloud.lfs || machine.lfs ? { lfs: { objects: lfsEntries(lfs => lfs.objects, object => object.oid), heldBack: lfsEntries(lfs => lfs.heldBack, entry => entry.path) } } : {}) };
   // The cloud has not changed since the machine's base: every path takes the machine's version, so its trees are the
   // result as they stand. A fast-forward of thousands of files in a large repository otherwise walked every tree of
   // three versions and rebuilt them.

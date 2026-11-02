@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { copyNegotiation, NEGOTIATION_WINDOW, readAdvertisedRefs, transferCommit, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
+import { GitLfsSnapshotSchema } from '@gitspace/protocol-workspace';
 
 const text = new TextEncoder();
 const author = { name: 'Fixture', email: 'fixture@example.invalid', timestamp: 1, timezoneOffset: 0 };
@@ -513,6 +514,25 @@ test('machine deltas merge onto cloud files and index with clean text merges, ex
     expect(preserved?.oid).toBeDefined();
     if (!preserved?.oid) throw new Error('Incoming LFS pointer was not preserved');
     expect(new TextDecoder().decode((await git.readBlob({ fs, dir: f.dir, oid: preserved.oid })).blob)).toBe(pointer('c'));
+  } finally { await f.close(); }
+});
+
+test('a held-back file the machine now sends leaves the cloud\'s record; one only the cloud recorded stays', async () => {
+  const f = await fixture();
+  try {
+    const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
+    const { objects } = GitLfsSnapshotSchema.parse({ objects: [{ oid: 'a'.repeat(64), size: 999, source: 'r2' }], heldBack: [] });
+    const base: RuntimeGitCheckpoint = { ...f.previous, lfs: { objects, heldBack: [{ path: 'asset', kind: 'added' }] } };
+    // The machine's capture of the same trees, its held-back file now sent.
+    const machine: RuntimeGitCheckpoint = { ...f.previous, lfs: { objects, heldBack: [] } };
+    const published = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: base, ...await planSnapshotMerge(reader, base, base, machine) }, f.request);
+    if (published.isErr()) throw published.error;
+    expect(published.value.lfs?.heldBack).toEqual([]);
+    expect(published.value.worktreeCommit).not.toBe(base.worktreeCommit);
+    // A held-back entry the cloud recorded after the machine's base is the cloud's to keep.
+    const cloud: RuntimeGitCheckpoint = { ...base, lfs: { objects, heldBack: [{ path: 'asset', kind: 'added' }, { path: 'other', kind: 'modified' }] } };
+    const plan = await planSnapshotMerge(reader, base, cloud, machine);
+    expect(plan.machine?.lfs?.heldBack).toEqual([{ path: 'other', kind: 'modified' }]);
   } finally { await f.close(); }
 });
 
