@@ -31,8 +31,6 @@
   .option span { color: var(--muted); }
   .pill { display: inline-block; font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 0 .55rem; margin-right: .35rem; color: var(--muted); }
   figcaption { font-size: 14px; color: var(--muted); margin-top: .6rem; }
-  .status { border-left: 3px solid var(--warn); padding: .25rem 0 .25rem 1rem; margin: 2rem 0; }
-  .status h3 { margin: 0 0 .5rem; font-size: 1rem; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 1rem 0 1.5rem; }
   th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-weight: 600; }
@@ -41,7 +39,7 @@
 </head>
 <body>
 <main>
-  <div class="note">Draft for review. Bracketed notes are for us, not readers. Screens marked “mock” become captures from a real run before this ships.</div>
+  <div class="note">Draft for review. Screens marked “mock” become captures from a real run before this ships; the booking link needs your calendar URL.</div>
 
   <div class="kicker">GitSpace · Engineering</div>
   <h1>Your fork, upstream’s releases, and an agent in between</h1>
@@ -87,6 +85,17 @@
     <li><strong>You merge; it asks to launch.</strong> Once the pull request is merged, the project agent asks whether to build your branch and launch it. A build runs on one of your machines and takes a few minutes; you can launch it as a trial first. If anything is wrong, Back to default puts the previous release back.</li>
   </ol>
 
+  <h2>Your agents keep working through it</h2>
+  <p>A release you launch shouldn’t cost you the work your agents are in the middle of. Usually, upgrading the system an agent runs on means stopping it: the session dies, the context is gone, and you start over and re-explain. GitSpace is built so that upgrades aren’t an event your agents notice.</p>
+  <p>Every workspace’s agent runs on <strong>pi-durable</strong>, which makes the durable record the state: its conversation, its subagents, its queued messages, its running tasks and its documents are committed before they’re shown, in the workspace’s own Durable Object. Nothing important lives only in memory. So when a release goes out:</p>
+  <ul>
+    <li><strong>Agents finish what they’re doing first.</strong> The release tells every workspace to move to the new code between turns. An idle one moves at once; a busy one waits until its current work ends.</li>
+    <li><strong>An interruption is resumed, not lost.</strong> If a workspace is restarted mid-turn anyway, pi-durable resumes its tasks from their last checkpoint, losing at most a fraction of a second of model output. A tool call that was running on a machine comes back to the agent as interrupted, with its output so far, and the agent carries on from there.</li>
+    <li><strong>Your machines keep their processes.</strong> When a machine updates, the dev servers and terminals your agents started keep running under the new version.</li>
+    <li><strong>Conversations stay where they were.</strong> A queued message, a subagent working in the background, a question waiting for your answer: all of it is still there after the release, on the new code.</li>
+  </ul>
+  <p>That’s what makes it reasonable to say yes to the release question in the middle of a working day. The merge workspace, the release, and the agent working on your actual project all keep going.</p>
+
   <h2>Why it’s safe to leave on</h2>
   <table>
     <tr><th>Concern</th><th>What GitSpace does</th></tr>
@@ -100,13 +109,8 @@
   <h2>What’s still hard</h2>
   <p>Merges aren’t the hard part; meaning is. A conflict where upstream renamed a function you also changed is easy for an agent. A release that changes the <em>behavior</em> your customization depended on, with no textual conflict at all, is not, and that’s exactly the case where the merge goes through cleanly and still breaks you. The pull request and your checks are the defense, and the agent’s summary of “what this release changes for you” is the early warning. We think the right default is an agent that does the work and a person who says yes.</p>
 
-  <div class="status">
-    <h3>[Status, before publishing]</h3>
-    <p>Built and tested, not yet run for a real account: the <em>GitSpace releases</em> automation is added only when an account’s GitSpace project is created, so existing accounts don’t have it, and the fork path (merge, pull request, build, launch) has only run in tests. Before this ships: add the automation to existing accounts, run one fork through a real release, and replace the mocks above with captures from that run.</p>
-  </div>
-
-  <h2>Try it</h2>
-  <p>Open your account’s GitSpace project, change its repository to your fork in Project settings, and ask the project agent for something you’d like GitSpace to do differently. The next GitSpace release will show up as a question in that project’s conversation.</p>
+  <h2>Join the alpha</h2>
+  <p>We’re bringing GitSpace to a small group of people by hand right now. If you want this for yourself (agents that change your own GitSpace, upstream’s releases merged into your fork, and work that survives every release), <a href="#book-a-call">book a 30-minute call with me</a>. We’ll set up your account together, point your GitSpace project at your fork, and get your first customization running.</p>
 </main>
 </body>
 </html>
