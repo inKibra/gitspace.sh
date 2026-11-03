@@ -46,13 +46,12 @@ export async function captureViews(drive: CaptureDrive): Promise<RuntimeBrowserC
     if (!captureId || !name || deeper.length) continue;
     folders.set(captureId, [...folders.get(captureId) ?? [], name]);
   }
-  const captures: { capture: RuntimeBrowserCapture; names: string[] }[] = [];
-  for (const [captureId, names] of folders) {
-    if (!names.includes('capture.json')) continue;
+  const read = await Promise.all([...folders].filter(([, names]) => names.includes('capture.json')).map(async ([captureId, names]) => {
     const bytes = await drive.read(`${captureFolder(captureId)}capture.json`);
     const parsed = bytes ? RuntimeBrowserCaptureSchema.safeParse(JSON.parse(new TextDecoder().decode(bytes))) : null;
-    if (parsed?.success && parsed.data.captureId === captureId) captures.push({ capture: parsed.data, names });
-  }
+    return parsed?.success && parsed.data.captureId === captureId ? { capture: parsed.data, names } : null;
+  }));
+  const captures = read.filter((entry) => entry !== null);
   captures.sort((left, right) => right.capture.startedAt.localeCompare(left.capture.startedAt));
   return Promise.all(captures.slice(0, 500).map(({ capture, names }) => captureView(drive, capture, names)));
 }

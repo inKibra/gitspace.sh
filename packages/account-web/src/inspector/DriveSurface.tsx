@@ -107,8 +107,8 @@ function captureFolders(files: readonly DriveFileView[], names: InspectorDrive['
     const type = video ? 'Recording' : image ? 'Screenshot' : 'Capture';
     captures.set(folder, {
       folder, files: held, primary: video ?? image ?? held.find((file) => !file.path.endsWith('.json')) ?? null, thumbnail: named('thumbnail.jpg') ?? image,
-      name: known?.name ?? (latest ? `${type} · ${new Date(latest).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}` : type),
-      detail: known ? [type, known.browser].filter(Boolean).join(' · ') : type, writtenAt: latest, size: held.reduce((total, file) => total + file.size, 0),
+      name: known?.name ?? (latest ? `${type} · ${new Date(latest).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}` : `${type} ${id.slice(0, 8)}`),
+      detail: known ? [type, known.browser].filter(Boolean).join(' · ') : `${type} · capture ${id.slice(0, 8)}`, writtenAt: latest, size: held.reduce((total, file) => total + file.size, 0),
     });
   }
   return captures;

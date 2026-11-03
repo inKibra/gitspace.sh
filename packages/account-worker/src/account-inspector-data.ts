@@ -94,6 +94,9 @@ function driveUrl(mount: string, path: string): string {
 /** Drive files: per-scope names in the tenant store (see `DriveFiles`), encrypted at rest under the scope's key. */
 export class InspectorCloudArtifacts {
   private readonly store: TenantStore;
+  /** Parsed manifests by scope, generation and hash: a manifest never changes under its hash, so every read of one
+   * drive object (157 capture records, say) parses it once. */
+  private readonly manifests = new Map<string, Promise<ArtifactManifest['entries']>>();
   readonly files: DriveFiles;
   constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {
     this.store = tenantStore(env);
@@ -114,11 +117,18 @@ export class InspectorCloudArtifacts {
       if (scope.generation !== 0) throw new Error('Committed artifact scope is missing its manifest hash');
       return [];
     }
-    const bytes = await this.readObject(scope.id, { blobHash: scope.manifestHash }, 64 * 1024 * 1024);
-    const manifest = artifactManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
-    if (manifest.scopeId !== scope.id || manifest.generation !== scope.generation) throw new Error('Artifact manifest does not match its canonical scope and generation');
-    if (new Set(manifest.entries.map((entry) => entry.path)).size !== manifest.entries.length) throw new Error('Artifact manifest contains duplicate paths');
-    return manifest.entries;
+    const key = `${scope.id}\n${scope.generation}\n${scope.manifestHash}`;
+    const cached = this.manifests.get(key);
+    if (cached) return cached;
+    const read = this.readObject(scope.id, { blobHash: scope.manifestHash }, 64 * 1024 * 1024).then((bytes) => {
+      const manifest = artifactManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+      if (manifest.scopeId !== scope.id || manifest.generation !== scope.generation) throw new Error('Artifact manifest does not match its canonical scope and generation');
+      if (new Set(manifest.entries.map((entry) => entry.path)).size !== manifest.entries.length) throw new Error('Artifact manifest contains duplicate paths');
+      return manifest.entries;
+    });
+    this.manifests.set(key, read);
+    read.catch(() => this.manifests.delete(key));
+    return read;
   }
 
   /** Normalizes a drive:// URL to the workspace it addresses; that workspace's scope may not exist yet. */
