@@ -625,7 +625,14 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     async workspaceReport(report, onDone) {
       const text = `Workspace ${report.name} ${REPORT_VERB[report.outcome]}${report.excerpt ? `: ${report.excerpt}` : '.'}`;
       const event = { requestId: `workspace:${report.workspaceId}:${report.requestId}`, sender: { id: report.workspaceId, name: report.name }, text, payload: report };
-      if (onDone === 'wake') await runtime.lifecycle.deliver({ ...event, conversationId: String(runtime.root.id), kind: 'workspace' });
+      // The report arrives inside the reporting workspace's request. Started here, the project agent's turn would run one
+      // level deeper than that workspace, which the project agent started one level deeper than itself: a project agent
+      // that kept starting workspaces and being woken by them hit Cloudflare's subrequest depth limit (2026-11-02,
+      // "Subrequest depth limit exceeded" in space_workspace status). Its turn starts from its own alarm (`wake`).
+      if (onDone === 'wake') {
+        await runtime.lifecycle.enqueue({ ...event, conversationId: String(runtime.root.id), kind: 'workspace' });
+        await options.schedule(Date.now());
+      }
       else await harness.commit(tx => tx.appendEntry(runtime.root.id, { kind: WORKSPACE_REPORT_ENTRY, data: event, model: [{ role: 'user', content: text, timestamp: Date.now() }] }), BACKGROUND_CONTEXT);
       publish(); await line;
     },

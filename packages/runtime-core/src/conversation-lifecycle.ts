@@ -64,6 +64,10 @@ export function handleEvents(state: ConversationLifecycleState, requestIds: Read
 }
 export type ConversationLifecycle = {
   deliver(event: ConversationEvent): Promise<void>;
+  /** Records `event` like `deliver` without starting the turn it brings: the next `recover` does. For an event an
+   *  object hands over from its own request, so the turn starts in a request of this object's own (an alarm), not
+   *  one level deeper than the caller's. */
+  enqueue(event: ConversationEvent): Promise<void>;
   wait(conversationId: string, options: { timeoutMs: number; signal?: AbortSignal }): Promise<ConversationEvent | { kind: 'timeout' | 'stopped' }>;
   stop(conversationId: string): Promise<void>;
   resume(conversationId: string): Promise<void>;
@@ -217,6 +221,18 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     try { await flush(id); }
     catch (error) { options.report(new Error(`Conversation ${id} could not resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
   }
+  /** Keeps `event` on its conversation once (a request id seen before is ignored) and shows it in the transcript. */
+  async function record(event: ConversationEvent) {
+    const conversation = await resolve(event.conversationId);
+    await conversation.commit(async tx => {
+      const state = await tx.doc(ConversationLifecycleDoc, conversation.id);
+      handleEvents(state, new Set());
+      if (state.events.some(item => item.event.requestId === event.requestId) || state.handled?.includes(event.requestId)) return;
+      state.events.push({ event });
+      await noteTakeoverEvent(tx, event);
+      await tx.appendEntry(conversation.id, { kind: `gitspace.${event.kind}`, data: { requestId: event.requestId, text: event.text, ...(event.sender ? { sender: event.sender } : {}), ...(event.payload === undefined ? {} : { payload: event.payload }) } });
+    }, context);
+  }
   async function setStopped(id: string, stopped: boolean) {
     return harness.commit(async tx => {
       const all = []; let cursor: Cursor | undefined;
@@ -281,17 +297,12 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     },
     async deliver(event) {
       await serialized(async () => {
-        const conversation = await resolve(event.conversationId);
-        await conversation.commit(async tx => {
-          const state = await tx.doc(ConversationLifecycleDoc, conversation.id);
-          handleEvents(state, new Set());
-          if (state.events.some(item => item.event.requestId === event.requestId) || state.handled?.includes(event.requestId)) return;
-          state.events.push({ event });
-          await noteTakeoverEvent(tx, event);
-          await tx.appendEntry(conversation.id, { kind: `gitspace.${event.kind}`, data: { requestId: event.requestId, text: event.text, ...(event.sender ? { sender: event.sender } : {}), ...(event.payload === undefined ? {} : { payload: event.payload }) } });
-        }, context);
+        await record(event);
         await flush(event.conversationId);
       });
+    },
+    async enqueue(event) {
+      await serialized(() => record(event));
     },
     async wait(id, { timeoutMs, signal }) {
       if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw new Error('Wait timeout must be between 1 and 300000 milliseconds');

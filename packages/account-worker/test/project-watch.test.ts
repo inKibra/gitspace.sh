@@ -45,6 +45,8 @@ async function watchFixture(ctx: DurableObjectState) {
   const hooks = projectWatchHooks(ctx.storage, identity, (report, onDone) => { reports.push({ report, onDone }); reported.resolve(); reported = Promise.withResolvers(); });
   const waits: Promise<unknown>[] = [];
   const failures: unknown[] = [];
+  /** When the runtime asked its object's alarm to wake it. */
+  const wakes: number[] = [];
   const automationReports: AutomationTurnReport[] = [];
   const automationTurns = automationTurnHooks(ctx.storage, identity, async report => { automationReports.push(report); }, (_label, promise) => { waits.push(promise); });
   const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: 'e'.repeat(40) });
@@ -59,7 +61,7 @@ async function watchFixture(ctx: DurableObjectState) {
     admitInference: async () => ({ provider: 'fixture', modelId: 'fixture', thinking: 'high' }), bindInferenceConversation: async () => undefined, refuseRequest: () => {},
     session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },
-    onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async () => {},
+    onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async timestamp => { wakes.push(timestamp); },
     published: (_snapshot, report) => { hooks.published(report); automationTurns.published(report); },
     turnChanged: (requestId, turn) => { hooks.turnChanged(requestId, turn); automationTurns.turnChanged(requestId, turn); },
     personPrompted: hooks.personPrompted,
@@ -74,7 +76,7 @@ async function watchFixture(ctx: DurableObjectState) {
   const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}` }, { name: 'FEAT-33', onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
   const automate = (requestId: string, text: string) => submitAutomationTurn(ctx.storage, runtime, { requestId, text });
-  return { identity, runtime, root, reply, call, requests, reports, automationReports, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
+  return { identity, runtime, root, reply, call, requests, reports, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
 }
 
 const room = () => env.SPACE_AUTHORITY.getByName(`project-watch:${crypto.randomUUID()}`);
@@ -214,7 +216,7 @@ test('progress shows the running turn\'s newest messages; a question in it repor
   });
 });
 
-test('a wake report starts the project agent\'s turn with a workspace event; a quiet one does not', async () => {
+test('a wake report starts the project agent\'s turn with a workspace event from its own alarm, not inside the report call; a quiet one does not', async () => {
   await runInDurableObject(room(), async (_instance, ctx) => {
     const f = await watchFixture(ctx);
     try {
@@ -226,7 +228,13 @@ test('a wake report starts the project agent\'s turn with a workspace event; a q
       expect(context.map(message => message.role === 'user' ? message.content : null)).toContain('Workspace FEAT-33 finished: Plan drafted.');
 
       const answered = f.reply('I will review FEAT-33 next.');
+      const before = Date.now();
       await f.runtime.workspaceReport({ ...report, requestId: 'start:b', outcome: 'failed', excerpt: 'Model request failed' }, 'wake');
+      await f.settle();
+      // The report call starts no turn: it asks the object's alarm for one now, which starts it in a request of its own.
+      expect(f.requests).toEqual([]);
+      expect(f.wakes.some(at => at >= before && at <= Date.now())).toBe(true);
+      await f.runtime.wake();
       await answered.requested.promise;
       await f.settle();
       expect(f.requests).toEqual(['<gitspace-event kind="workspace" source="FEAT-33">\nWorkspace FEAT-33 failed: Model request failed\n</gitspace-event>']);
