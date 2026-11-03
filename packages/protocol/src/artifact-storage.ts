@@ -15,6 +15,8 @@ export const artifactManifestSchema = z.object({
     /** Set for a file streamed before its digest was known: the id of its object (`driveUploadObjectKey`), read against
      * `blobHash` and `size`. Absent: the object named by `blobHash` (`artifactObjectKey`). */
     object: z.string().uuid().optional(),
+    /** When this path last received its current bytes. Absent on entries written before 2026-11-02. */
+    writtenAt: z.string().datetime().optional(),
   })),
 });
 export type ArtifactManifest = z.infer<typeof artifactManifestSchema>;

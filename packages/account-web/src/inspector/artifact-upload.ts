@@ -7,7 +7,7 @@ type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
  * Begin answers with the upload's link, the whole authority for the parts, commit and abort that follow. */
 export interface ArtifactUploadClient {
   /** `sha256` is the lowercase hex digest of the whole file; commit refuses bytes that do not match it. */
-  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null }): Promise<{ link: string; url: string; partBytes: number }>;
+  begin(input: { fileName: string; size: number; sha256: string; mediaType: string | null; folder?: string }): Promise<{ link: string; url: string; partBytes: number }>;
   /** Sends part `partNumber` (1-based) through `link`: `partBytes` raw bytes, or the rest of the file for the last
    * part. Resending the last acknowledged part is safe. Resolves with the bytes the authority now holds. */
   part(input: { link: string; partNumber: number; bytes: Uint8Array<ArrayBuffer> }, signal: AbortSignal): Promise<{ received: number }>;
@@ -77,6 +77,8 @@ export interface UploadArtifactOptions {
   onSession(session: ArtifactUploadSession): void;
   /** Backoff before each retry of a transient part failure; its length bounds the retries. */
   retryDelaysMs?: readonly number[];
+  /** The drive folder the file goes to; absent: `uploads`, empty: the drive's root. */
+  folder?: string;
 }
 
 /**
@@ -97,7 +99,7 @@ export async function uploadArtifactFile(client: ArtifactUploadClient, file: Fil
       options.onHashed?.(Math.min(file.size, offset + HASH_SLICE_BYTES));
     }
     signal.throwIfAborted();
-    const begun = await client.begin({ fileName: file.name, size: file.size, sha256: state.digest().slice('sha256:'.length), mediaType: file.type || null });
+    const begun = await client.begin({ fileName: file.name, size: file.size, sha256: state.digest().slice('sha256:'.length), mediaType: file.type || null, ...(options.folder === undefined ? {} : { folder: options.folder }) });
     session = { ...begun, received: 0 };
     options.onSession(session);
     signal.throwIfAborted();

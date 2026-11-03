@@ -64,7 +64,6 @@ import type {
   WorkflowNode,
   WorkflowView,
 } from '@gitspace/protocol';
-import { DRIVE_FILE_MAX_BYTES } from '@gitspace/protocol';
 import type { GitLfsHeldBack, WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import {
   AlertCircle,
@@ -96,8 +95,9 @@ import { UsageView, type UsageStatus, type InspectorProviderUsageState } from '.
 import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
 import { GuideShareButton, type GuideShareHandlers } from './GuideShare.js';
-import { ArtifactUploadButton, ArtifactUploadList, useArtifactUploads, type ArtifactUploads } from './ArtifactUploads.js';
-import { formatBytes, type ArtifactUploadClient } from './artifact-upload.js';
+import { useArtifactUploads } from './ArtifactUploads.js';
+import { DriveSurface, type DriveFileView, type InspectorDrive } from './DriveSurface.js';
+import type { ArtifactUploadClient } from './artifact-upload.js';
 import { syncRepositoryTreePaths } from './repository-tree-paths.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
@@ -179,8 +179,10 @@ export interface InspectorProps {
   resourceRequest?: ResourceRequest;
   onRequestResource?(uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
-  /** Present when the viewer may upload files into the workspace's `uploads/` artifact folder. */
+  /** Present when the viewer may upload files into the drive this space writes. */
   artifactUpload?: ArtifactUploadClient;
+  /** The space's drives as the catalog lists them; the Drive tab shows nothing else. */
+  drive?: InspectorDrive;
   reviewerId: string;
   loading?: boolean;
   error?: string | null;
@@ -671,42 +673,6 @@ function ResourceDocument({ uri, mode, onRequest, artifactReferences, artifactCo
   return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} />;
 }
 
-function ArtifactsSurface({ references, onOpen, actions, uploads }: { references: readonly ArtifactReference[]; onOpen: (reference: EvidenceReference) => void; actions?: ArtifactActionsHandlers; uploads: ArtifactUploads | null }) {
-  const [selected, setSelected] = useState<string[]>([]);
-  const [dragging, setDragging] = useState(false);
-  const runtimeAvailable = useContext(RuntimeAvailability);
-  const list = useRef<HTMLDivElement>(null);
-  const latestUpload = uploads?.highlighted.at(-1);
-  useEffect(() => {
-    if (latestUpload) list.current?.querySelector(`[data-artifact-url="${CSS.escape(latestUpload)}"]`)?.scrollIntoView({ block: 'nearest' });
-  }, [latestUpload, references]);
-  const selection = references.filter((reference) => selected.includes(reference.url));
-  const dropTarget = uploads && runtimeAvailable ? uploads : null;
-  return <div
-    className={`flex min-h-0 flex-1 flex-col ${dragging ? 'ring-1 ring-inset ring-[color:var(--focus-ring,#6B97FF)]' : ''}`}
-    onDragOver={dropTarget ? (event) => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); setDragging(true); } : undefined}
-    onDragLeave={dropTarget ? (event) => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDragging(false); } : undefined}
-    onDrop={dropTarget ? (event) => { event.preventDefault(); setDragging(false); dropTarget.add([...event.dataTransfer.files]); } : undefined}
-  ><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div ref={list} className="flex flex-col gap-3 p-4">
-    {uploads ? <div className="flex flex-wrap items-center gap-2">
-      <ArtifactUploadButton onFiles={uploads.add} disabledReason={runtimeAvailable ? null : openWorkspaceFirst} />
-      <p className="text-caption text-muted-foreground">Files are saved to <span className="font-mono">uploads/</span> in this workspace, up to {formatBytes(DRIVE_FILE_MAX_BYTES)} each. You can also drop files here.</p>
-    </div> : null}
-    {uploads ? <ArtifactUploadList uploads={uploads} /> : null}
-    {!references.length ? <EmptyState icon={ic(Archive, 22)} title="No artifacts" description="Published workspace and project files appear here, whether or not they are attached as evidence." /> : <>
-      {actions ? <><p className="text-caption text-muted-foreground">Select one or more published workspace files to copy. Select one project or workspace file to share.</p><ArtifactActions selected={selection} actions={actions} /></> : null}
-      <CardGroup orientation="inline" border="outlined">{references.map((reference) => <Card key={artifactId(reference)} data-artifact-url={reference.url} selected={uploads?.highlighted.includes(reference.url) ?? false}>
-        <CardMedia icon={reference.mediaType?.startsWith('image/') ? ImageGlyph : FileGlyph} />
-        <CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="truncate font-mono">{reference.url}</CardDescription></CardHeader>
-        <CardFooter className="flex-wrap gap-2">
-          {actions ? <Button variant={selected.includes(reference.url) ? 'secondary' : 'ghost'} size="compact" className="min-h-10" aria-pressed={selected.includes(reference.url)} onClick={() => setSelected((current) => current.includes(reference.url) ? current.filter((url) => url !== reference.url) : [...current, reference.url])}>{selected.includes(reference.url) ? 'Selected' : 'Select'}<span className="sr-only"> {reference.label}</span></Button> : null}
-          <Button variant="ghost" size="compact" className="min-h-10" onClick={() => onOpen(reference)}>Open<span className="sr-only"> {reference.label}</span></Button>
-          <span className="text-caption text-muted-foreground tabular-nums">generation {reference.generation}</span>
-        </CardFooter>
-      </Card>)}</CardGroup>
-    </>}
-  </div></ScrollArea></div>;
-}
 
 function SubagentsSurface({ subagents, onStop, renderTranscript }: { subagents: InspectorProps['subagents']; onStop?: InspectorProps['onStopSubagent']; renderTranscript?: InspectorProps['renderSubagentTranscript'] }) {
   const [stopping, setStopping] = useState<readonly string[]>([]);
@@ -1064,6 +1030,15 @@ export function Inspector(props: InspectorProps) {
     // Committed uploads show immediately; the catalog lists them once background publication finishes.
     return [...listed, ...uploads.uploaded.filter((upload) => !listed.some((reference) => reference.url === upload.url))];
   }, [evidence, props.artifactReferences, uploads.uploaded]);
+  // Committed uploads show at once with their size and time; the catalog lists them once publication finishes.
+  const driveFiles = useMemo<readonly DriveFileView[]>(() => {
+    if (!props.drive) return [];
+    const listed = props.drive.files;
+    const own = props.drive.own;
+    return [...listed, ...uploads.uploaded.filter((upload) => !listed.some((file) => file.url === upload.url)).map((upload) => ({
+      url: upload.url, path: upload.label, hash: upload.hash, size: upload.size, mediaType: upload.mediaType, scope: own, workspaceId: null, writtenAt: upload.writtenAt,
+    }))];
+  }, [props.drive, uploads.uploaded]);
   const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? null;
   const activeMode = activeDocument ? fileModes[activeDocument.id] ?? 'current' : 'current';
   const displayedFile = activeDocument?.kind === 'file' && activeMode === 'current' && props.repositoryFile?.path === activeDocument.target && props.repositoryFile.mode === activeMode ? props.repositoryFile : null;
@@ -1201,11 +1176,28 @@ export function Inspector(props: InspectorProps) {
       case 'agents': return null;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} onStop={props.onStopSubagent} renderTranscript={props.renderSubagentTranscript} />;
       case 'files': return <FilesSurface entries={props.repositoryEntries.filter((entry) => entry.mode === props.repositoryMode)} heldBack={props.repositoryMode === 'working' ? props.lfsHeldBack ?? [] : []} mode={props.repositoryMode} onModeChange={props.onRepositoryModeChange} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, props.repositoryMode)} onOpenHeldBack={path => openFile(path, 'working')} />;
-      case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={(reference) => {
-        if (reference.kind !== 'artifact') return;
-        openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });
-        void loadArtifact(reference);
-      }} actions={props.artifactActions} uploads={props.artifactUpload ? uploads : null} />;
+      case 'artifacts': return props.drive ? <DriveSurface
+        drive={{ ...props.drive, files: driveFiles }}
+        references={artifacts}
+        uploads={props.artifactUpload ? uploads : null}
+        uploadDisabledReason={runtimeAvailable ? null : openWorkspaceFirst}
+        {...(props.artifactActions ? { actions: props.artifactActions } : {})}
+        previewUrl={(reference) => artifactContent[artifactId(reference)]?.previewUrl ?? null}
+        onRequestPreview={(reference) => void loadArtifact(reference)}
+        onOpen={(reference) => {
+          openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });
+          void loadArtifact(reference);
+        }}
+        onDownload={async (reference) => {
+          await loadArtifact(reference);
+          const content = artifactCache.current.get(artifactId(reference));
+          if (!content) throw new Error(`${reference.label} could not be read`);
+          const link = window.document.createElement('a');
+          link.href = content.downloadUrl ?? content.previewUrl;
+          link.download = reference.label.split('/').at(-1) ?? reference.label;
+          link.click();
+        }}
+      /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Drive unavailable" description="This view has no drive to show." /></Padded>;
       case 'services': return props.runtimeServices ?? <ServicesSurface services={props.services} onOpenTerminal={(name) => props.onOpenServiceTerminal?.(name)} onStart={props.onStartService} onStop={props.onStopService} />;
       case 'issues': return props.issues ? <IssuesView {...props.issues} /> : <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Issues unavailable" description="This view has no workspace issues to show." /></Padded>;
       case 'usage': return <UsageView sessionId={props.usage.sessionId} report={props.usage.report} status={props.usage.status} error={props.usage.error} onLoad={props.usage.load} onRefresh={props.usage.refresh} providerUsage={props.usage.providerUsage} />;

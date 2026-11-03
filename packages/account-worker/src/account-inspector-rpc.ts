@@ -16,6 +16,7 @@ import {
   inspectorAbortArtifactUploadContract,
   inspectorListArtifactsContract,
   inspectorCopyArtifactsContract,
+  inspectorDeleteArtifactsContract,
   inspectorListArtifactSharesContract,
   inspectorCreateArtifactShareContract,
   inspectorRevokeArtifactShareContract,
@@ -463,7 +464,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const beginUpload = server.implement(inspectorBeginArtifactUploadContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
-      return ok(await new InspectorCloudArtifacts(env, userId, source).beginUpload(input.fileName, input.size, input.sha256, input.mediaType));
+      return ok(await new InspectorCloudArtifacts(env, userId, source).beginUpload(input.fileName, input.size, input.sha256, input.mediaType, input.folder));
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
@@ -518,6 +519,16 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
       return err(errors.OperationFailed({ operation: 'copy artifacts to project', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const deleteArtifacts = server.implement(inspectorDeleteArtifactsContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).delete(input.urls));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'artifacts', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const listShares = server.implement(inspectorListArtifactSharesContract).handler(async ({ input, errors }) => {
@@ -713,7 +724,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     },
     review: { list: threads, create: createThread, reply: replyThread, resolve: resolveThread },
     artifacts: {
-      read: readArtifact, readPage: readArtifactPage, file: artifactFile, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
+      read: readArtifact, readPage: readArtifactPage, file: artifactFile, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, delete: deleteArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
       uploadBegin: beginUpload, uploadChunk, uploadCommit: commitUpload, uploadAbort: abortUpload,
     },
     resources: { read: readResource, readPage: readResourcePage },

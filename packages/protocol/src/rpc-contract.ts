@@ -491,6 +491,8 @@ export const ArtifactViewCodec = wire.object({
   mediaType: wire.nullable(wire.string),
   scope: wire.enum(['base', 'workspace']),
   workspaceId: wire.nullable(wire.string),
+  /** When the path last received its current bytes; null for files written before 2026-11-02. */
+  writtenAt: wire.nullable(wire.string),
 });
 export const WorkspaceTerminalViewCodec = wire.object({
   spaceId: wire.string,
@@ -1929,7 +1931,8 @@ const artifactUploadRequestFields = { spaceId: wire.string, expectedGeneration: 
  * (1-based raw parts with their Content-Length), `POST <link>/complete`, `DELETE <link>`; no other authentication. */
 export const UPLOAD_LINK_PATH = '/api/uploads';
 
-/** Reserves `uploads/<fileName>` in the space's writable mount; the file is listed only after commit. `sha256` is the
+/** Reserves `<folder>/<fileName>` in the space's writable mount (`folder` absent: `uploads`; empty: the drive's root);
+ * the file is listed only after commit. `sha256` is the
  * whole file's hexadecimal SHA-256 (`Sha256State` hashes a large `File` slice by slice): the file is stored under it as
  * it arrives, up to `DRIVE_FILE_MAX_BYTES`, and commit refuses bytes that do not match it. Bytes travel either as
  * `chunkBytes` base64 chunks over RPC, or as raw `partBytes` parts through `link` (`UPLOAD_LINK_PATH`), which also
@@ -1937,7 +1940,7 @@ export const UPLOAD_LINK_PATH = '/api/uploads';
 export const inspectorBeginArtifactUploadContract = gitspaceRpc
   .procedure()
   .input(wire.object({
-    spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), fileName: wire.string,
+    spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), fileName: wire.string, folder: wire.optional(wire.string),
     size: wire.integer({ min: 1, max: DRIVE_FILE_MAX_BYTES }), sha256: wire.string, mediaType: wire.nullable(wire.string),
   }))
   .output(wire.object({ uploadId: wire.string, url: wire.string, link: wire.string, chunkBytes: wire.integer({ min: 1 }), partBytes: wire.integer({ min: 1 }) }))
@@ -1988,6 +1991,10 @@ export const inspectorCopyArtifactsContract = gitspaceRpc.procedure()
     expectedProjectGeneration: wire.integer({ min: 0 }),
     files: wire.array(wire.object({ url: wire.string, hash: wire.string, destinationPath: wire.string, expectedDestinationHash: wire.nullable(wire.string) })),
   }))
+  .output(InspectorArtifactCatalogCodec).errors(inspectorMutationErrors).mutation();
+/** Removes files from the space's own writable drive in one generation; another drive's files are refused. */
+export const inspectorDeleteArtifactsContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), urls: wire.array(wire.string) }))
   .output(InspectorArtifactCatalogCodec).errors(inspectorMutationErrors).mutation();
 export const inspectorListArtifactSharesContract = gitspaceRpc.procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string }))
@@ -2552,7 +2559,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       uploadBegin: inspectorBeginArtifactUploadContract, uploadChunk: inspectorUploadArtifactChunkContract,
       uploadCommit: inspectorCommitArtifactUploadContract, uploadAbort: inspectorAbortArtifactUploadContract,
       readPage: inspectorReadArtifactPageContract, file: inspectorArtifactFileContract,
-      list: inspectorListArtifactsContract, copyToProject: inspectorCopyArtifactsContract,
+      list: inspectorListArtifactsContract, copyToProject: inspectorCopyArtifactsContract, delete: inspectorDeleteArtifactsContract,
       shares: { list: inspectorListArtifactSharesContract, create: inspectorCreateArtifactShareContract, revoke: inspectorRevokeArtifactShareContract },
     },
     services: { list: inspectorServicesContract, start: startWorkspaceServiceContract, stop: stopWorkspaceServiceContract },

@@ -171,7 +171,7 @@ export class InspectorCloudArtifacts {
       return (await this.entries(scope)).map((entry) => ({
         url: driveUrl(base ? 'base' : 'workspace', entry.path), path: entry.path, hash: entry.blobHash,
         size: entry.size, mediaType: entry.mediaType, scope: base ? 'base' as const : 'workspace' as const,
-        workspaceId: base ? null : scope.workspaceId,
+        workspaceId: base ? null : scope.workspaceId, writtenAt: entry.writtenAt ?? null,
       }));
     }));
     return groups.flat();
@@ -283,7 +283,7 @@ export class InspectorCloudArtifacts {
     const copies: ArtifactCopyRecord[] = [];
     for (const { entry, target } of selected) {
       const copied = await this.files.copy({ scopeId: source.id, file: entry }, destination.id);
-      destinationByPath.set(target, { path: target, blobHash: copied.blobHash, size: copied.size, mediaType: entry.mediaType });
+      destinationByPath.set(target, { path: target, blobHash: copied.blobHash, size: copied.size, mediaType: entry.mediaType, writtenAt: createdAt });
       copies.push({
         id: crypto.randomUUID(), sourceScopeId: source.id, sourceWorkspaceId: source.workspaceId,
         sourceGeneration: source.generation, sourcePath: entry.path, sourceHash: entry.blobHash as `sha256:${string}`,
@@ -293,6 +293,26 @@ export class InspectorCloudArtifacts {
     const manifestHash = await this.persistManifest(destination, generation, destinationByPath.values());
     await this.source.authority.commitArtifactCopies({ id: destination.id, workspaceId: destination.workspaceId, generation, manifestHash, expectedGeneration: destination.generation }, copies);
     return this.catalog();
+  }
+
+  /** Removes files from this session's writable drive in one new generation; every one must still be there. Their
+   * bytes stay stored: other generations and copies may name the same object. */
+  async delete(urls: readonly string[]) {
+    if (urls.length === 0 || urls.length > 500) throw new Error('Select between 1 and 500 files');
+    const paths = new Set(urls.map((url) => this.writablePath(url)));
+    for (let attempt = 1; ; attempt++) {
+      const { scope, entries } = await this.writableEntries();
+      const missing = [...paths].find((path) => !entries.some((entry) => entry.path === path));
+      if (missing) throw new Error(`${missing} is not in this drive. Refresh and select again.`);
+      const generation = scope.generation + 1;
+      const manifestHash = await this.persistManifest(scope, generation, entries.filter((entry) => !paths.has(entry.path)));
+      try {
+        await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
+        return this.catalog();
+      } catch (error) {
+        if (attempt === ARTIFACT_WRITE_ATTEMPTS || !(error instanceof Error) || !error.message.startsWith('Artifact scope generation conflict')) throw error;
+      }
+    }
   }
 
   /** This session's writable scope: a worktree session writes drive://workspace/…, the project session drive://base/…. */
@@ -360,19 +380,22 @@ export class InspectorCloudArtifacts {
       if (conflict) throw new Error(`${path} conflicts with artifact ${conflict}`);
       const current = entries.get(path);
       let entry: ArtifactManifest['entries'][number];
+      const writtenAt = new Date().toISOString();
       if ('edits' in change) {
         if (!current) throw new Error('Artifact does not exist');
         const original = new TextDecoder('utf-8', { fatal: true }).decode(await this.readObject(scope.id, current, 16 * 1024 * 1024));
         const edited = await this.files.put(scope.id, new TextEncoder().encode(applyTextEdits(original, change.edits)));
-        entry = { path, blobHash: edited.blobHash, size: edited.size, mediaType: current.mediaType };
+        entry = { path, blobHash: edited.blobHash, size: edited.size, mediaType: current.mediaType, writtenAt };
       } else {
         if (!file) throw new Error('Artifact change has no content');
         const mediaType = change.mediaType === undefined ? current?.mediaType ?? null : change.mediaType;
-        entry = { path, blobHash: file.blobHash, size: file.size, mediaType, ...(file.object ? { object: file.object } : {}) };
+        entry = { path, blobHash: file.blobHash, size: file.size, mediaType, writtenAt, ...(file.object ? { object: file.object } : {}) };
       }
-      const view = { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType: entry.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId };
-      // A replayed publication of the same object is already committed.
-      if (current?.blobHash === entry.blobHash && current.mediaType === entry.mediaType && current.object === entry.object) return view;
+      // A replayed publication of the same object is already committed, with the time it was first written.
+      if (current?.blobHash === entry.blobHash && current.mediaType === entry.mediaType && current.object === entry.object) {
+        return { url: driveUrl(mount, path), path, hash: current.blobHash, size: current.size, mediaType: current.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId, writtenAt: current.writtenAt ?? null };
+      }
+      const view = { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType: entry.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId, writtenAt };
       entries.set(path, entry);
       const generation = scope.generation + 1;
       const manifestHash = await this.persistManifest(scope, generation, entries.values());
@@ -430,17 +453,20 @@ export class InspectorCloudArtifacts {
     return part;
   }
 
-  /** Reserves `uploads/<fileName>` in this session's writable scope; the file is listed only after commit. The file is
+  /** Reserves `<folder>/<fileName>` (`folder` absent: `uploads`; empty: the drive's root) in this session's writable
+   * scope; the file is listed only after commit. The file is
    * stored under the digest the browser declares, and commit refuses other bytes. `link` is the upload's link
    * (`upload-link.ts`): its parts, commit and abort without further signatures. */
-  async beginUpload(fileName: string, size: number, sha256: string, mediaType: string | null) {
+  async beginUpload(fileName: string, size: number, sha256: string, mediaType: string | null, folder = 'uploads') {
     const name = (fileName.split(/[\\/]/u).at(-1) ?? '').replace(/[\u0000-\u001f\u007f]/gu, '').trim();
     if (!name || name === '.' || name === '..' || name.length > 255) throw new Error('Choose a file with a valid name');
     if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('Declare the file’s SHA-256 as 64 hexadecimal digits');
+    // The folder is checked like any written path: it stays inside this drive.
+    const path = this.writablePath(driveUrl(this.writable().mount, folder ? `${folder}/${name}` : name));
     await this.deleteAbandonedUploads();
     const upload = this.files.begin(this.stagingScope, { declared: { sha256: `sha256:${sha256}`, size } });
     const generation = this.source.placement?.generation ?? 0;
-    const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation, path: `uploads/${name}`, size, mediaType, received: 0, last: null, upload };
+    const state: ArtifactUploadState = { spaceId: this.source.identity.spaceId, generation, path, size, mediaType, received: 0, last: null, upload };
     await this.saveUpload(upload.id, state);
     const link = await mintUploadLink(this.env, { kind: 'drive', spaceId: state.spaceId, generation, uploadId: upload.id });
     return { uploadId: upload.id, url: driveUrl(this.writable().mount, state.path), link, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES, partBytes: upload.partBytes };

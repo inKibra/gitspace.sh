@@ -9,11 +9,12 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 const PART = 256 * 1024;
 import { Inspector, type InspectorProps } from './Inspector.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
+import type { DriveFileView, InspectorDrive } from './DriveSurface.js';
 
 vi.mock('@pierre/diffs/react', () => ({ FileDiff: () => null }));
 vi.mock('@pierre/trees/react', () => ({ useFileTree: () => ({ model: { resetPaths() {}, setGitStatus() {} } }), FileTree: () => null }));
 
-const url = 'drive://workspace/uploads/data.zip';
+const url = 'drive://workspace/data.zip';
 let root: Root;
 let container: HTMLDivElement;
 let props: InspectorProps;
@@ -35,27 +36,35 @@ async function choose(...files: File[]) {
   await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
   await settle();
 }
+/** Clicks the last button with exactly this text, dialogs (rendered on the body) included. */
 async function click(label: string) {
-  const button = [...container.querySelectorAll('button')].find((node) => node.textContent === label);
+  const button = [...document.body.querySelectorAll('button')].findLast((node) => node.textContent === label);
   expect(button, label).toBeDefined();
   await act(async () => button!.click());
   await settle();
 }
+/** An upload authority that files each upload in the folder it names, as the account does: absent `uploads`, empty
+ * the drive's root. */
 function client(part: ArtifactUploadClient['part']) {
-  const names = new Map<string, string>();
+  const paths = new Map<string, string>();
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => {
-      const link = `https://account.test/api/uploads/token-${names.size + 1}`;
-      names.set(link, fileName);
-      return { link, url: `drive://workspace/uploads/${fileName}`, partBytes: PART };
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName, folder }) => {
+      const link = `https://account.test/api/uploads/token-${paths.size + 1}`;
+      const directory = folder ?? 'uploads';
+      const path = directory ? `${directory}/${fileName}` : fileName;
+      paths.set(link, path);
+      return { link, url: `drive://workspace/${path}`, partBytes: PART };
     }),
     part: vi.fn<ArtifactUploadClient['part']>(part),
     commit: vi.fn<ArtifactUploadClient['commit']>(async (link) => {
-      const name = names.get(link)!;
-      return { kind: 'artifact', url: `drive://workspace/uploads/${name}`, hash: 'hash', label: `uploads/${name}`, mediaType: null, generation: 1 };
+      const path = paths.get(link)!;
+      return { kind: 'artifact', url: `drive://workspace/${path}`, hash: 'hash', label: path, mediaType: null, generation: 1 };
     }),
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
   };
+}
+function driveFile(path: string, size = 10): DriveFileView {
+  return { url: `drive://workspace/${path}`, path, hash: `sha256:${'0'.repeat(64)}`, size, mediaType: null, scope: 'workspace', workspaceId: 'space', writtenAt: '2026-11-02T10:00:00.000Z' };
 }
 const acknowledge: ArtifactUploadClient['part'] = async ({ partNumber, bytes }) => ({ received: (partNumber - 1) * PART + bytes.length });
 
@@ -68,7 +77,7 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   props = {
     overview: { projectId: 'project', spaceId: 'space', revision: 1, goal: null, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, review: { total: 0, unresolved: 0 }, changeGuide: null },
-    initialView: 'artifacts', artifactReferences: [], workspaces: [], onSelectWorkspace() {}, repositoryEntries: [], repositoryMode: 'current', onRepositoryModeChange() {}, repositoryFile: null, repositoryDiff: null, journalEntries: [], threads: [], services: [], subagents: [],
+    initialView: 'artifacts', artifactReferences: [], drive: { files: [], own: 'workspace', captures: new Map(), remove: unavailable }, workspaces: [], onSelectWorkspace() {}, repositoryEntries: [], repositoryMode: 'current', onRepositoryModeChange() {}, repositoryFile: null, repositoryDiff: null, journalEntries: [], threads: [], services: [], subagents: [],
     usage: { sessionId: null, report: null, status: 'idle', load() {}, refresh() {} }, agentSetup: { sessionId: null, report: null, status: 'idle', load: unavailable, refresh: unavailable, save: unavailable }, reviewerId: 'reviewer', onRequestArtifact: unavailable, onRequestRepositoryFile() {}, onRequestRepositoryDiff() {}, onLoadGuideDiff: unavailable, onCreateThread: unavailable, onReplyThread: unavailable, onResolveThread: unavailable, onMarkGuideSectionRead: unavailable, onSetGuideApproval: unavailable,
   };
 });
@@ -118,7 +127,8 @@ describe('Inspector artifact uploads', () => {
     expect(uploads.commit).toHaveBeenCalledOnce();
     expect(container.querySelector('[role="progressbar"]')).toBeNull();
     expect(container.querySelector(`[data-artifact-url="${url}"]`)?.hasAttribute('data-selected')).toBe(true);
-    props.artifactReferences = [{ kind: 'artifact', url, hash: 'hash', label: 'uploads/data.zip', mediaType: null, generation: 1 }];
+    props.artifactReferences = [{ kind: 'artifact', url, hash: 'hash', label: 'data.zip', mediaType: null, generation: 1 }];
+    props.drive = { ...props.drive!, files: [driveFile('data.zip')] };
     await render();
     expect(container.querySelectorAll(`[data-artifact-url="${url}"]`)).toHaveLength(1);
     expect(container.querySelector(`[data-artifact-url="${url}"]`)?.hasAttribute('data-selected')).toBe(true);
@@ -143,8 +153,8 @@ describe('Inspector artifact uploads', () => {
 
     expect(uploads.part).toHaveBeenCalledTimes(4);
     expect(peak).toBe(1);
-    expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/a.zip"]')?.hasAttribute('data-selected')).toBe(true);
-    expect(container.querySelector('[data-artifact-url="drive://workspace/uploads/b.zip"]')?.hasAttribute('data-selected')).toBe(true);
+    expect(container.querySelector('[data-artifact-url="drive://workspace/a.zip"]')?.hasAttribute('data-selected')).toBe(true);
+    expect(container.querySelector('[data-artifact-url="drive://workspace/b.zip"]')?.hasAttribute('data-selected')).toBe(true);
   });
 
   it('rejects files over the drive file limit without beginning an upload', async () => {
@@ -160,5 +170,40 @@ describe('Inspector artifact uploads', () => {
     expect(uploads.begin).not.toHaveBeenCalled();
     await click('Dismiss huge.zip');
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('uploads into the folder that is open', async () => {
+    const uploads = client(acknowledge);
+    props.artifactUpload = uploads;
+    props.drive = { ...props.drive!, files: [driveFile('notes/plan.md')] };
+    await render();
+    const folder = [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('notes'));
+    await act(async () => folder!.click());
+
+    await choose(new File([new Uint8Array(10)], 'call.m4a'));
+
+    expect(uploads.begin).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ fileName: 'call.m4a', folder: 'notes' }));
+    expect(container.querySelector('[data-artifact-url="drive://workspace/notes/call.m4a"]')?.hasAttribute('data-selected')).toBe(true);
+  });
+
+  it('deletes a capture as its whole folder', async () => {
+    const remove = vi.fn<InspectorDrive['remove']>(async () => undefined);
+    const capture = 'browser/captures/6f0c2a7e-1b2c-4d3e-8f90-a1b2c3d4e5f6';
+    props.drive = {
+      files: [driveFile(`${capture}/capture.json`), driveFile(`${capture}/image.jpg`, 4_000), driveFile(`${capture}/thumbnail.jpg`, 900), driveFile('notes.md')],
+      own: 'workspace', captures: new Map([['6f0c2a7e-1b2c-4d3e-8f90-a1b2c3d4e5f6', { name: 'Checkout page', browser: 'Work Chrome' }]]), remove,
+    };
+    await render();
+    const browser = [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('browser'));
+    await act(async () => browser!.click());
+    const captures = [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('captures'));
+    await act(async () => captures!.click());
+
+    expect(container.textContent).toContain('Checkout page');
+    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="Select Checkout page"]')!.click());
+    await click('Delete');
+    await click('Delete');
+
+    expect(remove).toHaveBeenCalledExactlyOnceWith([`drive://workspace/${capture}/capture.json`, `drive://workspace/${capture}/image.jpg`, `drive://workspace/${capture}/thumbnail.jpg`]);
   });
 });

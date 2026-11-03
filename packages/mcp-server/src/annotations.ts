@@ -677,6 +677,12 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
+  "inspector.artifacts.delete": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": false
+  },
   "inspector.artifacts.list": {
     "readOnlyHint": true,
     "openWorldHint": false

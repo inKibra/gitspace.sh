@@ -24,6 +24,7 @@ import { InferenceProvider, useInference } from './InferenceContext.js';
 import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
+import type { InspectorDrive } from './inspector/DriveSurface.js';
 import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
@@ -161,6 +162,18 @@ export function LiveInspector({
 
   const projectChanges = useProjectChanges(projectId);
   useEventRefresh(projectChanges, () => artifactCatalog.refetch(), !runtimeAvailable);
+  const driveOwn = spaceId === projectId ? 'base' : 'workspace';
+  // The drive names captures from the session's capture list, read again when the drive's capture folders change.
+  const captureRecords = artifactValue?.artifacts.filter((artifact) => artifact.scope === driveOwn && artifact.path.startsWith('browser/captures/') && artifact.path.endsWith('/capture.json')).map((artifact) => artifact.path).join('\n') ?? '';
+  const [captureNames, setCaptureNames] = useState<InspectorDrive['captures']>(new Map());
+  useEffect(() => {
+    if (!captureRecords) return;
+    const controller = new AbortController();
+    void rpcClient.runtime.session({ projectId: runtimeContext.snapshot.projectId, workspaceId: runtimeContext.snapshot.workspaceId, command: { type: 'browserCaptures' } }, { signal: controller.signal }).then((response) => {
+      if (response.status === 'ok') setCaptureNames(new Map((response.value.browserCaptures ?? []).map((view) => [view.capture.captureId, { name: view.capture.name, browser: view.capture.browser }])));
+    }, () => undefined);
+    return () => controller.abort();
+  }, [captureRecords]);
 
   if (!overviewRead.value) {
     return overviewRead.error
@@ -248,6 +261,17 @@ export function LiveInspector({
     repositoryDiff={repositoryDiff}
     journalEntries={journalValue ?? []}
     artifactReferences={artifactReferences}
+    drive={artifactValue ? {
+      files: artifactValue.artifacts,
+      own: driveOwn,
+      captures: captureNames,
+      remove: async (urls) => {
+        try {
+          const result = await rpcClient.inspector.artifacts.delete({ ...request, urls });
+          if (result.status === 'error') throw result.error;
+        } finally { await artifactCatalog.refetch(); }
+      },
+    } : undefined}
     artifactActions={artifactValue ? {
       projectFiles: artifactValue.artifacts.filter((artifact) => artifact.scope === 'base').map(({ path, hash }) => ({ path, hash })),
       copy: async (files) => {

@@ -1,10 +1,12 @@
 import type { EvidenceReference } from '@gitspace/protocol';
-import { Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Tooltip, useShape } from '@gitspace/ui';
+import { Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, useShape } from '@gitspace/ui';
 import { useEffect, useRef, useState } from 'react';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { ArtifactUploadRejected, formatBytes, isTransientUploadError, uploadArtifactFile, uploadRejection, type ArtifactUploadClient, type ArtifactUploadSession } from './artifact-upload.js';
 
 type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
+/** A committed upload, with the size and time the drive lists once its catalog publishes it. */
+export type UploadedArtifact = ArtifactReference & { size: number; writtenAt: string };
 
 export interface ArtifactUploadRow {
   id: string;
@@ -19,6 +21,8 @@ export interface ArtifactUploadRow {
 
 interface PendingUpload {
   file: File;
+  /** The drive folder it goes to; absent: `uploads`. */
+  folder: string | undefined;
   client: ArtifactUploadClient;
   /** Present while a run is in flight. */
   controller: AbortController | null;
@@ -30,10 +34,11 @@ interface PendingUpload {
 export interface ArtifactUploads {
   rows: readonly ArtifactUploadRow[];
   /** Every artifact committed here; the published catalog may list them only after background publication. */
-  uploaded: readonly ArtifactReference[];
+  uploaded: readonly UploadedArtifact[];
   /** Artifact URLs committed since the latest batch began. */
   highlighted: readonly string[];
-  add(files: Iterable<File>): void;
+  /** Uploads into `folder` of the writable drive; absent: `uploads`, empty: its root. */
+  add(files: Iterable<File>, folder?: string): void;
   retry(id: string): void;
   cancel(id: string): void;
 }
@@ -43,7 +48,7 @@ function settle(promise: Promise<void>): void { void promise.catch(() => undefin
 /** Upload state outlives the Artifacts tab so switching Inspector views never orphans a transfer. */
 export function useArtifactUploads(client: ArtifactUploadClient | undefined): ArtifactUploads {
   const [rows, setRows] = useState<ArtifactUploadRow[]>([]);
-  const [uploaded, setUploaded] = useState<readonly ArtifactReference[]>([]);
+  const [uploaded, setUploaded] = useState<readonly UploadedArtifact[]>([]);
   const [highlighted, setHighlighted] = useState<readonly string[]>([]);
   const pending = useRef(new Map<string, PendingUpload>());
   const partQueue = useRef<Promise<unknown>>(Promise.resolve());
@@ -68,6 +73,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
       const artifact = await uploadArtifactFile(entry.client, entry.file, {
         signal: controller.signal,
         resume,
+        ...(entry.folder === undefined ? {} : { folder: entry.folder }),
         onHashed: (hashed) => update(id, { received: hashed }),
         onSession: (session) => {
           entry.session = session;
@@ -76,7 +82,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
       });
       pending.current.delete(id);
       setRows((current) => current.filter((row) => row.id !== id));
-      setUploaded((current) => [...current.filter((reference) => reference.url !== artifact.url), artifact]);
+      setUploaded((current) => [...current.filter((reference) => reference.url !== artifact.url), { ...artifact, size: entry.file.size, writtenAt: new Date().toISOString() }]);
       setHighlighted((current) => [...current, artifact.url]);
     } catch (error) {
       if (controller.signal.aborted) {
@@ -93,7 +99,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
     rows,
     uploaded,
     highlighted,
-    add: (files) => {
+    add: (files, folder) => {
       if (!client) return;
       setHighlighted([]);
       // Concurrent files send one part at a time, so at most one part is held in memory and in flight.
@@ -113,7 +119,7 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
         const rejection = uploadRejection(file);
         setRows((current) => [...current, { id, name: file.name, size: file.size, received: 0, status: rejection ? 'failed' : 'hashing', error: rejection, retryable: false }]);
         if (rejection) continue;
-        const entry: PendingUpload = { file, client: serialized, controller: null, session: null, resumable: false };
+        const entry: PendingUpload = { file, folder, client: serialized, controller: null, session: null, resumable: false };
         pending.current.set(id, entry);
         void run(id, entry);
       }
@@ -132,19 +138,6 @@ export function useArtifactUploads(client: ArtifactUploadClient | undefined): Ar
       else if (entry.session) settle(entry.client.abort(entry.session.link));
     },
   };
-}
-
-export function ArtifactUploadButton({ onFiles, disabledReason }: { onFiles(files: File[]): void; disabledReason: string | null }) {
-  const input = useRef<HTMLInputElement>(null);
-  const button = <Button variant="secondary" size="compact" className="min-h-10" type="button" disabled={disabledReason !== null} onClick={() => input.current?.click()}>Upload files</Button>;
-  return <>
-    <input ref={input} type="file" multiple hidden aria-label="Upload files to workspace uploads" onChange={(event) => {
-      const files = [...(event.currentTarget.files ?? [])];
-      event.currentTarget.value = '';
-      if (files.length) onFiles(files);
-    }} />
-    {disabledReason ? <Tooltip content={disabledReason}><span>{button}</span></Tooltip> : button}
-  </>;
 }
 
 export function ArtifactUploadList({ uploads }: { uploads: ArtifactUploads }) {

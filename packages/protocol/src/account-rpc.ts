@@ -190,6 +190,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'inspector.artifacts.file': 'cloud',
   'inspector.artifacts.list': 'cloud',
   'inspector.artifacts.copyToProject': 'cloud',
+  'inspector.artifacts.delete': 'cloud',
   'inspector.artifacts.shares.list': 'cloud',
   'inspector.artifacts.shares.create': 'cloud',
   'inspector.artifacts.shares.revoke': 'cloud',

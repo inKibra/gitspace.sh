@@ -246,6 +246,27 @@ describe('user artifact flows', () => {
     expect(stored?.customMetadata).toEqual({ scope: `space:${workspaceId}`, sha256: written.hash, size: String(bytes.byteLength) });
   });
 
+  it('deletes files only from the space’s own drive, keeping the others and when each was written', async () => {
+    const { client, workspaceId, projectId, publish } = await fixture();
+    await publish(projectId, 1, [{ path: 'shared.md', content: 'project file' }]);
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const before = Date.now();
+    await artifacts.write('drive://workspace/notes/keep.md', { bytes: new TextEncoder().encode('keep') });
+    await artifacts.write('drive://workspace/notes/drop.md', { bytes: new TextEncoder().encode('drop') });
+    const generation = (await artifacts.catalog()).scopes.find((scope) => scope.workspaceId === workspaceId)!.generation;
+
+    const refused = await client.inspector.artifacts.delete({ spaceId: workspaceId, expectedGeneration: 0, urls: ['drive://base/shared.md'] });
+    expect(refused).toMatchObject({ status: 'error' });
+    const deleted = await client.inspector.artifacts.delete({ spaceId: workspaceId, expectedGeneration: 0, urls: ['drive://workspace/notes/drop.md'] });
+    if (deleted.status === 'error') throw deleted.error;
+
+    const workspaceFiles = deleted.value.artifacts.filter((artifact) => artifact.scope === 'workspace');
+    expect(workspaceFiles.map((artifact) => artifact.path)).toEqual(['notes/keep.md']);
+    expect(Date.parse(workspaceFiles[0]!.writtenAt ?? '')).toBeGreaterThanOrEqual(before);
+    expect(deleted.value.artifacts.filter((artifact) => artifact.scope === 'base').map((artifact) => artifact.path)).toEqual(['shared.md']);
+    expect(deleted.value.scopes.find((scope) => scope.workspaceId === workspaceId)?.generation).toBe(generation + 1);
+  });
+
   it('rejects a conflicting batch atomically and keeps project copies independent of later workspace edits', async () => {
     const setup = await fixture();
     const { client, projectId, workspaceId, publish, authority } = setup;
