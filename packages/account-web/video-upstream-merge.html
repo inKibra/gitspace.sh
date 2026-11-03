@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Storyboard: your fork stays current · GitSpace</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1b1b1f; --muted: #5d5d66; --line: #e3e3e8; --surface: #f6f6f8; --accent: #2f6df6; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ececf1; --muted: #a0a0ab; --line: #2c2c33; --surface: #17171b; --accent: #7aa2ff; } body { background: #0f0f12; } }
+  body { margin: 0; font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); }
+  main { max-width: 76rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+  h1 { font-size: 1.9rem; letter-spacing: -.02em; margin: 0 0 .4rem; }
+  .dek { color: var(--muted); margin: 0 0 2rem; max-width: 52rem; }
+  .meta { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 2.5rem; }
+  .pill { font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .6rem; color: var(--muted); }
+  .scene { display: grid; grid-template-columns: 640px 1fr; gap: 1.75rem; padding: 1.75rem 0; border-top: 1px solid var(--line); }
+  @media (max-width: 1100px) { .scene { grid-template-columns: 1fr; } }
+  .shot { width: 640px; height: 400px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); position: relative; }
+  .shot iframe { width: 1280px; height: 800px; border: 0; transform: scale(.5); transform-origin: 0 0; pointer-events: auto; }
+  .shot .sketch { position: absolute; inset: 0; padding: 1.5rem; display: flex; flex-direction: column; gap: .75rem; }
+  .shot .label { position: absolute; left: .6rem; bottom: .6rem; font-size: 11px; background: rgba(0,0,0,.65); color: white; border-radius: 6px; padding: .1rem .45rem; }
+  .num { font-size: 12px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+  h2 { margin: .15rem 0 .75rem; font-size: 1.2rem; }
+  dl { margin: 0; display: grid; grid-template-columns: 7.5rem 1fr; gap: .5rem 1rem; }
+  dt { color: var(--muted); font-size: 13px; padding-top: .1rem; }
+  dd { margin: 0; }
+  .vo { font-style: italic; }
+  .box { border: 1px solid var(--line); border-radius: 10px; padding: .6rem .8rem; background: color-mix(in srgb, var(--surface) 70%, transparent); font-size: 13px; }
+  .row .dot { margin-right: .45rem; vertical-align: middle; }
+  .dot { width: 8px; height: 8px; border-radius: 99px; background: #16a34a; display: inline-block; }
+  .dot.red { background: #dc2626; } .dot.amber { background: #f59e0b; }
+  code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .tweet { margin: auto; max-width: 30rem; border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.25rem; background: var(--surface); font-size: 16px; }
+  .end { margin: auto; text-align: center; font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+  .end small { display: block; font-size: 14px; font-weight: 400; color: var(--muted); margin-top: .6rem; }
+  h3 { margin: 3rem 0 .75rem; font-size: 1.1rem; }
+  ul { margin: 0; padding-left: 1.2rem; } li { margin-bottom: .35rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Storyboard: your fork stays current</h1>
+  <p class="dek">A 95-second screen recording that shows one GitSpace release travelling into a customized account: the release, the question, the merge workspace, review, and the launch. Frames marked <b>live mock</b> are the real mock pages (use them as they are; click inside); frames marked <b>capture</b> come from the real run we do before publishing.</p>
+  <div class="meta"><span class="pill">≈ 95 s</span><span class="pill">16:9, 1440×900 captures</span><span class="pill">voice-over + captions</span><span class="pill">companion to blog-upstream-merge.html</span></div>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch"><div class="tweet">feels like there needs to be a new way to distribute opensource software such that people can modify via agents but also get upstream automatically merged in<br><br>coding agents can do this but they won’t do it automatically<div style="font-size:13px;color:var(--muted);margin-top:.6rem">Thariq · @trq212 · Oct 27</div></div></div><span class="label">title card</span></div>
+    <div><div class="num">Scene 1 · 0:00–0:07</div><h2>The question</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“Agents can change the software you run. Keeping your changed copy up to date is the part nobody does.”</dd>
+      <dt>On screen</dt><dd>The tweet, then it shrinks to the corner and stays as a small badge through scene 3.</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><iframe src="/mock-gitspace-project.html" loading="lazy" title="GitSpace project mock"></iframe><span class="label">live mock · GitSpace project</span></div>
+    <div><div class="num">Scene 2 · 0:07–0:17</div><h2>Your GitSpace is a project</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“Every GitSpace account runs its own copy of GitSpace, built from a project in the account. Mine builds my fork.”</dd>
+      <dt>On screen</dt><dd>Open the project menu → <b>Project settings</b>. Set <b>Repository</b> to <code>bradleat/gitspace.sh</code> and <b>Base branch</b> to <code>ui-experiments</code>. Highlight the line “releases arrive as merges”.</dd>
+      <dt>Capture note</dt><dd>Real run: a fork with 2–3 visible customizations (for example the sidebar change from scene 3).</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch">
+      <div class="box"><b>workspace · sidebar-pins</b> <span style="color:var(--muted)">· Code</span></div>
+      <div class="box">You: Pin projects I open daily to the top of the sidebar.</div>
+      <div class="box">Agent: Done in <code>AppSidebar.tsx</code> and <code>project-pins.ts</code>; launched the frontend as a trial.</div>
+      <div class="box row"><span class="dot amber"></span>Settings → Releases: frontend <b>trial</b> · sidebar-pins @ 4c1e9a2 · <u>Back to default</u></div>
+    </div><span class="label">capture · sketch</span></div>
+    <div><div class="num">Scene 3 · 0:17–0:27</div><h2>Customize it with an agent</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“When I want GitSpace to work differently, I ask an agent in that project. I try the result as a trial, and keep it by merging it into my fork.”</dd>
+      <dt>On screen</dt><dd>Speed-ramped workspace turn; the trial row in Settings → Releases; the merged pull request on the fork.</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><iframe src="/mock-automations.html" loading="lazy" title="Automations mock"></iframe><span class="label">live mock · Automations</span></div>
+    <div><div class="num">Scene 4 · 0:27–0:37</div><h2>The automation that asks</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“The GitSpace project comes with one automation: when upstream publishes a release, tell the project agent.”</dd>
+      <dt>On screen</dt><dd>Choose the GitSpace project; zoom on the <b>GitSpace releases</b> card: <i>When</i> a release of <code>inKibra/gitspace.sh</code>, <i>Only if</i> tag is <code>v*</code>, <i>Then</i> message the project agent. Caption: “Arrives instantly through your GitHub App.”</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch">
+      <div class="box"><b>inKibra/gitspace.sh</b> · Releases · <b>v0.2.0-rc.43</b> <span style="color:var(--muted)">published just now</span></div>
+      <div class="box row"><span class="dot"></span>Automations · Recent runs · <b>GitSpace releases</b> · release · v0.2.0-rc.43 · Messaged the project agent · now</div>
+    </div><span class="label">capture · sketch</span></div>
+    <div><div class="num">Scene 5 · 0:37–0:45</div><h2>Upstream ships</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“Upstream publishes a release. Nobody has to remember anything.”</dd>
+      <dt>On screen</dt><dd>Split: GitHub release page left; the run appearing in Recent runs right.</dd>
+      <dt>Capture note</dt><dd>Publish a real <code>v*</code> tag (an rc) during the recording.</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><iframe src="/mock-gitspace-project.html" loading="lazy" title="GitSpace project mock, release question"></iframe><span class="label">live mock · question card</span></div>
+    <div><div class="num">Scene 6 · 0:45–0:57</div><h2>The agent asks</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“The project agent reads the release against my fork: fourteen commits ahead, and this release touches two files I changed. Then it asks.”</dd>
+      <dt>On screen</dt><dd>In the mock: Project settings → Repository <code>bradleat/gitspace.sh</code>, then <b>Simulate → GitSpace publishes v0.2.0-rc.42</b>. Hold on the card; choose <b>Merge it in a workspace and open a PR</b>.</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch">
+      <div class="box"><b>workspace · merge-v0-2-0-rc-43</b> <span style="color:var(--muted)">· started by the project agent</span></div>
+      <div class="box">git merge v0.2.0-rc.43 → 2 conflicts: <code>AppSidebar.tsx</code>, <code>project-pins.ts</code></div>
+      <div class="box">Kept your pinned section; adopted rc.43’s new sidebar groups around it. Tests: 497 passed.</div>
+      <div class="box row"><span class="dot"></span>Opened PR #19 into <code>ui-experiments</code></div>
+    </div><span class="label">capture · sketch</span></div>
+    <div><div class="num">Scene 7 · 0:57–1:10</div><h2>A workspace does the merge</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“It merges in a workspace of its own, resolves the conflicts with my changes in mind, runs the checks and opens a pull request.”</dd>
+      <dt>On screen</dt><dd>Speed-ramped (≈ 8×) workspace turn: the conflict list, the resolution diff for one file, the test run, the PR link. Caption the conflicted files by name.</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch">
+      <div class="box row"><span class="dot red"></span>PR #19 · checks · <b>typecheck failed</b></div>
+      <div class="box">Automation <b>Failed checks to its workspace</b> → merge-v0-2-0-rc-43: “Checks failed on this workspace’s branch. Find out why and fix it.”</div>
+      <div class="box row"><span class="dot"></span>Agent pushed 1 commit · all checks passed · you approve</div>
+    </div><span class="label">capture · sketch</span></div>
+    <div><div class="num">Scene 8 · 1:10–1:20</div><h2>Review like any change</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“If a check fails or I leave a comment, it goes back to that workspace. I review a merge like any other pull request.”</dd>
+      <dt>On screen</dt><dd>GitHub PR; a failing check turns green after the agent’s commit; your approval. (If no check fails naturally, show a review comment instead.)</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch">
+      <div class="box">Project agent: PR #19 is merged into ui-experiments. Build it on Darktop and launch?</div>
+      <div class="box">✓ Launch the frontend as a trial first</div>
+      <div class="box row"><span class="dot amber"></span>Settings → Releases · frontend trial · ui-experiments @ 7aa31c0 · <u>Make default</u> · <u>Back to default</u></div>
+    </div><span class="label">capture · sketch</span></div>
+    <div><div class="num">Scene 9 · 1:20–1:30</div><h2>Launch when you say so</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“Once it’s merged, it asks to build and launch. I try it as a trial; if anything’s off, Back to default.”</dd>
+      <dt>On screen</dt><dd>The question card; the build progress; the trial in Settings → Releases; the app reloading with rc.43’s change and my pinned projects both present.</dd>
+    </dl></div>
+  </section>
+
+  <section class="scene">
+    <div class="shot"><div class="sketch"><div class="end">Agents change it. Automations keep it current. You say yes.<small>gitspace.sh</small></div></div><span class="label">end card</span></div>
+    <div><div class="num">Scene 10 · 1:30–1:35</div><h2>End card</h2><dl>
+      <dt>Voice-over</dt><dd class="vo">“Your fork, upstream’s releases, and an agent in between.”</dd>
+      <dt>On screen</dt><dd>Tagline; link to the post.</dd>
+    </dl></div>
+  </section>
+
+  <h3>Before recording</h3>
+  <ul>
+    <li>Give existing accounts the <b>GitSpace releases</b> automation (today only newly created GitSpace projects get it).</li>
+    <li>Fork <code>inKibra/gitspace.sh</code>, point the account’s GitSpace project at it, and make the scene 3 customization for real, touching files the next release also touches, so the merge has real conflicts.</li>
+    <li>Publish an rc tag upstream while recording, and run the whole loop once without recording first.</li>
+    <li>Record at 1440×900 in light mode; speed-ramp agent turns; captions on.</li>
+  </ul>
+</main>
+</body>
+</html>

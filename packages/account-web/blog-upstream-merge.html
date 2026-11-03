@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Your fork, upstream's releases, and an agent in between · GitSpace</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1b1b1f; --muted: #5d5d66; --line: #e3e3e8; --surface: #f6f6f8; --accent: #2f6df6; --warn: #b45309; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ececf1; --muted: #a0a0ab; --line: #2c2c33; --surface: #17171b; --accent: #7aa2ff; --warn: #f59e0b; } body { background: #0f0f12; } }
+  body { margin: 0; font: 18px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); }
+  main { max-width: 42rem; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+  .kicker { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  h1 { font-size: 2.4rem; line-height: 1.15; letter-spacing: -.02em; margin: .4rem 0 1rem; }
+  .dek { font-size: 1.2rem; color: var(--muted); margin: 0 0 2.5rem; }
+  h2 { font-size: 1.45rem; letter-spacing: -.01em; margin: 3rem 0 .75rem; }
+  p, li { margin: 0 0 1rem; }
+  a { color: var(--accent); }
+  code { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface); padding: .1em .35em; border-radius: 6px; }
+  blockquote.tweet { margin: 2rem 0; padding: 1.25rem 1.5rem; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+  blockquote.tweet p { margin: 0 0 .5rem; font-size: 1.1rem; }
+  blockquote.tweet footer { font-size: 14px; color: var(--muted); }
+  ol.loop { counter-reset: step; list-style: none; padding: 0; }
+  ol.loop > li { counter-increment: step; position: relative; padding-left: 2.75rem; margin-bottom: 1.25rem; }
+  ol.loop > li::before { content: counter(step); position: absolute; left: 0; top: .1rem; width: 1.9rem; height: 1.9rem; border-radius: 999px; background: var(--accent); color: white; font-size: 14px; font-weight: 600; display: grid; place-items: center; }
+  figure { margin: 2rem 0; }
+  .frame { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 1rem 1.25rem; font-size: 15px; }
+  .frame .who { font-size: 13px; color: var(--muted); margin-bottom: .35rem; }
+  .card { border: 1px solid var(--line); border-radius: 12px; padding: .75rem 1rem; margin: .5rem 0 0; background: color-mix(in srgb, var(--surface) 60%, transparent); }
+  .option { display: flex; gap: .6rem; align-items: baseline; padding: .35rem 0; }
+  .option b { white-space: nowrap; }
+  .option span { color: var(--muted); }
+  .pill { display: inline-block; font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 0 .55rem; margin-right: .35rem; color: var(--muted); }
+  figcaption { font-size: 14px; color: var(--muted); margin-top: .6rem; }
+  .status { border-left: 3px solid var(--warn); padding: .25rem 0 .25rem 1rem; margin: 2rem 0; }
+  .status h3 { margin: 0 0 .5rem; font-size: 1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 1rem 0 1.5rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; }
+  .note { font-size: 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; padding: .6rem .9rem; margin: 2rem 0; }
+</style>
+</head>
+<body>
+<main>
+  <div class="note">Draft for review. Bracketed notes are for us, not readers. Screens marked “mock” become captures from a real run before this ships.</div>
+
+  <div class="kicker">GitSpace · Engineering</div>
+  <h1>Your fork, upstream’s releases, and an agent in between</h1>
+  <p class="dek">Agents make it easy to change the software you run. GitSpace makes the agent keep your changed copy current: every upstream release arrives as a merge into your branch, done in a workspace, reviewed like any pull request, launched when you say so.</p>
+
+  <blockquote class="tweet">
+    <p>feels like there needs to be a new way to distribute opensource software such that people can modify via agents but also get upstream automatically merged in</p>
+    <p>coding agents can do this but they won’t do it automatically</p>
+    <footer>Thariq (@trq212), Oct 27, 2026</footer>
+  </blockquote>
+
+  <p>This is a problem we had to solve for ourselves, because GitSpace is distributed exactly this way. Every account runs its own copy of GitSpace, and the source of that copy is a project inside the account, open to the same agents you use for everything else. If you want GitSpace to behave differently, you ask an agent to change it. And then you still want next week’s release.</p>
+
+  <h2>Every account runs its own GitSpace</h2>
+  <p>A GitSpace account isn’t a tenant in a shared app. It runs its own Worker, its own frontend and its own machine runtime, and it chooses which release each of those runs. Every account also has a <strong>GitSpace project</strong>: the repository its GitSpace is built from, with a base branch, workspaces and a project agent like any other project.</p>
+  <p>Out of the box that project points at upstream, <code>inKibra/gitspace.sh</code> on <code>develop</code>. Point it at your fork instead, and your fork is what the account builds. Customizing GitSpace is then just working in that project: an agent changes the code in a workspace, you try the result as a <strong>trial</strong> on the frontend, the Worker or your machines, and either keep it or go <strong>Back to default</strong>. A trial never changes the account’s default release; promoting one means merging it into the branch the project builds.</p>
+
+  <h2>The part agents don’t do on their own</h2>
+  <p>Thariq’s point is the second half. An agent will happily merge upstream into your fork if you ask. Nobody asks. Releases go by, the fork drifts, and the merge that would have taken ten minutes in October takes an afternoon in March.</p>
+  <p>So we don’t rely on anyone asking. The asking is an <strong>automation</strong>, and the merging is a workspace.</p>
+
+  <h2>The loop</h2>
+  <ol class="loop">
+    <li><strong>A release is published upstream.</strong> Every GitSpace project starts with one automation, <em>GitSpace releases</em>: watch the releases of the project’s repository, or of its upstream parent when the project builds a fork, for tags matching <code>v*</code>. It hears about a release through the account’s GitHub App the moment it’s published, or by checking once a day.</li>
+    <li><strong>The project agent reads it against what you run.</strong> The automation hands the release to the project agent, which reads the release notes, what the account runs and what your branch changes, and says in a few lines what the release would change for <em>you</em>.</li>
+    <li><strong>It asks.</strong> One question, with the answers spelled out.
+      <figure>
+        <div class="frame">
+          <div class="who">Project agent · GitSpace</div>
+          GitSpace <b>v0.2.0-rc.42</b> is out upstream. <code>ui-experiments</code> is 14 commits ahead of upstream, and rc.42 touches 2 files you changed.
+          <div class="card">
+            <div><b>Bring v0.2.0-rc.42 into ui-experiments?</b></div>
+            <div class="option"><b>Merge it in a workspace and open a PR</b><span>I resolve what I can in merge-v0-2-0-rc-42 and open a pull request into ui-experiments.</span></div>
+            <div class="option"><b>Not now</b><span>I ask again with the next release.</span></div>
+            <div class="option"><b>Skip this release</b><span>I won’t ask about rc.42 again.</span></div>
+          </div>
+        </div>
+        <figcaption>The question card for a fork (mock; from <code>mock-gitspace-project.html</code>). On upstream, the card offers to launch the published release as is instead: nothing is built.</figcaption>
+      </figure>
+    </li>
+    <li><strong>A workspace does the merge.</strong> The agent starts a workspace on its own branch, merges the tag into your branch there and resolves the conflicts. It isn’t resolving them blind: it has your branch’s history, and the goals and journal entries your agents recorded when they made those changes. It runs the checks, then opens a pull request into your branch.</li>
+    <li><strong>Review happens where it always does.</strong> The pull request is linked to the workspace. Default automations send failed checks back to it (“Checks failed on this workspace’s branch. Find out why and fix it.”) and send your review comments to it, so you review a merge the way you’d review any change, and the agent keeps working on it until you’re happy.</li>
+    <li><strong>You merge; it asks to launch.</strong> Once the pull request is merged, the project agent asks whether to build your branch and launch it. A build runs on one of your machines and takes a few minutes; you can launch it as a trial first. If anything is wrong, Back to default puts the previous release back.</li>
+  </ol>
+
+  <h2>Why it’s safe to leave on</h2>
+  <table>
+    <tr><th>Concern</th><th>What GitSpace does</th></tr>
+    <tr><td>An agent acting on its own</td><td>The automation asks before merging or launching. You can edit it to act without asking; an automation an agent proposes does nothing until a person turns it on.</td></tr>
+    <tr><td>What “a release” is</td><td>Releases are pinned: a commit plus the SHA-256 of its manifest, which lists the SHA-256 of every file. A pin fixes every byte of one release.</td></tr>
+    <tr><td>A bad merge reaching production</td><td>The merge lands as a pull request on your branch, with your checks. Launching is a separate answer, can be a trial, and Back to default undoes it.</td></tr>
+    <tr><td>Agents talking themselves into loops</td><td>Each run has provenance; a release a run produced doesn’t start a new run; rounds per subject and runs per day are capped.</td></tr>
+    <tr><td>Untrusted input</td><td>Watching another repository is an explicit trust decision a person makes. Events from people without write access to your repository don’t reach an agent.</td></tr>
+  </table>
+
+  <h2>What’s still hard</h2>
+  <p>Merges aren’t the hard part; meaning is. A conflict where upstream renamed a function you also changed is easy for an agent. A release that changes the <em>behavior</em> your customization depended on, with no textual conflict at all, is not, and that’s exactly the case where the merge goes through cleanly and still breaks you. The pull request and your checks are the defense, and the agent’s summary of “what this release changes for you” is the early warning. We think the right default is an agent that does the work and a person who says yes.</p>
+
+  <div class="status">
+    <h3>[Status, before publishing]</h3>
+    <p>Built and tested, not yet run for a real account: the <em>GitSpace releases</em> automation is added only when an account’s GitSpace project is created, so existing accounts don’t have it, and the fork path (merge, pull request, build, launch) has only run in tests. Before this ships: add the automation to existing accounts, run one fork through a real release, and replace the mocks above with captures from that run.</p>
+  </div>
+
+  <h2>Try it</h2>
+  <p>Open your account’s GitSpace project, change its repository to your fork in Project settings, and ask the project agent for something you’d like GitSpace to do differently. The next GitSpace release will show up as a question in that project’s conversation.</p>
+</main>
+</body>
+</html>
