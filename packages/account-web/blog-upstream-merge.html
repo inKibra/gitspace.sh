@@ -16,21 +16,18 @@
   p, li { margin: 0 0 1rem; }
   a { color: var(--accent); }
   code { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface); padding: .1em .35em; border-radius: 6px; }
-  blockquote.tweet { margin: 2rem 0; padding: 1.25rem 1.5rem; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
-  blockquote.tweet p { margin: 0 0 .5rem; font-size: 1.1rem; }
-  blockquote.tweet footer { font-size: 14px; color: var(--muted); }
+  .tweet { margin: 2rem 0; padding: 12px 16px; border: 1px solid #cfd9de; border-radius: 16px; background: #fff; color: #0f1419; font: 15px/20px TwitterChirp, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; gap: 12px; text-decoration: none; }
+  .tweet img { width: 40px; height: 40px; border-radius: 999px; object-fit: cover; flex-shrink: 0; background: #cfd9de; }
+  .tweet .head { display: flex; align-items: center; gap: 4px; }
+  .tweet .head b { font-weight: 700; }
+  .tweet .head span { color: #536471; }
+  .tweet .head svg { margin-left: auto; }
+  .tweet p { margin: 2px 0 0; white-space: pre-wrap; }
+  .video iframe { display: block; width: 100%; height: calc((min(42rem, 100vw) - 3rem) * .625 + 150px); border: 0; border-radius: 14px; background: #0b0b0d; }
   ol.loop { counter-reset: step; list-style: none; padding: 0; }
   ol.loop > li { counter-increment: step; position: relative; padding-left: 2.75rem; margin-bottom: 1.25rem; }
   ol.loop > li::before { content: counter(step); position: absolute; left: 0; top: .1rem; width: 1.9rem; height: 1.9rem; border-radius: 999px; background: var(--accent); color: white; font-size: 14px; font-weight: 600; display: grid; place-items: center; }
-  figure { margin: 2rem 0; }
-  .frame { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 1rem 1.25rem; font-size: 15px; }
-  .frame .who { font-size: 13px; color: var(--muted); margin-bottom: .35rem; }
-  .card { border: 1px solid var(--line); border-radius: 12px; padding: .75rem 1rem; margin: .5rem 0 0; background: color-mix(in srgb, var(--surface) 60%, transparent); }
-  .option { display: flex; gap: .6rem; align-items: baseline; padding: .35rem 0; }
-  .option b { white-space: nowrap; }
-  .option span { color: var(--muted); }
-  .pill { display: inline-block; font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 0 .55rem; margin-right: .35rem; color: var(--muted); }
-  figcaption { font-size: 14px; color: var(--muted); margin-top: .6rem; }
+  .video { margin: 2rem 0 2.5rem; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 1rem 0 1.5rem; }
   th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-weight: 600; }
@@ -39,19 +36,27 @@
 </head>
 <body>
 <main>
-  <div class="note">Draft for review. Screens marked “mock” become captures from a real run before this ships; the booking link needs your calendar URL.</div>
+  <div class="note">Draft for review. The booking link needs your calendar URL.</div>
 
   <div class="kicker">GitSpace · Engineering</div>
   <h1>Your fork, upstream’s releases, and an agent in between</h1>
   <p class="dek">Agents make it easy to change the software you run. GitSpace makes the agent keep your changed copy current: every upstream release arrives as a merge into your branch, done in a workspace, reviewed like any pull request, launched when you say so.</p>
 
-  <blockquote class="tweet">
-    <p>feels like there needs to be a new way to distribute opensource software such that people can modify via agents but also get upstream automatically merged in</p>
-    <p>coding agents can do this but they won’t do it automatically</p>
-    <footer>Thariq (@trq212), Oct 27, 2026</footer>
-  </blockquote>
+  <a class="tweet" href="https://x.com/trq212" target="_blank" rel="noopener">
+    <img src="https://unavatar.io/x/trq212" alt="" />
+    <div>
+      <div class="head"><b>Thariq</b><span>@trq212 · Oct 27</span><svg viewBox="0 0 24 24" width="20" height="20" aria-label="X"><path fill="#0f1419" d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" /></svg></div>
+      <p>feels like there needs to be a new way to distribute opensource software such that people can modify via agents but also get upstream automatically merged in
+
+coding agents can do this but they won’t do it automatically</p>
+    </div>
+  </a>
 
   <p>This is a problem we had to solve for ourselves, because GitSpace is distributed exactly this way. Every account runs its own copy of GitSpace, and the source of that copy is a project inside the account, open to the same agents you use for everything else. If you want GitSpace to behave differently, you ask an agent to change it. And then you still want next week’s release.</p>
+
+  <figure class="video">
+    <iframe src="/video-upstream-merge.html" title="One GitSpace release travelling into a customized account" loading="lazy"></iframe>
+  </figure>
 
   <h2>Every account runs its own GitSpace</h2>
   <p>A GitSpace account isn’t a tenant in a shared app. It runs its own Worker, its own frontend and its own machine runtime, and it chooses which release each of those runs. Every account also has a <strong>GitSpace project</strong>: the repository its GitSpace is built from, with a base branch, workspaces and a project agent like any other project.</p>
@@ -65,21 +70,7 @@
   <ol class="loop">
     <li><strong>A release is published upstream.</strong> Every GitSpace project starts with one automation, <em>GitSpace releases</em>: watch the releases of the project’s repository, or of its upstream parent when the project builds a fork, for tags matching <code>v*</code>. It hears about a release through the account’s GitHub App the moment it’s published, or by checking once a day.</li>
     <li><strong>The project agent reads it against what you run.</strong> The automation hands the release to the project agent, which reads the release notes, what the account runs and what your branch changes, and says in a few lines what the release would change for <em>you</em>.</li>
-    <li><strong>It asks.</strong> One question, with the answers spelled out.
-      <figure>
-        <div class="frame">
-          <div class="who">Project agent · GitSpace</div>
-          GitSpace <b>v0.2.0-rc.42</b> is out upstream. <code>ui-experiments</code> is 14 commits ahead of upstream, and rc.42 touches 2 files you changed.
-          <div class="card">
-            <div><b>Bring v0.2.0-rc.42 into ui-experiments?</b></div>
-            <div class="option"><b>Merge it in a workspace and open a PR</b><span>I resolve what I can in merge-v0-2-0-rc-42 and open a pull request into ui-experiments.</span></div>
-            <div class="option"><b>Not now</b><span>I ask again with the next release.</span></div>
-            <div class="option"><b>Skip this release</b><span>I won’t ask about rc.42 again.</span></div>
-          </div>
-        </div>
-        <figcaption>The question card for a fork (mock; from <code>mock-gitspace-project.html</code>). On upstream, the card offers to launch the published release as is instead: nothing is built.</figcaption>
-      </figure>
-    </li>
+    <li><strong>It asks.</strong> One question, with the answers spelled out. On a fork it offers to merge the release in a workspace; on upstream it offers to launch the published release as is, with nothing built.</li>
     <li><strong>A workspace does the merge.</strong> The agent starts a workspace on its own branch, merges the tag into your branch there and resolves the conflicts. It isn’t resolving them blind: it has your branch’s history, and the goals and journal entries your agents recorded when they made those changes. It runs the checks, then opens a pull request into your branch.</li>
     <li><strong>Review happens where it always does.</strong> The pull request is linked to the workspace. Default automations send failed checks back to it (“Checks failed on this workspace’s branch. Find out why and fix it.”) and send your review comments to it, so you review a merge the way you’d review any change, and the agent keeps working on it until you’re happy.</li>
     <li><strong>You merge; it asks to launch.</strong> Once the pull request is merged, the project agent asks whether to build your branch and launch it. A build runs on one of your machines and takes a few minutes; you can launch it as a trial first. If anything is wrong, Back to default puts the previous release back.</li>
