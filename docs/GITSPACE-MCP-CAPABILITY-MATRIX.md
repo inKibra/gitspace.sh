@@ -228,6 +228,7 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `mcp.composio.refresh` | `rpc.write` | F | T | F | T | Tool | Refreshes authorization status from the external connected account and persists it. |
 | `mcp.composio.catalog`<br>`mcp.composio.tools` | `rpc.read` | T | - | - | T | Tool | Reads may contact external provider/catalog APIs; retain filtering, byte limits and safe output handling. |
 | `mcp.composio.authorize` | `rpc.write` | F | T | F | T | Excluded | External provider consent is outside the agreed scope. |
+| `mcp.connections.signIn` | `rpc.write` | F | F | F | T | Excluded | Starts OAuth sign-in for a Streamable HTTP or SSE plugin whose server answers with a Bearer challenge; the person completes it in their browser and the account Worker's `/v1/mcp/oauth/callback` stores the grant in the credential vault. Changing the plugin's URL or deleting it forgets the grant. |
 | `mcp.discover` | `rpc.read` + `rpc.write` in MCP | F | T | F | T | Split | Reloads a live integration session or creates a temporary one. Configured stdio integrations may launch processes, so it is treated like other code execution: destructive and open-world. |
 
 ### browserRelay

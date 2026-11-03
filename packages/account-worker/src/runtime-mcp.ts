@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker-provider.js';
@@ -8,6 +9,7 @@ import type { UserMcpConnectionsDO } from './local-mcp.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
 import type { CredentialVaultDO } from './application.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
+import { mcpBackgroundAuth } from './mcp-oauth.js';
 import type { RuntimeIdentity } from './runtime-services.js';
 type RuntimeJson = z.infer<typeof RuntimeJsonSchema>;
 
@@ -61,18 +63,21 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     }
     const secrets = Object.values(headers);
     const client = new Client({ name: 'gitspace-cloud', version: '1.0.0' }, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
+    // Composio materializes its own credential; custom servers may answer with an OAuth challenge.
+    const oauth = connection.transport.type === 'composio' ? {} : { authProvider: await mcpBackgroundAuth(env, connection.id) };
     const transport = type === 'http'
-      ? new StreamableHTTPClientTransport(new URL(url), { redirectPolicy: 'same-origin', requestInit: { headers } })
+      ? new StreamableHTTPClientTransport(new URL(url), { redirectPolicy: 'same-origin', requestInit: { headers }, ...oauth })
       : new SSEClientTransport(new URL(url), {
           redirectPolicy: 'same-origin',
           requestInit: { headers },
           eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }) },
+          ...oauth,
         });
     const audit = async (outcome: 'started' | 'succeeded' | 'failed' | 'canceled') => {
       await connections().appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: invocation?.name ?? null, outcome, message: null });
     };
     let observedRevision = connection.revision;
-    const observe = async (status: 'ready' | 'failed', message: string | null) => {
+    const observe = async (status: 'ready' | 'failed' | 'sign-in-required', message: string | null) => {
       try {
         const updated = await connections().recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision, status, message });
         observedRevision = updated.revision;
@@ -101,6 +106,10 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
       return redacted(result, secrets);
     } catch (error) {
       if (invoke) await audit(signal?.aborted ? 'canceled' : 'failed');
+      if (error instanceof UnauthorizedError) {
+        await observe('sign-in-required', 'Sign in to connect');
+        throw new Error(`MCP connection "${connection.label}" needs a person to sign in: Plugins → Custom plugins → Sign in`);
+      }
       const message = String(redacted(error instanceof Error ? error.message : String(error), secrets));
       await observe('failed', message.slice(0, 1024));
       throw new Error(message);

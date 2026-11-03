@@ -19,6 +19,7 @@ import {
   updateMcpConnectionContract,
   deleteMcpConnectionContract,
   getMcpConnectionStatusContract,
+  signInMcpConnectionContract,
   listProjectMcpGrantsContract,
   putProjectMcpGrantContract,
   deleteProjectMcpGrantContract,
@@ -53,6 +54,7 @@ import { UserSkillsDO, SkillRevisionConflict } from './user-skills.js';
 import { UserMcpConnectionsDO, McpConnectionNotFoundError, McpConnectionRevisionConflictError, McpConnectionValidationError, validateComposioToolPolicy } from './local-mcp.js';
 import { automationFailureMessage } from './project-automations.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
+import { probeMcpSignIn, startMcpSignIn } from './mcp-oauth.js';
 import { signComposioState, type CredentialVaultDO } from './application.js';
 import { requireRuntimeAccess } from './account-runtime-rpc.js';
 import { RuntimeToolResultSchema, RuntimeJsonSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
@@ -97,6 +99,13 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     return { ...value, transport: value.transport };
   };
   const gateway = async () => new ComposioPluginGateway(env, await vault.getProviderSecret('composio'));
+  /** A Streamable HTTP or SSE server that answers with an OAuth challenge, while no grant is stored for it, is marked
+   * for sign-in. An unreachable server keeps the status it had. */
+  const noteSignIn = async (saved: McpConnection): Promise<McpConnection> => {
+    if (!saved.enabled || (saved.transport.type !== 'http' && saved.transport.type !== 'sse') || await vault.getMcpOAuth(saved.id) !== null) return saved;
+    const { challenged } = await probeMcpSignIn(saved.transport.url).catch(() => ({ challenged: false }));
+    return challenged ? connections.recordStatus({ principalId: userId, connectionId: saved.id, observedRevision: saved.revision, status: 'sign-in-required', message: 'Sign in to connect' }) : saved;
+  };
   const listSecrets = server.implement(listProjectSecretsContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId); return ok(await secrets.list(input.projectId));
@@ -199,7 +208,7 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   });
   const createConnection = server.implement(createMcpConnectionContract).handler(async ({ input, errors }) => {
     try {
-      return ok(mcpConnectionView(await connections.create(userId, input.connection as McpConnectionDraft)));
+      return ok(mcpConnectionView(await noteSignIn(await connections.create(userId, input.connection as McpConnectionDraft))));
     } catch (error) {
       if (error instanceof McpConnectionValidationError) return err(errors.McpInvalid({ field: error.field, message: error.message }));
       return err(errors.OperationFailed({ operation: 'createConnection', message: error instanceof Error ? error.message : String(error) }));
@@ -207,7 +216,13 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   });
   const updateConnection = server.implement(updateMcpConnectionContract).handler(async ({ input, errors }) => {
     try {
-      return ok(mcpConnectionView(await connections.update(userId, input.connectionId, input.expectedRevision, input.connection as McpConnectionDraft)));
+      const before = await connection(input.connectionId);
+      const saved = await connections.update(userId, input.connectionId, input.expectedRevision, input.connection as McpConnectionDraft);
+      // A grant belongs to the server it was issued for; it is never sent to a changed address.
+      const previous = before.transport.type === 'http' || before.transport.type === 'sse' ? before.transport.url : null;
+      const next = saved.transport.type === 'http' || saved.transport.type === 'sse' ? saved.transport.url : null;
+      if (previous !== next) await vault.deleteMcpOAuth(saved.id);
+      return ok(mcpConnectionView(await noteSignIn(saved)));
     } catch (error) {
       if (error instanceof McpConnectionNotFoundError || error instanceof ProjectMcpGrantNotFoundError) return err(errors.McpNotFound({ resource: error instanceof ProjectMcpGrantNotFoundError ? 'grant' : 'connection', id: error.connectionId }));
       if (error instanceof McpConnectionRevisionConflictError || error instanceof ProjectMcpGrantRevisionConflictError) return err(errors.McpRevisionConflict({ resource: error.connectionId, expected: error.expected, actual: error.actual }));
@@ -217,7 +232,10 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
   });
   const deleteConnection = server.implement(deleteMcpConnectionContract).handler(async ({ input, errors }) => {
     try {
-      const current = await connection(input.connectionId); if (current.transport.type === 'composio') throw new Error('Use plugin disconnect for Composio connections'); return ok({ connectionId: input.connectionId, deleted: await connections.delete(userId, input.connectionId, input.expectedRevision) });
+      const current = await connection(input.connectionId); if (current.transport.type === 'composio') throw new Error('Use plugin disconnect for Composio connections');
+      const deleted = await connections.delete(userId, input.connectionId, input.expectedRevision);
+      await vault.deleteMcpOAuth(input.connectionId);
+      return ok({ connectionId: input.connectionId, deleted });
     } catch (error) {
       if (error instanceof McpConnectionNotFoundError || error instanceof ProjectMcpGrantNotFoundError) return err(errors.McpNotFound({ resource: error instanceof ProjectMcpGrantNotFoundError ? 'grant' : 'connection', id: error.connectionId }));
       if (error instanceof McpConnectionRevisionConflictError || error instanceof ProjectMcpGrantRevisionConflictError) return err(errors.McpRevisionConflict({ resource: error.connectionId, expected: error.expected, actual: error.actual }));
@@ -230,6 +248,18 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     } catch (error) {
       if (error instanceof McpConnectionNotFoundError || error instanceof ProjectMcpGrantNotFoundError) return err(errors.McpNotFound({ resource: error instanceof ProjectMcpGrantNotFoundError ? 'grant' : 'connection', id: error.connectionId }));
       return err(errors.OperationFailed({ operation: 'connectionStatus', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const signIn = server.implement(signInMcpConnectionContract).handler(async ({ input, errors }) => {
+    try {
+      const current = await connection(input.connectionId);
+      if (current.transport.type !== 'http' && current.transport.type !== 'sse') throw new McpConnectionValidationError('transport', 'Only Streamable HTTP and SSE plugins sign in');
+      if (!current.enabled) throw new McpConnectionValidationError('enabled', 'Enable the plugin before signing in');
+      return ok({ authorizationUrl: await startMcpSignIn(env, current.id, current.transport.url) });
+    } catch (error) {
+      if (error instanceof McpConnectionNotFoundError) return err(errors.McpNotFound({ resource: 'connection', id: error.connectionId }));
+      if (error instanceof McpConnectionValidationError) return err(errors.McpInvalid({ field: error.field, message: error.message }));
+      return err(errors.OperationFailed({ operation: 'signIn', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const listGrants = server.implement(listProjectMcpGrantsContract).handler(async ({ input, errors }) => {
@@ -502,6 +532,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
     automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview },
-    mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
+    mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus, signIn }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

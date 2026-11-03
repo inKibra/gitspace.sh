@@ -36,7 +36,7 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
 // browser callback consumes, private key upload) are browser-only, as are deciding which GitHub accounts the App serves
 // (keeping, uninstalling, forgetting requests and removals).
 const excluded = (path: string) => path.startsWith('providers.login.') || [
-  'mcp.composio.authorize', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
+  'mcp.composio.authorize', 'mcp.connections.signIn', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
   'inspector.guide.setApproval', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
   'github.request.cancel', 'github.request.record', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
   'storageIncidents.list', 'storageIncidents.resume',

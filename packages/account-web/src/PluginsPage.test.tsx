@@ -11,6 +11,7 @@ const browsers: BrowserPluginsState = {
 const composioProps = {
   composioCatalog: { configured: true, toolkits: [] },
   onAuthorizeComposio: async () => 'https://connect.composio.dev/test',
+  onSignIn: async () => null,
   onRefreshComposio: noop,
   onLoadComposioTools: async () => [],
   onUpdateComposioTools: noop,

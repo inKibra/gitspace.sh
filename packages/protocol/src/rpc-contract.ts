@@ -1015,6 +1015,15 @@ export const getMcpConnectionStatusContract = gitspaceRpc
   .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
+/** Starts OAuth sign-in for a Streamable HTTP or SSE connection: returns the authorization server's page to open, or
+ * null when the stored grant was refreshed without one. The account Worker's callback finishes it. */
+export const signInMcpConnectionContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ connectionId: wire.string }))
+  .output(wire.object({ authorizationUrl: wire.nullable(wire.string) }))
+  .errors({ McpNotFound: rpcErrors.mcpNotFound, McpInvalid: rpcErrors.mcpInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 /** A Durable Object whose storage was quarantined (it wrote past its budget, or the platform's watchdog stopped it) or
  * that passed one of the watchdog's alert thresholds. `resolvedAt` is null while the incident is active: an alert
  * resolves when a later watchdog run finds the object back under every threshold, or when it is dismissed; a
@@ -2450,6 +2459,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       update: updateMcpConnectionContract,
       delete: deleteMcpConnectionContract,
       status: getMcpConnectionStatusContract,
+      signIn: signInMcpConnectionContract,
     },
     composio: {
       setup: {

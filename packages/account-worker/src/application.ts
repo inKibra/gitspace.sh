@@ -14,7 +14,7 @@ import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamC
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation, type UsageObservation } from '@gitspace/provider-auth';
 import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
 import type { AccountFailure, CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
-import type { ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
+import type { McpConnectionStatus, ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
 import { ProviderLoginEventCodec } from '@gitspace/protocol';
 import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js';
 import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSelectionSchema, type CloudImageSelection } from '@gitspace/protocol/cloud-image';
@@ -95,6 +95,7 @@ import {
 } from '@gitspace/protocol/deployment';
 import { refreshCredential, ProviderRefreshError, type StoredOAuthCredential } from './providers.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
+import { completeMcpSignIn, MCP_OAUTH_CALLBACK_PATH, mcpSignInPage } from './mcp-oauth.js';
 import { githubRequest, importGitHubAppPrivateKey, signGitHubAppJwt, verifyGitHubSignature } from './github-api.js';
 import { githubRoute } from './github-app.js';
 import { ProjectSecretsDO } from './project-secrets.js';
@@ -524,6 +525,17 @@ export class CredentialVaultDO extends BudgetedDurableObject {
           sealed_json TEXT NOT NULL,
           revision INTEGER NOT NULL,
           updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mcp_oauth (
+          connection_id TEXT PRIMARY KEY,
+          sealed_json TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mcp_oauth_pending (
+          state TEXT PRIMARY KEY,
+          connection_id TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS github_app_secrets (
           id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1324,6 +1336,44 @@ export class CredentialVaultDO extends BudgetedDurableObject {
 
   deleteProviderSecret(provider: 'composio'): { deleted: boolean } {
     return { deleted: this.ctx.storage.sql.exec('DELETE FROM provider_secrets WHERE provider = ?', provider).rowsWritten === 1 };
+  }
+
+  /** One custom MCP connection's OAuth state (client registration, tokens, discovery) as JSON, sealed per revision. */
+  async getMcpOAuth(connectionId: string): Promise<string | null> {
+    const config = this.config();
+    const row = this.mcpOAuthRow(connectionId);
+    if (!config || !row) return null;
+    return openVaultText(row.sealed_json, credentialProtocolBase64.decode(config.vault_key), `mcp-oauth:${connectionId}\n${row.revision}`);
+  }
+
+  async putMcpOAuth(connectionId: string, json: string): Promise<void> {
+    const config = this.config();
+    if (!config) throw new Error('This account has no credential vault');
+    const revision = (this.mcpOAuthRow(connectionId)?.revision ?? 0) + 1;
+    const sealed = await sealVaultText(json, credentialProtocolBase64.decode(config.vault_key), `mcp-oauth:${connectionId}\n${revision}`);
+    this.ctx.storage.sql.exec(`
+      INSERT INTO mcp_oauth(connection_id, sealed_json, revision, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(connection_id) DO UPDATE SET sealed_json=excluded.sealed_json,revision=excluded.revision,updated_at=excluded.updated_at
+    `, connectionId, sealed, revision, new Date().toISOString());
+  }
+
+  /** Forgets the connection's OAuth state and any sign-in in progress for it. */
+  deleteMcpOAuth(connectionId: string): void {
+    this.ctx.storage.sql.exec('DELETE FROM mcp_oauth WHERE connection_id = ?', connectionId);
+    this.ctx.storage.sql.exec('DELETE FROM mcp_oauth_pending WHERE connection_id = ?', connectionId);
+  }
+
+  /** Records the `state` of a sign-in the browser was sent to; it replaces the connection's earlier one. */
+  beginMcpOAuth(connectionId: string, state: string, expiresAt: number): void {
+    this.ctx.storage.sql.exec('DELETE FROM mcp_oauth_pending WHERE connection_id = ? OR expires_at < ?', connectionId, Date.now());
+    this.ctx.storage.sql.exec('INSERT INTO mcp_oauth_pending(state, connection_id, expires_at) VALUES (?, ?, ?)', state, connectionId, expiresAt);
+  }
+
+  /** The connection a callback's `state` belongs to, once; null when it is unknown or expired. */
+  consumeMcpOAuth(state: string): string | null {
+    const row = this.ctx.storage.sql.exec<{ connection_id: string; expires_at: number }>('SELECT connection_id, expires_at FROM mcp_oauth_pending WHERE state = ?', state).toArray()[0];
+    this.ctx.storage.sql.exec('DELETE FROM mcp_oauth_pending WHERE state = ?', state);
+    return row && row.expires_at > Date.now() ? row.connection_id : null;
   }
 
   /** The App's secrets from its manifest conversion, sealed; the private key never leaves the vault. */
@@ -2221,6 +2271,10 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       'SELECT provider, sealed_json, revision, updated_at FROM provider_secrets WHERE provider = ?',
       provider,
     ).toArray()[0];
+  }
+
+  private mcpOAuthRow(connectionId: string): { sealed_json: string; revision: number } | undefined {
+    return this.ctx.storage.sql.exec<{ sealed_json: string; revision: number }>('SELECT sealed_json, revision FROM mcp_oauth WHERE connection_id = ?', connectionId).toArray()[0];
   }
 
 }
@@ -3651,6 +3705,35 @@ const worker = {
         });
       } catch (error) {
         return new Response(error instanceof Error ? error.message : 'Composio authorization failed', { status: 400, headers: { 'cache-control': 'no-store' } });
+      }
+    }
+    // The authorization server sends the browser here with the `state` GitSpace issued; it is single-use.
+    if (url.pathname === MCP_OAUTH_CALLBACK_PATH && request.method === 'GET') {
+      const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
+      if (denied) return denied;
+      const state = url.searchParams.get('state') ?? '';
+      const connectionId = state ? await credentialVault(env, env.ACCOUNT_ID).consumeMcpOAuth(state) : null;
+      const connections = userMcpConnections(env, env.ACCOUNT_ID);
+      const connection = connectionId ? await connections.get(env.ACCOUNT_ID, connectionId) : null;
+      if (!connection) return mcpSignInPage('Sign-in expired', 'This sign-in expired or was already used. Start it again from Plugins.', 400);
+      const record = async (status: McpConnectionStatus, message: string | null) => {
+        const latest = await connections.get(env.ACCOUNT_ID, connection.id);
+        if (latest) await connections.recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision: latest.revision, status, message }).catch(() => undefined);
+      };
+      try {
+        const refused = url.searchParams.get('error');
+        if (refused) throw new Error(url.searchParams.get('error_description') ?? refused);
+        const code = url.searchParams.get('code');
+        if (!code) throw new Error('The authorization server returned no code');
+        const outcome = await completeMcpSignIn(env, connection, code);
+        await record(outcome.status, outcome.message);
+        return outcome.status === 'failed'
+          ? mcpSignInPage('Signed in, but the plugin did not connect', outcome.message ?? 'Connection failed', 502)
+          : mcpSignInPage('Plugin signed in', `${connection.label} is connected. You can close this window.`, 200);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await record('sign-in-required', `Sign-in failed: ${message}`.slice(0, 1024));
+        return mcpSignInPage('Sign-in failed', message, 400);
       }
     }
     if (url.pathname === '/v1/control' && request.method === 'POST') {

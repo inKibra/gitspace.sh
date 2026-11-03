@@ -63,6 +63,8 @@ export interface PluginsPageProps {
   onCreate(connection: McpConnectionDraftInput): Promise<void>;
   onUpdate(connectionId: string, expectedRevision: number, connection: McpConnectionDraftInput): Promise<void>;
   onDelete(connectionId: string, expectedRevision: number): Promise<void>;
+  /** Starts OAuth sign-in for a Streamable HTTP or SSE plugin: the page to open, or null when none is needed. */
+  onSignIn(connectionId: string): Promise<string | null>;
   onAuthorizeComposio(toolkit: string, label: string): Promise<string>;
   onRefreshComposio(connectionId: string): Promise<void>;
   onLoadComposioTools(connectionId: string): Promise<readonly ComposioPluginToolRpcView[]>;
@@ -105,7 +107,7 @@ function bindings(source: string) {
 function statusColor(status: McpConnectionRpcView['status']): 'gray' | 'green' | 'blue' | 'amber' | 'red' {
   if (status === 'ready') return 'green';
   if (status === 'connecting') return 'blue';
-  if (status === 'offline') return 'amber';
+  if (status === 'offline' || status === 'sign-in-required') return 'amber';
   if (status === 'failed') return 'red';
   return 'gray';
 }
@@ -232,6 +234,34 @@ export function PluginsPage(props: PluginsPageProps) {
     }
   };
 
+  const signIn = async (connection: McpConnectionRpcView) => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    const popup = window.open('', 'gitspace-mcp-sign-in', 'popup,width=720,height=760');
+    setPending(`sign-in:${connection.id}`);
+    setActionError(null);
+    try {
+      const authorizationUrl = await props.onSignIn(connection.id);
+      if (authorizationUrl === null) { popup?.close(); await props.onRefresh(); }
+      else if (popup) popup.location.href = authorizationUrl;
+      else window.location.assign(authorizationUrl);
+    } catch (failure) {
+      popup?.close();
+      setActionError(rpcErrorMessage(failure, 'Sign in'));
+    } finally {
+      pendingRef.current = false;
+      setPending(null);
+    }
+  };
+
+  useEffect(() => {
+    const signedIn = (event: MessageEvent<unknown>) => {
+      if (event.origin === window.location.origin && typeof event.data === 'object' && event.data !== null && 'type' in event.data && event.data.type === 'gitspace:mcp-sign-in') void props.onRefresh();
+    };
+    window.addEventListener('message', signedIn);
+    return () => window.removeEventListener('message', signedIn);
+  }, [props.onRefresh]);
+
   const error = props.error ?? actionError;
   return <PageCanvas>
     <PageHeader kicker="Account configuration" title="Plugins" description="Manage account connections, then explicitly grant each project access. Runtime diagnostics are separate and never required for management." />
@@ -283,7 +313,7 @@ export function PluginsPage(props: PluginsPageProps) {
         return <Card size="compact" key={connection.id}>
           <CardMedia icon={connection.transport.type === 'stdio' ? ServerGlyph : LinkGlyph} />
           <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{transportLabel} · {targetLabel}</CardDescription><span className="text-caption tabular-nums text-muted-foreground"><span className="font-mono">{connection.id}</span> · {grantCount} project grants</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
-          <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge><Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Switch checked={connection.enabled} label={connection.enabled ? 'Enabled' : 'Disabled'} disabled={pending !== null} onToggle={() => void settle(`connection:${connection.id}`, () => props.onUpdate(connection.id, connection.revision, customConnectionDraft(connection, !connection.enabled)))} /><Button variant="tertiary" size="icon-compact" aria-label={`Delete ${connection.label}`} onClick={() => void settle(`delete:${connection.id}`, () => props.onDelete(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
+          <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge>{connection.status === 'sign-in-required' && connection.transport.type !== 'stdio' ? <Button variant="primary" disabled={pending !== null} onClick={() => void signIn(connection)}>Sign in</Button> : null}<Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Switch checked={connection.enabled} label={connection.enabled ? 'Enabled' : 'Disabled'} disabled={pending !== null} onToggle={() => void settle(`connection:${connection.id}`, () => props.onUpdate(connection.id, connection.revision, customConnectionDraft(connection, !connection.enabled)))} /><Button variant="tertiary" size="icon-compact" aria-label={`Delete ${connection.label}`} onClick={() => void settle(`delete:${connection.id}`, () => props.onDelete(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
         </Card>;
       })}</CardGroup> : <EmptyState icon={<PuzzlePiece01 width={22} height={22} strokeWidth={1.5} />} title={customConnections.length ? 'No matching custom plugins' : 'No custom plugins connected'} description={customConnections.length ? 'Change the filter to see your custom plugins.' : 'Connect a local stdio, Streamable HTTP, or SSE MCP server.'} action={customConnections.length ? undefined : <Button variant="primary" leadingIcon={PlusGlyph} onClick={() => setCreatingCustom(true)}>Add custom plugin</Button>} />}
     </TabsSubtlePanel>

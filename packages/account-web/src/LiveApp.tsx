@@ -1374,6 +1374,7 @@ function AccountPlugins({ projects }: { projects: readonly ConfigurationProject[
     onCreate={async (connection) => { await configurationResult(rpcClient.mcp.connections.create({ connection })); await refresh(); }}
     onUpdate={async (connectionId, expectedRevision, connection) => { await configurationResult(rpcClient.mcp.connections.update({ connectionId, expectedRevision, connection })); await refresh(); }}
     onDelete={async (connectionId, expectedRevision) => { await configurationResult(rpcClient.mcp.connections.delete({ connectionId, expectedRevision })); await refresh(); }}
+    onSignIn={async (connectionId) => (await configurationResult(rpcClient.mcp.connections.signIn({ connectionId }))).authorizationUrl}
     onSetGrant={async (projectId, connectionId, projectSpaceEnabled, workspacesEnabled, expectedRevision) => {
       const updated = await configurationResult(rpcClient.mcp.grants.put({ projectId, connectionId, projectSpaceEnabled, workspacesEnabled, enabled: projectSpaceEnabled || workspacesEnabled, expectedRevision }));
       setGrants((current) => [...current.filter((grant) => grant.projectId !== projectId || grant.connectionId !== connectionId), updated]);
