@@ -9,11 +9,13 @@ import { ArtifactsCodeStore, artifactsWorkspaceRepository } from './artifacts.js
 import { validateSnapshotPath } from './artifacts-snapshot.js';
 import { parseEnvironmentBundleJson } from '@gitspace/protocol-environment';
 
-const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find', 'apply_patch']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
+/** `resolve_head` keeps the cloud's branch head over a machine's: it clears the HEAD conflict and changes no file. */
+const InvocationSchema = z.object({ tool: z.enum(['read', 'edit', 'write', 'find', 'apply_patch', 'resolve_head']), args: z.unknown(), requestId: z.string(), attemptId: z.string() });
 const PathSchema = z.object({ path: z.string().min(1) });
 type Checkpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 type Invocation = z.infer<typeof InvocationSchema>;
-const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, mutations: z.array(z.object({ path: z.string(), content: z.string().nullable() })) });
+/** `conflicts`: the conflict list the write leaves, when it settles one no file holds (HEAD). */
+const PendingSchema = z.object({ input: InvocationSchema, previous: RuntimeGitCheckpointSchema, mutations: z.array(z.object({ path: z.string(), content: z.string().nullable() })), conflicts: z.array(z.string()).optional() });
 const MachinePendingSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, previous: z.string().nullable(), current: RuntimeGitCheckpointSchema.nullable(), base: RuntimeGitCheckpointSchema.nullable(), machineId: z.string() });
 const RetentionCheckpointSchema = RuntimeGitCheckpointSchema.extend({ publicationId: z.string().optional(), acceptedPublicationIds: z.array(z.string()).optional() });
 const CLOUD_FILE_READ_LIMIT = 8 * 1024 * 1024;
@@ -280,7 +282,7 @@ export class CloudFileStore {
       const readOnly = input.tool === 'read' || input.tool === 'find';
       const previous = readOnly ? await this.snapshot() ?? await this.initializeSnapshot() : await this.initializeSnapshot();
       if (!previous) throw new Error('Workspace has no committed source snapshot');
-      const path = input.tool === 'find' || input.tool === 'apply_patch' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
+      const path = input.tool === 'find' || input.tool === 'apply_patch' || input.tool === 'resolve_head' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
       if (path) validateSnapshotPath(path);
       this.storage.sql.exec('INSERT OR IGNORE INTO runtime_cloud_files(id,input) VALUES(?,?)', input.attemptId, canonicalJson(input));
       if (input.tool === 'find') {
@@ -291,6 +293,13 @@ export class CloudFileStore {
         const matches = paths.filter(candidate => (!root || root === '.' || candidate === root || candidate.startsWith(`${root}/`)) && attributeMatches(args.pattern, candidate));
         const completed = result('completed', matches.join('\n'));
         this.complete(input, completed); return completed;
+      }
+      if (input.tool === 'resolve_head') {
+        if (!previous.conflicts?.includes('HEAD')) throw new Error(`HEAD is not in conflict. Current conflicts: ${previous.conflicts?.join(', ') || 'none'}`);
+        pending = { input, previous, mutations: [], conflicts: previous.conflicts.filter(conflict => conflict !== 'HEAD') };
+        this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
+        await this.storage.sync();
+        return this.finish(pending);
       }
       if (input.tool === 'apply_patch') {
         const args = ApplyPatchArgumentsSchema.parse(input.args);
@@ -389,10 +398,10 @@ export class CloudFileStore {
   private async finish(pending: z.infer<typeof PendingSchema>): Promise<RuntimeToolResult> {
     const { input, previous } = pending;
     // Derived only from the durable pending record, so a recovered publication reproduces the same commit.
-    const supplied = input.tool === 'write' ? RuntimeWriteArgumentsSchema.parse(input.args).message : input.tool === 'edit' ? RuntimeEditArgumentsSchema.parse(input.args).message : input.tool === 'apply_patch' ? ApplyPatchArgumentsSchema.parse(input.args).message : undefined;
+    const supplied = input.tool === 'write' ? RuntimeWriteArgumentsSchema.parse(input.args).message : input.tool === 'edit' ? RuntimeEditArgumentsSchema.parse(input.args).message : input.tool === 'apply_patch' ? ApplyPatchArgumentsSchema.parse(input.args).message : input.tool === 'resolve_head' ? 'Resolve the HEAD conflict: keep the cloud\'s branch head' : undefined;
     const changed = [...new Set(pending.mutations.map(mutation => mutation.path))];
     const subject = supplied ?? `${input.tool} ${changed.length <= 3 ? changed.join(', ') : `${changed.slice(0, 3).join(', ')} and ${changed.length - 3} more`}`;
-    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, message: `${subject}\n\nGitSpace-Tool: ${input.tool}\n`, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })) });
+    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, message: `${subject}\n\nGitSpace-Tool: ${input.tool}\n`, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })), ...(pending.conflicts ? { conflicts: pending.conflicts } : {}) });
     if (written.isErr()) {
       if (written.error.certainty === 'unknown') throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: written.error.message });
       const failed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: written.error.message }], error: { code: 'HOST_OPERATION_FAILED', message: written.error.message } };
@@ -400,7 +409,7 @@ export class CloudFileStore {
       await this.storage.sync();
       return failed;
     }
-    const completed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool === 'write' ? 'Wrote' : input.tool === 'apply_patch' ? 'Patched' : 'Edited'} ${pending.mutations.map(mutation => mutation.path).join(', ')}` }] };
+    const completed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: input.tool === 'resolve_head' ? `Kept the cloud's branch head ${previous.headCommit ?? '(none)'}; HEAD is no longer in conflict` : `${input.tool === 'write' ? 'Wrote' : input.tool === 'apply_patch' ? 'Patched' : 'Edited'} ${pending.mutations.map(mutation => mutation.path).join(', ')}` }] };
     this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
       const current = row ? RuntimeGitCheckpointSchema.parse(JSON.parse(row.checkpoint)) : null;

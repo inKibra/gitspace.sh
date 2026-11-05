@@ -1,7 +1,7 @@
 import { defineDoc, defineTask, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context, JsonValue } from '@earendil-works/chord';
 import { awaitWithContext, withAbortSignal } from '@earendil-works/chord/context';
-import { RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation } from '@gitspace/protocol-runtime';
+import { PROCESS_MACHINE_DETACHED, RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
@@ -141,6 +141,15 @@ export const ProcessExitsDoc = defineDoc<{ exits: Record<string, { daemon: JsonV
 /** Reports no watch takes (a process started outside a watch) are dropped beyond this many, oldest first. */
 const MAX_PROCESS_EXIT_REPORTS = 100;
 export const processExitKey = (daemon: Pick<DaemonSnapshot, 'id' | 'restartCount'>) => `${daemon.id}:${daemon.restartCount}`;
+/** Why a watched process can no longer be observed or stopped, when that is certain: its machine's supervisor answers
+ * that it does not know the process (it is not running there), or the machine has left the workspace. An offline machine
+ * or any other failure is not certain, and is tried again. */
+function processGone(result: RuntimeToolResult, name: string): string | null {
+  if (result.status !== 'failed') return null;
+  if (result.error.code === PROCESS_MACHINE_DETACHED) return result.error.message;
+  if (result.error.message === `Unknown process ${name}`) return `The machine's supervisor no longer knows process ${name}, so it is not running there`;
+  return null;
+}
 /** Records a machine's report that a process exited. */
 export function recordProcessExit(exits: { exits: Record<string, { daemon: JsonValue; reportedAt: number }> }, daemon: DaemonSnapshot, now: number): void {
   if (daemon.state !== 'exited' && daemon.state !== 'failed') throw new Error('Only an exited or failed process is reported');
@@ -192,6 +201,11 @@ export function createProcessExitTask(services: JobServices) {
             // An observation is a read: it leaves no receipt in the transcript and no record on the machine.
             const requestId = `process-observation:${runtime.taskId}:${poll}`;
             const result = await services.observeProcess({ originAttemptId: task.input.originAttemptId, conversationId: String(runtime.conversationId), taskId: String(runtime.taskId), requestId, attemptId: requestId, args: { ...args, restartCount } });
+            const gone = processGone(result, args.name);
+            if (gone !== null) {
+              await runtime.commit(async tx => { delete (await tx.doc(ProcessExitsDoc)).exits[key]; return { status: 'terminal', outcome: { status: 'failed', error: { message: gone } } }; }, context);
+              return;
+            }
             if (result.status !== 'completed') throw new Error('Process observation unavailable');
             const text = result.content.find(item => item.type === 'text');
             if (!text || text.type !== 'text') throw new Error('Process observation missing');
@@ -245,6 +259,11 @@ export function createProcessExitTask(services: JobServices) {
             await tx.appendEntry(runtime.conversationId, { kind: 'gitspace.executor-results', data: { results: [{ attemptId: result.attemptId, sha256 }] } });
             return { status: 'running', checkpoint: { phase: 'observe', poll, restartCount, failures, stopFailing } };
           }, context);
+          const gone = processGone(result, args.name);
+          if (gone !== null) {
+            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted', reason: `Conversation stopped; ${gone}` } }), context);
+            return;
+          }
           if (result.status !== 'completed') throw new Error('Owned process stop remains unresolved');
           const text = result.content.find(item => item.type === 'text');
           if (!text || text.type !== 'text') throw new Error('Process stop observation missing');

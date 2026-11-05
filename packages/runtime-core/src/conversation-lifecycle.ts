@@ -341,8 +341,14 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       try {
         const records = await serialized(() => setStopped(id, true));
         const targets = await Promise.all(records.map(record => resolve(String(record.id))));
-        await Promise.all(targets.map(target => target.abort(context, { background: true })));
+        // The turn and its tools: marked, queued inputs withdrawn, and waited until they end.
+        await Promise.all(targets.map(target => target.abort(context)));
+        // Background work (process watches, jobs, background subagents) is only marked: its abort ends it, and a process
+        // stop waits for its machine to confirm, which a detached or offline machine may never do. A message sent after
+        // Stop waits for these marks, not for that confirmation.
         const stopped = new Set(records.map(record => String(record.id)));
+        const { tasks } = await harness.inspect(context);
+        await Promise.all(tasks.filter(({ record }) => record.background && record.owner === undefined && stopped.has(String(record.conversationId))).map(({ record }) => harness.abortTask(record.id, context)));
         await harness.commit(async tx => {
           const questions = await tx.doc(QuestionsDoc);
           questions.items = questions.items.filter(question => question.answer !== null || !stopped.has(question.conversationId));

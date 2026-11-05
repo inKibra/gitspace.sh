@@ -586,6 +586,32 @@ for (const resolution of ['cache', 'cloud'] as const) for (const replacement of 
   } finally { await f.close(); }
 });
 
+test('a HEAD conflict stays through sync and clears once a machine moves its branch to where the branch then is', async () => {
+  const f = await fixture();
+  try {
+    const reader = { ...f.repo, readBlob: async (oid: string) => new Blob([Uint8Array.from((await git.readBlob({ fs, dir: f.dir, oid })).blob)]) };
+    const head = f.previous.headCommit;
+    if (!head) throw new Error('Fixture has no head');
+    const child = async (message: string) => git.writeCommit({ fs, dir: f.dir, commit: { tree: f.previous.worktreeTree, parent: [head], author, committer: author, message } });
+    const conflicted = { ...f.previous, conflicts: ['HEAD'] };
+    // Sync put the machine on the cloud's head, which is its base: nothing it chose.
+    expect((await planSnapshotMerge(reader, conflicted, conflicted, f.previous)).conflicts).toEqual(['HEAD']);
+    // A commit on the cloud's head.
+    const next = await child('next\n');
+    expect((await planSnapshotMerge(reader, conflicted, conflicted, { ...f.previous, headCommit: next })).conflicts).toEqual([]);
+    // The cloud's head moved, and the machine checked that head out.
+    const moved = { ...conflicted, headCommit: next };
+    expect((await planSnapshotMerge(reader, f.previous, moved, { ...f.previous, headCommit: next })).conflicts).toEqual([]);
+    // The machine moved elsewhere while the cloud's head moved: the branch heads diverge again.
+    const other = await child('other\n');
+    expect((await planSnapshotMerge(reader, f.previous, moved, { ...f.previous, headCommit: other })).conflicts).toEqual(['HEAD']);
+    // Keeping the cloud's head (sync resolve): a write that changes no file publishes the conflict list without HEAD.
+    const kept = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: { ...f.previous, conflicts: ['HEAD', 'other'] }, mutations: [], conflicts: ['other'] }, f.request);
+    if (kept.isErr()) throw kept.error;
+    expect([kept.value.conflicts, kept.value.headCommit, kept.value.worktreeTree]).toEqual([['other'], head, f.previous.worktreeTree]);
+  } finally { await f.close(); }
+});
+
 for (const publication of ['cloud', 'cache'] as const) test(`${publication} publication introduces conflict flags for marker content and clears them only after resolution`, async () => {
   const f = await fixture();
   try {

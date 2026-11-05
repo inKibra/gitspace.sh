@@ -32,7 +32,7 @@ import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper } from './runtime-inference.js';
-import { RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { machineCapabilities } from './runtime-attachments.js';
@@ -540,6 +540,18 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const cloud = await runtime.cloudFiles.initializeSnapshot();
     if (!cloud) throw new Error('Cloud working copy is unavailable');
     if (!(cloud.conflicts ?? []).includes(path)) throw new Error(`${path} is not in conflict. Current conflicts: ${(cloud.conflicts ?? []).join(', ') || 'none'}`);
+    // HEAD: the branch moved differently on a machine and in the cloud, and the cloud kept its head. Keeping it clears the
+    // flag; the machine's own commits are not in the cloud, so keeping them is the machine's move.
+    if (path === 'HEAD') {
+      if (keep === 'machine') throw new Error('The machine\'s commits the branch did not take are not in the cloud. On that machine, merge or cherry-pick them onto the branch\'s current head and commit: the branch moving that way clears the HEAD conflict.');
+      const checkpointRef = `refs/gitspace/backups/cloud/${Date.now()}`;
+      await code.copyCommit(repository, repository, checkpointRef, cloud.worktreeCommit, null);
+      const result = await runtime.cloudFiles.execute({ ...input, requestId: `${input.requestId}:resolve:1`, attemptId: `${input.attemptId}:resolve:1`, tool: 'resolve_head', args: {} }, input.signal);
+      if (result.status !== 'completed') throw new Error(result.status === 'failed' ? result.error.message : 'Resolving HEAD was interrupted; check sync status before retrying');
+      const resolved = await runtime.cloudFiles.snapshot();
+      await recordBackup(code, repository, { checkpointRef, commit: cloud.worktreeCommit, base: resolved?.worktreeCommit ?? cloud.worktreeCommit }, 'cloud', 'resolve HEAD: keep cloud', [{ status: 'C', path }]);
+      return { resolved: path, keep, backup: checkpointRef, conflicts: resolved?.conflicts ?? [] };
+    }
     const reader = code.reader(repository);
     const entries = await snapshotEntries(reader, cloud.worktreeTree).finally(() => reader.close());
     const sibling = [...entries.keys()].find(other => other.startsWith(`${path}.gitspace-machine-`)) ?? null;
@@ -876,9 +888,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (name === null || name !== object.parse(input.args).name) throw new Error('Process control identity changed');
     let admission = savedDispatch(input.attemptId);
     if (admission && (admission.tool !== 'proc' || admission.machineId !== origin.machineId || admission.projectId !== origin.projectId || admission.workspaceId !== origin.workspaceId || admission.parentAttemptId !== input.originAttemptId || admission.conversationId !== input.conversationId || admission.taskId !== input.taskId || admission.requestId !== input.requestId || admission.replay !== replay || canonicalJson(admission.args) !== canonicalJson(input.args))) throw new Error('Process control identity changed');
-    const selected = options.runtime().attachments.list()
-      .filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId && isAttachmentReady(attachment))
-      .sort((left, right) => right.generation - left.generation)[0];
+    const onMachine = options.runtime().attachments.list().filter(attachment => attachment.machineId === origin.machineId && attachment.projectId === origin.projectId && attachment.workspaceId === origin.workspaceId);
+    const selected = onMachine.filter(isAttachmentReady).sort((left, right) => right.generation - left.generation)[0];
+    if (!selected && onMachine.every(attachment => attachment.state === 'detached')) {
+      return { requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [], error: { code: PROCESS_MACHINE_DETACHED, message: `Machine ${origin.machineId} is detached from this workspace: its process cannot be reached and may still run there` } };
+    }
     if (!selected) throw new Error('Original process machine is unreachable: no READY execution cache');
     if (!admission) {
       admission = RuntimeToolDispatchSchema.parse({ ...origin, attachmentId: selected.attachmentId, generation: selected.generation, parentAttemptId: input.originAttemptId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, args: input.args, replay, deadlineAt: new Date(Date.now() + 30_000).toISOString() });

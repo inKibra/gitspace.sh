@@ -20,12 +20,13 @@ async function until(done: () => boolean): Promise<void> {
 
 const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'lifecycle-fixture', name: 'Lifecycle fixture', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
-async function fixture(storage: Storage = new MemoryStorage(), blocked = false, failFirst?: Promise<void>) {
+/** `backgroundStopHeld`: the background task's abort waits for it, as a process stop its machine never confirms does. */
+async function fixture(storage: Storage = new MemoryStorage(), blocked = false, failFirst?: Promise<void>, backgroundStopHeld?: Promise<void>) {
   const seen: string[] = [];
   const threeStarted = Promise.withResolvers<void>();
   let aborted = 0;
   let backgroundAborted = 0;
-  const background = defineTask<null, { phase: 'wait' }, null>({ name: 'proof.BackgroundCommand', version: 1, initial: () => ({ phase: 'wait' }), phases: { async wait(_task, runtime, ctx) { await runtime.sleep(Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { backgroundAborted++; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
+  const background = defineTask<null, { phase: 'wait' }, null>({ name: 'proof.BackgroundCommand', version: 1, initial: () => ({ phase: 'wait' }), phases: { async wait(_task, runtime, ctx) { await runtime.sleep(Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { backgroundAborted++; await backgroundStopHeld; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
   const registry = createRegistry(); registry.install(defineExtension({ name: 'proof.background', tasks: [background] }));
   const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input, options) {
     seen.push(JSON.stringify(input.messages));
@@ -233,7 +234,7 @@ test('Stop aborts three actual running child conversations and persists the latc
     await f.threeStarted;
     await f.lifecycle.stop(String(f.root.id));
     expect(f.aborted()).toBe(3);
-    expect(f.backgroundAborted()).toBe(1);
+    await until(() => f.backgroundAborted() === 1);
     for (const id of children) expect((await f.harness.snapshot(ConversationLifecycleDoc, id, context))?.stopped).toBe(true);
     await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId: 'late-completion', kind: 'command-completed', text: 'Background command finished after Stop' });
     expect(f.seen).toHaveLength(3);
@@ -254,6 +255,23 @@ test('Stop aborts three actual running child conversations and persists the latc
     expect(reopened.seen.join('\n')).toContain('Queued child followup');
     for (const id of children) expect((await reopened.harness.snapshot(ConversationLifecycleDoc, id, context))?.stopped).toBe(false);
   } finally { await reopened.harness.close(context); }
+}, 5000);
+
+test('a Stop whose background work never finishes stopping lets the next message through', async () => {
+  const held = Promise.withResolvers<void>();
+  const f = await fixture(new MemoryStorage(), true, undefined, held.promise);
+  try {
+    await f.root.submit({ type: 'input', requestId: 'first', content: 'Remain running' }, context);
+    await until(() => f.seen.length === 1);
+    void f.lifecycle.stop(String(f.root.id));
+    await until(() => f.backgroundAborted() === 1);
+    let accepted = false;
+    void f.lifecycle.userInput(String(f.root.id), () => f.root.submit({ type: 'input', requestId: 'second', content: 'After Stop', whenBusy: 'followUp' }, context)).then(() => { accepted = true; });
+    await until(() => accepted);
+    await until(() => f.seen.length === 2);
+    expect(f.aborted()).toBe(1);
+    expect(f.seen[1]).toContain('After Stop');
+  } finally { held.resolve(); await f.harness.close(context); }
 }, 5000);
 
 test('wait returns first durable event of every kind, then times out, and supports cancellation', async () => {

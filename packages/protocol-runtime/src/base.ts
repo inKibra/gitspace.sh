@@ -17,6 +17,9 @@ export const RuntimeBrowserExecutionSchema = z.strictObject({ pairingId: z.strin
 export type RuntimeBrowserExecution = z.infer<typeof RuntimeBrowserExecutionSchema>;
 const result = { requestId: z.string().min(1), attemptId: z.string().min(1), content: z.array(RuntimeContentSchema), browser: RuntimeBrowserExecutionSchema.optional() };
 export const RuntimeToolResultSchema = z.discriminatedUnion('status', [z.object({ ...result, status: z.literal('completed') }), z.object({ ...result, status: z.literal('failed'), error: z.object({ code: z.string(), message: z.string() }) }), z.object({ ...result, status: z.literal('interrupted') })]);
+/** A process control's failure code when the process's machine has no attachment left in its workspace: the control
+ * cannot reach the process, which may still run there. */
+export const PROCESS_MACHINE_DETACHED = 'machine_detached';
 export const RuntimeCheckoutSchema = z.object({ kind: z.literal('shared'), branch: z.string().min(1) });
 export const RuntimeCacheObservationSchema = z.object({
   state: z.enum(['setup', 'live']),

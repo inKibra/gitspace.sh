@@ -266,6 +266,10 @@ export async function planSnapshotMerge(repo: Reader, base: RuntimeGitCheckpoint
     return mutations;
   };
   const headChanged = machine.headCommit !== base.headCommit, branchChanged = machine.branch !== base.branch;
+  // A machine moving its branch itself settles a HEAD conflict when the branch ends where it chose: the cloud's head had
+  // not moved (the cloud takes the machine's), or the machine moved onto the cloud's head. Sync putting a machine back on
+  // the cloud's head is no such move: that head is the machine's base.
+  if (headChanged && (cloud.headCommit === base.headCommit || cloud.headCommit === machine.headCommit)) conflicts.delete('HEAD');
   // The machine's additions and removals since its base apply to the cloud's entries. A union kept every entry a machine
   // had since resolved (a held-back file it now sends): the cloud then called the publication unchanged and answered its
   // old version, which the machine installed, which rewrote its index and started the next sync (SIMPLIFICATION 142).

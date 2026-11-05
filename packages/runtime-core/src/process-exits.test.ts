@@ -8,7 +8,7 @@ import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/n
 import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import { ProcessSupervisor, DaemonRequestSchema } from '@gitspace/supervisor';
-import { RuntimeProcArgumentsSchema } from '@gitspace/protocol-runtime';
+import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ProcessExitsDoc, createProcessExitTask, recordMachineReconnection, recordProcessExit, type JobServices } from './jobs.js';
 
 const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
@@ -245,5 +245,47 @@ test('a Stop its machine does not confirm backs off while it fails, then waits f
     expect((await f.harness.waitForTask(f.id, context)).state.outcome).toMatchObject({ status: 'aborted', reason: 'Conversation stopped' });
     expect([attempts, delays.length]).toEqual([13, 11]);
     expect(f.reports).toEqual(['Owned process stop remains unresolved']);
+  } finally { await f.close(); }
+}, 8000);
+
+/** A machine whose supervisor restarted without the process's records: the failure its executor returns, from a real
+ * supervisor that never ran the process. */
+async function forgottenProcess(input: { requestId: string; attemptId: string; args: unknown }): Promise<RuntimeToolResult> {
+  const rootPath = await mkdtemp(join(tmpdir(), 'process-forgotten-'));
+  const fresh = new ProcessSupervisor(rootPath);
+  await fresh.recover();
+  try {
+    const control = RuntimeProcArgumentsSchema.parse(input.args);
+    if (control.op !== 'status' && control.op !== 'stop') throw new Error('Unexpected process control');
+    const message = await fresh.request(DaemonRequestSchema.parse({ op: 'describe', name: control.name, instanceId: control.instanceId })).then(() => 'known', (error: unknown) => error instanceof Error ? error.message : String(error));
+    return { status: 'failed', requestId: input.requestId, attemptId: input.attemptId, content: [], error: { code: 'execution', message } };
+  } finally { await fresh.request({ op: 'shutdown' }); await rm(rootPath, { recursive: true, force: true }); }
+}
+
+for (const mode of ['Stop, process forgotten', 'Stop, machine detached', 'watch, process forgotten'] as const) test(`a watch whose process is certainly out of reach ends instead of retrying (${mode})`, async () => {
+  let controls = 0;
+  const f = await watched(() => ({
+    ...(mode === 'watch, process forgotten' ? { async observeProcess(input) { controls++; return forgottenProcess(input); } } : {}),
+    async stopProcess(input) {
+      controls++;
+      if (mode === 'Stop, machine detached') return { status: 'failed', requestId: input.requestId, attemptId: input.attemptId, content: [], error: { code: PROCESS_MACHINE_DETACHED, message: 'Machine m-1 is detached from this workspace' } };
+      return forgottenProcess(input);
+    },
+  }));
+  const context = withAbortSignal(AbortSignal.timeout(4000), BACKGROUND_CONTEXT);
+  try {
+    if (mode === 'watch, process forgotten') {
+      f.harness.resume();
+      expect((await f.harness.waitForTask(f.id, context)).state.outcome).toEqual({ status: 'failed', error: { message: 'The machine\'s supervisor no longer knows process server, so it is not running there' } });
+    } else {
+      const observed = f.observed();
+      f.harness.resume();
+      await awaitWithContext(observed, context);
+      await f.root.abort(context, { background: true });
+      const reason = mode === 'Stop, machine detached' ? 'Machine m-1 is detached from this workspace' : 'The machine\'s supervisor no longer knows process server, so it is not running there';
+      expect((await f.harness.waitForTask(f.id, context)).state.outcome).toEqual({ status: 'aborted', reason: `Conversation stopped; ${reason}` });
+      expect(f.reports).toEqual([]);
+    }
+    expect(controls).toBe(1);
   } finally { await f.close(); }
 }, 8000);
