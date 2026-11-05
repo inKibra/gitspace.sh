@@ -206,4 +206,21 @@ describe('Inspector artifact uploads', () => {
 
     expect(remove).toHaveBeenCalledExactlyOnceWith([`drive://workspace/${capture}/capture.json`, `drive://workspace/${capture}/image.jpg`, `drive://workspace/${capture}/thumbnail.jpg`]);
   });
+
+  it('keeps the open folder after a file is opened and the Drive tab is chosen again', async () => {
+    props.drive = { ...props.drive!, files: [driveFile('notes/plan.md'), driveFile('notes/call.m4a'), driveFile('readme.md')] };
+    props.artifactReferences = [{ kind: 'artifact', url: 'drive://workspace/notes/plan.md', hash: 'hash', label: 'notes/plan.md', mediaType: null, generation: 1 }];
+    props.onRequestArtifact = () => Promise.withResolvers<never>().promise;
+    await render();
+    await act(async () => [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('notes'))!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('plan.md'))!.click());
+    expect(container.querySelector('[aria-label="Workspace Inspector"] header strong')?.textContent).toBe('notes/plan.md');
+    expect(container.querySelector('nav[aria-label="Folder"]')?.closest('[role="tabpanel"]')?.hasAttribute('hidden') ?? true).toBe(true);
+
+    await act(async () => [...container.querySelectorAll('[role="tab"]')].find((node) => node.textContent?.startsWith('Drive'))!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+    expect(container.querySelector('nav[aria-label="Folder"]')?.textContent).toContain('notes');
+    expect(container.textContent).toContain('call.m4a');
+    expect(container.textContent).not.toContain('readme.md');
+  });
 });

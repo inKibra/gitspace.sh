@@ -246,6 +246,9 @@ const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }
   { id: 'journal', label: 'Journal' },
 ];
 const agentSetupTabIndex = permanentTabs.findIndex((tab) => tab.id === 'agents');
+/** Files and Drive stay mounted once opened, hidden while another tab or a document shows: the tree's open folders, the
+ * drive's folder, filter and sort, and both scroll positions survive opening a file. */
+const keptMounted: Partial<Record<InspectorPermanentView, true>> = { files: true, artifacts: true };
 const repositoryModes: ReadonlyArray<{ id: RepositoryMode; label: string }> = [
   { id: 'current', label: 'Current files' },
   { id: 'working', label: 'Unstaged' },
@@ -998,6 +1001,8 @@ export function Inspector(props: InspectorProps) {
   const [view, setView] = useState<ActiveView>(props.initialView ?? 'goal');
   const [agentSetupDirty, setAgentSetupDirty] = useState(false);
   useEffect(() => { if (props.initialView) setView(props.initialView); }, [props.initialView]);
+  const [opened, setOpened] = useState<ReadonlySet<InspectorPermanentView>>(() => new Set());
+  useEffect(() => { if (view !== 'document' && keptMounted[view]) setOpened((current) => current.has(view) ? current : new Set([...current, view])); }, [view]);
   const [documents, setDocuments] = useState<InspectorOpenDocument[]>([]);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [fileModes, setFileModes] = useState<Record<string, RepositoryMode>>({});
@@ -1222,15 +1227,19 @@ export function Inspector(props: InspectorProps) {
   let body: ReactNode;
   if (props.loading) body = <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label="Loading Inspector authority state…" /></div>;
   else if (props.error) body = <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Inspector could not load" description={props.error} /></Padded>;
-  else if (view === 'document') body = document;
-  else body = permanentTabs.map((tab, index) => {
+  else body = <>{view === 'document' ? document : null}{permanentTabs.map((tab, index) => {
     if (tab.id === 'agents') return null;
+    const kept = keptMounted[tab.id] === true;
+    if (kept ? tab.id !== view && !opened.has(tab.id) : view === 'document') return null;
     const failure = props.sectionErrors?.[tab.id];
-    return <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>
+    const content = <>
       {failure?.retained ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{tab.label} refresh failed; showing the last accepted state. {failure.message}<Button variant="ghost" size="compact" onClick={failure.retry}>Retry {tab.label}</Button></p> : null}
       {renderSurface(tab.id)}
-    </TabsSubtlePanel>;
-  });
+    </>;
+    return kept
+      ? <div role="tabpanel" id={`inspectorTabs-panel-${index}`} aria-labelledby={`inspectorTabs-tab-${index}`} hidden={view !== tab.id} className={view === tab.id ? 'flex min-h-0 flex-1 flex-col' : 'hidden'} key={tab.id}>{content}</div>
+      : <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>{content}</TabsSubtlePanel>;
+  })}</>;
   return <ResourceNavigation.Provider value={openResource}><RuntimeAvailability.Provider value={runtimeAvailable}><div className="flex h-full min-h-0 flex-col bg-surface-2" aria-label="Workspace Inspector">
     {!runtimeAvailable ? <p className="px-4 pt-3 text-caption text-muted-foreground">Cloud Inspector · Saved records. Live files, processes, terminals, and services are unavailable.</p> : null}
     <div className="flex shrink-0 items-center gap-1 px-2 pb-1 pt-2">
