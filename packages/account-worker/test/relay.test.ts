@@ -540,6 +540,25 @@ describe('portable RelayDO', () => {
     expect(new TextDecoder().decode(requestBody)).toBe('request body');
     machine.close(1000, 'done');
   });
+  it('passes a compressed machine response through with its encoding, so the client decodes the original body', async () => {
+    const machine = await openSocket('machine', 'darktop');
+    const page = '<p>inKibra</p>'.repeat(4_000);
+    const gzipped = new Uint8Array(await new Response(new Blob([page]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    machine.addEventListener('message', (event) => {
+      if (typeof event.data !== 'string') return;
+      const message = parseTunnelRequest(event.data);
+      if (message.type !== 'tunnel.request.end') return;
+      machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [['content-type', 'text/html'], ['content-encoding', 'gzip']] }));
+      // Two chunks, as a chunked upstream arrives.
+      for (const part of [gzipped.subarray(0, 100), gzipped.subarray(100)]) machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.chunk', requestId: message.requestId, data: encodeTunnelChunk(part) }));
+      machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
+    });
+
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/', { headers: { 'accept-encoding': 'gzip' } }));
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(page);
+  });
   it('stores client-sealed artifact bytes by their content address', async () => {
     // The route stores what the client sealed, opaque to the account.
     const sealed = crypto.getRandomValues(new Uint8Array(96));

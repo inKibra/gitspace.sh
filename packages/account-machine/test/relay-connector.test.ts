@@ -9,6 +9,7 @@ import {
   RELAY_PING_MESSAGE,
   RELAY_PONG_MESSAGE,
   RELAY_PROTOCOL_VERSION,
+  decodeTunnelChunk,
   type MachineLiveNotice,
   type RelayNotice,
 } from '@gitspace/protocol';
@@ -208,6 +209,32 @@ describe('MachineRelayConnector transport recovery', () => {
     advance(RELAY_HEARTBEAT_INTERVAL_MS);
     socket.pong();
     expect(socket.readyState).toBe(1);
+  });
+
+  it('sends a compressed local response into the tunnel as its own bytes with its encoding', async () => {
+    const page = '<p>inKibra</p>'.repeat(4_000);
+    const gzipped = Bun.gzipSync(new TextEncoder().encode(page));
+    // A chunked gzip body, as `wrangler dev` answers.
+    const local = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(new Blob([gzipped]).stream(), { headers: { 'content-encoding': 'gzip', 'content-type': 'text/html' } }) });
+    const relay = new MachineRelayConnector({ relayUrl: 'https://relay.test', machineId: 'machine-test', machineGrant, signingPrivateKey: privateKey, localOrigin: `http://127.0.0.1:${local.port}` });
+    try {
+      relay.start();
+      const socket = Socket.instances.at(-1)!;
+      socket.open();
+      socket.pong();
+      const ended = Promise.withResolvers<void>();
+      const send = socket.send.bind(socket);
+      socket.send = (input: string) => { send(input); if (input.includes('"tunnel.response.end"') || input.includes('"tunnel.response.error"')) ended.resolve(); };
+      const requestId = crypto.randomUUID();
+      socket.receive({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.request.start', requestId, method: 'GET', path: '/', headers: [['accept-encoding', 'gzip']] });
+      socket.receive({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.request.end', requestId });
+      await ended.promise;
+      const messages = socket.sent.filter((message) => message !== RELAY_PING_MESSAGE).map((message) => JSON.parse(message));
+      const start = messages.find((message) => message.type === 'tunnel.response.start');
+      expect(new Headers(start?.headers).get('content-encoding')).toBe('gzip');
+      const body = Buffer.concat(messages.filter((message) => message.type === 'tunnel.response.chunk').map((message) => decodeTunnelChunk(message.data)));
+      expect(new Uint8Array(body)).toEqual(gzipped);
+    } finally { relay.stop(); local.stop(true); }
   });
 
   it('logs the close frame, connection age, and aborted forwards when the relay closes the socket', async () => {

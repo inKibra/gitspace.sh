@@ -257,8 +257,11 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       const result = await serialized(async () => {
         if (pendingStops.size) return { kind: 'stopping' as const, waits: [...pendingStops] };
         const targets = await setStopped(id, false);
+        // The person's message goes in first; events that waited while the conversation was stopped (the process exits
+        // a Stop causes, among others) follow it, instead of starting a turn the message would queue behind.
+        const value = await operation();
         for (const target of targets) await flush(String(target.id));
-        return { kind: 'submitted' as const, value: await operation() };
+        return { kind: 'submitted' as const, value };
       });
       if (result.kind === 'submitted') return result.value;
       await Promise.all(result.waits);

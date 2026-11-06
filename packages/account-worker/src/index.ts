@@ -733,7 +733,8 @@ export class UserRelayDO extends BudgetedDurableObject {
             void writer.closed.catch((error) => this.failTunnel(message.requestId, error instanceof Error ? error : new Error(String(error))));
           }
           const headers = new Headers(filteredHeaders(new Headers(message.headers), false));
-          const response = this.tunnelCors(new Response(stream?.readable ?? null, { status: message.status, headers }), pending.origin);
+          // A body the machine's service already compressed is sent as those bytes; `automatic` would compress it again.
+          const response = this.tunnelCors(new Response(stream?.readable ?? null, { status: message.status, headers, encodeBody: headers.has('content-encoding') ? 'manual' : 'automatic' }), pending.origin);
           pending.responseStarted = true;
           pending.resolve(response);
           return;

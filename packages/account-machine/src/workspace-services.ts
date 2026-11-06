@@ -392,7 +392,8 @@ export class WorkspaceServiceManager {
     headers.delete('host');
     headers.delete(SERVICE_ASSERTION_HEADER);
     stripGitSpaceCredentials(headers);
-    return fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+    // `decompress: false`: Bun otherwise decodes the body and keeps its Content-Encoding, so the next reader fails to decode it.
+    return fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }), { decompress: false });
   }
 
   async dispose(): Promise<void> {

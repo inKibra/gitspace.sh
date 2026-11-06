@@ -52,6 +52,29 @@ test('proc ready.port becomes a private signed machine URL and stop releases its
   }
 }, 30_000);
 
+test('a compressed, chunked service response passes through the proxy as its own bytes with its encoding', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'proc-gzip-'));
+  const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const trust = { accountId: 'account', publicKey: credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey))) };
+  const registry = new HostedRoutesFake([{ id: 'machine', label: 'alpha' }]);
+  const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('Workspace terminal not allowed'); }, stop: async () => { throw new Error('Workspace terminal not allowed'); } }, 'machine', root, 'gssh.dev', 'test', registry.authority('machine'), async () => trust);
+  const page = '<p>inKibra</p>'.repeat(4_000);
+  const gzipped = Bun.gzipSync(new TextEncoder().encode(page));
+  // A chunked gzip body, as `wrangler dev` answers.
+  const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(new Blob([gzipped]).stream(), { headers: { 'content-encoding': 'gzip', 'content-type': 'text/html' } }) });
+  const hostname = `site--alpha-${new Bun.CryptoHasher('sha256').update('machine').digest('hex').slice(0, 4)}--workspace--test-srv.gssh.dev`;
+  try {
+    await manager.registerService({ projectId: 'project', workspaceId: 'workspace', generation: 1, source: 'process', name: 'site', ports: [{ name: 'http', port: upstream.port }] });
+    const assertion = await signServiceAssertion({ version: 1, accountId: 'account', hostname, machineId: 'machine', caller: { kind: 'cloud', accountId: 'account', projectId: 'project', workspaceId: 'workspace' }, method: 'GET', target: '/', issuedAt: Date.now(), expiresAt: Date.now() + 30_000, nonce: crypto.randomUUID() }, keys.privateKey);
+    const response = await manager.proxy(new Request(`https://${hostname}/`, { headers: { [SERVICE_ASSERTION_HEADER]: assertion, 'accept-encoding': 'gzip' } }));
+    expect(response?.headers.get('content-encoding')).toBe('gzip');
+    expect(new Uint8Array(await response!.arrayBuffer())).toEqual(gzipped);
+  } finally {
+    upstream.stop(true);
+    await manager.dispose(); await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test('a workspace process that exits on its own is reported to the account with its workspace and run', async () => {
   const root = await mkdtemp(join(tmpdir(), 'proc-exit-'));
   const manager = new WorkspaceServiceManager(noCheckouts, { list: async () => [], startService: async () => { throw new Error('unused'); }, stop: async () => { throw new Error('unused'); } }, 'machine', root, 'gssh.dev', 'test', new HostedRoutesFake([{ id: 'machine', label: 'alpha' }]).authority('machine'));

@@ -319,11 +319,13 @@ export class MachineRelayConnector {
       const body = bodyLength === 0
         ? undefined
         : new Blob(pending.chunks.map((chunk) => Uint8Array.from(chunk).buffer)).stream();
+      // The tunnel carries the body as the service encoded it, with its Content-Encoding; the account sends it unchanged.
       const response = await fetch(new URL(pending.path, this.options.localOrigin), {
         method: pending.method,
         headers: pending.headers,
         body,
         signal: controller.signal,
+        decompress: false,
         ...(body ? { duplex: 'half' } : {}),
       } as RequestInit);
       this.send(socket, {

@@ -274,6 +274,19 @@ test('a Stop whose background work never finishes stopping lets the next message
   } finally { held.resolve(); await f.harness.close(context); }
 }, 5000);
 
+test('a message sent after Stop goes ahead of the events that arrived while stopped', async () => {
+  const f = await fixture();
+  try {
+    await f.lifecycle.stop(String(f.root.id));
+    await f.lifecycle.deliver({ conversationId: String(f.root.id), requestId: 'exit-1', kind: 'process-exited', text: 'Process exited: bench' });
+    await f.lifecycle.userInput(String(f.root.id), () => f.root.submit({ type: 'input', requestId: 'after-stop', content: 'After Stop', whenBusy: 'followUp' }, context));
+    await until(() => f.seen.length === 2);
+    expect(f.seen[0]).toContain('After Stop');
+    expect(f.seen[0]).not.toContain('Process exited: bench');
+    expect(f.seen[1]).toContain('Process exited: bench');
+  } finally { await f.harness.close(context); }
+});
+
 test('wait returns first durable event of every kind, then times out, and supports cancellation', async () => {
   const f = await fixture();
   try {
