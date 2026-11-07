@@ -12,8 +12,9 @@ const OUTPUT = 'y'.repeat(150_000), LOG = `case 7 failed\n${OUTPUT}`, SCREENSHOT
 const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage => ({ role: 'assistant', content: [{ type: 'text', text }], api: model.api, provider: model.provider, model: model.id, stopReason, ...(stopReason === 'error' ? { errorMessage: 'prompt is too long' } : {}), timestamp: Date.now(), usage });
 
 /** A conversation holding one large tool exchange (after `older` earlier ones and a screenshot when asked), the
- * provider's requests, and the record of unfinished requests. */
-async function fixture(options: { fullFails?: boolean; unfinished?: Record<string, number>; older?: number } = {}) {
+ * provider's requests, and the record of unfinished requests. `bindFails` fails the inference binding; `summary`
+ * replaces the provider's summary. */
+async function fixture(options: { fullFails?: boolean; unfinished?: Record<string, number>; older?: number; bindFails?: boolean; summary?: string } = {}) {
   const requests: Context[] = [];
   const unfinished = new Map(Object.entries(options.unfinished ?? {}));
   /** Requests refused by signal never reach the provider; their reasons are what the user is shown. */
@@ -28,7 +29,7 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
     async completeSimple(_model: Model<Api>, request: Context, streamOptions?: { signal?: AbortSignal }) {
       if (refusal(streamOptions?.signal) !== undefined) return answer('', 'error');
       requests.push(request);
-      return options.fullFails && JSON.stringify(request.messages).length > 100_000 ? answer('', 'error') : answer('Handoff: wrote big.ts, the test log failed at case 7.');
+      return options.fullFails && JSON.stringify(request.messages).length > 100_000 ? answer('', 'error') : answer(options.summary ?? 'Handoff: wrote big.ts, the test log failed at case 7.');
     },
     streamSimple(_model: Model<Api>, request: Context, streamOptions?: { signal?: AbortSignal }) {
       const stream = createAssistantMessageEventStream();
@@ -45,7 +46,7 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
     tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
     retainedRules: { loadRules: async () => [], judge: unused, matchAst: unused }, editTool: () => 'edit',
-    onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: (signal, reason) => { refused.set(signal, reason); },
+    onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => { if (options.bindFails) throw new Error('Inference binding failed: credential vault unavailable'); }, refuseRequest: (signal, reason) => { refused.set(signal, reason); },
     unfinished: { begin: key => { const earlier = unfinished.get(key) ?? 0; unfinished.set(key, earlier + 1); return earlier; }, end: key => { unfinished.delete(key); } },
   };
   const { harness, root } = await createRuntimeHarness(options_);
@@ -150,5 +151,29 @@ test('a turn resets cut off three times fails in words without a request, and th
     await root.waitForIdle(context);
     expect(requests).toHaveLength(1);
     expect(sent(requests[0]!)).toContain(OUTPUT);
+  } finally { await harness.close(context); }
+}, 10_000);
+
+test('a compaction whose binding fails is refused in words: pi never summarizes the prefix itself and keeps no summary', async () => {
+  const { harness, root, requests, unfinished, refusals } = await fixture({ bindFails: true });
+  try {
+    await root.compact(undefined, context).catch(() => undefined);
+    await root.waitForIdle(context);
+    expect(requests).toHaveLength(0);
+    expect(refusals).toEqual(['Inference binding failed: credential vault unavailable']);
+    expect((await root.entries({}, 100, undefined, context)).items.some(entry => entry.kind === 'pi.compaction')).toBe(false);
+    expect(unfinished.size).toBe(0);
+  } finally { await harness.close(context); }
+}, 10_000);
+
+test('a summary too large for one conversation entry is refused in words and never written', async () => {
+  const { harness, root, requests, unfinished, refusals } = await fixture({ summary: `Handoff: ${'s'.repeat(1_100_000)}` });
+  try {
+    await root.compact(undefined, context).catch(() => undefined);
+    await root.waitForIdle(context);
+    expect(requests).toHaveLength(1);
+    expect(refusals).toEqual([expect.stringContaining('The compaction summary was 1.0 MB, more than the 1 MB a conversation entry holds')]);
+    expect((await root.entries({}, 100, undefined, context)).items.some(entry => entry.kind === 'pi.compaction')).toBe(false);
+    expect(unfinished.size).toBe(0);
   } finally { await harness.close(context); }
 }, 10_000);
