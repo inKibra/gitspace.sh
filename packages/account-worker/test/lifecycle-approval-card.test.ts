@@ -46,7 +46,7 @@ async function workspace(): Promise<LifecycleState> {
   const provision = await script('cloud/provision', '10-db.sh', 'echo db\n');
   const check: LifecycleExecution = { id: 'node', kind: 'check', label: 'Node', command: 'node --version', hash: await executionHash({ kind: 'check', command: 'node --version' }), phase: null, fileName: null, content: 'node --version' };
   return { ...emptyLifecycleState('project', 'workspace'), executions: [check, install, approved, interactive, provision], approvals: [
-    { scope: 'project', executionHash: await executionHash({ kind: 'script', command: merged }), approvedBy: 'github:merged:#1340', approvedAt: '2026-11-01T00:00:00.000Z' },
+    { scope: 'project', executionHash: await executionHash({ kind: 'script', command: merged }), approvedBy: 'device-1', approvedAt: '2026-11-01T00:00:00.000Z' },
     { scope: 'workspace', executionHash: approved.hash, approvedBy: 'device-1', approvedAt: '2026-11-01T00:00:00.000Z' },
   ] };
 }
@@ -56,7 +56,7 @@ test('a run lists only its unapproved non-interactive scripts, each with the new
   const files = (install: string) => ({ '.gitspace/lifecycle/machine/prepare/10-install.sh': install, '.gitspace/lifecycle/machine/prepare/20-approved.sh': 'echo approved\n' });
   expect(await lifecycleApprovalRequest({ args: run, state, cards: [], history: history([files(current), files(edited), files(merged)]) })).toEqual({ phase: 'machine/prepare', scripts: [{
     hash: await executionHash({ kind: 'script', command: current }), kind: 'script', label: '10-install.sh', phase: 'machine/prepare', fileName: '10-install.sh', content: current,
-    previous: { content: merged, approvedBy: 'github:merged:#1340' },
+    previous: { content: merged, approvedBy: 'device-1' },
   }] });
   // Without an approved earlier version there is nothing to compare with.
   expect((await lifecycleApprovalRequest({ args: run, state, cards: [], history: history([files(current), files(edited)]) }))?.scripts[0]?.previous).toBeNull();
