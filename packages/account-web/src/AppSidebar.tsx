@@ -308,8 +308,9 @@ function matches(item: RowItem, filter: SidebarFilter): boolean {
   return item.phase === filter;
 }
 
-/** A workspace row: the status dot and name, then its stack parent, phase, pull request and what it waits on or blocks.
- * A focused workspace lights what it waits on (violet edge) and what waits on it (teal edge); unrelated rows recede. */
+/** A workspace row: the status dot and name, then its stack parent, phase, pull request and what blocks it or what it
+ * blocks. A focused workspace lights what it depends on (violet edge) and what depends on it (teal edge); unrelated rows
+ * recede. Its actions sit centred on the row's two lines. */
 function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed, actions, onHover, onSelect }: { item: RowItem; kin: Relation; selected: boolean; inset: number; guides: readonly number[]; meta: ReactNode; flags: ReactNode; dimmed: boolean; actions: ReactNode; onHover(id: string | null): void; onSelect(): void }) {
   const { summary } = item;
   const tone = kin === 'upstream' ? UPSTREAM_TONE : kin === 'downstream' ? DOWNSTREAM_TONE : null;
@@ -332,7 +333,7 @@ function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed,
       </span>
       <span className="relative flex min-w-0 items-center gap-1.5 pl-[22px] text-[11px] text-muted-foreground">{meta}</span>
     </button>
-    <SidebarMenuActions showOnHover>{actions}</SidebarMenuActions>
+    <SidebarMenuActions showOnHover className="top-1/2 -translate-y-1/2">{actions}</SidebarMenuActions>
   </SidebarMenuSubItem>;
 }
 
