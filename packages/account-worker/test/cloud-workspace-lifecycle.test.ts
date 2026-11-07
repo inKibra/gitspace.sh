@@ -6,6 +6,7 @@ import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, GitDiscoveryError } from '@gitspace/runtime-workspace-do';
 import { createBrowserClient } from 'result-rpc/client';
+import { HttpResponse, http } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Result } from 'better-result';
 import { tenantRootPrivateKey } from './setup.js';
@@ -16,6 +17,7 @@ import { GitHubAppDO } from '../src/github-app.js';
 import { UserProjectIndexDO } from '../src/project-authority.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PlanDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
+import { network } from './network.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -291,6 +293,19 @@ describe('cloud workspace lifecycle with no machines', () => {
 
   it('imports missing public branches for workspace sources and base switches without refreshing cached refs', async () => {
     const { userId, client, project, artifacts, authority, run, ready } = await cloudProject('Public branches', 'https://github.com/octocat/Hello-World.git');
+    // The project's alarm checks the origin after the operations it runs; it is answered here, never by the network.
+    const packet = (line: string) => (line.length + 4).toString(16).padStart(4, '0') + line;
+    network.use(
+      http.get('https://github.com/octocat/Hello-World.git/info/refs', () => new HttpResponse(packet('# service=git-upload-pack\n') + '0000' + packet('version 2\n') + packet('ls-refs\n') + packet('fetch=shallow\n') + '0000')),
+      http.post('https://github.com/octocat/Hello-World.git/git-upload-pack', () => new HttpResponse(packet(`${commit('1')} refs/heads/main\n`) + '0000')),
+    );
+    // The base workspace without `remote`, which that origin check records on its own schedule.
+    const baseWorkspace = async () => {
+      const base = (await authority.listWorkspaces()).find(workspace => workspace.kind === 'base');
+      if (!base) throw new Error('Missing base workspace');
+      const { remote: _remote, ...rest } = base;
+      return rest;
+    };
     const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockImplementation(async (projectId, _url, ref) => {
       const hash = ref === 'refs/heads/feature/public' ? commit('2') : ref === 'refs/heads/release/public' ? commit('3') : null;
       if (!hash) throw new Error(`Source ref ${ref} is not advertised by the public origin`);
@@ -306,12 +321,12 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
     const current = await authority.getProject();
     if (!current) throw new Error('Missing project');
-    const baseBefore = (await authority.listWorkspaces()).find(workspace => workspace.kind === 'base');
+    const baseBefore = await baseWorkspace();
     const missing = await ready(client.workspace.create({ projectId: project.id, name: 'Missing public branch', branch: 'missing', sourceKind: 'branch', sourceRef: 'missing' }));
     expect(missing.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('not advertised by the public origin') });
     expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision, baseBranch: 'missing' }))).toMatchObject({ state: 'failed', error: expect.stringContaining('not advertised by the public origin') });
     expect(await authority.getProject()).toMatchObject({ baseBranch: 'main', revision: current.revision });
-    expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toEqual(baseBefore);
+    expect(await baseWorkspace()).toEqual(baseBefore);
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
     expect(await client.project.setBaseBranch({ projectId: project.id, expectedRevision: current.revision - 1, baseBranch: 'release/public' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('revision conflict') } } });
     expect(artifacts.refs.has(`project-${project.id} refs/heads/release/public`)).toBe(false);
