@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
   type HTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -1075,6 +1076,18 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       [supportsFiles, disabled, addFiles]
     );
 
+    // Pasted files (a screenshot) attach like dropped ones; the text a paste carries still goes in.
+    const handlePaste = useCallback(
+      (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+        if (!supportsFiles || disabled) return;
+        const pasted = Array.from(e.clipboardData.files);
+        if (!pasted.length) return;
+        if (!e.clipboardData.types.includes("text/plain")) e.preventDefault();
+        addFiles(pasted);
+      },
+      [supportsFiles, disabled, addFiles]
+    );
+
     const handleFileInputChange = useCallback(
       (e: ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files) return;
@@ -1214,6 +1227,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
                 onValueChange(e.target.value);
               }}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               // Compose the consumer's textareaProps handlers with the internal
               // focus-visible tracking (the spread below would otherwise
               // overwrite these).

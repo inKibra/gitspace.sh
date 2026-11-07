@@ -81,6 +81,18 @@ it('keeps the draft and its attachment when the upload fails', async () => {
   expect(container.querySelector('[aria-label="Remove report.pdf"]')).not.toBeNull();
 });
 
+it('attaches an image pasted into the message', async () => {
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={async () => undefined} />));
+  const screenshot = new File([new Uint8Array(10)], 'image.png', { type: 'image/png' });
+  const paste = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, 'clipboardData', { value: { files: [screenshot], types: ['Files'] } });
+
+  await act(async () => container.querySelector('textarea')!.dispatchEvent(paste));
+
+  expect(container.querySelector('[aria-label="Remove image.png"]')).not.toBeNull();
+  expect(paste.defaultPrevented).toBe(true);
+});
+
 const shareId = '00000000-0000-4000-8000-0000000000d1';
 const secret = 'test-share-secret'.padEnd(43, 'x');
 const control: SessionControlView = { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null };
