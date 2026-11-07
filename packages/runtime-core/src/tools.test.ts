@@ -27,7 +27,7 @@ const services: ToolServices = {
   images: { async store(image) { storedImages.push(image.data); return { ...image, data: `stored:${image.data}` }; }, load: async image => ({ ...image, data: image.data.replace(/^stored:/u, '') }) },
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
-  question: async (_id, api) => api.callId === 'propose_plan' ? { approved: false, note: 'Split the backfill out.' } : 'answered', instructions: async () => '', preflight: async () => {},
+  question: async (_id, api) => api.callId === 'propose_plan' ? { approved: false, note: 'Split the backfill out.' } : 'answered', instructions: async () => '', preflight: async () => {}, lifecycleApproval: async () => null,
   async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
   results: {
     async put(input) { kept.set(keptReference(input), input.text); return keptReference(input); },
@@ -199,13 +199,13 @@ test('agent environment registration rejects human lifecycle options before disp
   const supported: ToolCall['arguments'][] = [
     { method: 'runChecks', runId: 'checks', rerun: true, deadlineAt: '2030-01-01T00:00:00.000Z', on: 'machine' },
     { method: 'runPhase', runId: 'prepare', phase: 'machine/prepare', rerun: true, deadlineAt: '2030-01-01T00:00:00.000Z', on: { needs: ['linux'], prefer: 'idle' } },
+    { method: 'runPhase', runId: 'destroy', phase: 'cloud/destroy' },
   ];
   const forbidden: ToolCall['arguments'][] = [
     { method: 'runChecks', runId: 'interactive-checks', interactive: true },
     { method: 'runChecks', runId: 'noninteractive-checks', interactive: false },
     { method: 'runPhase', runId: 'interactive-phase', phase: 'machine/prepare', interactive: true },
     { method: 'runPhase', runId: 'noninteractive-phase', phase: 'machine/prepare', interactive: false },
-    { method: 'runPhase', runId: 'destroy', phase: 'cloud/destroy' },
   ];
   const routed: string[] = [];
   const { harness, root } = await registered([[...supported.map((args, index) => call('environment', args, `valid-${index}`)), ...forbidden.map((args, index) => call('environment', args, `invalid-${index}`))]], async input => { routed.push(input.requestId); return completed(input); });
@@ -214,7 +214,7 @@ test('agent environment registration rejects human lifecycle options before disp
     await root.waitForIdle(BACKGROUND_CONTEXT);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.filter(result => result.isError).map(result => result.toolCallId).sort()).toEqual(forbidden.map((_, index) => `invalid-${index}`));
-    expect(routed.sort()).toEqual(['valid-0', 'valid-1']);
+    expect(routed.sort()).toEqual(['valid-0', 'valid-1', 'valid-2']);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
 
@@ -223,7 +223,6 @@ test('agent advertised lifecycle schema excludes human options', () => {
   if (!environment) throw new Error('Missing environment registration');
   const advertised = JSON.stringify(environment.parameters);
   expect(advertised).not.toContain('"interactive"');
-  expect(advertised).not.toContain('"cloud/destroy"');
 });
 
 test('background bash rejects unavailable execution before returning acceptance or creating durable work', async () => {

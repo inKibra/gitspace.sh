@@ -4,6 +4,7 @@ import { APPROVE, REJECT } from '@gitspace/blocks';
 import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
+import { lifecycleApprovalRequest } from './lifecycle-approval-card.js';
 import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
@@ -465,6 +466,13 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       return interrupted(dispatch, ended.failure?.message ?? `Lifecycle ${ended.status}`);
     } finally { signal?.removeEventListener('abort', abort); active.delete(dispatch.attemptId); }
   }
+  /** An agent destroys only its own workspace's recorded resources, never those of the project's base workspace,
+   * whose resources every workspace of the project may use. */
+  async function assertAgentMayDestroy(): Promise<void> {
+    const workspace = identity.workspaceId === baseWorkspaceId ? null
+      : (await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).listWorkspaces()).find(entry => entry.id === identity.workspaceId);
+    if (!workspace || workspace.kind === 'base') throw new Error('Agents cannot destroy the project\'s base workspace resources; that requires the user in the Environment tab');
+  }
   async function environment(input: Invocation) {
     const args = RuntimeEnvironmentArgumentsSchema.parse(input.args);
     const method = args.method;
@@ -483,6 +491,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (method === 'runPhase' || method === 'runChecks') {
       const { method: ignored, ...candidate } = args;
       const request = RuntimeAgentLifecycleRunArgumentsSchema.parse({ ...candidate, phase: args.method === 'runChecks' ? 'checks' : args.phase });
+      if (request.phase === 'cloud/destroy') await assertAgentMayDestroy();
       return executeMachine({ ...input, tool: 'lifecycle', args: RuntimeJsonSchema.parse(request), replay: 'unsafe' }, request.deadlineAt);
     }
     if (method === 'setProfile' || method === 'putValue' || method === 'deleteValue' || method === 'cancelRun') {
@@ -872,7 +881,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   async function execute(input: Operation): Promise<RuntimeToolResult> {
     try {
       const tool = { Checkpoint: 'checkpoint_code', LifecycleRun: 'lifecycle', Job: 'bash', Service: 'service', Merge: 'merge' }[input.kind];
-      if (input.kind === 'LifecycleRun') RuntimeAgentLifecycleRunArgumentsSchema.parse(input.args);
+      if (input.kind === 'LifecycleRun' && RuntimeAgentLifecycleRunArgumentsSchema.parse(input.args).phase === 'cloud/destroy') await assertAgentMayDestroy();
       const result = await executeMachine({ ...input, tool }, input.deadlineAt);
       if (input.kind !== 'LifecycleRun' || result.status !== 'completed') return result;
       const dispatch = savedDispatch(input.attemptId);
@@ -931,6 +940,16 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           const args = object.parse(input.args);
           if (typeof args.connectionId === 'string' && await mcp.isStdio(args)) await selections.cache(args);
         }
+      },
+      // An `environment` run whose executions are not approved waits on a card listing them; a dispatched one never asks again.
+      async lifecycleApproval(input) {
+        if (input.tool !== 'environment' || savedDispatch(input.attemptId) || selections.load(input.attemptId)?.result) return null;
+        const runtime = options.runtime();
+        const [state, questions, checkpoint] = await Promise.all([options.environment.currentLifecycleState(identity), runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT), runtime.cloudFiles.snapshot()]);
+        const reader = new ArtifactsCodeStore(env.ARTIFACTS).reader(artifactsWorkspaceRepository(identity.workspaceId));
+        try {
+          return await lifecycleApprovalRequest({ args: input.args, state, cards: questions?.items ?? [], history: checkpoint ? { reader, commit: checkpoint.worktreeCommit } : null });
+        } finally { await reader.close(); }
       },
       async instructions(conversationId) {
       // One call reads the project, this workspace and its running services' URLs.

@@ -4,7 +4,8 @@ import { workspaceLiveKey, type LiveNotice } from '@gitspace/protocol/live-notic
 import { notifyBrowsers } from './live-notices.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
-import { RuntimeApprovalAnswerSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeApprovalAnswerSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeProcessExitedInputSchema, RuntimeMachineIdSchema, RuntimeJsonSchema, RuntimeSubmitInputSchema, RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeAttachment, type RuntimeGitCheckpoint, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { approveExecutionsAsPerson } from './lifecycle-approvals.js';
 import { RuntimeBrowserCommentAuthorSchema, RuntimeBrowserCommentFilterSchema, RuntimeBrowserCommentWriteSchema, RuntimeBrowserHolderSchema, RuntimeBrowsersDocumentSchema, type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentFilter, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite, type RuntimeBrowserHolder, type RuntimeBrowsersDocumentGroup } from '@gitspace/protocol-runtime';
 import { BROWSER_GROUP_ROWS, retireWorkspaceBrowsers } from './runtime-browser.js';
 import { announceComment, workspaceCommentThreads, writeWorkspaceComment, type CommentScope } from './browser-comments.js';
@@ -835,17 +836,51 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       throw error;
     }
   }
+  /** A configure, from the cloud's derivation or a machine's, that leaves a script without approval then applies the
+   * trust rule (`ProjectAuthorityDO.trustMergedLifecycle`), which reads GitHub at most once per base branch tip. A
+   * cloud/destroy run this mutation ends is recorded in the workspace journal. */
   async mutateLifecycleState(raw: unknown, input: LifecycleMutation, actor: LifecycleActor): Promise<{ status: 'ok'; state: LifecycleState } | { status: 'error'; failure: EnvironmentFailure }> {
     const { identity, project } = await this.environmentReady(raw);
     try {
       const result = this.environment.mutate(identity.projectId, identity.workspaceId, input, actor, await project.environmentShared());
       if (result.shared) await project.applyEnvironmentShared(result.shared);
-      this.ctx.waitUntil(notifyLifecycleHolders(this.env, identity.workspaceId, result.state, actor.machineId));
-      return { status: 'ok', state: result.state };
+      let state = result.state;
+      if (input.op === 'configure' && state.executions.some(execution => execution.kind === 'script' && !state.approvals.some(approval => approval.executionHash === execution.hash))
+        && (await project.trustMergedLifecycle()).length > 0) {
+        state = this.environment.get(identity.projectId, identity.workspaceId, await project.environmentShared());
+      }
+      // A claim ends a run only by skipping it: the workspace's resources were already destroyed.
+      if (input.op !== 'claim') for (const run of result.ended) {
+        if (run.phase === 'cloud/destroy') await this.journalDestroy(identity, state, run);
+      }
+      this.ctx.waitUntil(notifyLifecycleHolders(this.env, identity.workspaceId, state, actor.machineId));
+      return { status: 'ok', state };
     } catch (error) {
       const failure = environmentFailure(error);
       if (failure) return { status: 'error', failure };
       throw error;
+    }
+  }
+  /** One journal entry per ended cloud/destroy run, naming the resources the workspace recorded (its bindings and its
+   * provisioning run's) and the outcome. A failed write is logged; the run's own record is unaffected. */
+  private async journalDestroy(identity: z.infer<typeof RuntimeIdentitySchema>, state: LifecycleState, run: LifecycleRun): Promise<void> {
+    const provisioned = state.provisioned ? state.runs.find(entry => entry.id === state.provisioned?.runId) : undefined;
+    const resources = Object.entries({ ...state.bindings, ...provisioned?.bindings, ...run.bindings });
+    const succeeded = run.status === 'succeeded';
+    const body = [
+      `cloud/destroy run ${run.id} ${run.status} on machine ${run.machineId}.`,
+      resources.length > 0 ? `Resources recorded for this workspace${succeeded ? ', now deleted' : ''}:\n${resources.map(([name, value]) => `- ${name}: ${value}`).join('\n')}` : 'This workspace had no recorded resources.',
+    ].join('\n\n');
+    try {
+      const spaceId = identity.workspaceId;
+      const entry = await this.env.SPACE_CONTEXT.getByName(JSON.stringify([this.env.ACCOUNT_ID, identity.projectId, spaceId])).appendJournalEntry({
+        projectId: identity.projectId, spaceId, id: `cloud-destroy:${crypto.randomUUID()}`, kind: 'narrative', phase: 'cloud/destroy',
+        title: succeeded ? 'Deleted this workspace\'s cloud resources' : `cloud/destroy ${run.status}; recorded resources may remain`,
+        body, outcome: succeeded ? 'Deleted' : run.failure?.message ?? run.status, decisions: [], evidence: [], createdBy: 'environment',
+      });
+      await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`).appendEvent({ scope: 'workspace', entity: 'journal', entityId: entry.id, revision: entry.sequence, operation: 'append', payload: { spaceId } });
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'cloud_destroy_journal_failed', workspaceId: identity.workspaceId, runId: run.id, message: error instanceof Error ? error.message : String(error) }));
     }
   }
   /** Called once the cloud knows the holder is gone (destroyed or revoked): its runs end as interrupted. */
@@ -884,11 +919,19 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     await (await this.getRuntime(identity)).browserEvent({ kind: 'capture-replay', requestId: `capture-replay:${capture.captureId}:${at}`, sender: { id: request.pairingId, name: `Chrome "${request.browser}"` }, text: captureReplayAskedText(capture), payload: { captureId: capture.captureId, at } });
   }
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
-  /** Approving an agent's machine-attach question attaches that machine; the asking conversation hears when it is ready. */
-  async runtimeAnswer(raw: unknown, actor: { deviceId: string; canApprove: boolean }) {
+  /** Approving an agent's machine-attach question attaches that machine; the asking conversation hears when it is ready.
+   * Approving a lifecycle approval card approves its scripts at the chosen scope as the answering person, who needs
+   * lifecycle control, before the card records the answer and the agent's run proceeds. */
+  async runtimeAnswer(raw: unknown, actor: { deviceId: string; kind: LifecycleActor['kind']; canApprove: boolean; lifecycleControl: boolean }) {
     const input = RuntimeAnswerInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    const result = await runtime.answer(input, actor);
+    const lifecycle = (await runtime.snapshot()).questions.find(item => item.id === input.questionId && item.kind === 'lifecycle-approval' && item.answer === null)?.lifecycle;
+    if (lifecycle) {
+      const choice = RuntimeLifecycleApprovalAnswerSchema.parse(input.answer);
+      if (choice !== 'not-now') await approveExecutionsAsPerson(this, input, { executionHashes: lifecycle.scripts.map(script => script.hash), scope: choice, person: { deviceId: actor.deviceId, kind: actor.kind, lifecycleControl: actor.lifecycleControl } });
+      return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.lifecycleControl });
+    }
+    const result = await runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove });
     if (!input.questionId.startsWith('machine-attach:') || RuntimeApprovalAnswerSchema.safeParse(input.answer).data?.approved !== true) return result;
     const question = (await runtime.snapshot()).questions.find(item => item.id === input.questionId);
     if (question?.tool?.name !== 'machines') return result;

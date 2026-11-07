@@ -19,7 +19,7 @@ async function fixture() {
   const answers: { approved: boolean; note: string | null }[] = [];
   const decisions: PlanDecision[] = [];
   const services: ToolServices = {
-    invoke: unused, prepareBrowser: unused, takeoverTab: unused, instructions: async () => '', preflight: async () => {},
+    invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {},
     images: { store: async image => image, load: async image => image },
     results: { put: unused, text: unused },
     async question(id, api, context) {

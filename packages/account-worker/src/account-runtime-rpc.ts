@@ -74,7 +74,7 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
   const answer = server.implement(runtimeAnswerContract).handler(observed('runtime.answer', async ({ input, errors }) => {
     try {
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, 'session.prompt');
-      return ok(await authority.runtimeAnswer(input, { deviceId, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') }));
+      return ok(await authority.runtimeAnswer(input, { deviceId, kind: device.kind, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin'), lifecycleControl: deviceCanAdminister(device, 'lifecycle.control') }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'answer cloud conversation', message: message(error) })); }
   }));
   const session = server.implement(runtimeSessionContract).handler(observed('runtime.session', async ({ input, errors }) => {

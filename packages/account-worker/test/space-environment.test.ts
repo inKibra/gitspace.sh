@@ -241,6 +241,26 @@ describe('workspace environment', () => {
     expect((await p.mutate('workspace', { op: 'finish', runId: 'partial', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {} })).runs[0]?.status).toBe('interrupted');
   });
 
+  it('records every ended cloud/destroy run in the workspace journal with the resources the workspace recorded', async () => {
+    const p = await project();
+    const destroyHash = `sha256:${'b'.repeat(64)}`;
+    await p.mutate('workspace', { op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'destroy', kind: 'script', phase: 'cloud/destroy', label: 'Destroy', command: '10-destroy.sh', fileName: '10-destroy.sh', content: 'echo destroy', hash: destroyHash }] });
+    await p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: destroyHash, approved: true }, human);
+    const run = async (runId: string, phase: 'cloud/provision' | 'cloud/destroy', executionHashes: string[], bindings: Record<string, string>) => {
+      await p.mutate('workspace', { op: 'claim', runId, phase, profile: 'base', executionHashes, generation: null, rerun: true });
+      await p.mutate('workspace', { op: 'start', runId });
+      await p.mutate('workspace', { op: 'finish', runId, status: 'succeeded', exitCode: 0, results: [], output: '', bindings });
+    };
+    await run('provision', 'cloud/provision', [], { BUCKET: 'bucket-123' });
+    await run('destroy', 'cloud/destroy', [destroyHash], {});
+    const workspaceId = (await p.space('workspace')).identity.workspaceId;
+    const journal = await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, p.projectId, workspaceId])).listJournal({ projectId: p.projectId, spaceId: workspaceId });
+    expect(journal).toHaveLength(1);
+    expect(journal[0]).toMatchObject({ phase: 'cloud/destroy', title: 'Deleted this workspace\'s cloud resources', outcome: 'Deleted' });
+    expect(journal[0]?.body).toContain('- BUCKET: bucket-123');
+    expect(journal[0]?.body).toContain('cloud/destroy run destroy succeeded');
+  });
+
   it('moves a workspace environment held by the project into the workspace object once', async () => {
     const projectId = `project-${crypto.randomUUID()}`;
     const workspaceId = `${projectId}-legacy`;

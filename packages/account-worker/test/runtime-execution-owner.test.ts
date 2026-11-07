@@ -516,3 +516,31 @@ test('read, write and edit of an absolute /tmp path run on the attached machine;
     } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
+
+test('an agent runs cloud/destroy for its own workspace; on the project\'s base workspace it is refused before dispatch', async () => {
+  const projectId = `destroy-project-${crypto.randomUUID()}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const created = await authority.bootstrap({ id: projectId, name: projectId, repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+  await authority.setProjectLifecycle(created.revision, 'active');
+  await authority.putWorkspace({ id: `${projectId}-worker`, projectId, kind: 'worktree', name: 'worker', branch: 'worker', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  const cases: Array<{ workspaceId: string; allowed: boolean }> = [{ workspaceId: `${projectId}-worker`, allowed: true }, { workspaceId: projectId, allowed: false }];
+  for (const { workspaceId, allowed } of cases) {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`destroy:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const { runtime, invoke, text, identity } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+      const machine = vi.spyOn(runtime.attachments, 'execute').mockImplementation(async dispatch => ({ status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: 'accepted' }] }));
+      try {
+        const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'destroy-cache', machineId: 'destroy-machine', generation: 1, state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities], updatedAt: new Date().toISOString(), online: true });
+        ctx.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
+        const request = { method: 'runPhase', runId: 'retire', phase: 'cloud/destroy' };
+        if (allowed) {
+          const result = await invoke('environment', request);
+          expect(result.status, text(result)).toBe('completed');
+          expect(machine.mock.calls.map(([dispatch]) => [dispatch.tool, dispatch.machineId, dispatch.args])).toEqual([['lifecycle', 'destroy-machine', { runId: 'retire', phase: 'cloud/destroy' }]]);
+        } else {
+          await expect(invoke('environment', request)).rejects.toThrow('base workspace');
+          expect(machine).not.toHaveBeenCalled();
+        }
+      } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  }
+});

@@ -13,6 +13,7 @@ export * from './browser-share.js';
 export * from './browser-comments.js';
 export * from './browser-watch.js';
 export * from './browser-takeover.js';
+export * from './lifecycle-approval.js';
 export * from './browser-capture-tracks.js';
 export * from './browser-capture-rules.js';
 export * from './browser-capture-share.js';

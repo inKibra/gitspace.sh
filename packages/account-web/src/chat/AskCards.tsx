@@ -4,6 +4,7 @@ import { Check, Lock01 } from '@untitledui/icons';
 import { useContext, useState } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
+import { LifecycleApprovalCard } from '../LifecycleApprovalCard.js';
 import { TakeoverCard, TakeoverCardsContext } from '../TakeoverCard.js';
 import { ToolCall } from './ToolCall.js';
 import type { ItemInteractionProps, TranscriptItemState } from './TranscriptItemView.js';
@@ -104,4 +105,12 @@ export function AskTakeoverCall({ block, state, onStateChange }: { block: ToolCa
   const cards = useContext(TakeoverCardsContext);
   const question = cards?.questions.find(item => item.kind === 'takeover' && item.takeover?.callId === block.toolCallId);
   return cards && question?.takeover ? <TakeoverCard question={question} card={question.takeover} cards={cards} /> : <ToolCall block={block} state={state} onStateChange={onStateChange} />;
+}
+
+/** An `environment` call that waits, or waited, on a lifecycle approval card shows the card above the call. */
+export function EnvironmentCall({ block, state, onStateChange }: { block: ToolCallBlock } & ItemInteractionProps) {
+  const cards = useContext(TakeoverCardsContext);
+  const question = cards?.questions.find(item => item.kind === 'lifecycle-approval' && item.lifecycle?.callId === block.toolCallId);
+  const call = <ToolCall block={block} state={state} onStateChange={onStateChange} />;
+  return cards && question?.lifecycle ? <div className="flex min-w-0 flex-col gap-2"><LifecycleApprovalCard question={question} card={question.lifecycle} cards={cards} />{call}</div> : call;
 }

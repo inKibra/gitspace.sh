@@ -21,7 +21,9 @@ import type {
 } from '@gitspace/protocol';
 import type { ExportedEnvironment, ExportedLogs, SharedEnvironment, SharedEnvironmentChange } from './space-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
-import { LifecycleMutationSchema, LifecycleStateSchema } from '@gitspace/protocol-environment';
+import { LifecycleMutationSchema, LifecycleStateSchema, type LifecycleState } from '@gitspace/protocol-environment';
+import { githubRepositoryOf } from '@gitspace/protocol/github';
+import type { MergedLifecycleScript } from './lifecycle-approvals.js';
 import { LiveChanges } from './live-changes.js';
 import { liveClientMessageSchema, liveKeyId, liveNoticeSchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice, type LiveNoticeMessage } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
@@ -1029,6 +1031,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         });
       }
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS origin_check(id INTEGER PRIMARY KEY CHECK(id=1),interval TEXT NOT NULL,attempted_at INTEGER)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS lifecycle_trust(id INTEGER PRIMARY KEY CHECK(id=1),tip TEXT NOT NULL)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS lifecycle_trusted(hash TEXT PRIMARY KEY)');
       await this.armAlarm();
     });
   }
@@ -1314,6 +1318,9 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         return this.requireProject();
       });
       await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(updated);
+      if (updated.remote?.head && updated.remote.head !== project.remote?.head) {
+        this.ctx.waitUntil(this.trustMergedLifecycle().catch((error: unknown) => console.warn(JSON.stringify({ event: 'lifecycle_trust_failed', projectId: project.id, message: error instanceof Error ? error.message : String(error) }))));
+      }
       return updated;
     });
     // A failed update fails its caller only; the next one still runs.
@@ -1355,6 +1362,45 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   setEnvironmentValue(name: string, value: string | null): Record<string, string> {
     LifecycleMutationSchema.parse({ op: 'value', scope: 'project', name, value });
     return this.applyEnvironmentShared({ values: { [name]: value }, approvals: [], revoked: [] }).values;
+  }
+
+  private trusting: Promise<LifecycleState['approvals']> | undefined;
+  /**
+   * The trust rule (`readMergedLifecycleScripts`), applied once per base branch tip: each lifecycle script at the tip
+   * that reached the base branch through a merged pull request gets a project approval by `github:merged:#<number>`.
+   * Content trusted once is never approved this way again, so a person's revocation stands. A project without a GitHub
+   * repository or a known tip approves nothing; neither does a failed GitHub read, which the next call repeats.
+   */
+  trustMergedLifecycle(): Promise<LifecycleState['approvals']> {
+    this.trusting ??= (async () => {
+      const project = this.requireProject();
+      const tip = project.remote?.head ?? null;
+      const repository = project.repositoryReference === null ? null : githubRepositoryOf(project.repositoryReference);
+      if (tip === null || repository === null) return [];
+      if (this.ctx.storage.sql.exec('SELECT 1 FROM lifecycle_trust WHERE tip=?', tip).toArray().length > 0) return [];
+      let scripts: MergedLifecycleScript[];
+      try { scripts = await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).mergedLifecycleScripts(repository, project.baseBranch, tip); }
+      catch (error) {
+        console.warn(JSON.stringify({ event: 'lifecycle_trust_failed', projectId: project.id, tip, message: error instanceof Error ? error.message : String(error) }));
+        return [];
+      }
+      const approvedAt = new Date().toISOString();
+      return this.ctx.storage.transactionSync(() => {
+        const approved = new Set(this.environmentShared().approvals.map(approval => approval.executionHash));
+        for (const row of this.ctx.storage.sql.exec<{ hash: string }>('SELECT hash FROM lifecycle_trusted')) approved.add(row.hash);
+        const approvals: LifecycleState['approvals'] = [];
+        for (const script of scripts) {
+          if (approved.has(script.executionHash)) continue;
+          approved.add(script.executionHash);
+          approvals.push({ scope: 'project', executionHash: script.executionHash, approvedAt, approvedBy: `github:merged:#${script.pullRequest}` });
+          this.ctx.storage.sql.exec('INSERT OR IGNORE INTO lifecycle_trusted(hash) VALUES(?)', script.executionHash);
+        }
+        if (approvals.length > 0) this.applyEnvironmentShared({ values: {}, approvals, revoked: [] });
+        this.ctx.storage.sql.exec('INSERT INTO lifecycle_trust(id,tip) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET tip=excluded.tip', tip);
+        return approvals;
+      });
+    })().finally(() => { this.trusting = undefined; });
+    return this.trusting;
   }
 
   /** One-time move of a workspace's environment into its workspace object: the rows this project still holds. */

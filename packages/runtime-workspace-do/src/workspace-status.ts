@@ -16,7 +16,7 @@ export type AgentActivity = 'approval' | 'question' | 'working' | 'failed' | 'id
 
 /** Each conversation's activity. A pending answer outranks the task waiting on it; a live task outranks an earlier failure. */
 export function agentActivity(live: LiveAgents): Map<string, AgentActivity> {
-  const approvals = new Set(live.questions.flatMap(question => question.answer === null && question.kind === 'approval' ? [question.conversationId] : []));
+  const approvals = new Set(live.questions.flatMap(question => question.answer === null && (question.kind === 'approval' || question.kind === 'lifecycle-approval') ? [question.conversationId] : []));
   // An ask_takeover card waits on you only while its call waits; left open after, it holds nothing.
   const questions = new Set(live.questions.flatMap(question => question.answer === null && (question.kind === 'ask' || question.kind === 'takeover' && question.takeover?.waiting === true) ? [question.conversationId] : []));
   const working = new Set(live.tasks.flatMap(task => task.background ? [] : [task.conversationId]));

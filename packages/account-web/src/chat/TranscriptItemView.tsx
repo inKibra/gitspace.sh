@@ -7,7 +7,7 @@ import { connectedTabsIn, TabChip } from '../connected-tab.js';
 import { CaptureChip } from '../capture-chip.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { glyph } from '../glyph.js';
-import { AskBlockView, AskTakeoverCall } from './AskCards.js';
+import { AskBlockView, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
 import { Notice, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
 import { Execution, SideAgents } from './ExecutionCard.js';
 import { MessageAttachments, RichContent, userMessageMarkdown } from './RichContent.js';
@@ -76,7 +76,9 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
     case 'tool-call':
-      return item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} /> : <ToolCall block={item} state={state} onStateChange={onStateChange} />;
+      return item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} />
+        : item.tool === 'environment' ? <EnvironmentCall block={item} state={state} onStateChange={onStateChange} />
+        : <ToolCall block={item} state={state} onStateChange={onStateChange} />;
     case 'execution':
       return <Execution block={item} state={state} onStateChange={onStateChange} renderHistory={renderExecutionHistory} />;
     case 'ask':

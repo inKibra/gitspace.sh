@@ -45,7 +45,7 @@ Content approval allows repository code to run as the machine user, using that u
 | `machine/prepare` | Prepare tools needed on this machine | Workspace-specific generated files |
 | `workspace/materialize` | Install checkout dependencies and rebuild local configuration | Creating a second cloud stack on each arrival |
 | `workspace/dematerialize` | Flush local state and release local leases before leaving | Deleting remote databases, buckets, or deployments |
-| `cloud/destroy` | Delete recorded workspace-owned resources after explicit retirement authorization | Cleanup on selection, close, or move |
+| `cloud/destroy` | Delete recorded workspace-owned resources when the person retires them, in Environment or by asking the workspace's agent | Cleanup on selection, close, or move |
 
 Keep long-running services in `.gitspace/services.json` and run them through GitSpace service controls. Lifecycle scripts should finish, not leave unmanaged background processes.
 

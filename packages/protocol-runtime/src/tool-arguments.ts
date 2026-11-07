@@ -172,9 +172,11 @@ export const RuntimeDriveTransferArgumentsSchema = z.discriminatedUnion('directi
 /** What `fromMachine` stored in the scope: the plaintext digest naming the object, for the cloud to check and name in the
  * scope's manifest. */
 export const RuntimeDriveTransferStoredSchema = z.object({ blobHash: sha256Hash, size: z.number().int().nonnegative() }).strict();
-export const RuntimeAgentLifecycleRunArgumentsSchema = LifecycleRunRequestSchema.omit({ interactive: true }).extend({ ...RuntimeDispatchSelectionSchema.shape, phase: LifecycleRunRequestSchema.shape.phase.exclude(['cloud/destroy']) });
+/** An agent's lifecycle run never runs interactively. Its cloud/destroy deletes only the resources its own workspace
+ * recorded; the account refuses it on the project's base workspace. */
+export const RuntimeAgentLifecycleRunArgumentsSchema = LifecycleRunRequestSchema.omit({ interactive: true }).extend(RuntimeDispatchSelectionSchema.shape);
 /** A lifecycle run as its cache machine receives it. Agents enter through the narrower schema above; a human run,
- * authorized by the account before dispatch, may also run interactively or destroy cloud resources. */
+ * authorized by the account before dispatch, may also run interactively. */
 export const RuntimeLifecycleDispatchArgumentsSchema = LifecycleRunRequestSchema.extend(RuntimeDispatchSelectionSchema.shape);
 export const RuntimeEnvironmentArgumentsSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('get') }),

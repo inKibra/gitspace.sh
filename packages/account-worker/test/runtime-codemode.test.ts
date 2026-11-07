@@ -155,7 +155,7 @@ test('real durable authority completes a caught denied read after an effect with
         if (input.tool === 'write') effects++;
         return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [] };
       },
-      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', preflight: async () => {}, results: createToolResultStore(ctx.storage.sql, 'workspace', WORKSPACE_TOOL_RESULTS_MAX_BYTES),
+      prepareBrowser: noModel, takeoverTab: noModel, lifecycleApproval: async () => null, question: noModel, instructions: async () => '', preflight: async () => {}, results: createToolResultStore(ctx.storage.sql, 'workspace', WORKSPACE_TOOL_RESULTS_MAX_BYTES),
     };
     const jobs: Parameters<typeof createRuntimeTools>[1] = { execute: noModel, reconcile: noModel, cancel: noModel, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: noModel, wakeAt: noModel, deliverConversationEvent: noModel, observeProcess: noModel, stopProcess: noModel };
     const tools = createRuntimeTools(services, jobs, (id, context) => harness.abortTask(id, context), async call => {
@@ -200,7 +200,7 @@ test('an MCP result past what the transcript keeps reaches mcp.call whole, the s
         if (input.tool === 'mcp_invoke') return completedWith(input, comments);
         throw new Error(`Unexpected tool ${input.tool}`);
       },
-      prepareBrowser: noModel, takeoverTab: noModel, question: noModel, instructions: async () => '', preflight: async () => {}, results: kept,
+      prepareBrowser: noModel, takeoverTab: noModel, lifecycleApproval: async () => null, question: noModel, instructions: async () => '', preflight: async () => {}, results: kept,
     };
     const jobs: Parameters<typeof createRuntimeTools>[1] = { execute: noModel, reconcile: noModel, cancel: noModel, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: noModel, wakeAt: noModel, deliverConversationEvent: noModel, observeProcess: noModel, stopProcess: noModel };
     const tools = createRuntimeTools(services, jobs, (id, context) => harness.abortTask(id, context), async () => {});

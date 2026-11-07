@@ -133,9 +133,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     },
   } : null, [identity, conversationId, snapshot.cursor]);
   const transcript = useTranscriptHistory(transcriptSource);
-  // ask_takeover cards answer in the transcript, never above the composer; so does a plan, on its propose_plan card. A
-  // machine-attach approval (it names the tool it gates) has no call there and answers above the composer.
-  const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null && item.kind !== 'takeover');
+  // ask_takeover and lifecycle approval cards answer in the transcript, never above the composer; so does a plan, on
+  // its propose_plan card. A machine-attach approval (it names the tool it gates) has no call there and answers above
+  // the composer.
+  const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null && item.kind !== 'takeover' && item.kind !== 'lifecycle-approval');
   const controls: SessionControlsProps | undefined = value ? {
     value: value.pendingAsk || !question ? value : { ...value, pendingAsk: { id: question.id, source: question.kind === 'approval' && !question.tool ? 'ask-tool' : 'gitspace', links: [], questions: [question.kind === 'approval'
       ? { id: APPROVAL_DECISION, question: question.prompt, header: 'Approval required', multi: false, recommended: null, written: false, options: [APPROVE, REJECT].map(label => ({ label, description: null, preview: null })) }
@@ -214,6 +215,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     return response.value;
   }, [identity, conversationId]);
   const takeoverCards = useMemo<TakeoverCards>(() => ({ questions: snapshot.questions, request: sessionCommand,
+    answer: async (questionId, answer) => {
+      const response = await rpcClient.runtime.answer({ ...identity, questionId, answer });
+      if (response.status === 'error') throw response.error;
+    },
     watch: (card, onClose) => <BrowserWatchDialog identity={identity} request={sessionCommand} target={{ source: card.source, groupId: card.groupId, targetId: card.targetId, title: card.title, url: card.url, label: card.browser }} focusInChrome={card.source === 'chrome'} takeover onClose={onClose} /> }), [snapshot.questions, sessionCommand, identity]);
   return <>
     {props.creation}
