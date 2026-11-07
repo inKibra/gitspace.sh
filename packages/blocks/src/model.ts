@@ -46,12 +46,13 @@ export const toolCallBlockSchema = base.extend({
   details: z.unknown().optional(),
 });
 
-/** `kind: 'plan'` is a `propose_plan` call (`planQuestions`). A question with `written: false` is answered only by its
- * options; an `optional` one may be skipped. */
+/** `kind: 'plan'` is a `propose_plan` call (`planQuestions`), with the `steps` it proposes. A question with
+ * `written: false` is answered only by its options; an `optional` one may be skipped. */
 export const askBlockSchema = base.extend({
   type: z.literal('ask'),
   kind: z.literal('plan').optional(),
   toolCallId: z.string(),
+  steps: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string().optional(), where: z.array(z.string()).optional() })).optional(),
   status: z.enum(['pending', 'answered', 'dismissed']),
   questions: z.array(z.object({
     id: z.string(),
@@ -79,10 +80,15 @@ export const permissionBlockSchema = base.extend({
   risk: z.enum(['ordinary', 'elevated', 'destructive']).default('ordinary'),
 });
 
+/** The agent's todo list as a `todo` call set it. `source`: `plan` when it follows the approved plan (loaded from it, or
+ * its items name plan steps), `own` when it is the agent's own list (a detour from the plan, or no plan). `error`: the
+ * call failed and the list did not change. */
 export const todoBlockSchema = base.extend({
   type: z.literal('todo'),
   title: z.string().optional(),
-  items: z.array(z.object({ text: z.string(), state: z.enum(['pending', 'active', 'done', 'blocked']) })),
+  source: z.enum(['plan', 'own']).optional(),
+  error: z.string().optional(),
+  items: z.array(z.object({ text: z.string(), state: z.enum(['pending', 'active', 'done', 'blocked']), planStep: z.string().optional() })),
 });
 
 export const interruptionBlockSchema = base.extend({
@@ -90,6 +96,8 @@ export const interruptionBlockSchema = base.extend({
   /** `event`: a subagent's reply, a finished background command, an exited process or a ready machine, delivered to the
    * agent on someone else's behalf; `machine` also carries GitSpace's own notices to the agent. */
   reason: z.enum(['aborted', 'compacted', 'replaced', 'connection-lost', 'rule', 'machine', 'event']),
+  /** An `event`'s kind (`agent-message`, `command-completed`, `process-exited`, `machine-ready`, …). */
+  kind: z.string().optional(),
   title: z.string(),
   detail: z.string().optional(),
   /** The whole message when `detail` shows only its start. */

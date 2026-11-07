@@ -117,6 +117,23 @@ try {
   assert.notEqual((await session({ type: 'control' })).control.context?.tokens, 0, 'A failed request read as an empty context');
   console.log('PASS failed model request surfaces its error, turns the workspace red and keeps the context in use');
 
+  // The fixture model echoes the prompt, so this reply holds an invalid block: the main agent gets one notice, which
+  // starts no turn.
+  {
+    const told = 'user: Block 1 in your last message is invalid: the Mermaid source is empty\nThe chat shows an error in place of that block; send a corrected block in a new message.';
+    const texts = (snapshot: RuntimeSnapshot) => snapshot.conversations.find(item => item.title === 'Workspace')!.messages.flatMap(message => message.content.flatMap(part => part.type === 'text' ? [`${message.role}: ${part.text}`] : []));
+    await request(`/submit?text=${encodeURIComponent('Status:\n```mermaid\n\n```')}`);
+    await until(snapshot => texts(snapshot).includes(told));
+    await Bun.sleep(500);
+    const settled = RuntimeSnapshotSchema.parse(await request('/'));
+    assert.equal(texts(settled).filter(text => text === told).length, 1, 'The invalid block was noticed more than once');
+    assert.equal(texts(settled).at(-1), told, 'The block notice started a turn');
+    const mainId = settled.conversations.find(item => item.title === 'Workspace')!.id;
+    const tasks = z.array(z.object({ conversationId: z.string(), state: z.string() })).parse(await request('/live-tasks'));
+    assert(!tasks.some(task => task.conversationId === mainId && task.state !== 'terminal'), 'The block notice left work running');
+    console.log('PASS an invalid block in the agent\'s reply is noticed once and starts no turn');
+  }
+
 
   // Both public answer surfaces must restart a persisted suspended Pi task by themselves.
   for (const surface of ['session', 'answer'] as const) {

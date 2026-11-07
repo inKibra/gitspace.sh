@@ -1,81 +1,142 @@
+// The Goal tab, in the order it explains the work: where the workspace is (phase, pull request, what needs you); the
+// goal (the problem, why it matters, what done means); the plan; the requirements and their evidence; the decisions;
+// and how the workspace runs (its automations by phase). The workflow and rubric records open from the last part.
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from '@xyflow/react';
-import { Button, Card, CardAction, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardMedia, CardTitle, ScrollArea, Tooltip, useShape } from '@gitspace/ui';
-import type { EvidenceReference, GoalRecordView, InspectorOverview, RubricCriterion, RubricView, WorkflowNode, WorkflowView } from '@gitspace/protocol';
-import { File02, GitBranch01, Play, Scales02, Terminal, User01, Users01 } from '@untitledui/icons';
-import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { glyph } from '../glyph.js';
+import { Badge, Button, Card, CardAction, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, ScrollArea, useShape } from '@gitspace/ui';
+import type { EvidenceReference, InspectorOverview, JournalEntryView, ReviewThreadView, RubricCriterion, RubricView, WorkflowNode, WorkflowView } from '@gitspace/protocol';
+import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
+import { ArrowUpRight, Play, Scales02, Terminal, User01, Users01 } from '@untitledui/icons';
+import { useContext, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react';
+import { AutomationPhaseGrid } from '../automations/AutomationPhaseGrid.js';
+import { MODE_LABEL } from '../automations/automation-formatters.js';
+import { BlockActionsProvider } from '../blocks/BlockActions.js';
+import { useComposerStaging, workspaceBlockActions } from '../chat/staging.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { EmptyState, StatusDot } from '../GitSpaceShell.js';
+import { EmptyState, type AgentScopeView } from '../GitSpaceShell.js';
+import { DecisionsSection } from '../goal/DecisionsSection.js';
+import { EvidenceList } from '../goal/Evidence.js';
+import { PlanSection } from '../goal/PlanSection.js';
+import { RequirementsSection } from '../goal/RequirementsSection.js';
+import type { StepCommentHandlers } from '../goal/StepComments.js';
+import type { GoalAutomations } from '../goal/useWorkspaceAutomations.js';
+import { automationsUrl, navigateProductUrl } from '../routes.js';
+import { PrChip } from '../sidebar/parts.js';
+import { ProjectGraphsContext } from '../sidebar/project-graph.js';
 import type { InspectorProps } from './Inspector.js';
-import { RuntimeAvailability, openWorkspaceFirst, ic, settle, formatDate, Tone, Kicker, Heading, SectionTitle, Padded, MetaCard } from './inspector-shared.js';
+import { ic, settle, formatDate, Tone, Kicker, Heading, SectionTitle, Padded } from './inspector-shared.js';
 
-// Untitled UI glyphs adapted once, at module scope, to Fluid's IconComponent
-// shape so Card/Tabs slots never remount a freshly created component.
-const GitBranchGlyph = glyph(GitBranch01);
-const PlayGlyph = glyph(Play);
-const ScalesGlyph = glyph(Scales02);
 function evidenceLabel(reference: EvidenceReference): string {
   return reference.label;
 }
 function SurfaceHeader({ kicker, title, detail }: { kicker: string; title: string; detail: string }) {
   return <header className="flex flex-col gap-1 px-4 pb-3 pt-4"><Kicker>{kicker}</Kicker><Heading>{title}</Heading><p className="text-body text-muted-foreground">{detail}</p></header>;
 }
-function EvidenceButton({ reference, onOpen }: { reference: EvidenceReference; onOpen: (reference: EvidenceReference) => void }) {
-  const disabled = !useContext(RuntimeAvailability) && reference.kind === 'git';
-  const button = <Button variant="tertiary" size="compact" type="button" disabled={disabled} onClick={() => onOpen(reference)}>{ic(File02, 14)}{evidenceLabel(reference)}</Button>;
-  return disabled ? <Tooltip content={openWorkspaceFirst}><span>{button}</span></Tooltip> : button;
-}
-function EvidenceList({ evidence, onOpen, prefix }: { evidence: readonly EvidenceReference[]; onOpen: (reference: EvidenceReference) => void; prefix: string }) {
-  if (!evidence.length) return null;
-  return <div className="flex flex-wrap gap-1">{evidence.map((reference, index) => <EvidenceButton reference={reference} onOpen={onOpen} key={`${prefix}:${index}`} />)}</div>;
-}
-function RequirementList({ requirements, onOpenEvidence }: { requirements: GoalRecordView['requirements']; onOpenEvidence: (reference: EvidenceReference) => void }) {
-  return <section className="flex flex-col gap-2">
-    <SectionTitle>Requirements</SectionTitle>
-    <CardGroup border="outlined">{requirements.map((requirement) => <Card key={requirement.id}>
-      <CardHeader><CardTitle>{requirement.title}</CardTitle><CardDescription>{requirement.required ? 'Required' : 'Optional'}</CardDescription><CardAction><Tone value={requirement.status} /></CardAction></CardHeader>
-      {requirement.description || requirement.evidence.length ? <CardContent className="flex flex-col gap-2">{requirement.description ? <GitSpaceMarkdown>{requirement.description}</GitSpaceMarkdown> : null}<EvidenceList evidence={requirement.evidence} onOpen={onOpenEvidence} prefix={requirement.id} /></CardContent> : null}
-    </Card>)}</CardGroup>
+
+/** A numbered part of the Goal. */
+function Part({ number, title, detail, children }: { number: number; title: string; detail?: ReactNode; children: ReactNode }): ReactElement {
+  return <section className="flex flex-col gap-3" aria-label={title}>
+    <header className="flex items-baseline gap-2.5 border-t border-border pt-5">
+      <span className="text-caption font-semibold tabular-nums text-muted-foreground">{number}</span>
+      <span className="flex min-w-0 flex-col gap-0.5"><h3 className="text-title font-semibold text-foreground">{title}</h3>{detail ? <span className="text-caption text-muted-foreground">{detail}</span> : null}</span>
+    </header>
+    {children}
   </section>;
 }
-export function GoalOverview({ overview, openDocuments, onOpenProduct, onOpenEvidence }: { overview: InspectorOverview; openDocuments: number; onOpenProduct: (kind: 'goal' | 'workflow' | 'rubric') => void; onOpenEvidence: (reference: EvidenceReference) => void }) {
-  const shape = useShape();
-  const goal = overview.goal;
-  if (!goal) return <Padded><EmptyState icon={ic(GitBranch01, 22)} title="No goal is attached" description="Create the canonical workspace goal to give requirements, workflow, and review evidence a shared home." /></Padded>;
-  const accepted = goal.requirements.filter((item) => item.status === 'accepted').length;
-  const review = goal.requirements.filter((item) => item.status === 'review').length;
-  const missing = goal.requirements.filter((item) => item.status === 'missing').length;
-  const total = Math.max(1, goal.requirements.length);
-  const products = 1 + (overview.workflow ? 1 : 0) + (overview.rubric ? 1 : 0);
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-4 p-4">
-    <header className="flex flex-col gap-1"><Kicker>Workspace goal</Kicker><Heading>{goal.title}</Heading><GitSpaceMarkdown className="text-body text-muted-foreground">{goal.summary}</GitSpaceMarkdown></header>
-    <CardGroup columns={2} separated border="outlined">
-      <MetaCard label="Phase"><StatusDot color={goal.phase === 'ship' ? 'green' : 'blue'} />{goal.phase}</MetaCard>
-      <MetaCard label="Revision">r{goal.revision}</MetaCard>
-      <MetaCard label="Open tabs">{openDocuments}</MetaCard>
-      <MetaCard label="Review threads">{overview.review.unresolved} unresolved</MetaCard>
-    </CardGroup>
-    <div className="flex flex-wrap items-center gap-3 text-caption text-muted-foreground">
-      <span><b className="font-medium tabular-nums text-foreground">{accepted}</b> accepted</span>
-      <span><b className="font-medium tabular-nums text-foreground">{review}</b> in review</span>
-      <span><b className="font-medium tabular-nums text-foreground">{missing}</b> missing</span>
-      {/* FLUID-GAP: progress meter — the registry has no read-only progress bar; the fill width is the measured ratio. */}
-      <span role="progressbar" aria-label="Accepted requirements" aria-valuemin={0} aria-valuemax={total} aria-valuenow={accepted} className={`${shape.bg} h-1 min-w-12 flex-1 overflow-hidden bg-muted`}><span className="block h-full bg-foreground" style={{ width: `${accepted / total * 100}%` }} /></span>
-    </div>
-    <CardGroup columns={products} separated border="outlined">
-      <Card onClick={() => onOpenProduct('goal')} label="Open goal & requirements"><CardHeader><CardMedia icon={GitBranchGlyph} /><CardTitle>Goal & requirements</CardTitle><CardDescription className="tabular-nums">{goal.requirements.length} requirements · revision {goal.revision}</CardDescription></CardHeader></Card>
-      {overview.workflow ? <Card onClick={() => onOpenProduct('workflow')} label={`Open ${overview.workflow.title}`}><CardHeader><CardMedia icon={PlayGlyph} /><CardTitle>{overview.workflow.title}</CardTitle><CardDescription className="tabular-nums">{overview.workflow.nodes.length} nodes · {overview.workflow.edges.length} edges</CardDescription></CardHeader></Card> : null}
-      {overview.rubric ? <Card onClick={() => onOpenProduct('rubric')} label={`Open ${overview.rubric.title}`}><CardHeader><CardMedia icon={ScalesGlyph} /><CardTitle>{overview.rubric.title}</CardTitle><CardDescription className="tabular-nums">{overview.rubric.criteria.length} criteria</CardDescription></CardHeader></Card> : null}
-    </CardGroup>
-    <RequirementList requirements={goal.requirements} onOpenEvidence={onOpenEvidence} />
-  </div></ScrollArea>;
+
+function Term({ label, children }: { label: string; children: ReactNode }): ReactElement {
+  return <div className="flex flex-col gap-0.5"><dt className="text-caption font-semibold uppercase tracking-wide text-muted-foreground">{label}</dt><dd className="text-body text-foreground">{children}</dd></div>;
 }
 
-export function ProductGoal({ goal, onOpenEvidence }: { goal: GoalRecordView; onOpenEvidence: (reference: EvidenceReference) => void }) {
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-4 p-4">
-    <header className="flex flex-col gap-1"><Kicker>Goal · revision {goal.revision}</Kicker><Heading>{goal.title}</Heading><GitSpaceMarkdown className="text-body text-muted-foreground">{goal.summary}</GitSpaceMarkdown></header>
-    <RequirementList requirements={goal.requirements} onOpenEvidence={onOpenEvidence} />
-  </div></ScrollArea>;
+export interface GoalSurfaceProps {
+  overview: InspectorOverview;
+  scope?: AgentScopeView;
+  /** The conversation's session controls: its plan and todo list. */
+  controls?: SessionControlView;
+  journalEntries: readonly JournalEntryView[];
+  threads: readonly ReviewThreadView[];
+  /** This browser's device id, which records name as their author. */
+  viewerId: string;
+  automations?: GoalAutomations;
+  comments: StepCommentHandlers;
+  onSetAcceptance?(requirementId: string, accepted: boolean): Promise<void>;
+  onOpenEvidence(reference: EvidenceReference): void;
+  onOpenGuideSection(sectionId: string): void;
+  onOpenJournal(): void;
+  onOpenProduct(kind: 'workflow' | 'rubric'): void;
+}
+
+export function GoalSurface({ overview, scope, controls, journalEntries, threads, viewerId, automations, comments, onSetAcceptance, onOpenEvidence, onOpenGuideSection, onOpenJournal, onOpenProduct }: GoalSurfaceProps): ReactElement {
+  const shape = useShape();
+  const goal = overview.goal;
+  const workspace = scope?.kind === 'workspace' ? scope : null;
+  const phase = workspace?.phase ?? goal?.phase ?? null;
+  const graphs = useContext(ProjectGraphsContext);
+  const pullRequest = workspace ? graphs[workspace.projectId]?.pullRequests[workspace.id] : undefined;
+  const staging = useComposerStaging();
+  const blockActions = useMemo(() => workspaceBlockActions({ staging, setAcceptance: onSetAcceptance, openGuideSection: onOpenGuideSection }), [staging, onSetAcceptance, onOpenGuideSection]);
+  const plan = controls?.plan ?? null;
+  const requirements = goal?.requirements ?? [];
+  const required = requirements.filter(requirement => requirement.required);
+  const accepted = required.filter(requirement => requirement.status === 'accepted').length;
+  const toAccept = requirements.filter(requirement => requirement.status === 'review').length;
+  const stepsDone = plan?.steps.filter(step => step.status === 'completed').length ?? 0;
+  const needsYou = [
+    ...plan?.status === 'proposed' ? ['approve the proposed plan'] : [],
+    ...controls?.pendingAsk ? ['answer the agent’s question'] : [],
+    ...toAccept ? [`accept ${toAccept} requirement${toAccept === 1 ? '' : 's'} with evidence to check`] : [],
+    ...overview.review.unresolved ? [`${overview.review.unresolved} open review thread${overview.review.unresolved === 1 ? '' : 's'}`] : [],
+  ];
+  const entries = journalEntries.length ? journalEntries : overview.journal.recent;
+  const done = [
+    ...plan?.steps.length ? [`${stepsDone} of ${plan.steps.length} plan steps`] : [],
+    ...required.length ? [`${accepted} of ${required.length} required requirements accepted`] : [],
+  ];
+
+  return <BlockActionsProvider actions={blockActions}><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-6 p-4">
+    <section className={`${shape.container} flex flex-col gap-2 bg-surface-1 p-4 shadow-surface-1`} aria-label="Where we are">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-caption font-semibold tabular-nums text-muted-foreground">1</span>
+        <h3 className="text-body font-semibold text-foreground">Where we are</h3>
+        {phase ? <Badge variant="dot" size="compact" color={phase === 'ship' ? 'green' : 'blue'}>{MODE_LABEL[phase]}</Badge> : null}
+        {pullRequest ? <PrChip pr={pullRequest} full /> : workspace ? <span className="text-caption text-muted-foreground">no PR</span> : null}
+      </div>
+      {done.length ? <p className="text-body text-foreground">Done: {done.join(', ')}.</p> : null}
+      <p className="text-body text-foreground"><span className="font-medium">Needs you:</span> {needsYou.length ? needsYou.join(' · ') : 'nothing right now'}</p>
+    </section>
+
+    <Part number={2} title={goal?.title ?? 'The goal'} detail={workspace ? <>The goal · <span className="font-mono">{workspace.branch}</span>{goal ? ` · revision ${goal.revision}` : null}</> : 'The goal'}>
+      {goal ? <dl className="flex min-w-0 flex-col gap-3">
+        <Term label="The problem">{goal.summary.trim() ? <GitSpaceMarkdown>{goal.summary}</GitSpaceMarkdown> : <span className="text-muted-foreground">Not written yet.</span>}</Term>
+        {overview.changeGuide?.intro?.trim() ? <Term label="Why it matters"><GitSpaceMarkdown>{overview.changeGuide.intro}</GitSpaceMarkdown></Term> : null}
+        <Term label="What done means">{required.length ? `The ${required.length} required requirement${required.length === 1 ? ' is' : 's are'} accepted, each on its evidence.` : 'No required requirements are set yet.'}</Term>
+      </dl> : <p className="text-body text-muted-foreground">No goal is attached. The agent writes the workspace goal: the problem, its requirements and their evidence.</p>}
+    </Part>
+
+    <Part number={3} title="The plan" detail="The agent’s steps. Steps mark themselves done as the agent finishes them; you approve the plan in the conversation and comment on any step.">
+      <PlanSection plan={plan} todos={controls?.todos ?? []} requirements={requirements} threads={threads} comments={comments} />
+    </Part>
+
+    <Part number={4} title="Requirements and evidence" detail="Each points at the evidence that shows it and the guide section that explains it.">
+      <RequirementsSection requirements={requirements} guide={overview.changeGuide} viewerId={viewerId} onSetAcceptance={onSetAcceptance} onOpenEvidence={onOpenEvidence} onOpenGuideSection={onOpenGuideSection} />
+    </Part>
+
+    <Part number={5} title="Decisions" detail="What was decided, by whom, and the conversation that informed it. Newest first.">
+      <DecisionsSection entries={entries} guide={overview.changeGuide} viewerId={viewerId} onOpenGuideSection={onOpenGuideSection} onOpenJournal={onOpenJournal} />
+    </Part>
+
+    <Part number={6} title="How this workspace runs" detail="The project’s automations that reach this workspace, by phase, and this workspace’s exceptions to them.">
+      {workspace && automations ? <>
+        {automations.error ? <p role="alert" className="flex flex-wrap items-center gap-2 text-caption text-destructive">{automations.read ? automations.error : `Automations are unavailable. ${automations.error}`}<Button variant="ghost" size="compact" type="button" onClick={automations.retry}>Retry</Button></p> : null}
+        {automations.read ? <AutomationPhaseGrid automations={automations.automations} workspaces={[{ id: workspace.id, name: workspace.name, active: workspace.closedAt === null, phase: workspace.phase }]} exceptions={automations.exceptions} busy={automations.busy} now={Date.now()} onSet={automations.set} />
+          : automations.error ? null : <p className="text-caption text-muted-foreground">Reading automations…</p>}
+        <button type="button" onClick={() => navigateProductUrl(automationsUrl(workspace.projectId))} className="flex items-center gap-1 self-start text-caption text-muted-foreground hover:text-foreground hover:underline">The Automations page edits the project’s automations<ArrowUpRight width={12} height={12} /></button>
+      </> : <p className="text-body text-muted-foreground">Automations reach workspaces, not the project agent.</p>}
+      {overview.workflow || overview.rubric ? <div className="flex flex-wrap gap-2">
+        {overview.workflow ? <Button variant="secondary" size="compact" type="button" onClick={() => onOpenProduct('workflow')}>{ic(Play, 14)}{overview.workflow.title}</Button> : null}
+        {overview.rubric ? <Button variant="secondary" size="compact" type="button" onClick={() => onOpenProduct('rubric')}>{ic(Scales02, 14)}{overview.rubric.title}</Button> : null}
+      </div> : null}
+    </Part>
+  </div></ScrollArea></BlockActionsProvider>;
 }
 
 function workflowNodeLabel(node: WorkflowNode): ReactNode {

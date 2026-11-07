@@ -1,8 +1,10 @@
-import { TRANSCRIPT_CACHE_ROWS, type ExecutionBlock, type TranscriptItem, type TranscriptRow, type TransportBlock } from '@gitspace/blocks';
+import { TRANSCRIPT_CACHE_ROWS, type ExecutionBlock, type TranscriptRow, type TransportBlock } from '@gitspace/blocks';
 import { Button } from '@gitspace/ui';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { TranscriptItemView, type ExecutionHistoryRenderer, type TranscriptItemState, type TranscriptReadingPosition } from './chat/TranscriptItemView.js';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { ToolGroup, toolRuns, type GroupCall } from './chat/ToolGroup.js';
+import { TranscriptItemView, type TranscriptItemState, type TranscriptReadingPosition } from './chat/TranscriptItemView.js';
 import { TransportNotice, type TurnTranscriptProps } from './chat/TurnTranscript.js';
+import { TakeoverCardsContext } from './TakeoverCard.js';
 import { useTranscriptHistory, type TranscriptHistory } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
 
@@ -22,9 +24,13 @@ const MAX_PINNED_ROWS = 64;
 const INTERACTION_CACHE_BYTES = 512 * 1024;
 const interactionEncoder = new TextEncoder();
 const EMPTY_STATE: TranscriptItemState = {};
-interface Layout { rows: readonly TranscriptRow[]; offsets: number[]; total: number }
+/** What the window lays out: one transcript row, or a run of consecutive tool-call rows of one turn drawn as one group.
+ * Its id and ordinal are its first row's, so anchors, positions and interaction state keep pointing at real rows. */
+interface DisplayRow { id: string; ordinal: number; turnId: string; turnStatus: TranscriptRow['turnStatus']; rows: readonly TranscriptRow[]; tools: boolean }
+/** `index` finds the display row holding a transcript row. */
+interface Layout { rows: readonly DisplayRow[]; offsets: number[]; total: number; index: Map<string, number> }
 interface Anchor { id: string; ordinal: number; offset: number }
-interface PinnedRow { row: TranscriptRow; top: number }
+interface PinnedRow { row: DisplayRow; top: number }
 interface InteractionEntry { state: TranscriptItemState; bytes: number }
 
 interface ViewState {
@@ -41,8 +47,9 @@ interface ViewState {
 // callback weakly owns bounded content and interaction state across that replacement.
 const viewStates = new WeakMap<object, ViewState>();
 
-function estimateHeight(row: TranscriptRow): number {
-  const item = row.item;
+function estimateHeight(row: DisplayRow): number {
+  if (row.tools) return 52;
+  const item = row.rows[0]!.item;
   if (item.type === 'ask' && item.status === 'pending') return 280;
   if (item.type === 'workspace-report') return 26;
   if (item.type === 'message' || item.type === 'markdown' || item.type === 'code') return Math.min(640, 64 + Math.ceil(item.text.length / 90) * 20);
@@ -61,13 +68,10 @@ function rowAt(layout: Layout, top: number): number {
   return Math.min(low, Math.max(0, layout.rows.length - 1));
 }
 
-
-function MeasuredRow({ row, item, error, top, gap, state, onStateChange, onAnswer, onRetry, onMeasure, onNode, renderExecutionHistory }: {
-  row: TranscriptRow; item?: TranscriptItem; error?: string; top: number; gap: number; state: TranscriptItemState;
-  onStateChange(id: string, patch: Partial<TranscriptItemState>): void;
-  onAnswer?: TurnTranscriptProps['onAnswer']; onRetry(): void;
+function MeasuredRow({ row, top, gap, onMeasure, onNode, children }: {
+  row: DisplayRow; top: number; gap: number;
   onMeasure(id: string, height: number): void; onNode(id: string, node: HTMLDivElement | null): void;
-  renderExecutionHistory?: ExecutionHistoryRenderer;
+  children: ReactNode;
 }) {
   const element = useRef<HTMLDivElement | null>(null);
   const bind = useCallback((node: HTMLDivElement | null) => { element.current = node; onNode(row.id, node); }, [onNode, row.id]);
@@ -80,11 +84,7 @@ function MeasuredRow({ row, item, error, top, gap, state, onStateChange, onAnswe
     observer.observe(node);
     return () => observer.disconnect();
   }, [row.id, onMeasure]);
-  return <div ref={bind} data-transcript-row={row.id} data-turn-id={row.turnId} data-status={row.turnStatus} className="absolute inset-x-0 min-w-0" style={{ top, paddingBottom: gap }}>
-    {item ? <TranscriptItemView item={item} active={row.turnStatus === 'running'} state={state} onStateChange={(patch) => onStateChange(row.id, patch)} onAnswer={onAnswer} renderExecutionHistory={renderExecutionHistory} />
-      : !error ? <p role="status" className="py-4 text-body text-muted-foreground">Loading content…</p> : null}
-    {error ? <div role="alert" className="mt-2 text-body text-destructive">{error}<Button variant="ghost" onClick={onRetry}>Retry content</Button></div> : null}
-  </div>;
+  return <div ref={bind} data-transcript-row={row.id} data-turn-id={row.turnId} data-status={row.turnStatus} className="absolute inset-x-0 min-w-0" style={{ top, paddingBottom: gap }}>{children}</div>;
 }
 
 /** Uses the existing ScrollArea viewport: no nested scroller or scroll event cancellation. */
@@ -146,11 +146,21 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
   const lastReported = useRef('');
   const lastBoundary = useRef('');
   const appliedNavigation = useRef<TranscriptHistory['navigation']>(null);
+  const cards = useContext(TakeoverCardsContext);
+  const displayRows = useMemo(() => toolRuns(history.rows, cards).map((run): DisplayRow => {
+    const rows = run.tools ? run.entries : [run.entry];
+    const first = rows[0]!;
+    return { id: first.id, ordinal: first.ordinal, turnId: first.turnId, turnStatus: first.turnStatus, rows, tools: run.tools };
+  }), [history.rows, cards]);
   const layout = useMemo<Layout>(() => {
     const offsets = [0];
-    for (const row of history.rows) offsets.push(offsets[offsets.length - 1]! + (measurements.current.get(row.id) ?? estimateHeight(row)));
-    return { rows: history.rows, offsets, total: offsets[offsets.length - 1]! };
-  }, [history.rows, measurementVersion]);
+    const index = new Map<string, number>();
+    displayRows.forEach((row, position) => {
+      offsets.push(offsets[offsets.length - 1]! + (measurements.current.get(row.id) ?? estimateHeight(row)));
+      for (const member of row.rows) index.set(member.id, position);
+    });
+    return { rows: displayRows, offsets, total: offsets[offsets.length - 1]!, index };
+  }, [displayRows, measurementVersion]);
   const committed = useRef(layout);
 
   const listTop = useCallback(() => {
@@ -175,7 +185,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
     anchor.current = row ? { id: row.id, ordinal: row.ordinal, offset: top - current.offsets[first]! } : null;
     if (row) positionListener.current?.({ generation: latest.current.generation, rowId: row.id, ordinal: row.ordinal, offset: top - current.offsets[first]!, following: following.current });
     const firstId = row?.id ?? null;
-    const lastId = current.rows[last]?.id ?? null;
+    const lastId = current.rows[last]?.rows.at(-1)?.id ?? null;
     const report = JSON.stringify([firstId, lastId, following.current]);
     if (report !== lastReported.current) {
       lastReported.current = report;
@@ -190,7 +200,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
     if (following.current && !latest.current.hasAfter) next = Math.max(0, element.scrollHeight - element.clientHeight);
     else if (anchor.current && current.rows.length) {
       const held = anchor.current;
-      let index = current.rows.findIndex((row) => row.id === held.id);
+      let index = current.index.get(held.id) ?? -1;
       if (index < 0) index = current.rows.findIndex((row) => row.ordinal >= held.ordinal);
       if (index < 0) index = current.rows.length - 1;
       next = listTop() + current.offsets[index]! + held.offset;
@@ -244,14 +254,15 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
     if (following.current) seenTotal.current = history.total;
     committed.current = layout;
     if (history.navigation && history.navigation !== appliedNavigation.current) {
-      const target = history.rows.find((row) => row.id === history.navigation!.rowId);
+      const position = history.navigation.rowId === null ? undefined : layout.index.get(history.navigation.rowId);
+      const target = position === undefined ? undefined : layout.rows[position];
       if (history.navigation.rowId === null || target) {
         appliedNavigation.current = history.navigation;
         setFollow(history.navigation.rowId === null);
         anchor.current = target ? { id: target.id, ordinal: target.ordinal, offset: 0 } : null;
       }
     }
-    const retained = new Set(history.rows.map((row) => row.id));
+    const retained = new Set(layout.rows.map((row) => row.id));
     for (const id of pinned.current.keys()) retained.add(id);
     for (const id of measurements.current.keys()) if (!retained.has(id)) measurements.current.delete(id);
     // Guard measurements even when an alternate caller supplies an oversized cache.
@@ -295,7 +306,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
       const next = new Map<string, PinnedRow>();
       for (const [id, node] of nodes.current) {
         if (!node.contains(document.activeElement) && !(range?.intersectsNode(node))) continue;
-        const index = committed.current.rows.findIndex((row) => row.id === id);
+        const index = committed.current.index.get(id) ?? -1;
         const retained = index >= 0 ? { row: committed.current.rows[index]!, top: committed.current.offsets[index]! } : pinned.current.get(id);
         if (retained && next.size < MAX_PINNED_ROWS) next.set(id, retained);
       }
@@ -368,27 +379,50 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
   const top = Number.isFinite(view.top) ? view.top : Math.max(0, layout.total - view.height);
   const first = Math.max(0, rowAt(layout, top) - OVERSCAN_ROWS);
   const last = Math.min(layout.rows.length - 1, rowAt(layout, top + view.height) + OVERSCAN_ROWS);
-  const rendered = new Map<string, { row: TranscriptRow; top: number; gap: number }>();
+  const rendered = new Map<string, { row: DisplayRow; top: number; gap: number }>();
   for (let index = first; index <= last; index++) {
     const row = layout.rows[index]!;
     const next = layout.rows[index + 1];
     // Workspace reports in a row stack tightly, one line each.
-    const gap = row.item.type === 'workspace-report' && next?.item.type === 'workspace-report' ? 2 : next?.turnId === row.turnId ? 8 : 24;
+    const gap = row.rows[0]!.item.type === 'workspace-report' && next?.rows[0]!.item.type === 'workspace-report' ? 2 : next?.turnId === row.turnId ? 8 : 24;
     rendered.set(row.id, { row, top: layout.offsets[index]!, gap });
   }
   for (const [id, held] of pinned.current) {
     if (rendered.has(id)) continue;
-    const index = layout.rows.findIndex((row) => row.id === id);
-    rendered.set(id, { row: index < 0 ? held.row : layout.rows[index]!, top: index < 0 ? -1_000_000 : layout.offsets[index]!, gap: 8 });
+    const index = layout.index.get(id);
+    const current = index === undefined ? undefined : layout.rows[index];
+    rendered.set(id, current?.id === id ? { row: current, top: layout.offsets[index!]!, gap: 8 } : { row: held.row, top: -1_000_000, gap: 8 });
   }
+  // A group keeps its state under its first row; one whose first row changed (older calls loaded) finds its members'.
+  const shown = [...rendered.values()].sort((a, b) => a.row.ordinal - b.row.ordinal).map((entry) => ({ ...entry, state: interactions.current.get(entry.row.id)?.state
+    ?? (entry.row.tools ? entry.row.rows.map((member) => interactions.current.get(member.id)?.state).find((state) => state !== undefined) : undefined) ?? EMPTY_STATE }));
+  // A group loads complete content only for its selected call; closed groups and other calls draw their previews.
+  const needed = shown.flatMap(({ row, state }) => !row.tools ? row.rows : state.open ? row.rows.filter((member) => member.item.id === state.selectedCall) : []);
   useLayoutEffect(() => {
-    contentCache.setNeeded([...rendered.values()].map(({ row }) => row), (id, offset, signal) => latest.current.content(id, offset, signal));
+    contentCache.setNeeded(needed, (id, offset, signal) => latest.current.content(id, offset, signal));
   });
-  const content: ReactNode[] = [...rendered.values()].sort((a, b) => a.row.ordinal - b.row.ordinal).map(({ row, top: rowTop, gap }) => {
-    const complete = row.truncated ? contentCache.get(row) : { item: row.item };
-    return <MeasuredRow key={row.id} row={row} {...complete} top={rowTop} gap={gap} state={interactions.current.get(row.id)?.state ?? EMPTY_STATE} onStateChange={onStateChange} onAnswer={onAnswer} onRetry={() => contentCache.retry(row)} onMeasure={onMeasure} onNode={onNode}
-      renderExecutionHistory={inline ? undefined : (block, state, onChange) => <ExecutionHistory key={block.executionId} block={block} parent={history} state={state} onStateChange={onChange} onAnswer={onAnswer} />}
-    />;
+  const content: ReactNode[] = shown.map(({ row, top: rowTop, gap, state }) => {
+    let body: ReactNode;
+    if (row.tools) {
+      const calls = row.rows.flatMap((member): GroupCall[] => {
+        if (member.item.type !== 'tool-call') return [];
+        // Cached complete items (the selected call's, or any loaded before) replace previews without a new read.
+        const complete = member.truncated ? contentCache.get(member) : { item: member.item };
+        const full = complete.item?.type === 'tool-call' ? complete.item : null;
+        return [{ block: full ?? member.item, complete: full !== null, error: complete.error, onRetry: () => contentCache.retry(member) }];
+      });
+      body = <ToolGroup calls={calls} state={state} onStateChange={(patch) => onStateChange(row.id, { ...state, ...patch })} />;
+    } else {
+      const member = row.rows[0]!;
+      const complete = member.truncated ? contentCache.get(member) : { item: member.item };
+      body = <>
+        {complete.item ? <TranscriptItemView item={complete.item} active={row.turnStatus === 'running'} state={state} onStateChange={(patch) => onStateChange(row.id, patch)} onAnswer={onAnswer}
+          renderExecutionHistory={inline ? undefined : (block, executionState, onChange) => <ExecutionHistory key={block.executionId} block={block} parent={history} state={executionState} onStateChange={onChange} onAnswer={onAnswer} />} />
+          : !complete.error ? <p role="status" className="py-4 text-body text-muted-foreground">Loading content…</p> : null}
+        {complete.error ? <div role="alert" className="mt-2 text-body text-destructive">{complete.error}<Button variant="ghost" onClick={() => contentCache.retry(member)}>Retry content</Button></div> : null}
+      </>;
+    }
+    return <MeasuredRow key={row.id} row={row} top={rowTop} gap={gap} onMeasure={onMeasure} onNode={onNode}>{body}</MeasuredRow>;
   });
   return <div ref={root} data-virtual-transcript className={`${inline ? 'min-w-0 w-full px-3 py-2' : 'mx-auto min-w-0 w-full max-w-3xl px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6'} [overflow-anchor:none]`}>
     {transport.length ? <div className="mb-6 flex min-w-0 flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}

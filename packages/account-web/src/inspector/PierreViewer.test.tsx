@@ -25,3 +25,20 @@ it('draws the file on first open under StrictMode, which mounts the viewer twice
     expect(drawn).toContain('retryThreeTimes');
   }, { timeout: 5_000 });
 });
+
+it('draws the code in the page\'s scheme and switches it in place when the appearance changes', async () => {
+  document.documentElement.classList.add('dark');
+  try {
+    await act(async () => root.render(<StrictMode><PierreViewer path="retry.ts" identities={{ base: identity, head: identity }} patch={patch} threads={[]} onSelectThread={() => undefined} /></StrictMode>));
+    const host = container.querySelector('diffs-container');
+    await vi.waitFor(() => {
+      expect(host?.shadowRoot?.textContent ?? '').toContain('retryOnce');
+      expect(host?.shadowRoot?.innerHTML ?? '').toContain('color-scheme: dark');
+    }, { timeout: 5_000 });
+    await act(async () => { document.documentElement.classList.replace('dark', 'light'); });
+    await vi.waitFor(() => expect(host?.shadowRoot?.innerHTML ?? '').toContain('color-scheme: light'), { timeout: 5_000 });
+    expect(container.querySelector('diffs-container')).toBe(host);
+  } finally {
+    document.documentElement.classList.remove('dark', 'light');
+  }
+});

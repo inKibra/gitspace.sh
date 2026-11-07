@@ -2,7 +2,8 @@ import { providerErrorText, WORKSPACE_REPORT_ENTRY, type WorkspaceTurnReport } f
 import { createWithdrawnNotices } from './withdrawn-notices.js';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication, SubmissionRecord } from '@earendil-works/pi-durable';
-import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
+import { AssistantEntry, GenerationTask } from '@earendil-works/pi-durable';
+import { appendNotice, CacheNoticesDoc, noticeInvalidBlocks } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
 import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, recordMachineReconnection, recordProcessExit, type PlanDecision, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
@@ -29,7 +30,9 @@ import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, ty
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
 import { createToolResultStore, type WorkspaceToolResults } from './tool-results.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl };
+import { createMessageDecisions, type SentDecisions } from './message-decisions.js';
+export type { SentDecisions } from './message-decisions.js';
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** The decisions a person's prompt carried, once the prompt is placed in its conversation; called again (on the next submission change or wake) until it resolves, so it must accept the same message twice. */ recordMessageDecisions?(sent: SentDecisions): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl };
 /** The main conversation's turn for an input submitted with a request id. */
 export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
 /** One message of a turn, its text cut short. */
@@ -132,8 +135,6 @@ function turnItem(message: ModelMessage): RuntimeTurnItem[] {
   }
   return [{ role: 'assistant', text: cut(parts.join('\n')) }];
 }
-// Retain the persisted document kind so acknowledged cache notices are not emitted again.
-const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
 /** One-time: a sync failure was announced on every retry while each error carried a fresh reference, about 250 notices
  * in a few hours per workspace, all in the agent's context. They are withdrawn from the chat and the model's context. */
 async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harness, root: Conversation, withdrawn: WithdrawnNotices, sql: SqlStorage): Promise<void> {
@@ -228,14 +229,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     options.snapshotChanged?.(attachments.list().filter(item => item.state !== 'detached' && item.machineId !== source).map(item => item.machineId));
   }
   async function notice(text: string, key?: string, source = 'Machine') {
-    await harness.commit(async tx => {
-      if (key) {
-        const seen = await tx.doc(CacheNoticesDoc);
-        if (seen.seen[key]) return;
-        seen.seen[key] = true;
-      }
-      await tx.appendEntry(runtime.root.id, { kind: 'gitspace.machine-notice', data: { source }, model: [{ role: 'user', content: text, timestamp: Date.now() }] });
-    }, BACKGROUND_CONTEXT);
+    await appendNotice(harness, runtime.root.id, text, key, source);
     publish(); await line;
   }
   /** Each failure carries a fresh provider reference, so reporting every retry filled the project's QA list (and with
@@ -293,7 +287,11 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     } finally { await reader.close(); }
   };
   const history = createSessionHistory(options.storage, storage, withdrawn, undefined, options.imageUrl);
-  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference, images: options.tools.images });
+  const recordMessageDecisions = options.recordMessageDecisions;
+  const messageDecisions = recordMessageDecisions ? createMessageDecisions(options.storage.sql, recordMessageDecisions) : undefined;
+  /** A failed pass keeps its decisions for the next one; it is only logged. */
+  const unrecordedDecisions = (error: unknown) => { console.error(JSON.stringify({ event: 'message_decisions_unrecorded', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); };
+  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference, images: options.tools.images, ...(messageDecisions ? { holdDecisions: messageDecisions.hold } : {}) });
   const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const automations = createAutomationRequests({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
@@ -531,11 +529,17 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   }
   harness.subscribeCommits(publication => {
     for (const change of publication.changes) {
+      // The main agent's finished message: its invalid blocks get a notice, posted after the listener returns.
+      if (change.type === 'entry' && change.value.conversationId === runtime.root.id && AssistantEntry.is(change.value)) options.waitUntil(Promise.resolve(change.value).then(entry => noticeInvalidBlocks(harness, entry)).catch(options.onReport));
       if (change.type === 'entry') dirtyConversations.add(change.value.conversationId);
       else if (change.type === 'conversation') dirtyConversations.add(change.value.id);
       else if (change.type === 'task') dirtyTasks.set(Number(change.value.id), change.value);
       else if ((change.type === 'document' || change.type === 'document.copy') && change.conversationId !== undefined) dirtyConversations.add(change.conversationId);
-      else if (change.type === 'submission') turnChanged(change.value);
+      else if (change.type === 'submission') {
+        turnChanged(change.value);
+        const recording = messageDecisions?.submissionChanged(change.value);
+        if (recording) options.waitUntil(recording.catch(unrecordedDecisions));
+      }
     }
     publish();
   });
@@ -748,6 +752,10 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const recovering = marks.stage('conversation recovery', `${sizes.conversations} conversations, lifecycle documents ${megabytes(sizes.lifecycle)}`);
         try { await runtime.lifecycle.recover(); } finally { recovering.end(); }
         harness.resume();
+        if (messageDecisions) options.waitUntil(messageDecisions.retry(async (conversationId, requestId) => {
+          const id = await history.conversation(conversationId).catch(() => undefined);
+          return id === undefined ? undefined : await storage.submissionByRequest(id, requestId, BACKGROUND_CONTEXT) ?? undefined;
+        }).catch(unrecordedDecisions));
         if (marks.active() || attachments.dispatching()) heartbeat();
       }
       finally { await indexing; }

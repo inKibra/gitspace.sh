@@ -577,6 +577,15 @@ export class SpaceContextDO extends BudgetedDurableObject {
     });
   }
 
+  /** `appendJournalEntry`, except that the entry already holding `input.id` is returned as it is: a retried append adds
+   * nothing. */
+  appendJournalEntryOnce(input: AppendJournalEntryInput): JournalEntryView {
+    const parsed = appendJournalEntryInputSchema.parse(input);
+    const identity = this.requireIdentity(parsed);
+    const existing = this.ctx.storage.sql.exec<JournalRow>(`SELECT ${JOURNAL_COLUMNS} FROM inspector_journal_entries WHERE entry_id = ?`, parsed.id).toArray()[0];
+    return existing ? this.journalRecord(identity, existing) : this.appendJournalEntry(input);
+  }
+
   getChangeGuide(input: InspectorIdentity): ChangeGuideView | null {
     return this.readChangeGuide(this.requireIdentity(input));
   }
@@ -1173,7 +1182,7 @@ export function computeJournalDelta(start: JournalStateSnapshot, end: JournalSta
 }
 
 function reviewAnchorStaleReason(anchor: z.infer<typeof reviewAnchorSchema>, context?: ReviewAnchorContext): string | null {
-  if (!context || anchor.kind === 'workspace' || anchor.kind === 'artifact') return null;
+  if (!context || anchor.kind === 'workspace' || anchor.kind === 'artifact' || anchor.kind === 'plan-step') return null;
   const pinnedHead = anchor.kind === 'file' ? anchor.commitId : anchor.headCommit;
   if (pinnedHead !== context.headCommit) return `Anchor HEAD ${pinnedHead} no longer matches ${context.headCommit}`;
   return null;

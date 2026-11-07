@@ -19,6 +19,7 @@ vi.mock('@pierre/diffs', async (importOriginal) => {
       fileContainer.append(this.button);
     }
     render() { return true; }
+    setThemeType() {}
     cleanUp() { this.button.remove(); }
   }
   return { ...actual, FileDiff };

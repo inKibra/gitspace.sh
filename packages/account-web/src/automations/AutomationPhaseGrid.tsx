@@ -40,9 +40,9 @@ export function AutomationPhaseGrid({ automations, workspaces, exceptions, busy,
   return <div className="flex min-w-0 flex-col gap-2">
     <div className="flex flex-wrap items-end justify-between gap-2">
       <p className="min-w-0 flex-[1_1_18rem] text-caption text-muted-foreground">The automations that reach {workspace.name} and its exceptions to their phases. {live} on in {MODE_LABEL[workspace.phase]}, its phase now. A ringed cell is an exception.</p>
-      <div className="w-60 max-w-full"><Select value={workspace.id} onValueChange={setChosen}>
+      {choices.length > 1 ? <div className="w-60 max-w-full"><Select value={workspace.id} onValueChange={setChosen}>
         <SelectTrigger aria-label="Workspace" />{options(choices.map(entry => ({ value: entry.id, label: entry.active ? entry.name : `${entry.name} (closed)` })))}
-      </Select></div>
+      </Select></div> : null}
     </div>
     {rows.length ? <div className={`${shape.container} overflow-x-auto border border-border bg-surface-1`}>
       <table aria-label={`Automations by phase for ${workspace.name}`} className="w-full border-collapse text-left">

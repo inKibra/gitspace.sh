@@ -24,6 +24,7 @@ import { originAccess, originReadCredentials } from './origin-access.js';
 import { remoteDefaultBranch } from './cloud-project.js';
 import { createRuntimeImages } from './runtime-images.js';
 import { inferenceWorkerRunner } from './inference-runner.js';
+import { journalMessageDecisions } from './message-decisions.js';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the origin's history,
  * imported natively from a public origin or streamed with installation-token reads from a covered one. */
@@ -135,6 +136,12 @@ export async function createAccountWorkspaceRuntime(
         });
         await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).appendEvent({ scope: 'workspace', entity: 'journal', entityId: entry.id, revision: entry.sequence, operation: 'append', payload: { spaceId: owned.spaceId } });
       } catch (error) { console.error('Plan decision was not journaled', { workspaceId: identity.workspaceId, conversationId: decision.conversationId, error }); }
+    },
+    /** The decisions a person sent with a message are journaled in the workspace's phase (a base space's: `project`); a
+     * failure throws, and the runtime retries the message. */
+    async recordMessageDecisions(sent) {
+      const current = metadata();
+      await journalMessageDecisions(env, identity, current.kind === 'base' ? 'project' : current.phase ?? 'plan', sent);
     },
     published: (snapshot, report) => {
       const status = report.summary;

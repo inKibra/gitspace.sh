@@ -2,7 +2,7 @@ import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness,
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
-import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
+import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeMessageDecision, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
@@ -95,6 +95,8 @@ export interface SessionHistoryService {
 }
 /** A passive snapshot; an unavailable profile has no displayed default to adopt. */
 export type SessionCatalog = { models: SessionControlView['models']; roles: SessionControlView['roles']; inference?: SessionControlView['inference'] };
+/** The decisions a person (`deviceId`) sent with a prompt whose text is `text`. */
+export type HeldDecisions = { deviceId: string; text: string; decisions: RuntimeMessageDecision[] };
 export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference' | 'setWorkspacePhase'> & {
   harness: Harness;
   root: Conversation;
@@ -106,6 +108,8 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
   /** Stores a person's attached image and returns the block naming it, as tool images are (`ToolServices['images']`). */
   images: ToolServices['images'];
+  /** Keeps the decisions a person's prompt carries under the prompt's request id; called before the prompt is submitted. */
+  holdDecisions?(conversationId: string, requestId: string, held: HeldDecisions): void;
   /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null);
    * `tabGroup` the group's id. */
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
@@ -188,7 +192,7 @@ export function createSessionControls(services: SessionControlServices) {
     // The plan in effect; before any approval, the latest proposal.
     const inEffect = plan?.status === 'approved' ? { text: plan.text, steps: plan.steps ?? [] } : plan?.approved;
     const planView: SessionControlView['plan'] = inEffect ? { status: 'approved', revision: plan?.revision ?? 0, summary: inEffect.text, steps: inEffect.steps } : plan && plan.status !== 'draft' ? { status: plan.status, revision: plan.revision ?? 0, summary: plan.text, steps: plan.steps ?? [] } : null;
-    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role ?? intended?.id ?? null, roleLabel: child ? child.role : catalog.roles.find(role => role.id === (state.role ?? intended?.id))?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? intended?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? intended?.model ?? null, thinking: child ? child.thinking : intended ? (state.thinkingSelection?.source === 'conversation' ? state.thinkingSelection.thinking : intended.thinking) ?? null : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null, written: true }] } : null, plan: planView };
+    return { sessionId: String(target.id), ...(catalog.inference ? { inference: catalog.inference } : {}), role: child?.role ?? state.role ?? intended?.id ?? null, roleLabel: child ? child.role : catalog.roles.find(role => role.id === (state.role ?? intended?.id))?.label ?? null, roles: catalog.roles.map(role => ({ ...role, current: role.id === state.role })), provider: child?.model?.provider ?? agent.model?.provider ?? intended?.provider ?? null, models: catalog.models, model: child?.model?.modelId ?? agent.model?.modelId ?? intended?.model ?? null, thinking: child ? child.thinking : intended ? (state.thinkingSelection?.source === 'conversation' ? state.thinkingSelection.thinking : intended.thinking) ?? null : agent.thinkingLevel, fastMode: state.fastMode, planMode: !child && workspace?.phase === 'plan', context, cost, todos: todos ? [{ name: 'Workspace', tasks: todos.items.map(item => ({ content: item.text, status: item.status === 'active' ? 'in_progress' : item.status, blocker: null, ...(item.planStep ? { planStep: item.planStep } : {}) })) }] : [], queue: { steering: queueText('steer'), followUp: queueText('followUp') }, historyAnchorId: history.anchorId, history: boundSessionControl({ history: history.prompts }).history, goal, pendingAsk: pending ? { id: pending.id, source: 'ask-tool', links: [], questions: [{ id: pending.id, question: pending.prompt, header: null, options: pending.choices.map(label => ({ label, description: null, preview: null })), multi: false, recommended: null, written: true }] } : null, plan: planView };
   }
   /** `deviceId`: the signed-in device that sent the command, when a person sent it; Take over records it as the tab's holder. */
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false, deviceId?: string): Promise<RuntimeSessionResult> {
@@ -303,6 +307,7 @@ export function createSessionControls(services: SessionControlServices) {
           const requestId = crypto.randomUUID();
           await applyInferenceThinking(target, await admitted(requestId));
           const images = command.images?.length ? await Promise.all(command.images.map(image => services.images.store(image))) : [];
+          if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: command.text, decisions: command.decisions });
           await target.submit({ type: 'input', requestId, content: images.length ? [{ type: 'text', text: command.text }, ...images] : command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
         });
         break;

@@ -138,6 +138,28 @@ export function describeAutomationSchedule(expression: string): string {
   return `${trimmed} (UTC)`;
 }
 
+/** What an automation run tells the agent it reaches: which automation, the event, the instruction, the event's fields. */
+export interface AutomationMessage { name: string; event: string; summary: string; instruction: string; fields: unknown }
+
+const AUTOMATION_MESSAGE = /^Automation "(.*?)" · ([^\n]*?) · ([^\n]*)\n\n([\s\S]*?)\n\nThe event:\n([\s\S]*)$/u;
+
+export function automationMessage(message: AutomationMessage): string {
+  return `Automation "${message.name}" · ${message.event} · ${message.summary}\n\n${message.instruction}\n\nThe event:\n${JSON.stringify(message.fields, null, 2)}`;
+}
+
+/** An automation run's message read back (the conversation shows it as the run's card); null for any other text. */
+export function parseAutomationMessage(text: string): AutomationMessage | null {
+  const match = AUTOMATION_MESSAGE.exec(text);
+  if (!match) return null;
+  let fields: unknown;
+  try {
+    fields = JSON.parse(match[5]!);
+  } catch {
+    return null;
+  }
+  return { name: match[1]!, event: match[2]!, summary: match[3]!, instruction: match[4]!, fields };
+}
+
 // GitHub events (docs/AUTOMATIONS-DESIGN.md §4).
 
 /** The events the GitHub App subscribes to that an automation can start on. */

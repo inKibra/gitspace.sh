@@ -1,4 +1,4 @@
-import { DIFFS_TAG_NAME, FileDiff, getLineAnnotationName, parsePatchFiles, type DiffLineAnnotation, type FileDiffOptions, type SelectedLineRange } from '@pierre/diffs';
+import { DIFFS_TAG_NAME, FileDiff, getLineAnnotationName, parsePatchFiles, type DiffLineAnnotation, type FileDiffOptions, type SelectedLineRange, type ThemeTypes } from '@pierre/diffs';
 import { FileTree, useFileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import { Badge, Button, Select, SelectTrigger, TabsSubtle, TabsSubtleItem, useShape } from '@gitspace/ui';
@@ -6,6 +6,7 @@ import type { RepositoryFileView, RepositoryMode, RepositoryTreeEntry, ReviewThr
 import type { GitLfsHeldBack } from '@gitspace/protocol-workspace';
 import { File02, FileCode02, MessageSquare01 } from '@untitledui/icons';
 import { createElement, useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties } from 'react';
+import { useDarkScheme } from '../appearance.js';
 import { EmptyState } from '../GitSpaceShell.js';
 import { syncRepositoryTreePaths } from './repository-tree-paths.js';
 import { selectOptions, type ThreadSelection, type ThreadIdentities, repositoryModes, ic, Padded } from './inspector-shared.js';
@@ -46,19 +47,22 @@ export function repositoryPatch(file: RepositoryFileView): string {
 interface ThreadAnnotation { thread: ReviewThreadView }
 /** Pierre's gutter slot: pinned to the hovered row's gutter, as its React wrapper places it. */
 const gutterSlotStyle = { position: 'absolute', top: 0, bottom: 0, textAlign: 'center', whiteSpace: 'normal', touchAction: 'none' } satisfies CSSProperties;
-/** Without `onSelectRange` the diff is read-only: no line selection starts a thread. */
-export function PierreViewer({ path, identities, patch, threads, onSelectThread, onSelectRange }: { path: string; identities: ThreadIdentities; patch: string; threads: readonly ReviewThreadView[]; onSelectThread: (thread: ReviewThreadView) => void; onSelectRange?: (selection: ThreadSelection) => void }) {
+/** Without `onSelectRange` the diff is read-only: no line selection starts a thread. Without `identities` no thread
+ * anchors to it. `lineNumbers: false` hides the gutter's numbers, for a patch whose hunks do not know their file lines. */
+export function PierreViewer({ path, identities, patch, threads = [], onSelectThread, onSelectRange, lineNumbers = true }: { path: string; identities?: ThreadIdentities; patch: string; threads?: readonly ReviewThreadView[]; onSelectThread?: (thread: ReviewThreadView) => void; onSelectRange?: (selection: ThreadSelection) => void; lineNumbers?: boolean }) {
   const fileDiff = useMemo(() => parsePatchFiles(patch).flatMap((parsed) => parsed.files)[0] ?? null, [patch]);
   const container = useRef<HTMLElement>(null);
   const instance = useRef<FileDiff<ThreadAnnotation> | null>(null);
-  const selectLine = (side: 'base' | 'head', startLine: number, endLine: number): void => onSelectRange?.({ path, identity: identities[side], side, startLine, endLine });
+  const selectLine = (side: 'base' | 'head', startLine: number, endLine: number): void => { if (identities) onSelectRange?.({ path, identity: identities[side], side, startLine, endLine }); };
   const selectLineRef = useRef(selectLine);
   selectLineRef.current = selectLine;
-  const selectable = !!onSelectRange;
+  const selectable = !!onSelectRange && !!identities;
   const identityKey = JSON.stringify(identities);
+  // Pierre holds both GitHub themes and shows the one for the page's scheme; a scheme change switches it in place.
+  const themeType: ThemeTypes = useDarkScheme() ? 'dark' : 'light';
   const { annotations, outdatedThreads } = useMemo(() => {
     const matches = (thread: ReviewThreadView): boolean => {
-      if (thread.anchor.kind !== 'line' || thread.anchor.path !== path) return false;
+      if (!identities || thread.anchor.kind !== 'line' || thread.anchor.path !== path) return false;
       const identity = identities[thread.anchor.side];
       return thread.anchorState !== 'stale' && thread.anchor.generation === identity.generation && thread.anchor.baseCommit === identity.baseCommit && thread.anchor.headCommit === identity.headCommit && !!identity.blobId && thread.anchor.blobId === identity.blobId;
     };
@@ -68,11 +72,11 @@ export function PierreViewer({ path, identities, patch, threads, onSelectThread,
     };
   }, [threads, path, identityKey]);
   const options = useMemo<FileDiffOptions<ThreadAnnotation>>(() => ({
-    diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableHoverUtility: selectable, enableLineSelection: selectable,
+    diffStyle: 'unified', theme: { dark: 'github-dark', light: 'github-light' }, disableFileHeader: true, disableLineNumbers: !lineNumbers, hunkSeparators: 'line-info', enableHoverUtility: selectable, enableLineSelection: selectable,
     onLineSelectionEnd: (range: SelectedLineRange | null) => { if (range) selectLineRef.current(range.side === 'deletions' ? 'base' : 'head', Math.min(range.start, range.end), Math.max(range.start, range.end)); },
     // The gutter's button is the slotted React child below; Pierre only needs to know there is one.
     ...(selectable ? { renderGutterUtility: () => null } : {}),
-  }), [selectable]);
+  }), [selectable, lineNumbers]);
   // One instance per mount, drawn into the container this component owns. Cleanup also empties what it drew from the
   // container's shadow root, which outlives the instance: React's StrictMode remounts on the same node, and a second
   // instance that finds the first one's <pre> takes it for server-rendered HTML and never draws the file.
@@ -89,12 +93,14 @@ export function PierreViewer({ path, identities, patch, threads, onSelectThread,
     };
   }, [fileDiff, options]);
   useLayoutEffect(() => { instance.current?.render({ fileDiff: fileDiff ?? undefined, lineAnnotations: annotations }); }, [annotations]);
+  // Runs after each new instance too, which starts on the OS scheme.
+  useLayoutEffect(() => { instance.current?.setThemeType(themeType); }, [themeType, fileDiff, options]);
   if (!fileDiff) return <Padded><EmptyState icon={ic(FileCode02, 22)} title="No parseable content" description={`The selected ${path} view did not contain a text patch Pierre can render.`} /></Padded>;
   // FLUID-GAP: diff viewer — @pierre/diffs renders the patch with its own theme.
   return <div className="min-h-0 flex-1 overflow-auto bg-surface-3">
-    {outdatedThreads.length ? <div className="flex flex-wrap items-center gap-2 p-3"><span className="text-caption text-muted-foreground">Comments on other or unverified content:</span>{outdatedThreads.map((thread) => <Button key={thread.id} variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(thread)}>{ic(MessageSquare01, 14)}{thread.anchor.kind === 'line' ? `Lines ${thread.anchor.startLine}–${thread.anchor.endLine}` : 'Thread'}</Button>)}</div> : null}
+    {outdatedThreads.length ? <div className="flex flex-wrap items-center gap-2 p-3"><span className="text-caption text-muted-foreground">Comments on other or unverified content:</span>{outdatedThreads.map((thread) => <Button key={thread.id} variant="tertiary" size="compact" type="button" onClick={() => onSelectThread?.(thread)}>{ic(MessageSquare01, 14)}{thread.anchor.kind === 'line' ? `Lines ${thread.anchor.startLine}–${thread.anchor.endLine}` : 'Thread'}</Button>)}</div> : null}
     {createElement(DIFFS_TAG_NAME, { ref: container },
-      annotations.map((annotation, index) => <div key={index} slot={getLineAnnotationName(annotation)}><Button variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(annotation.metadata.thread)}>{ic(MessageSquare01, 14)}<span className="tabular-nums">{annotation.metadata.thread.messages.length}</span></Button></div>),
+      annotations.map((annotation, index) => <div key={index} slot={getLineAnnotationName(annotation)}><Button variant="tertiary" size="compact" type="button" onClick={() => onSelectThread?.(annotation.metadata.thread)}>{ic(MessageSquare01, 14)}<span className="tabular-nums">{annotation.metadata.thread.messages.length}</span></Button></div>),
       selectable ? <div slot="gutter-utility-slot" style={gutterSlotStyle}><Button variant="tertiary" size="icon-compact" type="button" aria-label="Add line comment" onMouseDown={(event) => { event.preventDefault(); const line = instance.current?.getHoveredLine(); if (line) selectLine(line.side === 'deletions' ? 'base' : 'head', line.lineNumber, line.lineNumber); }}>+</Button></div> : null)}
   </div>;
 }

@@ -53,6 +53,7 @@ export async function createGuideShare(env: Env, source: InspectorCloudContext, 
     guide: {
       repository, title: guide.title, baseRef: guide.baseRef, baseCommit, headCommit: guide.headCommit,
       sections: guide.sections, sharedAt: new Date().toISOString(),
+      ...(guide.intro === undefined ? {} : { intro: guide.intro }), ...(guide.map === undefined ? {} : { map: guide.map }),
     },
     createdAt: new Date().toISOString(), expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
   });

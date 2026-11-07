@@ -1,6 +1,7 @@
 import { planQuestions } from './approval.js';
 import { providerErrorText } from './provider-error.js';
-import { WORKSPACE_REPORT_ENTRY, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock } from './model.js';
+import { WORKSPACE_REPORT_ENTRY, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
+import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
 import { parseConversationEvents } from './conversation-events.js';
@@ -73,6 +74,30 @@ function toolTarget(tool: string, args: Record<string, unknown>): string | undef
   if (tool === 'task' && Array.isArray(args.tasks)) return `${args.tasks.length} side agents`;
   return undefined;
 }
+
+const TODO_STATE: Record<string, z.infer<typeof todoBlockSchema>['items'][number]['state']> = { pending: 'pending', active: 'active', completed: 'done' };
+
+/** A `todo` call's items (`{ text, status, planStep? }`), as the list shows them. */
+function todoItems(value: unknown): z.infer<typeof todoBlockSchema>['items'] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    const item = record(raw);
+    if (!item || typeof item.text !== 'string') return [];
+    return [{ text: item.text, state: TODO_STATE[typeof item.status === 'string' ? item.status : ''] ?? 'pending', ...(typeof item.planStep === 'string' ? { planStep: item.planStep } : {}) }];
+  });
+}
+
+/** The steps a `propose_plan` call proposes, as its approval card lists them. */
+function planSteps(value: unknown): NonNullable<AskBlock['steps']> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    const step = record(raw);
+    if (!step || typeof step.id !== 'string' || typeof step.title !== 'string') return [];
+    const where = Array.isArray(step.where) ? step.where.filter((entry): entry is string => typeof entry === 'string') : [];
+    return [{ id: step.id, title: step.title, ...(typeof step.detail === 'string' && step.detail ? { detail: step.detail } : {}), ...(where.length ? { where } : {}) }];
+  });
+}
+
 function askQuestions(args: Record<string, unknown>): AskBlock['questions'] {
   // GitSpace's `ask` asks one question: `prompt`, answered from `choices` or free text.
   if (typeof args.prompt === 'string') {
@@ -281,7 +306,13 @@ export class TranscriptProjector {
         toolCallId,
         status: 'pending',
         questions: tool === 'propose_plan' ? planQuestions(typeof args.prompt === 'string' ? args.prompt : '') : askQuestions(args),
+        ...(tool === 'propose_plan' ? { steps: planSteps(args.steps) } : {}),
       });
+    } else if (tool === 'todo') {
+      const id = this.#toolId(toolCallId, 'tool');
+      if (this.store.read(id)) return;
+      const items = todoItems(args.items);
+      this.#write({ id, type: 'todo', source: args.from === 'plan' || items.some((item) => item.planStep !== undefined) ? 'plan' : 'own', items });
     } else if (!this.#findTool(toolCallId)) {
       const id = this.#toolId(toolCallId, 'tool');
       this.#write({
@@ -308,6 +339,16 @@ export class TranscriptProjector {
     };
     applyAskAnswers(ask, details);
     this.#write(ask, previous);
+    return true;
+  }
+
+  /** A finished `todo` call: a list loaded from the plan arrives in its details; a failed call keeps why. */
+  #finishTodo(toolCallId: string, isError: boolean, text: string, details: unknown): boolean {
+    const previous = this.store.read(this.#toolId(toolCallId, 'tool'));
+    if (previous?.type !== 'todo') return false;
+    const loaded = record(details)?.items;
+    if (isError) this.#write({ ...previous, error: text || 'The todo list did not change.' }, previous);
+    else if (Array.isArray(loaded)) this.#write({ ...previous, items: todoItems(loaded) }, previous);
     return true;
   }
 
@@ -401,7 +442,7 @@ export class TranscriptProjector {
             if (note.kind === 'workspace') return;
             const lines = note.text.split('\n');
             const detail = lines.slice(0, 2).join('\n').slice(0, 240);
-            this.#write({ id: `${turn.id}:event:${event.ordinal}:${index}`, type: 'interruption', reason: 'event', title: note.source, detail, ...(detail.length < note.text.length ? { body: note.text } : {}) });
+            this.#write({ id: `${turn.id}:event:${event.ordinal}:${index}`, type: 'interruption', reason: 'event', kind: note.kind, title: note.source, detail, ...(detail.length < note.text.length ? { body: note.text } : {}) });
           });
           return;
         }
@@ -444,6 +485,7 @@ export class TranscriptProjector {
       }
       if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
         if (this.#answerAsk(message.toolCallId, message.isError === true, message.details)) return;
+        if (this.#finishTodo(message.toolCallId, message.isError === true, contentText(message.content), message.details)) return;
         const tool = this.#findTool(message.toolCallId);
         if (!tool) return;
         const completed: ToolCallBlock = {
@@ -491,6 +533,8 @@ export class TranscriptProjector {
       this.#ensureTurn(event);
       const toolCallId = typeof event.payload.toolCallId === 'string' ? event.payload.toolCallId : '';
       if (this.#answerAsk(toolCallId, event.payload.isError === true, event.payload.details)) return;
+      const ended = record(event.payload.result);
+      if (this.#finishTodo(toolCallId, event.payload.isError === true, typeof event.payload.result === 'string' ? event.payload.result : contentText(ended?.content), event.payload.details ?? ended?.details)) return;
       const tool = this.#findTool(toolCallId);
       if (!tool) return;
       const result = record(event.payload.result);

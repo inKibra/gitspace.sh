@@ -39,6 +39,7 @@ import {
   type AutomationTestResult,
   type AutomationTrigger,
   type AutomationView,
+  automationMessage,
 } from '@gitspace/protocol/automations-contract';
 import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS } from '@gitspace/protocol/inference';
@@ -1176,7 +1177,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const subject = event.subjects[0];
     const summary = describeAutomationEvent(event);
     const instruction = renderAutomationInstruction(automation.action.instruction, { ...event.fields, 'automation.name': automation.name });
-    const message = `Automation "${automation.name}" · ${automationEventName(event)} · ${summary}\n\n${instruction}\n\nThe event:\n${JSON.stringify(event.fields, null, 2)}`;
+    const message = automationMessage({ name: automation.name, event: automationEventName(event), summary, instruction, fields: event.fields });
     const plan = { checks, ended: null, message, start: null, timeline, sendsTo: null, phase: null };
     const { action } = automation;
     switch (action.kind) {

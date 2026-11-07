@@ -7,13 +7,19 @@ import type { GitSpaceMarkdownProps } from './GitSpaceMarkdown.js';
 import { BLOCK_RENDERERS } from './blocks/MarkdownBlocks.js';
 import { rehypeResourceAnchors, rehypeResourceLinks } from './ResourceNavigation.js';
 import { MarkdownResourceAnchor, MarkdownResourceMedia, rehypeResourceAddresses, rehypeResourceMedia, rehypeResourceMediaMarkers } from './resource-media.js';
+import { useDarkScheme } from './appearance.js';
 
 const RESOURCE_COMPONENTS = { 'gitspace-resource': MarkdownResourceAnchor, 'gitspace-media': MarkdownResourceMedia } satisfies Components;
+// Mermaid draws in the page's scheme; a diagram draws again when the scheme changes.
+const MERMAID_LIGHT = { config: { theme: 'neutral' } };
+const MERMAID_DARK = { config: { theme: 'dark' } };
 
 // Prose typography lives on the wrapper as Tailwind utilities over Fluid
 // tokens; streamdown's own stylesheet handles block layout, and the theme
-// already styles inline `code`.
-const PROSE = 'min-w-0 max-w-full text-body text-foreground [overflow-wrap:anywhere] [&_:is(h1,h2,h3,h4,h5,h6)]:font-semibold [&_:is(h1,h2,h3,h4,h5,h6)]:tracking-tight [&_h1]:text-display [&_h2]:text-title [&_h3]:text-subtitle [&_a]:underline [&_a]:underline-offset-2 [&_code]:font-mono [&_pre]:bg-surface-2 [&_pre]:whitespace-pre [&_pre]:[overflow-wrap:normal] [&_[data-streamdown=code-block]]:min-w-0 [&_[data-streamdown=code-block]]:max-w-full [&_[data-streamdown=code-block-body]]:min-w-0 [&_[data-streamdown=code-block-body]]:max-w-full [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:text-muted-foreground [&_hr]:border-border [&_[data-streamdown=table-wrapper]]:min-w-0 [&_[data-streamdown=table-wrapper]]:max-w-full [&_table]:[overflow-wrap:normal] [&_table]:text-caption [&_th]:font-semibold [&_img]:max-w-full';
+// already styles inline `code`. Streamdown frames its code and Mermaid action
+// bars with a `sidebar` colour the theme does not define (the border falls back
+// to the text colour); they show as plain icon buttons instead.
+const PROSE = 'min-w-0 max-w-full text-body text-foreground [overflow-wrap:anywhere] [&_:is(h1,h2,h3,h4,h5,h6)]:font-semibold [&_:is(h1,h2,h3,h4,h5,h6)]:tracking-tight [&_h1]:text-display [&_h2]:text-title [&_h3]:text-subtitle [&_a]:underline [&_a]:underline-offset-2 [&_code]:font-mono [&_pre]:bg-surface-2 [&_pre]:whitespace-pre [&_pre]:[overflow-wrap:normal] [&_[data-streamdown=code-block]]:min-w-0 [&_[data-streamdown=code-block]]:max-w-full [&_[data-streamdown=code-block-body]]:min-w-0 [&_[data-streamdown=code-block-body]]:max-w-full [&_:is([data-streamdown=code-block-actions],[data-streamdown=mermaid-block-actions])]:border-transparent [&_:is([data-streamdown=code-block-actions],[data-streamdown=mermaid-block-actions])]:bg-transparent [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:text-muted-foreground [&_hr]:border-border [&_[data-streamdown=table-wrapper]]:min-w-0 [&_[data-streamdown=table-wrapper]]:max-w-full [&_table]:[overflow-wrap:normal] [&_table]:text-caption [&_th]:font-semibold [&_img]:max-w-full';
 
 export function GitSpaceMarkdownRenderer({ children, streaming = false, className, documentUri }: GitSpaceMarkdownProps) {
   const needsCode = /(?:```|~~~)[^\n]*\n/u.test(children);
@@ -22,6 +28,7 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
   const needsCjk = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff]/u.test(children);
   // ```gitspace-ui and ```svg fences draw as blocks; ```mermaid goes to the Mermaid plugin.
   const [plugins, setPlugins] = useState<PluginConfig>({ renderers: BLOCK_RENDERERS });
+  const dark = useDarkScheme();
   useEffect(() => {
     let cancelled = false;
     // Runtime-selected plugin loading keeps Mermaid, Shiki, KaTeX, and CJK code off Markdown surfaces that do not use them.
@@ -47,6 +54,7 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
     caret={streaming ? 'circle' : undefined}
     parseIncompleteMarkdown={streaming}
     plugins={plugins}
+    mermaid={dark ? MERMAID_DARK : MERMAID_LIGHT}
     codeBlockMaxHeight={520}
     tableMaxHeight={420}
     lineNumbers={false}

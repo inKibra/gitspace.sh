@@ -100,6 +100,6 @@ describe('files in messages', () => {
     const image = page.querySelector('img[src="data:image/png;base64,AA=="]');
     expect(image).toBeTruthy();
     expect(image?.closest('[hidden]')).toBeNull();
-    expect(page.querySelector('[hidden]')?.textContent).toContain('Read 1 image');
+    expect(page.body.textContent).not.toContain('Read 1 image');
   });
 });

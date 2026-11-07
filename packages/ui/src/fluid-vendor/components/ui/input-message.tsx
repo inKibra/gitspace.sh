@@ -202,6 +202,9 @@ interface InputMessageProps
    *  ArrowUp walks back up and out, Enter or click fills the highlighted
    *  prompt into the composer. Typing collapses the list. */
   suggestions?: string[];
+  /** Content held outside the textarea (e.g. staged choices) that may be sent
+   *  on its own: with it, an empty draft can still be sent. */
+  sendable?: boolean;
 }
 
 // ─── File preview tile ────────────────────────────────────────────────────
@@ -522,6 +525,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       history = [],
       placeholderSuggestion,
       suggestions,
+      sendable = false,
       className,
       style,
       ...props
@@ -677,7 +681,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     }, [resizeTextarea]);
 
     const trimmed = value.trim();
-    const canSend = !disabled && (trimmed.length > 0 || filesArr.length > 0);
+    const canSend = !disabled && (trimmed.length > 0 || filesArr.length > 0 || sendable);
 
     // Edge = the box-shadow's 1px ring, recoloured in place per state so the
     // stroke gains contrast without ever appearing to thicken (no second

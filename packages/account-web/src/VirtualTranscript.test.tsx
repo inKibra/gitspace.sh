@@ -383,11 +383,17 @@ it('keeps execution history inline, paged and expanded after completion and a na
   expect(executionPage).not.toHaveBeenCalled();
   await act(() => container.querySelector<HTMLButtonElement>('[aria-label="Expand process history: Development server"]')!.click());
   const region = container.querySelector<HTMLElement>('[aria-label="Development server execution history"]')!;
-  expect(region.textContent).toContain('"cursor": 90');
+  // The calls show as one group; opening it and selecting a call shows its output and its arguments.
+  await act(() => region.querySelector<HTMLButtonElement>('[data-tool-group] > button')!.click());
+  await act(() => region.querySelector<HTMLButtonElement>('[data-call="observation-90"] > button')!.click());
   expect(region.textContent).toContain('Complete original output 90');
+  await act(() => [...region.querySelectorAll<HTMLElement>('[role="tab"]')].find((tab) => tab.textContent?.includes('Arguments'))!.click());
+  expect(region.querySelector('[role="tree"]')?.textContent).toContain('cursor:90');
   expect(region.querySelector('[data-virtual-transcript]')).not.toBeNull();
   await act(() => [...region.querySelectorAll('button')].find((button) => button.textContent === 'Load earlier calls')!.click());
-  expect(region.textContent).toContain('Complete original output 10');
+  // The earlier call joins the group, which stays open on the selected call.
+  expect(region.textContent).toContain('2 tool calls');
+  expect(region.textContent).toContain('Log observation 10');
   expect(region.textContent).toContain('Complete original output 90');
   expect(container.querySelectorAll('[data-execution-id]')).toHaveLength(1);
   history = { ...history, rows: [{ ...execution, item: { ...execution.item, type: 'execution', executionId: execution.id, kind: 'process', label: 'Development server', status: 'done', historyCount: 2, hasFailures: true } }] };
@@ -445,4 +451,27 @@ it('draws workspace reports as one-line rows that stack tightly, link to their w
   await act(() => first.querySelector<HTMLAnchorElement>('a')!.click());
   const location = new URL(window.location.href);
   expect([location.pathname, location.searchParams.get('project'), location.searchParams.get('workspace')]).toEqual(['/', 'project-a', 'space-1']);
+});
+
+it('draws consecutive tool calls as one group and reads complete content only for the selected call', async () => {
+  const call = (index: number): TranscriptRow => ({
+    id: `call-${index}`, ordinal: index, turnId: 'turn-1', turnStatus: 'done', truncated: true, contentBytes: 400,
+    item: { id: `call-${index}`, type: 'tool-call', toolCallId: `tool-${index}`, tool: 'bash', target: `step ${index}`, status: 'done' },
+  });
+  const full = Promise.withResolvers<TranscriptContentPage>();
+  const content = vi.fn<TranscriptHistory['content']>(() => full.promise);
+  await render(historyFor([call(0), call(1), call(2)], { content }));
+  expect(container.querySelectorAll('[data-transcript-row]')).toHaveLength(1);
+  const group = container.querySelector<HTMLElement>('[data-transcript-row="call-0"]')!;
+  expect(group.textContent).toContain('3 tool calls');
+  await act(() => group.querySelector<HTMLButtonElement>('[data-tool-group] > button')!.click());
+  expect(group.textContent).toContain('step 2');
+  expect(content).not.toHaveBeenCalled();
+  await act(() => group.querySelector<HTMLButtonElement>('[data-call="call-1"] > button')!.click());
+  expect(content.mock.calls.map(([rowId]) => rowId)).toEqual(['call-1']);
+  expect(group.querySelector('[data-call-detail] [role="status"]')?.textContent).toBe('Loading the call…');
+  const serialized = JSON.stringify({ ...call(1).item, args: { command: 'echo complete' }, result: [{ id: 'result', type: 'code', text: 'complete output' }] });
+  await act(async () => { full.resolve({ text: serialized, offset: 0, nextOffset: null, totalCharacters: serialized.length }); await full.promise; });
+  expect(group.querySelector('[data-call-detail] [data-log-view]')?.textContent).toContain('complete output');
+  expect(content).toHaveBeenCalledOnce();
 });

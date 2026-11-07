@@ -2,7 +2,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import type { AskBlock, TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
-import type { SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
+import type { RuntimeMessageDecision, SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RemoteBranchState, WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
@@ -51,6 +51,7 @@ import { ResourceFiles, type ResourceFile } from './resource-files.js';
 import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
 import { PrChip, StatusBadge } from './sidebar/parts.js';
 import { ProjectGraphsContext } from './sidebar/project-graph.js';
+import { GuideSectionNavigation } from './chat/staging.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -156,7 +157,8 @@ export interface GitSpaceShellProps {
   /** Cloud runtime status is independent of the directory's machine placement projection. */
   runtimeSummary?: SidebarSpaceSummary;
   machines?: Array<{ id: string; label: string }>;
-  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>) => void | Promise<void>;
+  /** `decisions`: the decisions staged in the composer that go with the message. */
+  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[]) => void | Promise<void>;
   draft?: WorkspaceDraftBinding;
   /** Present when composer attachments may be uploaded into the session's `uploads/` artifact folder. */
   artifactUpload?: ArtifactUploadClient;
@@ -190,7 +192,8 @@ export interface GitSpaceShellProps {
   onOpenSettings?: (section?: 'source' | 'github') => void;
   onNavigateView?: (view: AppView) => void;
   skills?: readonly SkillView[];
-  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void) => ReactNode;
+  /** `guideSection`: open the Change Guide at this section (a new `serial` opens it again). */
+  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { id: string; serial: number }) => ReactNode;
   renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
@@ -619,6 +622,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   const [inspectorFull, setInspectorFull] = useState(false);
   const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | undefined>(capturing ? 'browser' : undefined);
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
+  const [guideSection, setGuideSection] = useState<{ spaceId: string; id: string; serial: number } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (typeof window === 'undefined') return 560;
     const stored = Number(window.localStorage.getItem('gitspace:inspector-width'));
@@ -699,7 +703,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   };
   useLayoutEffect(() => { accountSidebar?.(sidebar); });
   useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
-  const content = <ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
+  const content = <ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id) => { setGuideSection((current) => ({ spaceId: workspace.id, id, serial: (current?.serial ?? 0) + 1 })); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
@@ -734,7 +738,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}</InspectorLayout.Provider></aside> : null}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { id: guideSection.id, serial: guideSection.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? () => { setInspectorSection('environment'); setInspectorOpen(true); } : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
@@ -753,6 +757,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       setCreateError(null);
       try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-  </ResourceNavigation.Provider></ResourceFiles.Provider>;
+  </GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider>;
   return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false} width="19rem"><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

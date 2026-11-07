@@ -21,6 +21,7 @@ vi.mock('./rpc-client.js', () => ({
   rpcClient: {
     inspector: { overview: 'overview', artifacts: { list: 'artifacts' }, journal: { list: 'journal' }, review: { list: 'threads' } },
     workspace: { stackStatus: 'stack' },
+    automations: { list: 'automations', exceptions: { list: 'automation-exceptions' } },
     environment: { get: 'environment' },
     runtime: { snapshot: 'snapshot', session: runtimeSession },
   },

@@ -1,6 +1,6 @@
 import type { SkillView } from '@gitspace/protocol';
 import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
-import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
+import type { RuntimeMessageDecision, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -16,6 +16,7 @@ import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { previewShare } from './share/share-client.js';
+import { StagedChips, useComposerStaging } from './chat/staging.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -150,6 +151,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [shareChips, setShareChips] = useState<ReadonlyMap<string, ShareChip>>(new Map());
   // The tabs the last message connected, for the line confirming they joined.
   const [joined, setJoined] = useState<readonly RuntimeBrowserConnectedTab[]>([]);
+  const staging = useComposerStaging();
   useEffect(() => {
     if (!sharing) return;
     const links = shareLinksIn(message);
@@ -184,7 +186,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   }, [captures]);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
-    if (!text || !onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting) return false;
+    if ((!text && !staging?.chips.length) || !onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting) return false;
     setSubmitError(null);
     setJoined([]);
     const sentDraft = workspaceDraft?.capture();
@@ -203,8 +205,8 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         } finally { setConnecting(false); }
       }
       // What the agent reads in place of the links and chips: the tabs, the captures (the workspace adds each one's
-      // summary), then the message.
-      const prompt = [...connected.map(connectedTabText), ...(captures.length ? [captures.map(captureMention).join(' ')] : []), text].join('\n');
+      // summary), then the message with the staged choices' lines.
+      const lead = [...connected.map(connectedTabText), ...(captures.length ? [captures.map(captureMention).join(' ')] : [])];
       const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
       const uploads = files.filter((file) => !file.type.startsWith('text/') || file.size > 256 * 1024);
       const uploaded = new Map<File, string>();
@@ -227,7 +229,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         if (url === undefined) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
         return `<attachment name="${file.name}" url="${url}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
       }));
-      await onSend([prompt, ...attached].join('\n\n'), behavior, images, sentDraft);
+      const send = async (body: string, decisions?: RuntimeMessageDecision[]) => { await onSend([[...lead, body].join('\n'), ...attached].join('\n\n'), behavior, images, sentDraft, decisions); };
+      if (staging) await staging.deliver(text, send);
+      else await send(text);
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
       // The input sends its text trimmed; a link swapped out of the draft can leave a space behind.
       else setLocalMessage(current => current.trim() === text ? '' : current);
@@ -342,13 +346,15 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         <Button variant="ghost" size="icon-compact" aria-label="Remove capture" onClick={() => setCaptures((current) => current.filter((item) => item !== id))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}
+    {staging ? <StagedChips staging={staging} disabled={pending || uploading !== null || connecting} /> : null}
     <InputMessage
       data-slot="input-message"
       onBlurCapture={() => workspaceDraft?.onBlur()}
       value={message}
       onValueChange={setMessage}
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
-      placeholder={recovering ? 'Recovering agent…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
+      placeholder={recovering ? 'Recovering agent…' : staging?.chips.length ? 'Say why, or add context; your choices go with it…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
+      sendable={!!staging?.chips.length}
       disabled={!onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting}
       files={attachments}
       onFilesChange={setAttachments}

@@ -18,7 +18,9 @@ import type { ArtifactUploadClient } from './artifact-upload.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
 import { type InspectorArtifactContent, type ArtifactReference, type ThreadSelection, diffIdentities, InspectorLayout, RuntimeAvailability, openWorkspaceFirst, repositoryModes, ic, artifactId, Kicker, Padded } from './inspector-shared.js';
-import { GoalOverview, ProductGoal, WorkflowDocument, RubricDocument } from './GoalSurface.js';
+import { GoalSurface, WorkflowDocument, RubricDocument } from './GoalSurface.js';
+import type { GoalAutomations } from '../goal/useWorkspaceAutomations.js';
+import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { REPOSITORY_FILE_TYPES, RepositoryBinaryFile, repositoryPatch, PierreViewer, FilesSurface } from './FilesSurface.js';
 import { ThreadPanel } from './ReviewThreads.js';
 import { ArtifactDocument, ResourceDocument } from './ArtifactDocuments.js';
@@ -82,6 +84,8 @@ export interface InspectorProps {
   onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactReferences?: readonly Extract<EvidenceReference, { kind: 'artifact' }>[];
   resourceRequest?: ResourceRequest;
+  /** Opens the Change Guide at this section (asked from outside the Inspector, e.g. a chat block); a new serial opens it again. */
+  guideSection?: { id: string; serial: number };
   onRequestResource?(uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
   /** Present when the viewer may upload files into the drive this space writes. */
@@ -108,6 +112,12 @@ export interface InspectorProps {
   onGenerateChangeGuide?(): Promise<void>;
   guideShares?: GuideShareHandlers;
   onSubmitHumanJudgment?(criterionId: string, verdict: 'pass' | 'fail', summary: string): Promise<void>;
+  /** A person accepts or reopens a goal requirement; absent without a goal. */
+  onSetRequirementAcceptance?(requirementId: string, accepted: boolean): Promise<void>;
+  /** The conversation's session controls; the Goal tab shows their plan and where the todo list is. */
+  controls?: SessionControlView;
+  /** The project's automations and this workspace's exceptions, for the Goal tab. */
+  goalAutomations?: GoalAutomations;
   onStartService?(serviceName: string): Promise<void>;
   onStopService?(serviceName: string): Promise<void>;
   onOpenServiceTerminal?(terminalName: string): void;
@@ -135,7 +145,7 @@ const agentSetupTabIndex = permanentTabs.findIndex((tab) => tab.id === 'agents')
  * tree's open folders, the drive's folder, filter and sort, and both scroll positions survive opening a file. */
 const keptMounted: Partial<Record<InspectorPermanentView, true>> = { files: true, artifacts: true };
 const artifactModes = ['preview', 'source'] as const;
-type ProductKind = 'goal' | 'workflow' | 'rubric';
+type ProductKind = 'workflow' | 'rubric';
 
 function fileName(path: string): string { return path.split('/').at(-1) ?? path; }
 function collectEvidence(overview: InspectorOverview, entries: readonly JournalEntryView[]): EvidenceReference[] {
@@ -261,7 +271,7 @@ export function Inspector(props: InspectorProps) {
   };
   const showDocument = (id: string): void => { setOpenFiles((current) => ({ ...current, active: id, viewing: true })); closeThread(); };
   const closeDocument = (id: string): void => { setOpenFiles((current) => closeInStrip(current, id)); closeThread(); };
-  const openProduct = (kind: ProductKind): void => { if (kind === 'goal' ? props.overview.goal : kind === 'workflow' ? props.overview.workflow : props.overview.rubric) setProduct(kind); };
+  const openProduct = (kind: ProductKind): void => { if (kind === 'workflow' ? props.overview.workflow : props.overview.rubric) setProduct(kind); };
   const openResource = ({ uri }: ResourceRequest): void => openDocument({ id: `resource:${uri}`, kind: 'resource', label: fileName(uri), target: uri });
   useEffect(() => { if (props.resourceRequest) openResource(props.resourceRequest); }, [props.resourceRequest]);
   const openFile = (path: string, mode: RepositoryMode): void => { const id = `file:${path}`; setFileModes((current) => ({ ...current, [id]: mode })); openDocument({ id, kind: 'file', label: fileName(path), target: path }); if (mode === 'current') props.onRequestRepositoryFile(path, mode); else props.onRequestRepositoryDiff(path, mode); };
@@ -281,6 +291,7 @@ export function Inspector(props: InspectorProps) {
     closeThread();
     setGuideFocus((current) => ({ id: sectionId, serial: (current?.serial ?? 0) + 1 }));
   };
+  useEffect(() => { if (props.guideSection) openGuideSection(props.guideSection.id); }, [props.guideSection?.serial]);
   const chooseMode = (mode: RepositoryMode): void => { if (!activeDocument || activeDocument.kind !== 'file') return; setFileModes((current) => ({ ...current, [activeDocument.id]: mode })); if (mode === 'current') props.onRequestRepositoryFile(activeDocument.target, mode); else props.onRequestRepositoryDiff(activeDocument.target, mode); };
   const createThread = async (body: string): Promise<void> => {
     if (!threadSelection) throw new Error('Select a line before starting a review thread.');
@@ -358,10 +369,28 @@ export function Inspector(props: InspectorProps) {
   />;
   const goalSurface = (): ReactNode => {
     let record: { title: string; body: ReactNode } | null = null;
-    if (product === 'goal' && props.overview.goal) record = { title: props.overview.goal.title, body: <ProductGoal goal={props.overview.goal} onOpenEvidence={openEvidence} /> };
-    else if (product === 'workflow' && props.overview.workflow) record = { title: props.overview.workflow.title, body: <WorkflowDocument workflow={props.overview.workflow} /> };
+    if (product === 'workflow' && props.overview.workflow) record = { title: props.overview.workflow.title, body: <WorkflowDocument workflow={props.overview.workflow} /> };
     else if (product === 'rubric' && props.overview.rubric) record = { title: props.overview.rubric.title, body: <RubricDocument rubric={props.overview.rubric} onOpenEvidence={openEvidence} onSubmit={props.onSubmitHumanJudgment} /> };
-    if (!product || !record) return <GoalOverview overview={props.overview} openDocuments={openFiles.items.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
+    if (!product || !record) return <GoalSurface
+      overview={props.overview}
+      scope={props.scope}
+      controls={props.controls}
+      journalEntries={props.journalEntries}
+      threads={props.threads}
+      viewerId={props.reviewerId}
+      automations={props.goalAutomations}
+      comments={{
+        viewerId: props.reviewerId,
+        onComment: async (stepId, body) => { await props.onCreateThread({ anchor: { kind: 'plan-step', stepId }, body, decision: 'pending' }); },
+        onReply: (thread, body) => props.onReplyThread(thread.id, thread.revision, body),
+        onResolve: (thread, resolved) => props.onResolveThread(thread.id, thread.revision, resolved, thread.decision),
+      }}
+      onSetAcceptance={props.onSetRequirementAcceptance}
+      onOpenEvidence={openEvidence}
+      onOpenGuideSection={openGuideSection}
+      onOpenJournal={() => selectSurface('journal')}
+      onOpenProduct={openProduct}
+    />;
     return <div className="flex min-h-0 flex-1 flex-col">
       <Button variant="ghost" size="compact" className="mx-2 mt-2 self-start" onClick={() => setProduct(null)}><ArrowLeft width={14} height={14} strokeWidth={1.5} />Goal</Button>
       <header className="flex min-w-0 flex-col px-4 pb-2 pt-1"><strong className="truncate text-body font-medium text-foreground">{record.title}</strong><span className="text-caption text-muted-foreground">{product} authority record</span></header>
@@ -418,6 +447,13 @@ export function Inspector(props: InspectorProps) {
           onSelectThread: (thread) => { setActiveThread(thread); setThreadSelection(null); },
           onSelectRange: (selection) => { setThreadSelection(selection); setActiveThread(null); },
         }}
+        goal={props.overview.goal}
+        onSetAcceptance={props.onSetRequirementAcceptance}
+        onOpenEvidence={openEvidence}
+        captures={{ content: (reference) => artifactContent[artifactId(reference)] ?? null, load: (reference) => void loadArtifact(reference) }}
+        scope={props.scope}
+        workspaces={props.workspaces}
+        onSetRelations={props.onSetRelations}
         onLoadDiff={props.onLoadGuideDiff}
         onMarkRead={props.onMarkGuideSectionRead}
         onGenerate={runtimeAvailable ? props.onGenerateChangeGuide : undefined}

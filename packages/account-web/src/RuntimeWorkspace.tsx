@@ -14,6 +14,7 @@ import { useTranscriptHistory } from './useTranscriptHistory.js';
 import { useInference } from './InferenceContext.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
+import { ComposerStagingProvider, RequirementAcceptance } from './chat/staging.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { uploadPromptImages } from './prompt-images.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -24,7 +25,7 @@ import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet, LaunchedBanner
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
-import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
+import type { RuntimeSessionCommand, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
 import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
@@ -37,6 +38,8 @@ export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
   conversationId: string | undefined;
   sessionId: string | null;
+  /** The viewed conversation's session controls (its plan and todo list); absent until they load. */
+  controls?: SessionControlView;
   turns: GitSpaceShellProps['turns'];
   scope: GitSpaceShellProps['workspace'];
   workspaces: GitSpaceShellProps['workspaces'];
@@ -47,6 +50,8 @@ export interface RuntimeInspectorContext {
   onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations'];
   initialView?: 'environment' | 'browser';
   resourceRequest?: ResourceRequest;
+  /** Open the Change Guide at this section (a block in the chat asked to). */
+  guideSection?: { id: string; serial: number };
   /** Opens the terminal panel on `machineId` and selects the named terminal, such as an interactive setup run. */
   onOpenTerminal(machineId: string, name: string): void;
 }
@@ -192,6 +197,13 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const terminalMachines = machines.flatMap((machine): WorkspaceTerminalMachine[] => machine.ready ? [{ id: machine.id, label: inspection.machines.find(candidate => candidate.id === machine.id)?.label ?? machine.id }] : []);
   const selectTerminalMachine = (machineId: string) => setTerminalChoice({ spaceId, machineId });
   const generation = scope.workspace.generation;
+  const acceptRequirement = useCallback(async (requirementId: string, accepted: boolean) => {
+    const overview = await rpcClient.inspector.overview({ spaceId, expectedGeneration: generation });
+    if (overview.status === 'error') throw overview.error;
+    if (!overview.value.goal) throw new Error('This workspace has no goal.');
+    const result = await rpcClient.inspector.requirement.setAcceptance({ expectedGeneration: generation, input: { projectId: snapshot.projectId, spaceId, expectedRevision: overview.value.goal.revision, requirementId, accepted } });
+    if (result.status === 'error') throw result.error;
+  }, [snapshot.projectId, spaceId, generation]);
   // One resolver per workspace version, so every message showing a file shares its URL.
   const resolveResourceFile = useMemo(() => async (uri: string): Promise<ResourceFile> => {
     const resource = parseResourceUri(uri);
@@ -229,7 +241,9 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     {relationQuery.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(relationQuery.error, "Load this project's workspaces")}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
     {relationValue?.statusError ? <div role="status" className="flex items-center gap-2 px-4 py-2 text-caption text-muted-foreground">Workspace statuses are unavailable: {relationValue.statusError}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
     <TakeoverCardsContext.Provider value={takeoverCards}>
-    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={skillValues} providers={providerValues?.providers} draft={draft} sendPending={session.pending || !draft} onSend={value ? async (text, streamingBehavior, images, draft) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, images: images?.length ? await uploadPromptImages(identity, images) : undefined }); } : undefined}
+    <ComposerStagingProvider>
+    <RequirementAcceptance.Provider value={acceptRequirement}>
+    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={skillValues} providers={providerValues?.providers} draft={draft} sendPending={session.pending || !draft} onSend={value ? async (text, streamingBehavior, images, draft, decisions) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, images: images?.length ? await uploadPromptImages(identity, images) : undefined, decisions: decisions?.length ? decisions : undefined }); } : undefined}
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
       controlsError={session.error ?? (providers.state === 'failure' ? rpcErrorMessage(providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
@@ -273,8 +287,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         send: async (machineId, name, data) => { const result = await rpcClient.terminals.send({ spaceId, machineId, name, data }); if (result.status === 'error') throw result.error; },
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
       }}
-      renderInspector={(onClose, initialView, resourceRequest, openTerminal) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
+      renderInspector={(onClose, initialView, resourceRequest, openTerminal, guideSection) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, controls: value, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, guideSection, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
+    </RequirementAcceptance.Provider>
+    </ComposerStagingProvider>
     </TakeoverCardsContext.Provider>
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog canonical={launchRequest.source} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}

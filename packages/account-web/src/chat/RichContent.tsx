@@ -30,11 +30,6 @@ export function MessageAttachments({ images }: { images: MessageImage[] }) {
   />)}</>;
 }
 
-export function ToolArguments({ args }: { args: unknown }) {
-  const serialized = JSON.stringify(args, null, 2);
-  return <GitSpaceMarkdown>{`~~~json\n${serialized}\n~~~`}</GitSpaceMarkdown>;
-}
-
 /** A user message as Markdown: an uploaded attachment becomes a link to its drive file, an inline text attachment a
  * titled block of its text. */
 export function userMessageMarkdown(text: string): string {

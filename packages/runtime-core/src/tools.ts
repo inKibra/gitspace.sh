@@ -370,7 +370,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         todos.items = listed;
         return listed;
       }, context);
-      return { output: [{ type: 'text', text: 'items' in args ? 'Checklist updated.' : `Checklist loaded from the plan: ${JSON.stringify(items)}` }] };
+      // The transcript draws the list from `details.items`.
+      return { output: [{ type: 'text', text: 'items' in args ? 'Checklist updated.' : `Checklist loaded from the plan: ${JSON.stringify(items)}` }], details: { items } };
     });
   } }));
   /** Records a question for the person once per task, with the plan it proposes when it has `steps`, and waits for the answer. */

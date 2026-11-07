@@ -461,8 +461,9 @@ export const changeGuideViewSchema = inspectorIdentitySchema.extend({
 }).strict().superRefine(refineGuideMapSections);
 export type ChangeGuideView = z.infer<typeof changeGuideViewSchema>;
 
-/** A shared Change Guide as its public viewer reads it: the guide pinned at one revision, its repository, and the merge
- * base its diffs compare against. */
+/** A shared Change Guide as its public viewer reads it: the guide pinned at one revision, its repository, the merge
+ * base its diffs compare against, and its introduction and map (absent on links shared before guides had them). Its
+ * captures stay in the workspace's drive. */
 export const sharedGuideSchema = z.object({
   repository: z.string().trim().min(1).max(512),
   title: shortTextSchema,
@@ -471,6 +472,8 @@ export const sharedGuideSchema = z.object({
   headCommit: gitObjectIdSchema,
   sections: z.array(changeGuideSectionSchema).max(512),
   sharedAt: isoDateSchema,
+  intro: changeGuideNarrativeFields.intro,
+  map: changeGuideNarrativeFields.map,
 }).strict();
 export type SharedGuide = z.infer<typeof sharedGuideSchema>;
 /** Why a shared guide is not shown: sign in with GitHub first, or the signed-in reader cannot read the repository. */
@@ -543,6 +546,8 @@ export const reviewAnchorSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('artifact'), url: z.string().min(1).max(4_096), hash: artifactHashSchema, generation: generationSchema,
   }).strict(),
+  /** A comment on a step of the workspace's plan (the runtime's plan step id). */
+  z.object({ kind: z.literal('plan-step'), stepId: z.string().trim().min(1).max(64) }).strict(),
 ]);
 export type ReviewAnchor = z.infer<typeof reviewAnchorSchema>;
 

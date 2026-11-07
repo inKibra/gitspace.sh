@@ -1,18 +1,16 @@
-import type { TurnBlock } from '@gitspace/blocks';
+import type { ToolCallBlock, TurnBlock } from '@gitspace/blocks';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { ToolGroup } from './ToolGroup.js';
 import { TurnTranscript } from './TurnTranscript.js';
 
 describe('TurnTranscript', () => {
-  it('identifies the admitted Chrome for each persisted relay action', () => {
-    const turns: TurnBlock[] = [{
-      id: 'chrome-turn', type: 'turn', status: 'done', sideAgents: [],
-      items: [
-        { id: 'a', type: 'tool-call', toolCallId: 'a', tool: 'browser', status: 'done', details: { browser: { pairingId: '00000000-0000-4000-8000-000000000001', name: 'Staging admin Chrome' } } },
-        { id: 'b', type: 'tool-call', toolCallId: 'b', tool: 'browser', status: 'done', details: { browser: { pairingId: '00000000-0000-4000-8000-000000000002', name: 'Customer account Chrome' } } },
-      ],
-    }];
-    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
+  it('identifies the admitted Chrome for each persisted relay action in its open tool group', () => {
+    const calls: ToolCallBlock[] = [
+      { id: 'a', type: 'tool-call', toolCallId: 'a', tool: 'browser', status: 'done', details: { browser: { pairingId: '00000000-0000-4000-8000-000000000001', name: 'Staging admin Chrome' } } },
+      { id: 'b', type: 'tool-call', toolCallId: 'b', tool: 'browser', status: 'done', details: { browser: { pairingId: '00000000-0000-4000-8000-000000000002', name: 'Customer account Chrome' } } },
+    ];
+    const html = renderToStaticMarkup(<ToolGroup calls={calls.map((block) => ({ block, complete: true }))} state={{ open: true }} />);
     expect(html).toContain('Staging admin Chrome');
     expect(html).toContain('Customer account Chrome');
   });

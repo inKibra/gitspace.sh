@@ -158,6 +158,18 @@ describe('SpaceContextDO', () => {
     expect(thread.messages.map((message) => message.id)).toEqual(['message-a', 'message-b']);
   });
 
+  it('keeps a comment on a plan step anchored to that step, current whatever the HEAD', async () => {
+    await inside('inspector-plan-step', (context) => context.createReviewThread({
+      ...identity,
+      id: 'thread-step',
+      anchor: { kind: 'plan-step', stepId: 'store-tokens' },
+      decision: 'pending',
+      message: { id: 'message-step', authorId: 'human-a', body: 'Keep the old column until the backfill ends.', createdAt: at },
+    }, { generation: 7, headCommit: head }));
+    const [thread] = await inside('inspector-plan-step', (context) => context.listReviewThreads(identity, { generation: 9, headCommit: movedHead }));
+    expect(thread).toMatchObject({ id: 'thread-step', anchor: { kind: 'plan-step', stepId: 'store-tokens' }, anchorState: 'current', staleReason: null });
+  });
+
   it('reads goals, guides and journal entries stored before their new fields exactly as before', async () => {
     const section = { id: 'old', title: 'Old section', kind: 'risk', explanation: 'Changed.', why: '', exhibits: [{ path: 'src/a.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] };
     await runInDurableObject(env.SPACE_CONTEXT.getByName('inspector-legacy'), (context: SpaceContextDO, state) => {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeIdentitySchema, RuntimePlanStepSchema } from './base.js';
+import { RuntimeIdentitySchema, RuntimeJsonSchema, RuntimePlanStepSchema } from './base.js';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import { SessionHistoryPageSchema, SessionHistoryPageRequestSchema } from '@gitspace/protocol-agent';
 import { transcriptPageRequestSchema, transcriptContentRequestSchema, transcriptPageSchema, transcriptContentPageSchema } from '@gitspace/blocks';
@@ -28,7 +28,8 @@ export const SessionControlSchema = z.object({
   role: z.string().nullable(), roleLabel: z.string().nullable(), roles: z.array(z.object({ id: z.string(), label: z.string(), provider: z.string(), model: z.string(), thinking: z.string().nullable(), current: z.boolean() })),
   provider: z.string().nullable(), models: z.array(z.object({ provider: z.string(), id: z.string(), name: z.string(), contextWindow: z.number().nullable() })), model: z.string().nullable(), thinking: z.string().nullable(), fastMode: z.boolean(), planMode: z.boolean(),
   context: z.object({ tokens: z.number(), contextWindow: z.number(), percent: z.number() }).nullable(), cost: z.number(),
-  todos: z.array(z.object({ name: z.string(), tasks: z.array(z.object({ content: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'abandoned', 'blocked']), blocker: z.string().nullable() })) })),
+  /** `planStep`: the plan step a task completes; absent on tasks of the agent's own list and from older runtimes. */
+  todos: z.array(z.object({ name: z.string(), tasks: z.array(z.object({ content: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'abandoned', 'blocked']), blocker: z.string().nullable(), planStep: z.string().optional() })) })),
   queue: z.object({ steering: z.array(z.string()), followUp: z.array(z.string()) }), historyAnchorId: z.string().nullable(), history: z.array(z.object({ entryId: z.string(), text: z.string() })),
   goal: z.object({ id: z.string(), status: z.enum(['active', 'paused', 'budget-limited', 'complete', 'dropped']), objective: z.string(), tokenBudget: z.number().nullable(), tokensUsed: z.number(), timeUsedSeconds: z.number() }).nullable(), pendingAsk: PendingAskSchema.nullable(),
   /** Absent from runtimes older than plans with steps. */
@@ -43,6 +44,15 @@ export type RuntimeSubagentRecord = z.infer<typeof RuntimeSubagentRecordSchema>;
 export const AgentDefinitionDiagnosticSchema = z.object({ name: z.string(), winnerPath: z.string(), ignoredPath: z.string() });
 export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema), diagnostics: z.array(AgentDefinitionDiagnosticSchema).optional(), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
 const simple = ['control', 'agentSetup', 'historyAnchorId', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
+/** A decision a person staged in the composer, sent with their prompt: once the prompt is in the conversation, the
+ * workspace journal records it as a `decision` entry citing that message. `title`: what was decided (the question, or
+ * the choice itself when there is none); `choice`: the option chosen; `sectionId`: the Change Guide section it belongs
+ * to; `payload`: the block's data for the choice. */
+export const RuntimeMessageDecisionSchema = z.object({
+  title: z.string().trim().min(1).max(512), choice: z.string().trim().min(1).max(512).optional(),
+  sectionId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/u).optional(), payload: RuntimeJsonSchema.optional(),
+}).strict();
+export type RuntimeMessageDecision = z.infer<typeof RuntimeMessageDecisionSchema>;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
@@ -91,7 +101,7 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserTabGroup'), pairingId: z.string().uuid() }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
-  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }),
+  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional() }),
   z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),
   z.object({ type: z.literal('cycleRole'), direction: z.enum(['forward', 'backward']) }),
   z.object({ type: z.literal('setModel'), provider: z.string(), model: z.string() }),

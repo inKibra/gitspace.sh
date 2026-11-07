@@ -47,4 +47,20 @@ describe('an answered ask', () => {
     expect(container.textContent).toContain('Approved');
     expect(container.textContent).not.toContain('Anything to add?');
   });
+
+  it('says above the card what it asks and that it was answered, and draws the plan\'s heading as its title', () => {
+    render({ id: 'plan', type: 'ask', kind: 'plan', toolCallId: 'plan', status: 'answered', questions: planQuestions('### Streaks\n\nMark a day.').map((question) => question.id === 'decision' ? { ...question, answer: 'Approve' } : question) });
+    expect(container.querySelector('[data-ask-origin]')?.textContent).toBe('Plan approvalasked by the workspace agent· answered');
+    const title = container.querySelector('h2');
+    expect(title?.textContent).toBe('Streaks');
+    expect(title?.className).toContain('text-display');
+    expect(container.textContent).not.toContain('###');
+  });
+});
+
+describe('a pending ask', () => {
+  it('says above the card that it waits for the person', () => {
+    render({ id: 'q', type: 'ask', toolCallId: 'q', status: 'pending', questions: [{ id: 'runtime', prompt: 'Choose a runtime', options: [{ id: 'Bun', title: 'Bun' }] }] });
+    expect(container.querySelector('[data-ask-origin]')?.textContent).toBe('Questionasked by the workspace agentWaiting for you');
+  });
 });

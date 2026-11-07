@@ -270,10 +270,38 @@ describe('messages delivered on others\' behalf', () => {
     expect(turns).toHaveLength(2);
     expect(turns[1]?.user).toBeUndefined();
     expect(turns[1]?.items.slice(0, 2)).toMatchObject([
-      { type: 'interruption', reason: 'event', title: 'Background command job:2174', detail: 'Exit code: 0\nline 2', body: stdout },
-      { type: 'interruption', reason: 'event', title: 'Reviewer (child-1)', detail: 'No findings </gitspace-event> in the fix.' },
+      { type: 'interruption', reason: 'event', kind: 'command-completed', title: 'Background command job:2174', detail: 'Exit code: 0\nline 2', body: stdout },
+      { type: 'interruption', reason: 'event', kind: 'agent-message', title: 'Reviewer (child-1)', detail: 'No findings </gitspace-event> in the fix.' },
     ]);
     expect(turns[1]?.items[1]).not.toHaveProperty('body');
     expect(turns[1]?.items.slice(2).map((item) => item.type === 'interruption' ? `${item.reason}:${item.title}` : item.type)).toEqual(['message', 'compacted:Context compacted', 'machine:Project']);
+  });
+});
+
+describe('todo lists and proposed plans', () => {
+  const start = (toolCallId: string, toolName: string, args: Record<string, unknown>) => ({ sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId, toolName, args } });
+  const end = (toolCallId: string, details: unknown, isError = false, text = '') => ({ sessionId: 's1', ordinal: 3, kind: 'tool_execution_end', payload: { toolCallId, isError, details, result: { content: [{ type: 'text', text }] } } });
+  const items = (events: Parameters<typeof reduceTranscriptToTurns>[0]) => reduceTranscriptToTurns([{ sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} }, ...events])[0]?.items ?? [];
+
+  it('shows a todo call as the list it set, from the plan when its items name plan steps, else the agent\'s own list', () => {
+    const [own] = items([start('t1', 'todo', { items: [{ id: 'a', text: 'Write the parser', status: 'completed' }, { id: 'b', text: 'Wire the form', status: 'active' }] })]);
+    expect(own).toEqual({ id: expect.any(String), type: 'todo', source: 'own', items: [{ text: 'Write the parser', state: 'done' }, { text: 'Wire the form', state: 'active' }] });
+    const [linked] = items([start('t2', 'todo', { items: [{ id: 'a', text: 'Add the table', status: 'pending', planStep: 'schema' }] })]);
+    expect(linked).toMatchObject({ type: 'todo', source: 'plan', items: [{ text: 'Add the table', state: 'pending', planStep: 'schema' }] });
+  });
+
+  it('fills a list loaded from the plan from the call\'s details, and keeps why a call failed', () => {
+    const [loaded] = items([start('t1', 'todo', { from: 'plan' }), end('t1', { items: [{ id: 'schema', text: 'Add the table', status: 'active', planStep: 'schema' }] })]);
+    expect(loaded).toMatchObject({ type: 'todo', source: 'plan', items: [{ text: 'Add the table', state: 'active', planStep: 'schema' }] });
+    const [failed] = items([start('t2', 'todo', { from: 'plan' }), end('t2', undefined, true, 'There is no approved plan with steps to load')]);
+    expect(failed).toMatchObject({ type: 'todo', source: 'plan', items: [], error: 'There is no approved plan with steps to load' });
+  });
+
+  it('puts the steps a propose_plan call proposes on its card', () => {
+    const [card] = items([start('p1', 'propose_plan', { prompt: 'Two steps.', choices: [], steps: [
+      { id: 'schema', title: 'Add the table', detail: 'One column per field.', where: ['db/schema.sql'], requirementIds: [] },
+      { id: 'form', title: 'Wire the form', detail: '', where: [], requirementIds: [] },
+    ] })]);
+    expect(card).toMatchObject({ type: 'ask', kind: 'plan', steps: [{ id: 'schema', title: 'Add the table', detail: 'One column per field.', where: ['db/schema.sql'] }, { id: 'form', title: 'Wire the form' }] });
   });
 });

@@ -58,6 +58,7 @@ import { RuntimeSubagentHistory } from './RuntimeSubagentHistory.js';
 import { CloudCreationProgress } from './CloudCreationProgress.js';
 import { latestOperation, useAccountOperations } from './OperationProgress.js';
 import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
+import { useWorkspaceAutomations } from './goal/useWorkspaceAutomations.js';
 
 
 
@@ -123,6 +124,7 @@ export function LiveInspector({
   // Every stacked workspace of this workspace's stack, whose positions the Relations tab's chain shows.
   const stackLinks = scope?.kind === 'workspace' ? stackOf(workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => ({ id: workspace.id, dependsOn: workspace.relations.dependsOn, stackedOn: workspace.relations.stackedOn })), scope.id).flatMap((link) => link.stackedOn === null ? [] : [link.id]) : [];
   const stackStatus = useStackStatuses(stackLinks, refreshToken);
+  const goalAutomations = useWorkspaceAutomations(projectId);
   const overviewRead = useRetainedRead(overview, readKey);
   const artifactValue = useRetainedQueryValue(artifactCatalog, readKey);
   const repositoryValue = useRetainedQueryValue(repository, JSON.stringify([readKey, repositoryMode]));
@@ -231,6 +233,7 @@ export function LiveInspector({
     runtimeAvailable={runtimeAvailable}
     initialView={initialView}
     resourceRequest={resourceRequest}
+    guideSection={runtimeContext.guideSection}
     onRequestResource={(uri, signal) => loadInspectorResource({
       readArtifact: (input, options) => rpcClient.inspector.artifacts.read(input, options),
       artifactFile: async (input, options) => {
@@ -440,6 +443,16 @@ export function LiveInspector({
       if (result.status === 'error') throw result.error;
       await overview.refetch();
     } : undefined}
+    onSetRequirementAcceptance={overviewValue.goal ? async (requirementId, accepted) => {
+      const result = await rpcClient.inspector.requirement.setAcceptance({
+        expectedGeneration: generation,
+        input: { projectId, spaceId, expectedRevision: overviewValue.goal!.revision, requirementId, accepted },
+      });
+      if (result.status === 'error') throw result.error;
+      await Promise.all([overview.refetch(), journal.refetch()]);
+    } : undefined}
+    controls={runtimeContext.controls}
+    goalAutomations={goalAutomations}
   /></>;
 }
 
