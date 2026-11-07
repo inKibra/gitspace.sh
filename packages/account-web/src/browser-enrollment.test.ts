@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deviceProtocolBase64, encodeDeviceInviteToken, signDeviceInvite } from '@gitspace/protocol/device-grant';
-import { accountHandleFromUrl, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
+import { accountHandleFromUrl, browserInvitationStatus, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
+import { currentDevice } from './device-session.js';
+
+vi.mock('./device-session.js', () => ({ currentDevice: vi.fn(), deviceRejected: vi.fn() }));
 
 const accountUrl = new URL('https://alice.gitspace.sh/');
 const rootKey = new Uint8Array(32).fill(7);
@@ -57,5 +60,19 @@ describe('browser enrollment account boundaries', () => {
     }));
     await expect(recoverAccountBrowser('alice', recoveryKey, accountUrl)).rejects.toMatchObject({ code: 'ACCOUNT_MISMATCH' });
     expect(requests).toEqual(['/v1/accounts/recover']);
+  });
+
+  it('sends browser invitation requests to the account host, even for a browser enrolled through the platform', async () => {
+    const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
+    if (!('privateKey' in keyPair)) throw new Error('Expected a key pair');
+    vi.mocked(currentDevice).mockResolvedValue({ deviceId: '44444444-4444-4444-8444-444444444444', label: 'Browser', publicKey: '', keyPair, enrolledAt: 0, userId: 'u-example', enrollUrl: 'https://gitspace.sh', canDelegate: true });
+    vi.stubGlobal('window', { location: { href: 'https://alice.gitspace.sh/?settings=connections' } });
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: URL | Request) => {
+      requests.push(input instanceof Request ? input.url : input.href);
+      return Response.json({ status: 'ok', value: { inviteId: 'invite', expiresAt: 0, status: 'pending', deviceId: null } });
+    }));
+    await expect(browserInvitationStatus('invite')).resolves.toMatchObject({ status: 'pending' });
+    expect(requests).toEqual(['https://alice.gitspace.sh/v1/devices/browser-invitations/status']);
   });
 });

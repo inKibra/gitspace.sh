@@ -64,7 +64,9 @@ const signedFetch = createDeviceSignedFetch(currentDevice, deviceRejected);
 async function requestInvitation(action: 'create' | 'status' | 'cancel', payload: { invite: SignedDeviceInvite } | { inviteId: string }, signal?: AbortSignal): Promise<BrowserInvitationStatus> {
   const device = await currentDevice();
   if (!device) throw new DeviceEnrollmentError('NOT_ENROLLED', 'Reconnect this browser before creating an enrollment link.');
-  const response = await signedFetch(new URL(`/v1/devices/browser-invitations/${action}`, device.enrollUrl), {
+  // A browser enrolled through the platform stores https://gitspace.sh as its enrollUrl; only the account host serves these routes.
+  const pageUrl = new URL(window.location.href);
+  const response = await signedFetch(new URL(`/v1/devices/browser-invitations/${action}`, accountHandleFromUrl(pageUrl) ? pageUrl.origin : device.enrollUrl), {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: device.userId, ...payload }), signal,
   });
   const result = await response.json() as { status: 'ok'; value: BrowserInvitationStatus } | { status: 'error'; error: { code: string; message: string } };
