@@ -11,12 +11,13 @@ export function directUpstream(item: GraphWorkspace): readonly string[] {
   return item.stackedOn && !item.dependsOn.includes(item.stackedOn) ? [...item.dependsOn, item.stackedOn] : item.dependsOn;
 }
 
-/** The dependencies a row writes out as "waits on": its stack parent is told by the nesting instead. */
+/** A workspace's dependencies other than its stack parent (the nesting tells that one): what a row can say it is
+ * blocked by, and the mini graph's solid edges. */
 export function waitsOn(item: GraphWorkspace): readonly string[] {
   return item.dependsOn.filter(id => id !== item.stackedOn);
 }
 
-/** The workspaces that write "waits on" this one. */
+/** The workspaces with `id` among those dependencies: what its row can say it is blocking. */
 export function blocks(items: readonly GraphWorkspace[], id: string): readonly string[] {
   return items.filter(item => waitsOn(item).includes(id)).map(item => item.id);
 }

@@ -336,17 +336,16 @@ function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed,
   </SidebarMenuSubItem>;
 }
 
-/** Orange and green counts beside a project: how many of its workspaces need you and how many run. */
+/** Orange and green counts after a project's name: how many of its workspaces need you and how many run. Inline in the
+ * row's button, which leaves room for the row's actions, so the actions never cover them. */
 function StateCounts({ items }: { items: readonly RowItem[] }) {
   const needs = items.filter(item => item.state === 'needs-you').length;
   const running = items.filter(item => item.state === 'running').length;
   if (!needs && !running) return null;
-  return <SidebarMenuBadge title={[needs ? `${needs} need you` : null, running ? `${running} last reported working` : null].filter(Boolean).join(' · ')}>
-    <span className="flex items-center gap-1.5 text-[11px] tabular-nums">
-      {needs ? <span className="inline-flex items-center gap-1"><span className="size-1.5 rounded-full" style={{ background: STATUS_COLOR.orange }} />{needs}</span> : null}
-      {running ? <span className="inline-flex items-center gap-1 text-muted-foreground"><span className="size-1.5 rounded-full" style={{ background: STATUS_COLOR.green }} />{running}</span> : null}
-    </span>
-  </SidebarMenuBadge>;
+  return <span className="ml-1.5 inline-flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums" title={[needs ? `${needs} need you` : null, running ? `${running} last reported working` : null].filter(Boolean).join(' · ')}>
+    {needs ? <span className="inline-flex items-center gap-1"><span className="size-1.5 rounded-full" style={{ background: STATUS_COLOR.orange }} />{needs}</span> : null}
+    {running ? <span className="inline-flex items-center gap-1 text-muted-foreground"><span className="size-1.5 rounded-full" style={{ background: STATUS_COLOR.green }} />{running}</span> : null}
+  </span>;
 }
 
 interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onNewWorkspace' | 'onOpenProjectSettings' | 'onOpenProjectAutomations'> {
@@ -386,10 +385,16 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
       flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{summary?.holder.kind === 'released' && !summary.closedAt ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
       actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} />} />;
   };
-  /** The second line after the stack caption and phase or state: the linked pull request and the written markers. */
+  /** The second line after the stack caption and phase or state: the linked pull request and what blocks it or what it
+   * blocks. A dependency blocks while it is open and not in Ship, as the server's `blockedBy` reads it; an archived one
+   * is not listed here, and one of unknown phase says nothing. */
   const markers = (item: RowItem) => {
     const pr = graph?.pullRequests[item.id];
-    return <>{pr ? <PrChip pr={pr} /> : null}<DependencyText waitsOn={waitsOn(item).flatMap((id) => names.get(id) ?? [])} blocks={blocks(items, item.id).flatMap((id) => names.get(id) ?? [])} /></>;
+    const holds = (id: string) => {
+      const phase = byId.get(id)?.phase;
+      return !!phase && phase !== 'ship';
+    };
+    return <>{pr ? <PrChip pr={pr} /> : null}<DependencyText blockedBy={waitsOn(item).filter(holds).flatMap((id) => names.get(id) ?? [])} blocking={holds(item.id) ? blocks(items, item.id).flatMap((id) => names.get(id) ?? []) : []} /></>;
   };
   const tree = () => {
     // One run per first-level row and its stack; a run shows whole while any of it matches the filter, its other rows dimmed.
@@ -413,9 +418,8 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
   };
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}{project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
+      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}<StateCounts items={items} />{project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
     </SpaceSummaryContext.Provider>
-    <StateCounts items={items} />
     <SidebarMenuActions showOnHover={open}>
       <SidebarMenuAction aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} aria-expanded={open} onClick={() => onCollapse(project.id, open)}><ChevronRight width={16} height={16} strokeWidth={1.5} className={open ? 'rotate-90 transition-[rotate] duration-80' : 'transition-[rotate] duration-80'} /></SidebarMenuAction>
       {createWorkspace ? <Tooltip content="New workspace" side="top"><SidebarMenuAction className={open ? undefined : FOLDED_ACTION_REVEAL} aria-label={`New workspace in ${project.name}`} onClick={createWorkspace}><Plus width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction></Tooltip> : null}

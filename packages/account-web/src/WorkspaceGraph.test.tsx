@@ -79,9 +79,9 @@ describe('OverviewView', () => {
   const blockedByAlpha = { ...gamma, projectId: alpha.projectId, relations: { dependsOn: [alpha.id], relatedTo: [], stackedOn: null }, stack: { blockedBy: [alpha.id], blocking: [], findings: [] } };
   const withBlocking = { ...scope, stack: { ...scope.stack, blocking: [gamma.id] } };
 
-  it('breaks a workspace down into blocked by, blocking, related, and findings', () => {
+  it('breaks a workspace down into what it depends on, what it is blocking, related, and findings', () => {
     const html = renderToStaticMarkup(<OverviewView scope={withBlocking} workspaces={[withBlocking, beta, blockedByAlpha]} onSelectWorkspace={() => undefined} onSetRelations={async () => undefined} />);
-    expect(html).toContain('Blocked by · 1');
+    expect(html).toContain('Depends on · 1');
     expect(html).toContain('Blocking · 1');
     expect(html).toContain('Related to · 1');
     expect(html).toContain('relay-hardening');

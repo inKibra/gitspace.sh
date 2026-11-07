@@ -40,12 +40,13 @@ function names(values: readonly string[], limit: number): string {
   return values.length > limit ? `${shown} +${values.length - limit}` : shown;
 }
 
-/** "↑ waits on X, Y" and "↓ blocks Z", one or both; a stack parent is told by the nesting and its caption instead. */
-export function DependencyText({ waitsOn, blocks }: { waitsOn: readonly string[]; blocks: readonly string[] }) {
-  if (!waitsOn.length && !blocks.length) return null;
+/** "↑ blocked by X, Y" and "↓ blocking Z", one or both, only while they hold; a stack parent is told by the nesting and
+ * its caption instead. */
+export function DependencyText({ blockedBy, blocking }: { blockedBy: readonly string[]; blocking: readonly string[] }) {
+  if (!blockedBy.length && !blocking.length) return null;
   return <span className="flex min-w-0 items-center gap-1.5 truncate">
-    {waitsOn.length ? <span className="inline-flex min-w-0 items-center gap-0.5 truncate" style={{ color: `color-mix(in oklab, ${UPSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowUp width={11} height={11} strokeWidth={2} className="shrink-0" /><span className="truncate">waits on {names(waitsOn, waitsOn.length > 1 && blocks.length ? 1 : 2)}</span></span> : null}
-    {blocks.length ? <span className="inline-flex min-w-0 shrink-0 items-center gap-0.5" style={{ color: `color-mix(in oklab, ${DOWNSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowDown width={11} height={11} strokeWidth={2} className="shrink-0" />blocks {waitsOn.length ? blocks.length : names(blocks, 1)}</span> : null}
+    {blockedBy.length ? <span className="inline-flex min-w-0 items-center gap-0.5 truncate" style={{ color: `color-mix(in oklab, ${UPSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowUp width={11} height={11} strokeWidth={2} className="shrink-0" /><span className="truncate">blocked by {names(blockedBy, blockedBy.length > 1 && blocking.length ? 1 : 2)}</span></span> : null}
+    {blocking.length ? <span className="inline-flex min-w-0 shrink-0 items-center gap-0.5" style={{ color: `color-mix(in oklab, ${DOWNSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowDown width={11} height={11} strokeWidth={2} className="shrink-0" />blocking {blockedBy.length ? blocking.length : names(blocking, 1)}</span> : null}
   </span>;
 }
 

@@ -149,7 +149,7 @@ describe('AppSidebar selected status', () => {
 });
 
 /** A bakery's stacks: bakery-api on bakery-core (and bakery-web on bakery-api), a fork bakery-admin on bakery-core;
- * bakery-payments waits on bakery-stock. Listed out of stacking order, as the directory lists them. */
+ * bakery-payments depends on bakery-stock. Listed out of stacking order, as the directory lists them. */
 const stackedProject: SidebarProject = {
   id: 'stacks', name: 'Stacks',
   workspaces: ['bakery-web', 'bakery-payments', 'bakery-api', 'bakery-core', 'bakery-admin', 'bakery-stock'].map((id) => ({ id, projectId: 'stacks', name: id, branch: `feature/${id}`, closedAt: null, phase: id === 'bakery-payments' ? 'review' : 'code' })),
@@ -173,9 +173,16 @@ describe('AppSidebar stacks', () => {
       .toEqual([['bakery-payments', 14], ['bakery-core', 14], ['bakery-api', 30], ['bakery-web', 30], ['bakery-admin', 30], ['bakery-stock', 14]]);
     expect(html).toContain('title="Stacked on bakery-core: it merges after it"');
     expect(html).toContain('title="Stacked on bakery-api: it merges after it"');
-    expect(html).toContain('waits on bakery-stock');
-    expect(html).toContain('blocks bakery-payments');
+    expect(html).toContain('blocked by bakery-stock');
+    expect(html).toContain('blocking bakery-payments');
     expect(html).toContain('#42');
+  });
+
+  it('says blocked by and blocking only while the dependency has not shipped', () => {
+    const shipped: SidebarProject = { ...stackedProject, workspaces: stackedProject.workspaces.map((workspace) => workspace.id === 'bakery-stock' ? { ...workspace, phase: 'ship' } : workspace) };
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[shipped]} /></SidebarProvider>);
+    expect(html).not.toContain('blocked by');
+    expect(html).not.toContain('blocking');
   });
 
   it('shows each workspace once, in the same order with one open, its stacked row carrying its git position against its parent', () => {

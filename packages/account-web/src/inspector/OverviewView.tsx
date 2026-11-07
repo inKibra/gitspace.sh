@@ -167,15 +167,15 @@ function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelation
       </header>
       <WorkspacePicker workspaces={others} exclude={addKind === 'dependsOn' ? [...scope.relations.dependsOn, ...dependents] : [...related, ...scope.relations.dependsOn]} onPick={addRelation} label="Add relation" placeholder={`Search workspaces this ${addKind === 'dependsOn' ? 'depends on' : 'relates to'}`} limit={5} empty="Every open workspace is already related." />
     </section> : null}
-    <RelationList title="Blocked by" count={scope.stack.blockedBy.length} empty="No dependencies. Add one to sequence this workspace after another.">
+    <RelationList title="Depends on" count={scope.relations.dependsOn.length} empty="No dependencies. Add one to sequence this workspace after another.">
       {scope.relations.dependsOn.map((id) => {
         const dependency = byId[id];
         const badge = scope.stack.blockedBy.includes(id) ? <Badge size="compact" color="amber">blocking</Badge> : dependency?.closedAt ? <Badge variant="dot" size="compact" color="gray">archived</Badge> : dependency && !isBlocking(dependency) ? <Badge variant="dot" size="compact" color="green">shipped</Badge> : null;
         return <WorkspaceRow key={id} id={id} workspace={dependency} badge={badge} onOpen={onSelectWorkspace} onRemove={onSetRelations ? () => removeDependency(id) : undefined} />;
       })}
     </RelationList>
-    <RelationList title="Blocking" count={scope.stack.blocking.length} empty="Nothing waits on this workspace.">
-      {scope.stack.blocking.map((id) => <WorkspaceRow key={id} id={id} workspace={byId[id]} badge={<Badge size="compact" color="amber">waiting</Badge>} onOpen={onSelectWorkspace} />)}
+    <RelationList title="Blocking" count={scope.stack.blocking.length} empty="Nothing is blocked by this workspace.">
+      {scope.stack.blocking.map((id) => <WorkspaceRow key={id} id={id} workspace={byId[id]} badge={<Badge size="compact" color="amber">blocked</Badge>} onOpen={onSelectWorkspace} />)}
     </RelationList>
     <RelationList title="Related to" count={related.length} empty="No related workspaces.">
       {related.map((id) => <WorkspaceRow key={id} id={id} workspace={byId[id]} onOpen={onSelectWorkspace} onRemove={onSetRelations ? () => removeRelated(id) : undefined} />)}
