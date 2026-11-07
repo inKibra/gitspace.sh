@@ -1,10 +1,11 @@
 import type { TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer } from '@gitspace/protocol';
-import { useContext } from 'react';
+import { Fragment, useContext } from 'react';
 import { TakeoverCardsContext } from '../TakeoverCard.js';
 import { SideAgents } from './ExecutionCard.js';
 import { ToolGroup, toolRuns } from './ToolGroup.js';
 import { TranscriptItemView } from './TranscriptItemView.js';
+import { dayBreaks, DayDivider, fullTime, itemAt } from './time.js';
 
 export interface TurnTranscriptProps {
   turns: TurnBlock[];
@@ -23,17 +24,27 @@ export function TransportNotice({ block }: { block: TransportBlock }) {
 }
 
 /** The transcript reads like the registry's chat demo: one column, messages stacked with gap-2, reasoning and tools
- * inline between them; consecutive tool calls of a turn show as one group. */
+ * inline between them; consecutive tool calls of a turn show as one group. A divider names the day above the first
+ * turn with a time and wherever the day changes between turns. */
 export function TurnTranscript({ turns, transport, onAnswer }: TurnTranscriptProps) {
   const cards = useContext(TakeoverCardsContext);
+  const started = turns.map((turn) => ({ id: turn.id, at: turn.startedAt ?? turn.user?.at ?? turn.items.map(itemAt).find((at) => at !== undefined) }));
+  const breaks = dayBreaks(started);
   return <div className="mx-auto flex min-w-0 w-full max-w-3xl flex-col gap-6 px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6">
     {transport.length ? <div className="flex min-w-0 flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}
-    {turns.map((turn) => <article className="flex min-w-0 flex-col gap-2" data-status={turn.status} key={turn.id}>
-      {turn.user ? <TranscriptItemView item={turn.user} active={false} /> : null}
-      {toolRuns(turn.items.flatMap((item) => item.type !== 'message' || item.role !== 'user' ? [{ item, turnId: turn.id }] : []), cards).map((run) => run.tools
-        ? <ToolGroup calls={run.entries.flatMap(({ item }) => item.type === 'tool-call' ? [{ block: item, complete: true }] : [])} key={run.entries[0]!.item.id} />
-        : <TranscriptItemView item={run.entry.item} active={turn.status === 'running'} onAnswer={onAnswer} key={run.entry.item.id} />)}
-      {turn.sideAgents.length ? <SideAgents agents={turn.sideAgents} /> : null}
-    </article>)}
+    {turns.map((turn, index) => {
+      const divider = breaks.get(turn.id);
+      const at = fullTime(started[index]!.at);
+      return <Fragment key={turn.id}>
+        {divider ? <DayDivider date={divider} /> : null}
+        <article className="flex min-w-0 flex-col gap-2" data-status={turn.status} title={at ? `Turn started ${at}` : undefined}>
+          {turn.user ? <TranscriptItemView item={turn.user} active={false} /> : null}
+          {toolRuns(turn.items.flatMap((item) => item.type !== 'message' || item.role !== 'user' ? [{ item, turnId: turn.id }] : []), cards).map((run) => run.tools
+            ? <ToolGroup calls={run.entries.flatMap(({ item }) => item.type === 'tool-call' ? [{ block: item, complete: true }] : [])} key={run.entries[0]!.item.id} />
+            : <TranscriptItemView item={run.entry.item} active={turn.status === 'running'} onAnswer={onAnswer} key={run.entry.item.id} />)}
+          {turn.sideAgents.length ? <SideAgents agents={turn.sideAgents} /> : null}
+        </article>
+      </Fragment>;
+    })}
   </div>;
 }

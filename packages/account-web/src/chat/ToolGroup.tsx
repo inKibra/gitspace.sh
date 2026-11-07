@@ -14,6 +14,7 @@ import { LogView } from './LogView.js';
 import { RichContent } from './RichContent.js';
 import { isJsonValue, type JsonValue } from './staging.js';
 import type { ItemInteractionProps, TranscriptItemState } from './TranscriptItemView.js';
+import { fullTime } from './time.js';
 
 const EDIT_TOOLS: Record<string, true> = { edit: true, write: true, apply_patch: true };
 /** A `write` call's diff shows at most this many of its lines. */
@@ -300,7 +301,7 @@ export function ToolGroup({ calls, state, onStateChange }: { calls: readonly Gro
   const at = (ms: number): string => span ? `${((ms - span.start) / span.scale) * 100}%` : '0%';
   const Chevron = open ? ChevronDown : ChevronRight;
   return <div role="group" aria-label={label} data-tool-group className={`min-w-0 overflow-hidden border bg-surface-2 ${running ? 'border-[#3b82f6]/40' : 'border-border'} ${shape.container}`}>
-    <button type="button" aria-expanded={open} onClick={() => update({ open: !open })} className="flex min-h-10 w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none hover:bg-surface-1 focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]">
+    <button type="button" aria-expanded={open} onClick={() => update({ open: !open })} title={span ? `Started ${fullTime(span.start)}` : undefined} className="flex min-h-10 w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none hover:bg-surface-1 focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]">
       <Chevron width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" />
       <span className="shrink-0 text-body text-foreground">{label}</span>
       {span ? <span className="shrink-0 text-caption tabular-nums text-muted-foreground" data-group-duration>{running ? `running ${duration(span.now - span.start)}` : duration(span.end - span.start)}</span> : null}
@@ -357,7 +358,7 @@ function CallRow({ call, timing, edit, span, at, selected, onSelect }: { call: G
   const file = edit?.files.length === 1 ? edit.files[0]! : null;
   const browser = browserOf(block);
   return <li className={`border-b border-border last:border-b-0 ${block.status === 'error' ? 'bg-[#ef4444]/[0.04]' : ''}`} data-call={block.id}>
-    <button type="button" onClick={onSelect} aria-expanded={selected} className={`relative grid h-7 w-full grid-cols-[minmax(0,17rem)_minmax(0,1fr)_4rem] items-center text-left outline-none hover:bg-surface-1 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:var(--focus-ring,#6B97FF)] ${selected ? 'bg-surface-1' : ''}`}>
+    <button type="button" onClick={onSelect} aria-expanded={selected} title={timing.start === null ? undefined : `Started ${fullTime(timing.start)}${timing.end === null ? '' : ` · ended ${fullTime(timing.end)}`}`} className={`relative grid h-7 w-full grid-cols-[minmax(0,17rem)_minmax(0,1fr)_4rem] items-center text-left outline-none hover:bg-surface-1 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:var(--focus-ring,#6B97FF)] ${selected ? 'bg-surface-1' : ''}`}>
       {block.status === 'error' ? <span aria-hidden className="absolute inset-y-0 left-0 w-0.5" style={{ background: badgeColors.red }} /> : null}
       <span className="flex h-full min-w-0 items-center gap-1.5 border-r border-border px-3">
         <StatusIcon status={block.status} />

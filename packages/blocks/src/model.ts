@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
 const base = z.object({ id: z.string().min(1) });
+/** When the event that created the item happened (ISO); the first event of a streamed message. Absent in transcripts
+ * recorded before items kept it. */
+const at = z.string().optional();
 /** An image a message carries: its bytes, or (a stored image) a URL. A transcript row names a stored image as
  * `gs-image:…;<mimeType>` until the workspace that serves the row resolves it to a URL a browser can load. */
 const messageImageSchema = z.union([
@@ -14,6 +17,7 @@ export const messageBlockSchema = base.extend({
   text: z.string(),
   images: z.array(messageImageSchema).optional(),
   pending: z.boolean().optional(),
+  at,
 });
 
 export const thinkingBlockSchema = base.extend({
@@ -103,6 +107,7 @@ export const interruptionBlockSchema = base.extend({
   /** The whole message when `detail` shows only its start. */
   body: z.string().optional(),
   recovered: z.boolean().optional(),
+  at,
 });
 
 export const previewBlockSchema = base.extend({
@@ -151,7 +156,7 @@ export const workspaceTurnReportSchema = z.object({
   excerpt: z.string().nullable(),
 });
 /** One compact row in the project conversation: the report of a turn the project agent started. */
-export const workspaceReportBlockSchema = base.extend({ type: z.literal('workspace-report'), ...workspaceTurnReportSchema.shape });
+export const workspaceReportBlockSchema = base.extend({ type: z.literal('workspace-report'), ...workspaceTurnReportSchema.shape, at });
 /** The entry kind, and custom transcript message type, of a workspace turn report; a delivered conversation event of
  * kind `workspace` appends the same entry. */
 export const WORKSPACE_REPORT_ENTRY = 'gitspace.workspace';

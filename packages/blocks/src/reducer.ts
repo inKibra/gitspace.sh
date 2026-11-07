@@ -32,6 +32,12 @@ function timestamp(value: Date | string | undefined): string | undefined {
   return value;
 }
 
+/** The `at` an item keeps from the event that created it. */
+function createdAt(event: TranscriptEventInput): { at?: string } {
+  const at = timestamp(event.createdAt);
+  return at ? { at } : {};
+}
+
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -186,6 +192,8 @@ interface ProjectionTurn {
 interface ProjectionMessage {
   ordinal: number;
   parts: Map<number, 'message' | 'thinking'>;
+  /** When the message's first event happened. */
+  at?: string;
 }
 
 function pendingItem(item: TranscriptItem | undefined): number {
@@ -207,13 +215,13 @@ export class TranscriptProjector {
 
   /** Derived indexes persist only the active projection state, never the history. */
   checkpoint(): string {
-    return JSON.stringify({ current: this.#current, message: this.#message ? { ordinal: this.#message.ordinal, parts: [...this.#message.parts] } : undefined });
+    return JSON.stringify({ current: this.#current, message: this.#message ? { ordinal: this.#message.ordinal, parts: [...this.#message.parts], at: this.#message.at } : undefined });
   }
 
   restore(checkpoint: string): void {
-    const state = JSON.parse(checkpoint) as { current?: ProjectionTurn; message?: { ordinal: number; parts: [number, 'message' | 'thinking'][] } };
+    const state = JSON.parse(checkpoint) as { current?: ProjectionTurn; message?: { ordinal: number; parts: [number, 'message' | 'thinking'][]; at?: string } };
     this.#current = state.current;
-    this.#message = state.message ? { ordinal: state.message.ordinal, parts: new Map(state.message.parts) } : undefined;
+    this.#message = state.message ? { ordinal: state.message.ordinal, parts: new Map(state.message.parts), ...(state.message.at ? { at: state.message.at } : {}) } : undefined;
   }
 
   #ensureTurn(event: TranscriptEventInput): ProjectionTurn {
@@ -354,7 +362,7 @@ export class TranscriptProjector {
 
   #assistantParts(event: TranscriptEventInput, content: unknown[], final: boolean): void {
     const turn = this.#ensureTurn(event);
-    const message = this.#message ??= { ordinal: event.ordinal, parts: new Map() };
+    const message = this.#message ??= { ordinal: event.ordinal, parts: new Map(), ...createdAt(event) };
     for (const [index, rawPart] of content.entries()) {
       const part = record(rawPart);
       if (!part || typeof part.type !== 'string') continue;
@@ -362,12 +370,14 @@ export class TranscriptProjector {
         const id = `${turn.id}:message:${message.ordinal}:${index}`;
         const previous = this.store.read(id);
         if (previous?.type === 'message' || (final ? part.text.trim() : part.text)) {
+          const at = previous?.type === 'message' ? previous.at : message.at;
           this.#write({
             id,
             type: 'message',
             role: 'assistant',
             text: part.text,
             ...(!final ? { pending: true } : previous?.type === 'message' ? { pending: false } : {}),
+            ...(at ? { at } : {}),
           }, previous);
           message.parts.set(index, 'message');
         }
@@ -408,14 +418,14 @@ export class TranscriptProjector {
     }
     if (event.kind === 'session_compact' || event.kind === 'compaction') {
       const turn = this.#ensureTurn(event);
-      this.#write({ id: `${turn.id}:compact:${event.ordinal}`, type: 'interruption', reason: 'compacted', title: 'Context compacted', recovered: true });
+      this.#write({ id: `${turn.id}:compact:${event.ordinal}`, type: 'interruption', reason: 'compacted', title: 'Context compacted', recovered: true, ...createdAt(event) });
       return;
     }
     if (event.kind === 'message_start') {
       if (record(event.payload.message)?.role === 'assistant') {
         this.#ensureTurn(event);
         this.#finishMessage();
-        this.#message = { ordinal: event.ordinal, parts: new Map() };
+        this.#message = { ordinal: event.ordinal, parts: new Map(), ...createdAt(event) };
       }
       return;
     }
@@ -442,28 +452,28 @@ export class TranscriptProjector {
             if (note.kind === 'workspace') return;
             const lines = note.text.split('\n');
             const detail = lines.slice(0, 2).join('\n').slice(0, 240);
-            this.#write({ id: `${turn.id}:event:${event.ordinal}:${index}`, type: 'interruption', reason: 'event', kind: note.kind, title: note.source, detail, ...(detail.length < note.text.length ? { body: note.text } : {}) });
+            this.#write({ id: `${turn.id}:event:${event.ordinal}:${index}`, type: 'interruption', reason: 'event', kind: note.kind, title: note.source, detail, ...(detail.length < note.text.length ? { body: note.text } : {}), ...createdAt(event) });
           });
           return;
         }
         // Saved transcripts omit turn markers: the next user opens a new turn.
         if (this.#current?.hasContent) this.#commit('done');
         const turn = this.#ensureTurn(event);
-        this.#write({ id: `${turn.id}:user`, type: 'message', role: 'user', text, ...(images.length ? { images } : {}) });
+        this.#write({ id: `${turn.id}:user`, type: 'message', role: 'user', text, ...(images.length ? { images } : {}), ...createdAt(event) });
         return;
       }
       const turn = this.#ensureTurn(event);
       if (message.role === 'custom' && message.customType === 'gitspace.machine-notice' && message.display === true) {
-        this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: typeof message.title === 'string' ? message.title : 'Machine', detail: contentText(message.content) });
+        this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: typeof message.title === 'string' ? message.title : 'Machine', detail: contentText(message.content), ...createdAt(event) });
         return;
       }
       if (message.role === 'custom' && message.customType === WORKSPACE_REPORT_ENTRY && message.display === true) {
         const report = workspaceTurnReportSchema.safeParse(message.details);
-        if (report.success) this.#write({ id: `${turn.id}:workspace:${event.ordinal}`, type: 'workspace-report', ...report.data });
+        if (report.success) this.#write({ id: `${turn.id}:workspace:${event.ordinal}`, type: 'workspace-report', ...report.data, ...createdAt(event) });
         return;
       }
       if (message.role === 'custom' && message.customType === 'gitspace-instructions-changed' && message.display === true) {
-        this.#write({ id: `${turn.id}:instructions:${event.ordinal}`, type: 'interruption', reason: 'rule', title: 'Workspace instructions changed', detail: contentText(message.content), recovered: true });
+        this.#write({ id: `${turn.id}:instructions:${event.ordinal}`, type: 'interruption', reason: 'rule', title: 'Workspace instructions changed', detail: contentText(message.content), recovered: true, ...createdAt(event) });
         return;
       }
       if (message.role === 'custom' && (message.display === true || message.customType === 'async-result' || message.customType === 'launch-completion')) {
@@ -554,7 +564,7 @@ export class TranscriptProjector {
     }
     if (event.kind === 'error') {
       const turn = this.#ensureTurn(event);
-      this.#write({ id: `${turn.id}:error:${event.ordinal}`, type: 'interruption', reason: 'aborted', title: 'Agent turn failed', detail: typeof event.payload.message === 'string' ? providerErrorText(event.payload.message) : undefined });
+      this.#write({ id: `${turn.id}:error:${event.ordinal}`, type: 'interruption', reason: 'aborted', title: 'Agent turn failed', detail: typeof event.payload.message === 'string' ? providerErrorText(event.payload.message) : undefined, ...createdAt(event) });
       turn.failed = true;
       this.store.turn(turn.id, 'error');
     }

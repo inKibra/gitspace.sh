@@ -14,6 +14,7 @@ import { Source } from './Authorship.js';
 import { SectionMap } from './ChangeMap.js';
 import { ExhibitDiff, type GuideReview } from './ExhibitDiff.js';
 import { areasTouching } from './map-layout.js';
+import { SectionChangeBadge, type GuideComparison } from './GuideRevisions.js';
 
 const KIND: Record<ChangeGuideSection['kind'], { label: string; color: string }> = {
   decision: { label: 'Decision', color: badgeColors.violet },
@@ -31,6 +32,8 @@ export interface GuideWorkspace {
   review: GuideReview;
   readIds: ReadonlySet<string>;
   onMarkRead(sectionId: string): void;
+  /** An older revision: shown as it was, with its requirements and follow-ups disabled and nothing to mark read. */
+  readOnly: boolean;
   goal: GoalRecordView | null;
   /** Accepts or reopens a requirement at once; absent where the viewer cannot. */
   onSetAcceptance?(requirementId: string, accepted: boolean): Promise<void>;
@@ -56,14 +59,14 @@ export function EvidenceLinks({ evidence, onOpen }: { evidence: readonly Evidenc
   })}</ul>;
 }
 
-function SectionRequirements({ section, goal, onSetAcceptance }: { section: ChangeGuideSection; goal: GoalRecordView | null; onSetAcceptance: GuideWorkspace['onSetAcceptance'] }) {
+function SectionRequirements({ section, goal, onSetAcceptance, readOnly }: { section: ChangeGuideSection; goal: GoalRecordView | null; onSetAcceptance: GuideWorkspace['onSetAcceptance']; readOnly: boolean }) {
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const requirements = section.requirementIds.flatMap((id) => goal?.requirements.find((requirement) => requirement.id === id) ?? []);
   const missing = section.requirementIds.filter((id) => !requirements.some((requirement) => requirement.id === id));
   if (!section.requirementIds.length) return null;
   const toggle = (id: string, accepted: boolean): void => {
-    if (!onSetAcceptance || pending.has(id)) return;
+    if (!onSetAcceptance || readOnly || pending.has(id)) return;
     setPending((current) => new Set(current).add(id));
     setError(null);
     void onSetAcceptance(id, accepted).catch((cause: unknown) => setError(rpcErrorMessage(cause, 'inspector.requirement.setAcceptance'))).finally(() => setPending((current) => {
@@ -75,19 +78,19 @@ function SectionRequirements({ section, goal, onSetAcceptance }: { section: Chan
   return <div className="flex flex-col gap-2">
     <PartHeading source={<Source by="agent" what="which requirements this section shows" />}>Requirements this section shows</PartHeading>
     {requirements.length ? onSetAcceptance
-      ? <CheckboxGroup className="w-full" checkedIndices={new Set(requirements.flatMap((requirement, index) => requirement.status === 'accepted' ? [index] : []))}>
-        {requirements.map((requirement, index) => <CheckboxItem key={requirement.id} index={index} label={requirement.title} checked={requirement.status === 'accepted'} aria-busy={pending.has(requirement.id)} onToggle={() => toggle(requirement.id, requirement.status !== 'accepted')} />)}
+      ? <CheckboxGroup className={readOnly ? 'pointer-events-none w-full opacity-60' : 'w-full'} checkedIndices={new Set(requirements.flatMap((requirement, index) => requirement.status === 'accepted' ? [index] : []))}>
+        {requirements.map((requirement, index) => <CheckboxItem key={requirement.id} index={index} label={requirement.title} checked={requirement.status === 'accepted'} aria-busy={pending.has(requirement.id)} aria-disabled={readOnly || undefined} onToggle={() => toggle(requirement.id, requirement.status !== 'accepted')} />)}
       </CheckboxGroup>
       : <ul className="flex flex-col gap-1">{requirements.map((requirement) => <li key={requirement.id} className="flex items-center gap-2 text-body"><Badge size="compact" variant="dot" color={requirement.status === 'accepted' ? 'green' : requirement.status === 'review' ? 'amber' : 'gray'}>{requirement.status}</Badge>{requirement.title}</li>)}</ul>
       : null}
     {missing.length ? <p className="text-caption text-muted-foreground">Not in the Goal: {missing.join(', ')}</p> : null}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-    {onSetAcceptance && requirements.length ? <p className="flex items-center gap-1 text-caption text-muted-foreground">Only you accept a requirement; it is the same record as in the Goal.<Source by="gitspace" what="whether each requirement is accepted, from the Goal" /></p> : null}
+    {onSetAcceptance && requirements.length ? <p className="flex items-center gap-1 text-caption text-muted-foreground">{readOnly ? 'Requirements are accepted on the latest revision.' : 'Only you accept a requirement; it is the same record as in the Goal.'}<Source by="gitspace" what="whether each requirement is accepted, from the Goal" /></p> : null}
   </div>;
 }
 
 function FollowUp({ text, section, number, workspace }: { text: string; section: ChangeGuideSection; number: number; workspace: GuideWorkspace }) {
-  const { staging, relate } = workspace;
+  const { staging, relate, readOnly } = workspace;
   const [relating, setRelating] = useState(false);
   const [target, setTarget] = useState('');
   const [related, setRelated] = useState<string | null>(null);
@@ -112,9 +115,9 @@ function FollowUp({ text, section, number, workspace }: { text: string; section:
       }}>Relate</Button>
       <Button variant="ghost" size="compact" type="button" onClick={() => setRelating(false)}>Cancel</Button>
     </div> : <div className="flex flex-wrap items-center gap-1.5">
-      {staging ? <Button variant="secondary" size="compact" type="button" disabled={staged('issue')} onClick={() => stage('issue')}><ArrowUpRight width={13} height={13} />{staged('issue') ? 'Issue in your message' : 'File an issue'}</Button> : null}
-      {relate?.workspaces.length ? <Button variant="ghost" size="compact" type="button" onClick={() => setRelating(true)}><Link03 width={13} height={13} />{related ? `Related to ${related}` : 'Relate a workspace'}</Button> : null}
-      {staging ? <Button variant="ghost" size="compact" type="button" disabled={staged('message')} onClick={() => stage('message')}><MessageChatSquare width={13} height={13} />{staged('message') ? 'In your message' : 'Message the agent'}</Button> : null}
+      {staging ? <Button variant="secondary" size="compact" type="button" disabled={readOnly || staged('issue')} onClick={() => stage('issue')}><ArrowUpRight width={13} height={13} />{staged('issue') ? 'Issue in your message' : 'File an issue'}</Button> : null}
+      {relate?.workspaces.length ? <Button variant="ghost" size="compact" type="button" disabled={readOnly} onClick={() => setRelating(true)}><Link03 width={13} height={13} />{related ? `Related to ${related}` : 'Relate a workspace'}</Button> : null}
+      {staging ? <Button variant="ghost" size="compact" type="button" disabled={readOnly || staged('message')} onClick={() => stage('message')}><MessageChatSquare width={13} height={13} />{staged('message') ? 'In your message' : 'Message the agent'}</Button> : null}
     </div>}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
   </li>;
@@ -147,7 +150,7 @@ function SectionDiagram({ section, map }: { section: ChangeGuideSection; map: Ch
   </figure>;
 }
 
-export function GuideSection({ section, index, map, open, onMapNow, onToggle, onReadNext, onLoadDiff, workspace }: {
+export function GuideSection({ section, index, map, open, onMapNow, onToggle, onReadNext, onLoadDiff, workspace, comparison }: {
   section: ChangeGuideSection;
   index: number;
   map: ChangeMap | undefined;
@@ -159,6 +162,8 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
   onReadNext: (() => void) | null;
   onLoadDiff(path: string): Promise<RepositoryDiffView>;
   workspace: GuideWorkspace | null;
+  /** The earlier revision a reader compares the guide with; null without one. */
+  comparison: GuideComparison | null;
 }) {
   const shape = useShape();
   const number = index + 1;
@@ -167,6 +172,8 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
   const paths = new Set(section.exhibits.map((exhibit) => exhibit.path));
   const threads = workspace?.review.threads.filter((thread) => thread.anchor.kind === 'line' && paths.has(thread.anchor.path)).length ?? 0;
   const kind = KIND[section.kind];
+  const change = comparison?.changes.get(section.id) ?? null;
+  const since = comparison?.onLoadSinceDiff && change === 'changed' ? { revision: comparison.since, onLoad: comparison.onLoadSinceDiff } : null;
   return <section id={`guide-section-${section.id}`} data-section={section.id} data-map-now={onMapNow || undefined} className="scroll-mt-2 pt-4">
     <div className={`flex items-start gap-3 border-t border-border pt-5 ${MEASURE}`}>
       <button type="button" onClick={onToggle} aria-expanded={open} className={`flex min-w-0 flex-1 items-start gap-3 text-left ${shape.item}`} style={onMapNow ? { boxShadow: `0 0 0 2px ${badgeColors.blue}`, padding: 4 } : undefined}>
@@ -175,6 +182,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
           <span className="text-title font-semibold leading-snug text-foreground">{section.title}</span>
           <span className="flex flex-wrap items-center gap-x-2 text-caption text-muted-foreground">
             <span className="flex items-center gap-1.5"><span className="size-1.5 rounded-full" style={{ background: kind.color }} />{kind.label}</span>
+            {comparison && change ? <SectionChangeBadge change={change} since={comparison.since} /> : null}
             <span className="tabular-nums">· {section.exhibits.length} file{section.exhibits.length === 1 ? '' : 's'}</span>
             {ranges ? <span className="tabular-nums">· {ranges} range{ranges === 1 ? '' : 's'}</span> : null}
             {threads ? <span className="flex items-center gap-1 tabular-nums">· <MessageSquare01 width={12} height={12} />{threads} thread{threads === 1 ? '' : 's'}</span> : null}
@@ -197,7 +205,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
         <ReadersGuide section={section} number={number} />
         {section.exhibits.map((exhibit) => <div key={exhibit.path} className="flex flex-col gap-2">
           {exhibit.note && !exhibit.ranges?.length ? <div className={`flex items-start gap-1.5 text-caption text-muted-foreground ${MEASURE}`}><span className="mt-1"><Source by="agent" what="this exhibit's note" /></span><div className="min-w-0 flex-1"><GitSpaceMarkdown>{exhibit.note}</GitSpaceMarkdown></div></div> : null}
-          <ExhibitDiff exhibit={exhibit} onLoadDiff={onLoadDiff} review={workspace?.review ?? null} />
+          <ExhibitDiff exhibit={exhibit} onLoadDiff={onLoadDiff} review={workspace?.review ?? null} since={since} />
         </div>)}
       </div> : <p className={`text-caption text-muted-foreground ${MEASURE}`}>No file exhibits in this section.</p>}
       <div className={`flex flex-col gap-6 ${MEASURE}`}>
@@ -205,7 +213,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
           <PartHeading source={<Source by="agent" what="which runs, commits and files prove this section" />}>Evidence</PartHeading>
           <EvidenceLinks evidence={section.evidence} onOpen={workspace ? workspace.onOpenEvidence : null} />
         </div> : null}
-        {workspace ? <SectionRequirements section={section} goal={workspace.goal} onSetAcceptance={workspace.onSetAcceptance} /> : null}
+        {workspace ? <SectionRequirements section={section} goal={workspace.goal} onSetAcceptance={workspace.onSetAcceptance} readOnly={workspace.readOnly} /> : null}
         {workspace && section.asks?.length && (workspace.staging || workspace.relate?.workspaces.length) ? <div className="flex flex-col gap-2">
           <PartHeading source={<Source by="agent" what="this section's follow-ups" />}>Follow-ups</PartHeading>
           <ul className="flex flex-col gap-4">{section.asks.map((text) => <FollowUp key={text} text={text} section={section} number={number} workspace={workspace} />)}</ul>

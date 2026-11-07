@@ -16,6 +16,7 @@ import { ToolCall } from './ToolCall.js';
 import { ToolGroup } from './ToolGroup.js';
 import { AgentMessageActions } from './staging.js';
 import type { TurnTranscriptProps } from './TurnTranscript.js';
+import { fullTime, ItemTime } from './time.js';
 
 export interface TranscriptReadingPosition {
   generation: string | null;
@@ -75,14 +76,15 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
   switch (item.type) {
     case 'message': {
       const automation = item.role === 'user' ? parseAutomationMessage(item.text) : null;
-      if (automation) return <AutomationCard message={automation} delivery="turn" />;
+      if (automation) return <AutomationCard message={automation} delivery="turn" at={item.at} />;
       // A sent message names the tabs its pasted share links connected and the captures it mentions (the summaries the
       // workspace appended for the agent); they show as chips above its text.
       const mentioned = item.role === 'user' ? captureSummariesIn(item.text) : null;
       const sent = mentioned === null ? null : connectedTabsIn(mentioned.captures.reduce((text, { captureId }) => text.replaceAll(captureMention(captureId), ''), mentioned.text));
-      return <ChatMessage
+      const message = <ChatMessage
         attachments={item.images?.length ? <MessageAttachments images={item.images} /> : undefined}
         from={item.role}
+        title={item.role === 'assistant' ? fullTime(item.at) : undefined}
         data-pending={item.pending || undefined}
       >{sent === null || mentioned === null ? <AgentMessageActions><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></AgentMessageActions> : <>
         {sent.tabs.length || mentioned.captures.length ? <span className="flex flex-wrap gap-1.5 pb-1.5">
@@ -91,6 +93,8 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         </span> : null}
         <GitSpaceMarkdown>{userMessageMarkdown(sent.text)}</GitSpaceMarkdown>
       </>}</ChatMessage>;
+      // The person's message shows when it was sent under its bubble.
+      return item.role === 'user' && item.at ? <div className="flex min-w-0 flex-col items-end gap-0.5">{message}<ItemTime at={item.at} className="px-1" /></div> : message;
     }
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
@@ -111,10 +115,10 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
     case 'interruption': {
       if (item.reason === 'machine') {
         const automation = item.title === 'GitHub' ? parseAutomationMessage(item.detail ?? '') : null;
-        return automation ? <AutomationCard message={automation} delivery="notice" /> : <NoticeRow item={item} />;
+        return automation ? <AutomationCard message={automation} delivery="notice" at={item.at} /> : <NoticeRow item={item} />;
       }
       if (item.reason === 'event') return item.kind === 'machine-ready' ? <NoticeRow item={item} /> : <EventCard item={item} />;
-      return <Notice icon={<AlertCircle width={16} height={16} strokeWidth={1.5} />} title={item.title} detail={item.detail} body={item.body} badge={item.recovered ? <Badge variant="dot" color="green">recovered</Badge> : <Badge variant="dot" color="red">{item.reason}</Badge>} />;
+      return <Notice icon={<AlertCircle width={16} height={16} strokeWidth={1.5} />} title={item.title} detail={item.detail} body={item.body} at={item.at} badge={item.recovered ? <Badge variant="dot" color="green">recovered</Badge> : <Badge variant="dot" color="red">{item.reason}</Badge>} />;
     }
     case 'workspace-report':
       return <WorkspaceReportRow item={item} state={state} onStateChange={onStateChange} />;

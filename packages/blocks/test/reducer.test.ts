@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { coalesceTransportEvents, reduceTranscriptToTurns } from '../src/index.js';
+import { coalesceTransportEvents, formatConversationEvents, reduceTranscriptToTurns } from '../src/index.js';
 
 const STORED = `gs-image:v1:ws-1:6:1x1:${'a'.repeat(64)}`;
 
@@ -303,5 +303,28 @@ describe('todo lists and proposed plans', () => {
       { id: 'form', title: 'Wire the form', detail: '', where: [], requirementIds: [] },
     ] })]);
     expect(card).toMatchObject({ type: 'ask', kind: 'plan', steps: [{ id: 'schema', title: 'Add the table', detail: 'One column per field.', where: ['db/schema.sql'] }, { id: 'form', title: 'Wire the form' }] });
+  });
+});
+
+describe('when items happened', () => {
+  it('keeps the creating event\'s time on messages and cards, the first event\'s for a streamed reply, and none without one', () => {
+    const at = (second: number) => `2026-11-04T18:48:${String(second).padStart(2, '0')}.000Z`;
+    const reply = (text: string) => ({ message: { role: 'assistant', content: [{ type: 'text', text }] } });
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'Run the tests' }] } }, createdAt: at(1) },
+      { sessionId: 's1', ordinal: 2, kind: 'message_start', payload: { message: { role: 'assistant', content: [] } }, createdAt: at(2) },
+      { sessionId: 's1', ordinal: 3, kind: 'message_update', payload: reply('Start'), createdAt: at(3) },
+      { sessionId: 's1', ordinal: 4, kind: 'message_end', payload: reply('Started.'), createdAt: new Date(at(9)) },
+      { sessionId: 's1', ordinal: 5, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: formatConversationEvents([{ kind: 'agent-message', source: 'Reviewer', text: 'No findings.' }]) }] } }, createdAt: at(10) },
+      { sessionId: 's1', ordinal: 6, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.machine-notice', display: true, title: 'Machine', content: 'Darktop is online.' } }, createdAt: at(11) },
+      { sessionId: 's1', ordinal: 7, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.workspace', display: true, content: '', details: { projectId: 'p', workspaceId: 'w', name: 'FEAT-1', requestId: 'r', outcome: 'finished', excerpt: null } } }, createdAt: at(12) },
+      { sessionId: 's1', ordinal: 8, kind: 'compaction', payload: {} },
+    ]);
+    expect(turns[0]?.user).toMatchObject({ text: 'Run the tests', at: at(1) });
+    expect(turns[0]?.items).toMatchObject([{ type: 'message', role: 'assistant', text: 'Started.', pending: false, at: at(2) }]);
+    expect(turns[1]?.items.map((item) => item.type === 'interruption' || item.type === 'workspace-report' ? [item.type, item.at] : [item.type])).toEqual([
+      ['interruption', at(10)], ['interruption', at(11)], ['workspace-report', at(12)], ['interruption', undefined],
+    ]);
+    expect(turns[1]?.items[3]).not.toHaveProperty('at');
   });
 });

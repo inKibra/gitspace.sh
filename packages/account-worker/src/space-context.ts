@@ -4,6 +4,7 @@ import {
   appendReviewMessageInputSchema,
   appendRubricJudgmentInputSchema,
   attachRequirementEvidenceInputSchema,
+  changeGuideRevisionSummarySchema,
   changeGuideViewSchema,
   createReviewThreadInputSchema,
   endJournalPhaseInputSchema,
@@ -36,6 +37,7 @@ import {
   type AppendReviewMessageInput,
   type AppendRubricJudgmentInput,
   type AttachRequirementEvidenceInput,
+  type ChangeGuideRevisionSummary,
   type ChangeGuideView,
   type CreateReviewThreadInput,
   type EndJournalPhaseInput,
@@ -161,6 +163,20 @@ interface ReviewerStateRow extends Record<string, SqlStorageValue> {
 }
 interface ReadSectionRow extends Record<string, SqlStorageValue> {
   section_id: string;
+}
+interface GuideRevisionRow extends Record<string, SqlStorageValue> {
+  revision: number;
+  head_commit: string;
+  base_ref: string;
+  base_commit: string | null;
+  title: string;
+  created_at: string;
+  created_by: string;
+  section_count: number;
+}
+interface GuideReaderRow extends Record<string, SqlStorageValue> {
+  revision: number;
+  reviewer_id: string;
 }
 interface ThreadRow extends Record<string, SqlStorageValue> {
   thread_id: string;
@@ -586,8 +602,34 @@ export class SpaceContextDO extends BudgetedDurableObject {
     return existing ? this.journalRecord(identity, existing) : this.appendJournalEntry(input);
   }
 
-  getChangeGuide(input: InspectorIdentity): ChangeGuideView | null {
-    return this.readChangeGuide(this.requireIdentity(input));
+  /** The guide at `revision`, the latest when absent; null when the workspace has no guide or no such revision. */
+  getChangeGuide(input: InspectorIdentity, revision?: number): ChangeGuideView | null {
+    const identity = this.requireIdentity(input);
+    if (revision === undefined) return this.readChangeGuide(identity);
+    const guide = this.ctx.storage.sql.exec<GuideRow>(`SELECT ${GUIDE_COLUMNS} FROM inspector_guide_revisions WHERE revision = ?`, revision).toArray()[0];
+    return guide ? this.guideView(identity, guide) : null;
+  }
+
+  /** Every stored guide revision, newest first. */
+  listGuideRevisions(input: InspectorIdentity): ChangeGuideRevisionSummary[] {
+    this.requireIdentity(input);
+    const readers = new Map<number, string[]>();
+    for (const row of this.ctx.storage.sql.exec<GuideReaderRow>('SELECT DISTINCT revision, reviewer_id FROM inspector_guide_section_reads ORDER BY revision, reviewer_id').toArray()) {
+      readers.set(row.revision, [...readers.get(row.revision) ?? [], row.reviewer_id]);
+    }
+    return this.ctx.storage.sql.exec<GuideRevisionRow>(
+      'SELECT r.revision, r.head_commit, r.base_ref, r.base_commit, r.title, r.created_at, r.created_by, (SELECT COUNT(*) FROM inspector_guide_sections s WHERE s.revision = r.revision) AS section_count FROM inspector_guide_revisions r ORDER BY r.revision DESC',
+    ).toArray().map((row) => changeGuideRevisionSummarySchema.parse({
+      revision: row.revision,
+      headCommit: row.head_commit,
+      baseRef: row.base_ref,
+      baseCommit: row.base_commit,
+      title: row.title,
+      createdAt: row.created_at,
+      createdBy: row.created_by,
+      sectionCount: row.section_count,
+      readerIds: readers.get(row.revision) ?? [],
+    }));
   }
 
   putChangeGuide(input: PutChangeGuideInput): ChangeGuideView {
@@ -1036,7 +1078,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   private latestGuideRow(): GuideRow | undefined {
-    return this.ctx.storage.sql.exec<GuideRow>('SELECT revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json FROM inspector_guide_revisions ORDER BY revision DESC LIMIT 1').toArray()[0];
+    return this.ctx.storage.sql.exec<GuideRow>(`SELECT ${GUIDE_COLUMNS} FROM inspector_guide_revisions ORDER BY revision DESC LIMIT 1`).toArray()[0];
   }
 
   private requireGuideVersion(revision: number, headCommit: string): GuideRow {
@@ -1049,7 +1091,10 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
   private readChangeGuide(identity: InspectorIdentity): ChangeGuideView | null {
     const guide = this.latestGuideRow();
-    if (!guide) return null;
+    return guide ? this.guideView(identity, guide) : null;
+  }
+
+  private guideView(identity: InspectorIdentity, guide: GuideRow): ChangeGuideView {
     const sections = this.ctx.storage.sql.exec<JsonOrdinalRow>('SELECT ordinal, value_json FROM inspector_guide_sections WHERE revision = ? ORDER BY ordinal', guide.revision)
       .toArray().map((row) => JSON.parse(row.value_json));
     const reviewerStates = this.ctx.storage.sql.exec<ReviewerStateRow>('SELECT reviewer_id, decision, note, updated_at FROM inspector_guide_reviewer_state WHERE revision = ? ORDER BY reviewer_id', guide.revision)
@@ -1118,6 +1163,8 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
 /** Every column of a journal row, in `JournalRow` order. */
 const JOURNAL_COLUMNS = 'sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by, citations_json, section_id, supersedes';
+/** Every column of a guide revision row, in `GuideRow` order. */
+const GUIDE_COLUMNS = 'revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json';
 const requirementAcceptanceSchema = goalRequirementSchema.pick({ acceptedBy: true, acceptedAt: true }).required();
 /** A requirement whose acceptance a person recorded and that is no longer accepted. */
 const REOPENED_ACCEPTANCE = JSON.stringify({ acceptedBy: null, acceptedAt: null });

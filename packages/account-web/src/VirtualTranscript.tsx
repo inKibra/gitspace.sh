@@ -4,6 +4,7 @@ import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, u
 import { ToolGroup, toolRuns, type GroupCall } from './chat/ToolGroup.js';
 import { TranscriptItemView, type TranscriptItemState, type TranscriptReadingPosition } from './chat/TranscriptItemView.js';
 import { TransportNotice, type TurnTranscriptProps } from './chat/TurnTranscript.js';
+import { dayBreaks, DayDivider, fullTime, itemAt } from './chat/time.js';
 import { TakeoverCardsContext } from './TakeoverCard.js';
 import { useTranscriptHistory, type TranscriptHistory } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
@@ -25,8 +26,10 @@ const INTERACTION_CACHE_BYTES = 512 * 1024;
 const interactionEncoder = new TextEncoder();
 const EMPTY_STATE: TranscriptItemState = {};
 /** What the window lays out: one transcript row, or a run of consecutive tool-call rows of one turn drawn as one group.
- * Its id and ordinal are its first row's, so anchors, positions and interaction state keep pointing at real rows. */
-interface DisplayRow { id: string; ordinal: number; turnId: string; turnStatus: TranscriptRow['turnStatus']; rows: readonly TranscriptRow[]; tools: boolean }
+ * Its id and ordinal are its first row's, so anchors, positions and interaction state keep pointing at real rows.
+ * `turnAt`: when its turn started (its first loaded row with a time); `divider`: the day it opens, on the first row of
+ * the first loaded turn with a time and of each turn whose day differs from the turn before. */
+interface DisplayRow { id: string; ordinal: number; turnId: string; turnStatus: TranscriptRow['turnStatus']; rows: readonly TranscriptRow[]; tools: boolean; turnAt?: string; divider?: Date }
 /** `index` finds the display row holding a transcript row. */
 interface Layout { rows: readonly DisplayRow[]; offsets: number[]; total: number; index: Map<string, number> }
 interface Anchor { id: string; ordinal: number; offset: number }
@@ -84,7 +87,11 @@ function MeasuredRow({ row, top, gap, onMeasure, onNode, children }: {
     observer.observe(node);
     return () => observer.disconnect();
   }, [row.id, onMeasure]);
-  return <div ref={bind} data-transcript-row={row.id} data-turn-id={row.turnId} data-status={row.turnStatus} className="absolute inset-x-0 min-w-0" style={{ top, paddingBottom: gap }}>{children}</div>;
+  const started = fullTime(row.turnAt);
+  return <div ref={bind} data-transcript-row={row.id} data-turn-id={row.turnId} data-status={row.turnStatus} title={started ? `Turn started ${started}` : undefined} className="absolute inset-x-0 min-w-0" style={{ top, paddingBottom: gap }}>
+    {row.divider ? <div className="pb-6"><DayDivider date={row.divider} /></div> : null}
+    {children}
+  </div>;
 }
 
 /** Uses the existing ScrollArea viewport: no nested scroller or scroll event cancellation. */
@@ -147,16 +154,27 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
   const lastBoundary = useRef('');
   const appliedNavigation = useRef<TranscriptHistory['navigation']>(null);
   const cards = useContext(TakeoverCardsContext);
-  const displayRows = useMemo(() => toolRuns(history.rows, cards).map((run): DisplayRow => {
-    const rows = run.tools ? run.entries : [run.entry];
-    const first = rows[0]!;
-    return { id: first.id, ordinal: first.ordinal, turnId: first.turnId, turnStatus: first.turnStatus, rows, tools: run.tools };
-  }), [history.rows, cards]);
+  const displayRows = useMemo(() => {
+    const runs = toolRuns(history.rows, cards);
+    const turnAt = new Map<string, string | undefined>();
+    for (const row of history.rows) if (turnAt.get(row.turnId) === undefined) turnAt.set(row.turnId, itemAt(row.item));
+    const breaks = dayBreaks([...turnAt].map(([id, at]) => ({ id, at })));
+    let previousTurn: string | null = null;
+    return runs.map((run): DisplayRow => {
+      const rows = run.tools ? run.entries : [run.entry];
+      const first = rows[0]!;
+      const opensTurn = first.turnId !== previousTurn;
+      previousTurn = first.turnId;
+      const divider = opensTurn ? breaks.get(first.turnId) : undefined;
+      const at = turnAt.get(first.turnId);
+      return { id: first.id, ordinal: first.ordinal, turnId: first.turnId, turnStatus: first.turnStatus, rows, tools: run.tools, ...(at ? { turnAt: at } : {}), ...(divider ? { divider } : {}) };
+    });
+  }, [history.rows, cards]);
   const layout = useMemo<Layout>(() => {
     const offsets = [0];
     const index = new Map<string, number>();
     displayRows.forEach((row, position) => {
-      offsets.push(offsets[offsets.length - 1]! + (measurements.current.get(row.id) ?? estimateHeight(row)));
+      offsets.push(offsets[offsets.length - 1]! + (measurements.current.get(row.id) ?? (row.divider ? 44 : 0) + estimateHeight(row)));
       for (const member of row.rows) index.set(member.id, position);
     });
     return { rows: displayRows, offsets, total: offsets[offsets.length - 1]!, index };

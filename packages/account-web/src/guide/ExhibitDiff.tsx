@@ -1,6 +1,7 @@
 // One exhibit of a Change Guide section at the full width: its diff between the guide's base and head, loaded as it
 // nears the reader. An exhibit with ranges shows only their lines, each range's note above them; the whole file is a
-// click away. In the workspace, selecting line numbers starts a review thread; a shared guide's diffs are read-only.
+// click away. Compared with an earlier revision, a changed section's exhibit also shows its code since that revision's
+// head. In the workspace, selecting line numbers starts a review thread; a shared guide's diffs are read-only.
 import type { ChangeGuideSection, RepositoryDiffView, ReviewThreadView } from '@gitspace/protocol';
 import { Badge, Button, ThinkingIndicator, Tooltip, badgeColors, useShape } from '@gitspace/ui';
 import { FileCode02 } from '@untitledui/icons';
@@ -57,7 +58,13 @@ function Body({ exhibit, diff, whole, review, onWhole }: { exhibit: Exhibit; dif
   </>;
 }
 
-export function ExhibitDiff({ exhibit, onLoadDiff, review }: { exhibit: Exhibit; onLoadDiff(path: string): Promise<RepositoryDiffView>; review: GuideReview | null }) {
+export function ExhibitDiff({ exhibit, onLoadDiff, review, since }: {
+  exhibit: Exhibit;
+  onLoadDiff(path: string): Promise<RepositoryDiffView>;
+  review: GuideReview | null;
+  /** An earlier revision to show this file's diff since: between its head commit and this revision's. */
+  since?: { revision: number; onLoad(path: string): Promise<RepositoryDiffView> } | null;
+}) {
   const shape = useShape();
   const runtimeAvailable = useContext(RuntimeAvailability);
   const root = useContext(GuideScrollRoot);
@@ -66,6 +73,8 @@ export function ExhibitDiff({ exhibit, onLoadDiff, review }: { exhibit: Exhibit;
   const [diff, setDiff] = useState<RepositoryDiffView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [whole, setWhole] = useState(false);
+  const [sinceShown, setSinceShown] = useState(false);
+  const fromSince = sinceShown && !!since;
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !runtimeAvailable || requested) return;
@@ -78,27 +87,30 @@ export function ExhibitDiff({ exhibit, onLoadDiff, review }: { exhibit: Exhibit;
     setError(null);
     if (!runtimeAvailable || !requested) return;
     let active = true;
-    void onLoadDiff(exhibit.path).then((loaded) => {
+    void (fromSince ? since.onLoad : onLoadDiff)(exhibit.path).then((loaded) => {
       if (!active) return;
       if (loaded.path !== exhibit.path || loaded.mode !== 'base') throw new Error('The diff response does not match this guide exhibit.');
       setDiff(loaded);
     }).catch((cause: unknown) => { if (active) setError(rpcErrorMessage(cause, 'Change Guide diff')); });
     return () => { active = false; };
-  }, [requested, exhibit.path, runtimeAvailable]);
+  }, [requested, exhibit.path, runtimeAvailable, fromSince]);
   const file = diff?.files.find((entry) => entry.path === exhibit.path);
   const name = <span className="min-w-0 truncate font-mono text-caption">{exhibit.path}</span>;
   return <figure ref={hostRef} className={`flex flex-col overflow-hidden border border-border ${shape.container}`}>
     <figcaption className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-2 py-1">
       {review && runtimeAvailable ? <Button variant="ghost" size="compact" type="button" className="min-w-0" onClick={() => review.onOpenFile(exhibit.path)}>{ic(FileCode02, 14)}{name}</Button>
         : <span className="flex min-w-0 items-center gap-2 px-1">{ic(FileCode02, 14)}{name}</span>}
-      {file ? <span className="flex items-center gap-1 text-caption tabular-nums"><span style={{ color: badgeColors.green }}>+{file.additions}</span><span style={{ color: badgeColors.red }}>−{file.deletions}</span><Source by="gitspace" what="the diff and its line counts, between the guide's base and head" /></span> : null}
+      {file ? <span className="flex items-center gap-1 text-caption tabular-nums"><span style={{ color: badgeColors.green }}>+{file.additions}</span><span style={{ color: badgeColors.red }}>−{file.deletions}</span><Source by="gitspace" what={fromSince ? `the diff and its line counts, between r${since.revision}'s head and this revision's` : "the diff and its line counts, between the guide's base and head"} /></span> : null}
       {exhibit.slowRead ? <Badge size="compact" variant="dot" color="amber">slow read</Badge> : null}
-      {exhibit.ranges?.length && diff ? <Button variant="ghost" size="compact" type="button" className="ml-auto" aria-pressed={whole} onClick={() => setWhole((value) => !value)}>{whole ? 'Lines for this section' : 'Whole file'}</Button> : null}
+      <span className="ml-auto flex items-center gap-1">
+        {since ? <Button variant="ghost" size="compact" type="button" aria-pressed={fromSince} onClick={() => setSinceShown((value) => !value)}>{fromSince ? 'Whole change' : `Since r${since.revision}`}</Button> : null}
+        {exhibit.ranges?.length && diff && !fromSince ? <Button variant="ghost" size="compact" type="button" aria-pressed={whole} onClick={() => setWhole((value) => !value)}>{whole ? 'Lines for this section' : 'Whole file'}</Button> : null}
+      </span>
     </figcaption>
     {!runtimeAvailable ? <Tooltip content={openWorkspaceFirst}><span><Placeholder>Saved file reference. {openWorkspaceFirst} to inspect its diff.</Placeholder></span></Tooltip>
       : !requested ? <Placeholder>The diff loads as it nears the reading position.</Placeholder>
         : error ? <Placeholder><span className="text-destructive">{error}</span></Placeholder>
           : !diff ? <div className="flex min-h-28 items-center justify-center"><ThinkingIndicator aria-label="Loading diff…" /></div>
-            : <Body exhibit={exhibit} diff={diff} whole={whole} review={review} onWhole={() => setWhole(true)} />}
+            : <Body exhibit={exhibit} diff={diff} whole={whole || fromSince} review={fromSince ? null : review} onWhole={() => setWhole(true)} />}
   </figure>;
 }

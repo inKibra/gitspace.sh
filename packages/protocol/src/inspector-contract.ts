@@ -461,6 +461,21 @@ export const changeGuideViewSchema = inspectorIdentitySchema.extend({
 }).strict().superRefine(refineGuideMapSections);
 export type ChangeGuideView = z.infer<typeof changeGuideViewSchema>;
 
+/** One stored revision of a workspace's Change Guide, as its revision picker lists it. `readerIds`: the reviewers who
+ * marked at least one of its sections read. */
+export const changeGuideRevisionSummarySchema = z.object({
+  revision: revisionSchema,
+  headCommit: gitObjectIdSchema,
+  baseRef: z.string().trim().min(1).max(512),
+  baseCommit: gitObjectIdSchema.nullable(),
+  title: shortTextSchema,
+  createdAt: isoDateSchema,
+  createdBy: idSchema,
+  sectionCount: z.number().int().nonnegative(),
+  readerIds: z.array(idSchema),
+}).strict();
+export type ChangeGuideRevisionSummary = z.infer<typeof changeGuideRevisionSummarySchema>;
+
 /** A shared Change Guide as its public viewer reads it: the guide pinned at one revision, its repository, the merge
  * base its diffs compare against, and its introduction and map (absent on links shared before guides had them). Its
  * captures stay in the workspace's drive. */
@@ -764,6 +779,7 @@ export const WorkflowViewCodec = asWireCodec(workflowViewSchema, 'gitspace/workf
 export const RubricViewCodec = asWireCodec(rubricViewSchema, 'gitspace/rubric-view/v2');
 export const JournalEntryViewCodec = asWireCodec(journalEntryViewSchema, 'gitspace/journal-entry-view/v1');
 export const ChangeGuideViewCodec = asWireCodec(changeGuideViewSchema, 'gitspace/change-guide-view/v1');
+export const ChangeGuideRevisionSummaryCodec = asWireCodec(changeGuideRevisionSummarySchema, 'gitspace/change-guide-revision-summary/v1');
 export const RepositoryTreeEntryCodec = asWireCodec(repositoryTreeEntrySchema, 'gitspace/repository-tree-entry/v1');
 export const RepositoryStatusEntryCodec = asWireCodec(repositoryStatusEntrySchema, 'gitspace/repository-status-entry/v1');
 export const RepositoryFileViewCodec = asWireCodec(repositoryFileViewSchema, 'gitspace/repository-file-view/v1');

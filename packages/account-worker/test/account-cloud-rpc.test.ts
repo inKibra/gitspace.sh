@@ -319,6 +319,38 @@ describe('Inspector administrative authority', () => {
   });
 });
 
+describe('Change Guide revisions', () => {
+  it('lists every revision newest first and reads any one of them, refusing a revision that does not exist', async () => {
+    const person = await account();
+    const { projectId, spaceId } = await inspectorWorkspace(person.userId);
+    const invoke = async (path: string, input: unknown) => parse(await (await SELF.fetch(person.request(single(path, { expectedGeneration: 0, input })))).text());
+    const read = async (path: string, input: object) => parse(await (await SELF.fetch(person.request(single(path, { spaceId, expectedGeneration: 0, ...input })))).text());
+    const identity = { projectId, spaceId };
+    const section = (id: string, explanation: string) => ({ id, title: `Section ${id}`, kind: 'behavior', explanation, why: '', exhibits: [], requirementIds: [] });
+    const first = { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'First pass', createdBy: 'narrator-a', sections: [section('kept', 'Old'), section('dropped', 'Gone later')] };
+    const second = { headCommit: 'c'.repeat(40), baseRef: 'develop', baseCommit: 'd'.repeat(40), title: 'Second pass', createdBy: 'narrator-b', sections: [section('kept', 'New'), section('added', 'Fresh'), section('third', 'More')] };
+    expect(await invoke('inspector.guide.put', { ...identity, expectedRevision: 0, guide: first })).toMatchObject({ status: 'ok' });
+    expect(await invoke('inspector.guide.markSectionRead', { ...identity, revision: 1, headCommit: first.headCommit, reviewerId: 'browser', sectionId: 'kept' })).toMatchObject({ status: 'ok' });
+    expect(await invoke('inspector.guide.put', { ...identity, expectedRevision: 1, guide: second })).toMatchObject({ status: 'ok' });
+
+    const revisions = await read('inspector.guide.revisions', {});
+    expect(revisions).toMatchObject({ status: 'ok' });
+    expect(revisions.value).toEqual([
+      { revision: 2, headCommit: second.headCommit, baseRef: 'develop', baseCommit: second.baseCommit, title: 'Second pass', createdAt: expect.any(String), createdBy: 'narrator-b', sectionCount: 3, readerIds: [] },
+      { revision: 1, headCommit: first.headCommit, baseRef: 'main', baseCommit: first.baseCommit, title: 'First pass', createdAt: expect.any(String), createdBy: 'narrator-a', sectionCount: 2, readerIds: [person.deviceId] },
+    ]);
+
+    const older = await read('inspector.guide.get', { revision: 1 });
+    expect(older).toMatchObject({ status: 'ok', value: { revision: 1, headCommit: first.headCommit, title: 'First pass', reviewerStates: [{ reviewerId: person.deviceId, readSectionIds: ['kept'] }] } });
+    expect(older.value.sections.map((entry: { id: string; explanation: string }) => [entry.id, entry.explanation])).toEqual([['kept', 'Old'], ['dropped', 'Gone later']]);
+    const latest = await read('inspector.guide.get', {});
+    expect(latest).toMatchObject({ status: 'ok', value: { revision: 2, reviewerStates: [] } });
+    expect(latest.value.sections.map((entry: { id: string }) => entry.id)).toEqual(['kept', 'added', 'third']);
+
+    expect(await read('inspector.guide.get', { revision: 7 })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state', data: { message: 'Change Guide revision 7 does not exist' } } });
+  });
+});
+
 describe('account cloud RPC without machines', () => {
   it('manages shared secrets and values without machines and enforces effective grants', async () => {
     emptyCommittedSource();

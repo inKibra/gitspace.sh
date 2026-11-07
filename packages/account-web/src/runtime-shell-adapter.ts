@@ -78,12 +78,12 @@ export function runtimeTurns(snapshot: RuntimeSnapshot, conversationId: string |
   const turns: TurnBlock[] = [];
   for (const message of conversation?.messages ?? []) {
     if (message.role !== 'user' && message.role !== 'assistant') continue;
-    const block: MessageBlock = { id: message.id, type: 'message', role: message.role, text: message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join(''), images: message.content.flatMap<MessageImage>(content => content.type === 'image' && (content.mimeType === 'image/png' || content.mimeType === 'image/jpeg' || content.mimeType === 'image/webp') ? [{ data: content.data, mimeType: content.mimeType }] : []) };
+    const block: MessageBlock = { id: message.id, type: 'message', role: message.role, text: message.content.flatMap(content => content.type === 'text' ? [content.text] : []).join(''), images: message.content.flatMap<MessageImage>(content => content.type === 'image' && (content.mimeType === 'image/png' || content.mimeType === 'image/jpeg' || content.mimeType === 'image/webp') ? [{ data: content.data, mimeType: content.mimeType }] : []), at: message.createdAt };
     // Messages delivered for subagents, jobs, processes and machines open the agent's turn as notices, not as the user's.
     const events = message.role === 'user' && block.images?.length === 0 ? parseConversationEvents(block.text) : null;
     if (message.role === 'user' || !turns.length) turns.push({ id: `turn:${message.id}`, type: 'turn', status: 'done', startedAt: message.createdAt, items: [], sideAgents: [], ...(message.role === 'user' && !events ? { user: block } : {}) });
     if (events) {
-      const notices: TurnBlock['items'] = events.map((event, index) => ({ id: `${message.id}:event:${index}`, type: 'interruption', reason: 'event', title: event.source, detail: event.text }));
+      const notices: TurnBlock['items'] = events.map((event, index) => ({ id: `${message.id}:event:${index}`, type: 'interruption', reason: 'event', title: event.source, detail: event.text, at: message.createdAt }));
       turns.at(-1)!.items.push(...notices);
     }
     if (message.role === 'assistant') turns.at(-1)!.items.push(block);

@@ -11,6 +11,7 @@ import { artifactId, type ArtifactReference, type InspectorArtifactContent } fro
 import { Source, SourceLegend } from './Authorship.js';
 import { ChangeMapView } from './ChangeMap.js';
 import { EvidenceLinks, GuideSection, MEASURE, type GuideWorkspace } from './GuideSection.js';
+import { ComparisonSummary, type GuideComparison } from './GuideRevisions.js';
 
 /** The parts of a guide both the workspace and a shared link read. */
 export interface GuideContent {
@@ -51,16 +52,20 @@ function Capture({ reference, captures }: { reference: ArtifactReference; captur
   </figure>;
 }
 
-export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, captures, focusSection, initialOpen, onOpenChange }: {
+export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, workspace, captures, comparison, focusSection, initialOpen, onOpenChange }: {
   guide: GuideContent;
   /** The line above the title: where the guide is from. */
   kicker: ReactNode;
-  /** Controls beside the header (sharing). */
+  /** Above everything else: that an older revision is shown. */
+  banner?: ReactNode;
+  /** Controls beside the header (revisions, sharing). */
   actions?: ReactNode;
   onLoadDiff(path: string): Promise<RepositoryDiffView>;
   /** The workspace's actions; null on a shared guide, which is read-only. */
   workspace: GuideWorkspace | null;
   captures: GuideCaptures | null;
+  /** The earlier revision the reader compares this one with. */
+  comparison?: GuideComparison | null;
   /** Opens a section and scrolls to it, once per serial. */
   focusSection?: { id: string; serial: number } | null;
   /** The sections open at first; the first section when absent. */
@@ -82,6 +87,7 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
   const otherCaptures = guide.captures?.filter((reference) => reference.kind !== 'artifact') ?? [];
   return <article className="flex w-full min-w-0 flex-col px-5 pb-16 pt-4">
     <header className={`flex flex-col gap-3 ${MEASURE}`}>
+      {banner}
       <span className="text-caption text-muted-foreground">{kicker}</span>
       <h1 className="flex flex-wrap items-center gap-x-1.5 text-[22px] font-semibold leading-snug text-foreground">{guide.title}<Source by="agent" what="the title, the introduction and the sections" /></h1>
       <p className="flex flex-wrap items-center gap-x-1.5 text-caption tabular-nums text-muted-foreground">
@@ -90,6 +96,7 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
         <Source by="gitspace" what="the base and head commits the guide's diffs compare" />
       </p>
       {actions ? <div className="flex flex-wrap items-center gap-1">{actions}</div> : null}
+      {comparison ? <ComparisonSummary comparison={comparison} /> : null}
       {workspace ? <div className="flex flex-col gap-1.5">
         <div className="flex gap-1" aria-hidden>{guide.sections.map((section) => <span key={section.id} className="h-1 flex-1 rounded-full" style={{ background: workspace.readIds.has(section.id) ? badgeColors.green : 'var(--border)' }} />)}</div>
         <span className="flex flex-wrap items-center gap-1 text-caption tabular-nums text-muted-foreground">
@@ -119,8 +126,8 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
     <div className="flex flex-col">
       {guide.sections.map((section, index) => <GuideSection key={section.id} section={section} index={index} map={guide.map} open={open.has(section.id)} onMapNow={mapSection === section.id}
         onToggle={() => setOpen((current) => { const next = new Set(current); if (next.has(section.id)) next.delete(section.id); else next.add(section.id); return next; })}
-        onReadNext={workspace ? () => { workspace.onMarkRead(section.id); const next = guide.sections[index + 1]; if (next) openSection(next.id); } : null}
-        onLoadDiff={onLoadDiff} workspace={workspace} />)}
+        onReadNext={workspace && !workspace.readOnly ? () => { workspace.onMarkRead(section.id); const next = guide.sections[index + 1]; if (next) openSection(next.id); } : null}
+        onLoadDiff={onLoadDiff} workspace={workspace} comparison={comparison ?? null} />)}
     </div>
   </article>;
 }

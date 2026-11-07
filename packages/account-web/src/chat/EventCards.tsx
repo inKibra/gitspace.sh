@@ -8,6 +8,7 @@ import { automationsUrl, navigateProductUrl, setProductRoute } from '../routes.j
 import { JsonTree } from './JsonTree.js';
 import { isJsonValue } from './staging.js';
 import type { ItemInteractionProps } from './TranscriptItemView.js';
+import { ItemTime } from './time.js';
 
 export const PERMISSION_BADGE: Record<string, 'green' | 'red' | 'amber' | 'gray'> = { pending: 'amber', 'allowed-once': 'green', 'allowed-always': 'green', denied: 'red' };
 const REPORT_OUTCOME: Record<WorkspaceReportBlock['outcome'], { label: string; color: keyof typeof badgeColors }> = {
@@ -41,17 +42,19 @@ export function WorkspaceReportRow({ item, state, onStateChange }: { item: Works
         aria-label={open ? 'Hide details' : undefined}
         onClick={() => { setLocalOpen(!open); onStateChange?.({ open: !open }); }}
       ><Chevron width={14} height={14} strokeWidth={1.5} className="shrink-0" />{open ? null : <span className="min-w-0 truncate">{item.excerpt}</span>}</button> : null}
+      <ItemTime at={item.at} className="ml-auto" />
     </div>
     {open && item.excerpt ? <p className="whitespace-pre-wrap pb-1 pl-4 [overflow-wrap:anywhere]">{item.excerpt}</p> : null}
   </div>;
 }
 
-export function Notice({ icon, title, detail, body, badge }: { icon: ReactNode; title: string; detail?: string; body?: string; badge?: ReactNode }) {
+export function Notice({ icon, title, detail, body, badge, at }: { icon: ReactNode; title: string; detail?: string; body?: string; badge?: ReactNode; at?: string }) {
   const shape = useShape();
   return <div className={`${shape.container} flex min-w-0 items-start gap-3 bg-surface-3 px-3 py-2.5 shadow-surface-1`}>
     <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
     <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><span className="block text-body text-foreground">{title}</span>{detail ? <span className="block whitespace-pre-line text-caption text-muted-foreground">{detail}</span> : null}
       {body ? <details className="mt-1 text-caption"><summary className="cursor-pointer text-muted-foreground">Show full message</summary><pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-caption text-muted-foreground">{body}</pre></details> : null}</span>
+    <ItemTime at={at} className="mt-1" />
     {badge}
   </div>;
 }
@@ -103,13 +106,14 @@ function FoldedMarkdown({ text }: { text: string }) {
 }
 
 /** An automation run's message: the turn it started, or a notice the agent reads on its next turn. */
-export function AutomationCard({ message, delivery }: { message: AutomationMessage; delivery: 'turn' | 'notice' }) {
+export function AutomationCard({ message, delivery, at }: { message: AutomationMessage; delivery: 'turn' | 'notice'; at?: string }) {
   return <OriginCard tone={badgeColors.amber} icon={<Zap {...ICON} />}
     kind={<>Automation <span className="font-normal text-muted-foreground">·</span> {message.name}</>}
     source={<><span className="font-mono">{message.event}</span> · {message.summary}</>}
     footer={<>
       <Button variant="ghost" size="compact" type="button" onClick={() => navigateProductUrl(automationsUrl(new URL(window.location.href).searchParams.get('project')))}>Open automations<ArrowUpRight width={12} height={12} strokeWidth={1.5} className="ml-0.5 opacity-60" /></Button>
       <span className="ml-auto pr-1">{delivery === 'turn' ? 'Started this turn' : 'The agent reads this on its next turn'}</span>
+      <ItemTime at={at} className="pr-1" />
     </>}>
     <FoldedMarkdown text={message.instruction} />
     {isJsonValue(message.fields) ? <Disclosure label="The event"><JsonTree value={message.fields} name="event" /></Disclosure> : null}
@@ -138,7 +142,7 @@ export function EventCard({ item }: { item: InterruptionBlock }) {
   const structured = value !== null && typeof value === 'object' && isJsonValue(value) ? value : null;
   const style = EVENT_KIND[item.kind ?? ''] ?? { tone: badgeColors.violet, icon: <Zap {...ICON} />, kind: (source: string) => source };
   return <div data-event={item.kind ?? 'event'}><OriginCard tone={style.tone} icon={style.icon} kind={style.kind(item.title)} source={item.kind === 'process-exited' || item.kind === 'command-completed' ? item.title : undefined}
-    footer={<span className="ml-auto pr-1">Delivered to the agent</span>}>
+    footer={<><span className="ml-auto pr-1">Delivered to the agent</span><ItemTime at={item.at} className="pr-1" /></>}>
     {structured ? <>{head ? <p className="[overflow-wrap:anywhere]">{head}</p> : null}<Disclosure label="Details"><JsonTree value={structured} name={item.kind ?? 'event'} /></Disclosure></> : <FoldedMarkdown text={text} />}
   </OriginCard></div>;
 }
@@ -154,5 +158,6 @@ export function NoticeRow({ item }: { item: InterruptionBlock }) {
   return <p data-notice={item.title} className="flex min-w-0 items-start gap-2 px-1 text-caption text-muted-foreground">
     <span className="status-dot mt-1 shrink-0" style={{ color }} />
     <span className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]"><span className="font-medium text-foreground/80">{item.title}</span> · {text}</span>
+    <ItemTime at={item.at} className="mt-px" />
   </p>;
 }

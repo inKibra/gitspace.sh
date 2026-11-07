@@ -12,6 +12,7 @@ import { UsageView, type UsageStatus, type InspectorProviderUsageState } from '.
 import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
 import type { GuideShareHandlers } from './GuideShare.js';
+import type { GuideDiffTarget, GuideRevisionHandlers } from '../guide/GuideRevisions.js';
 import { useArtifactUploads } from './ArtifactUploads.js';
 import { DriveSurface, type DriveFileView, type InspectorDrive } from './DriveSurface.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
@@ -102,8 +103,8 @@ export interface InspectorProps {
   onClose?: () => void;
   onRequestRepositoryFile(path: string, mode: RepositoryMode): void;
   onRequestRepositoryDiff(path: string | null, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): void;
-  /** One exhibit's diff between the Change Guide's recorded base and head commits. */
-  onLoadGuideDiff(path: string): Promise<RepositoryDiffView>;
+  /** One exhibit's diff in a Change Guide revision: between its recorded base and head commits, or since an earlier revision's head. */
+  onLoadGuideDiff(path: string, target: GuideDiffTarget): Promise<RepositoryDiffView>;
   onCreateThread(input: CreateInspectorThread): Promise<ReviewThreadView>;
   onReplyThread(threadId: string, expectedRevision: number, body: string): Promise<void>;
   onResolveThread(threadId: string, expectedRevision: number, resolved: boolean, decision: ReviewThreadView['decision']): Promise<void>;
@@ -111,6 +112,7 @@ export interface InspectorProps {
   onSetGuideApproval(decision: 'pending' | 'approved' | 'changes-requested', note: string | null, revision: number, headCommit: string): Promise<void>;
   onGenerateChangeGuide?(): Promise<void>;
   guideShares?: GuideShareHandlers;
+  guideRevisions?: GuideRevisionHandlers;
   onSubmitHumanJudgment?(criterionId: string, verdict: 'pass' | 'fail', summary: string): Promise<void>;
   /** A person accepts or reopens a goal requirement; absent without a goal. */
   onSetRequirementAcceptance?(requirementId: string, accepted: boolean): Promise<void>;
@@ -458,6 +460,7 @@ export function Inspector(props: InspectorProps) {
         onMarkRead={props.onMarkGuideSectionRead}
         onGenerate={runtimeAvailable ? props.onGenerateChangeGuide : undefined}
         shares={props.guideShares}
+        revisions={props.guideRevisions}
         focusSection={guideFocus}
       />{threadPanel}</>;
       default: return <div className={full ? 'mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col' : 'flex min-h-0 flex-1 flex-col'}><JournalSurface entries={props.journalEntries} guide={props.overview.changeGuide} artifactContent={artifactContent} artifactLoad={artifactLoad} artifactErrors={artifactErrors} onLoadArtifact={loadArtifact} onOpenEvidence={openEvidence} onOpenSection={openGuideSection} /></div>;

@@ -101,7 +101,7 @@ export type TranscriptContentPage = z.infer<typeof transcriptContentPageSchema>;
 // Leave room for the row envelope (including its repeated item/turn identifiers).
 const ITEM_PREVIEW_BYTES = TRANSCRIPT_ROW_BYTES - 2 * 1024;
 const OMITTED = Symbol('omitted');
-const LITERAL_KEYS: Record<string, true> = { type: true, role: true, status: true, mimeType: true, reason: true, risk: true, kind: true };
+const LITERAL_KEYS: Record<string, true> = { type: true, role: true, status: true, mimeType: true, reason: true, risk: true, kind: true, at: true, startedAt: true, endedAt: true };
 
 /**
  * Copy a bounded prefix only when the complete item exceeds the row budget.

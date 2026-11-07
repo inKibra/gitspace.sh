@@ -158,6 +158,84 @@ describe('Change Guide tab', () => {
   });
 });
 
+describe('Change Guide revisions', () => {
+  const quiet: ChangeGuideSection = { id: 'quiet', title: 'Night brews stay quiet', kind: 'behavior', explanation: 'The fan waits.', why: '', requirementIds: [], exhibits: [] };
+  const legacy: ChangeGuideSection = { id: 'legacy', title: 'Legacy start button', kind: 'mechanical', explanation: 'Removed later.', why: '', requirementIds: [], exhibits: [] };
+  const [schedule, heat] = sections as [ChangeGuideSection, ChangeGuideSection];
+  const latest: ChangeGuideView = { ...guide, sections: [schedule, { ...heat, contentHash: 'aaaaaaaaaaaa' }, quiet] };
+  const second: ChangeGuideView = { ...guide, revision: 2, headCommit: 'e'.repeat(40), title: 'Brew on a schedule, draft', map: undefined, sections: [{ ...schedule, explanation: 'The panel starts the heater.' }, { ...heat, explanation: 'Old words', contentHash: 'aaaaaaaaaaaa' }, legacy] };
+  const first: ChangeGuideView = { ...guide, revision: 1, headCommit: 'f'.repeat(40), map: undefined, sections: [schedule, { ...heat, contentHash: 'bbbbbbbbbbbb' }] };
+  const views = new Map([[2, second], [1, first]]);
+  const handlers = (read: readonly number[]) => ({
+    list: async () => [latest, second, first].map((view) => ({
+      revision: view.revision, headCommit: view.headCommit, baseRef: view.baseRef, baseCommit: view.baseCommit, title: view.title, createdAt: date, createdBy: view.createdBy,
+      sectionCount: view.sections.length, readerIds: read.includes(view.revision) ? ['reviewer'] : [],
+    })),
+    get: async (revision: number) => views.get(revision)!,
+  });
+  const badges = () => Object.fromEntries([...container.querySelectorAll('[data-section]')].map((node) => [node.getAttribute('data-section'), node.querySelector('[data-section-change]')?.getAttribute('data-section-change') ?? null]));
+  async function choose(control: string, prefix: string): Promise<void> {
+    await act(async () => button(control).click());
+    const option = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find((node) => node.textContent?.startsWith(prefix));
+    if (!option) throw new Error(`No option ${prefix}`);
+    await act(async () => option.click());
+  }
+
+  it('compares with the newest earlier revision the reader read in, badging each section and listing those removed', async () => {
+    const loadDiff = vi.fn(async (path: string) => diffFor(path));
+    await surface({ guide: latest, revisions: handlers([1, 2]), onLoadDiff: loadDiff });
+    await vi.waitFor(() => expect(container.querySelector('[data-comparison]')?.getAttribute('data-comparison')).toBe('2'));
+    expect(button('Changes since').textContent).toContain('r2');
+    expect(badges()).toEqual({ schedule: 'changed', heat: 'unchanged', quiet: 'new' });
+    expect(container.querySelector('[data-removed-since="2"]')?.textContent).toContain('Legacy start button');
+    // A changed section's file shows its code since the compared revision's head.
+    await vi.waitFor(() => expect(button('Since r2')).toBeDefined());
+    await act(async () => button('Since r2').click());
+    expect(loadDiff).toHaveBeenLastCalledWith('ui/panel.tsx', { revision: 3, sinceRevision: 2 });
+
+    await choose('Changes since', 'r1 ');
+    await vi.waitFor(() => expect(container.querySelector('[data-comparison]')?.getAttribute('data-comparison')).toBe('1'));
+    expect(badges()).toEqual({ schedule: 'unchanged', heat: 'changed', quiet: 'new' });
+    expect(container.querySelector('[data-removed-since]')).toBeNull();
+
+    await choose('Changes since', 'No comparison');
+    expect(container.querySelector('[data-comparison]')).toBeNull();
+    expect(badges()).toEqual({ schedule: null, heat: null, quiet: null });
+  });
+
+  it('compares with nothing when the reader has read no earlier revision', async () => {
+    await surface({ guide: latest, revisions: handlers([3]) });
+    await vi.waitFor(() => expect(button('Guide revision')).toBeDefined());
+    expect(button('Changes since').textContent).toContain('No comparison');
+    expect(container.querySelector('[data-comparison]')).toBeNull();
+    expect(badges()).toEqual({ schedule: null, heat: null, quiet: null });
+  });
+
+  it('shows a picked older revision read-only under a banner, and goes back to the latest', async () => {
+    const setAcceptance = vi.fn(async () => {});
+    const loadDiff = vi.fn(async (path: string) => diffFor(path));
+    await surface({ guide: latest, revisions: handlers([]), onSetAcceptance: setAcceptance, onLoadDiff: loadDiff });
+    await vi.waitFor(() => expect(button('Guide revision')).toBeDefined());
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    await choose('Guide revision', 'r2 ');
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('Viewing r2 of 3'));
+    expect(container.textContent).toContain('Brew on a schedule, draft');
+    expect(container.textContent).toContain('Legacy start button');
+    expect(container.textContent).toContain('The panel starts the heater.');
+    expect(button('A press schedules a brew').getAttribute('aria-disabled')).toBe('true');
+    await act(async () => button('A press schedules a brew').click());
+    expect(setAcceptance).not.toHaveBeenCalled();
+    expect([...container.querySelectorAll('button')].some((node) => node.textContent === 'Mark read and continue →')).toBe(false);
+    await vi.waitFor(() => expect(loadDiff).toHaveBeenCalledWith('ui/panel.tsx', { revision: 2 }));
+
+    await act(async () => button('Back to latest').click());
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).not.toContain('Legacy start button');
+    expect(button('A press schedules a brew').getAttribute('aria-disabled')).toBeNull();
+    expect([...container.querySelectorAll('button')].some((node) => node.textContent === 'Mark read and continue →')).toBe(true);
+  });
+});
+
 describe('narrowExhibit', () => {
   it('keeps the file\'s line numbers and never shows a line twice', () => {
     const { segments, otherChanges } = narrowExhibit(panelPatch, [{ start: 4, end: 4 }, { start: 11, end: 12 }]);

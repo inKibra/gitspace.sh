@@ -45,6 +45,7 @@ import {
   AnalyzeChangeGuideInputCodec,
   ChangeGuideWorksheetCodec,
   ChangeGuideViewCodec,
+  ChangeGuideRevisionSummaryCodec,
   CreateReviewThreadInputCodec,
   EndJournalPhaseInputCodec,
   InspectorOverviewCodec,
@@ -2040,9 +2041,21 @@ export const GuideShareViewCodec = wire.object({
   expiresAt: wire.nullable(wire.string),
 });
 export type GuideShareView = InputOf<typeof GuideShareViewCodec>;
-/** One exhibit's diff in the workspace's current Change Guide, between the guide's recorded base and head commits. */
+/** Every stored revision of the workspace's Change Guide, newest first. */
+export const inspectorGuideRevisionsContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }) }))
+  .output(wire.array(ChangeGuideRevisionSummaryCodec)).errors(inspectorReadErrors).query();
+/** One revision of the workspace's Change Guide with its sections and reviewer state; the latest when `revision` is absent. */
+export const inspectorGetGuideContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), revision: wire.optional(wire.integer({ min: 1 })) }))
+  .output(ChangeGuideViewCodec).errors(inspectorReadErrors).query();
+/** One exhibit's diff in a revision of the workspace's Change Guide (the latest when `revision` is absent), between that
+ * revision's recorded base and head commits; with `sinceRevision`, between that earlier revision's head and this one's. */
 export const inspectorGuideDiffContract = gitspaceRpc.procedure()
-  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), path: wire.string }))
+  .input(wire.object({
+    spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), path: wire.string,
+    revision: wire.optional(wire.integer({ min: 1 })), sinceRevision: wire.optional(wire.integer({ min: 1 })),
+  }))
   .output(RepositoryDiffViewCodec).errors(inspectorReadErrors).query();
 export const inspectorListGuideSharesContract = gitspaceRpc.procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }) }))
@@ -2571,6 +2584,8 @@ export const gitspaceContract = gitspaceRpc.contract({
       markSectionRead: inspectorMarkGuideSectionReadContract,
       setApproval: inspectorSetGuideApprovalContract,
       diff: inspectorGuideDiffContract,
+      revisions: inspectorGuideRevisionsContract,
+      get: inspectorGetGuideContract,
       shares: { list: inspectorListGuideSharesContract, create: inspectorCreateGuideShareContract, revoke: inspectorRevokeGuideShareContract },
     },
     review: {

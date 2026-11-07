@@ -321,8 +321,21 @@ export function LiveInspector({
         if (result.status === 'error') throw result.error;
       },
     }}
-    onLoadGuideDiff={async (path) => {
-      const result = await rpcClient.inspector.guide.diff({ ...request, path });
+    guideRevisions={{
+      list: async () => {
+        const result = await rpcClient.inspector.guide.revisions(request);
+        if (result.status === 'error') throw result.error;
+        return result.value;
+      },
+      get: async (revision) => {
+        const result = await rpcClient.inspector.guide.get({ ...request, revision });
+        if (result.status === 'error') throw result.error;
+        if (result.value.revision !== revision) throw new Error('Guide revision response does not match the requested revision.');
+        return result.value;
+      },
+    }}
+    onLoadGuideDiff={async (path, target) => {
+      const result = await rpcClient.inspector.guide.diff({ ...request, path, ...target });
       if (result.status === 'error') throw result.error;
       if (repositoryScope.current !== readKey || result.value.path !== path) throw new Error('Guide diff response does not match the requested view.');
       return result.value;
