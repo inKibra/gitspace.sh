@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AUTOMATION_MAX_QUEUE_MS, type AutomationDraft } from '@gitspace/protocol/automations-contract';
+import { AUTOMATION_MAX_QUEUE_MS, type AutomationDraft, type AutomationMode } from '@gitspace/protocol/automations-contract';
 import { automationValue } from '../src/project-automations.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 
@@ -160,6 +160,56 @@ describe('ProjectAutomationsDO', () => {
     expect(automationValue(await automations.testDraft({ projectId, draft: manual('By hand', 'Started by {{requested_by}}'), requestedBy: 'Brad' }))).toEqual({
       results: [{ label: 'Manual', result: 'Runs only when someone starts it', runs: false }],
       instruction: 'Started by Brad', checks: [],
+    });
+  });
+
+  describe('phases', () => {
+    /** A manual automation messaging the project's workspace (in Code), limited to `phases` when given. */
+    const toWorkspace = (name: string, workspaceId: string, phases?: AutomationMode[]): AutomationDraft => ({
+      name, trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'Check the release.' }, enabled: true, ...(phases ? { phases } : {}),
+    });
+
+    it('runs in every phase without phases, skips a workspace in a phase it does not name, and records the workspace\'s phase on its runs', async () => {
+      const { projectId, workspaceId, automations } = await project();
+      const run = async (draft: AutomationDraft) => {
+        const automation = automationValue(await automations.create({ projectId, draft }));
+        return automationValue(await automations.runNow({ projectId, automationId: automation.id, requestedBy: 'Brad' }));
+      };
+      expect(await run(toWorkspace('Any phase', workspaceId))).toMatchObject({ state: 'queued', workspaceId, phase: 'code', outcome: null, checks: [] });
+      expect(await run(toWorkspace('Plan and review', workspaceId, ['plan', 'review']))).toMatchObject({ state: 'skipped', workspaceId, phase: 'code', outcome: 'Skipped: release-work is in Code; it runs in Plan, Review', checks: [{ label: 'release-work is in Code; it runs in Plan, Review', passed: false }] });
+      await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).commitWorkspacePhase(workspaceId, 'review');
+      expect(await run(toWorkspace('Review only', workspaceId, ['review']))).toMatchObject({ state: 'queued', workspaceId, phase: 'review', outcome: null });
+      // The project agent has no phase, so phases do not limit a run to it.
+      expect(await run({ ...manual('Project check'), phases: ['ship'] })).toMatchObject({ state: 'queued', workspaceId: projectId, phase: null });
+      expect(await automations.create({ projectId, draft: toWorkspace('Twice', workspaceId, ['code', 'code']) })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'phases' } });
+    });
+
+    it('lets a person\'s exception for one workspace and phase decide over the automation\'s phases until it is removed, and deletes exceptions with the automation', async () => {
+      const { projectId, workspaceId, automations } = await project();
+      const codeOnly = automationValue(await automations.create({ projectId, draft: toWorkspace('Code only', workspaceId, ['code']) }));
+      const planOnly = automationValue(await automations.create({ projectId, draft: toWorkspace('Plan only', workspaceId, ['plan']) }));
+      const set = async (automationId: string, phase: AutomationMode, enabled: boolean | null) => automationValue(await automations.setException({ projectId, automationId, workspaceId, phase, enabled, by: 'device-1' }));
+      /** One run now; a queued one is cancelled so the automation can run again. */
+      const run = async (automationId: string) => {
+        const started = automationValue(await automations.runNow({ projectId, automationId, requestedBy: 'Brad' }));
+        if (started.state === 'queued') automationValue(await automations.cancelRun({ projectId, runId: started.id }));
+        return started;
+      };
+
+      // An exception in another phase leaves this one to the automation's phases.
+      await set(codeOnly.id, 'review', false);
+      expect(await run(codeOnly.id)).toMatchObject({ state: 'queued', phase: 'code' });
+      expect(await set(codeOnly.id, 'code', false)).toEqual({ automationId: codeOnly.id, workspaceId, phase: 'code', enabled: false, at: new Date(midnight + HOUR).toISOString(), by: 'device-1' });
+      expect(await run(codeOnly.id)).toMatchObject({ state: 'skipped', phase: 'code', outcome: 'Skipped: a person switched it off for release-work in Code' });
+      await set(planOnly.id, 'code', true);
+      expect(await run(planOnly.id)).toMatchObject({ state: 'queued', phase: 'code', checks: [{ label: 'a person switched it on for release-work in Code', passed: true }] });
+      expect(await set(codeOnly.id, 'code', null)).toBeNull();
+      expect(await run(codeOnly.id)).toMatchObject({ state: 'queued', phase: 'code', checks: [{ label: 'release-work is in Code; it runs in Code', passed: true }] });
+      expect(await automations.setException({ projectId, automationId: codeOnly.id, workspaceId: 'not-in-project', phase: 'code', enabled: true, by: 'device-1' })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'workspaceId' } });
+
+      expect(await automations.exceptions(projectId)).toHaveLength(2);
+      automationValue(await automations.delete({ projectId, automationId: planOnly.id }));
+      expect(await automations.exceptions(projectId)).toEqual([expect.objectContaining({ automationId: codeOnly.id, workspaceId, phase: 'review', enabled: false })]);
     });
   });
 });

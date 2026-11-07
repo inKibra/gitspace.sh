@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeIdentitySchema } from './base.js';
+import { RuntimeIdentitySchema, RuntimePlanStepSchema } from './base.js';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import { SessionHistoryPageSchema, SessionHistoryPageRequestSchema } from '@gitspace/protocol-agent';
 import { transcriptPageRequestSchema, transcriptContentRequestSchema, transcriptPageSchema, transcriptContentPageSchema } from '@gitspace/blocks';
@@ -21,6 +21,8 @@ export type ModelSelectionIntent = z.infer<typeof ModelSelectionIntentSchema>;
 export const PendingAskAnswerSchema = z.object({ id: z.string(), selectedOptions: z.array(z.string()).readonly(), customInput: z.string().nullable() });
 export type PendingAskAnswer = z.infer<typeof PendingAskAnswerSchema>;
 export const PendingAskSchema = z.object({ id: z.string(), source: z.enum(['ask-tool', 'gitspace']), links: z.array(z.object({ label: z.string(), uri: z.string() })), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string().nullable(), options: z.array(z.object({ label: z.string(), description: z.string().nullable(), preview: z.string().nullable() })), multi: z.boolean(), recommended: z.number().nullable(), written: z.boolean() })) });
+/** A conversation's plan: the approved one in effect, or, before any approval, the latest proposal. `revision` counts approvals. */
+export const SessionPlanSchema = z.object({ status: z.enum(['proposed', 'approved', 'rejected']), revision: z.number().int().nonnegative(), summary: z.string(), steps: z.array(RuntimePlanStepSchema) });
 export const SessionControlSchema = z.object({
   sessionId: z.string(), inference: z.object({ profileId: z.string(), profileName: z.string(), profileRevision: z.number(), assignmentRevision: z.number() }).optional(),
   role: z.string().nullable(), roleLabel: z.string().nullable(), roles: z.array(z.object({ id: z.string(), label: z.string(), provider: z.string(), model: z.string(), thinking: z.string().nullable(), current: z.boolean() })),
@@ -29,6 +31,8 @@ export const SessionControlSchema = z.object({
   todos: z.array(z.object({ name: z.string(), tasks: z.array(z.object({ content: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'abandoned', 'blocked']), blocker: z.string().nullable() })) })),
   queue: z.object({ steering: z.array(z.string()), followUp: z.array(z.string()) }), historyAnchorId: z.string().nullable(), history: z.array(z.object({ entryId: z.string(), text: z.string() })),
   goal: z.object({ id: z.string(), status: z.enum(['active', 'paused', 'budget-limited', 'complete', 'dropped']), objective: z.string(), tokenBudget: z.number().nullable(), tokensUsed: z.number(), timeUsedSeconds: z.number() }).nullable(), pendingAsk: PendingAskSchema.nullable(),
+  /** Absent from runtimes older than plans with steps. */
+  plan: SessionPlanSchema.nullable().optional(),
 });
 export type SessionControlView = z.infer<typeof SessionControlSchema>;
 export const AgentDefinitionSchema = z.object({ name: z.string(), description: z.string(), source: z.string(), path: z.string(), editable: z.boolean(), content: z.string(), revision: z.string(), modelSelectors: z.array(z.string()), role: z.string().nullable(), provider: z.string().nullable(), model: z.string().nullable(), thinking: z.string().nullable().default(null), selection: z.enum(['definition', 'settings']), tools: z.array(z.string()), spawns: z.string().nullable() });

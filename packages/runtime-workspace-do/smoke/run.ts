@@ -164,12 +164,15 @@ try {
     await request('/answer', { ...identity, questionId: question.id, answer: answer ? 'Approve' : 'Reject' }, true);
     await request('/session', { ...identity, command: { type: 'answerAsk', id: question.id, answers: [{ id: question.id, selectedOptions: ['Approve'], customInput: null }] }, canApprove: true }, true);
     assert.equal(RuntimeSnapshotSchema.parse(await request('/')).questions.find(item => item.id === question.id)?.answer, null);
-    await request('/answer', { ...identity, questionId: question.id, answer });
+    const decision = { approved: answer, note: null };
+    await request('/answer', { ...identity, questionId: question.id, answer: decision });
     const completed = await until(snapshot => assistantReplies(snapshot) > before);
-    assert.equal(completed.questions.find(item => item.id === question.id)?.answer, answer);
+    assert.deepEqual(completed.questions.find(item => item.id === question.id)?.answer, decision);
     const workspace = z.object({ phase: z.string() }).parse(completed.documents['gitspace.workspace']);
     assert.equal(workspace.phase, answer ? 'code' : 'plan');
-    assert.equal((await session({ type: 'control' })).control.planMode, workspace.phase === 'plan');
+    const control = (await session({ type: 'control' })).control;
+    assert.equal(control.planMode, workspace.phase === 'plan');
+    assert.equal(control.plan?.status, answer ? 'approved' : 'rejected');
   }
   console.log('PASS cold ask recovery, both answer surfaces, idle watch, approval authority and canonical phase');
   console.log('PASS bounded tasks and full receipts', await request('/burst'));

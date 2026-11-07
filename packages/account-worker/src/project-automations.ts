@@ -9,6 +9,7 @@ import {
   AUTOMATION_WATCH_LABEL,
   AutomationActionSchema,
   AutomationConditionSchema,
+  AutomationPhasesSchema,
   AutomationSubjectSchema,
   AutomationTriggerSchema,
   automationConditionKinds,
@@ -23,6 +24,7 @@ import {
   type AutomationCheck,
   type AutomationCondition,
   type AutomationDraft,
+  type AutomationException,
   type AutomationLinkSource,
   type AutomationLinkView,
   type AutomationMode,
@@ -95,6 +97,7 @@ export const AutomationRunRecordSchema = z.object({
   subject: AutomationSubjectSchema.nullable().default(null),
   state: z.enum(['queued', 'running', 'finished', 'skipped', 'failed']),
   workspaceId: z.string().nullable(),
+  phase: z.enum(AUTOMATION_MODES).nullable().default(null),
   outcome: z.string().nullable(),
   checks: ChecksSchema.default([]),
   timeline: TimelineSchema,
@@ -255,7 +258,9 @@ function checkDraft(draft: AutomationDraft): AutomationDraft {
     const fields = automationFields(trigger).map(field => `{{${field.path}}}`).join(', ');
     refuse('action.instruction', `${unknown.map(path => `{{${path}}}`).join(', ')} ${unknown.length === 1 ? 'is not a field' : 'are not fields'} of this trigger; it provides ${fields}`);
   }
-  return { name, trigger, conditions, action, enabled: draft.enabled };
+  const phases = draft.phases === undefined ? undefined : AutomationPhasesSchema.safeParse(draft.phases);
+  if (phases?.success === false) refuse('phases', phases.error.issues[0]?.message ?? 'Choose 1 to 4 phases, each once');
+  return { name, trigger, conditions, action, enabled: draft.enabled, ...(phases === undefined ? {} : { phases: phases.data }) };
 }
 
 /** The GitSpace project's release automation (docs/TENANT-RELEASES-DESIGN.md §5): GitSpace's releases go to its project
@@ -326,6 +331,8 @@ interface AutomationRow extends Record<string, SqlStorageValue> {
   next_run_at: number | null;
   created_at: number;
   updated_at: number;
+  /** The workspace phases it reaches a workspace in (`AutomationPhasesSchema`); null, every phase. */
+  phases_json: string | null;
 }
 
 /** A run that holds a slot while its agent works (`message`, `start`), or a notice that wakes no agent. */
@@ -361,6 +368,8 @@ interface RunRow extends Record<string, SqlStorageValue> {
   submitted: number;
   attempts: number;
   retry_at: number | null;
+  /** The workspace's phase when the run reached it; null for the project agent, or no workspace. */
+  phase: AutomationMode | null;
 }
 
 interface LinkRow extends Record<string, SqlStorageValue> {
@@ -374,6 +383,15 @@ interface LinkRow extends Record<string, SqlStorageValue> {
   activity_at: number | null;
 }
 
+interface ExceptionRow extends Record<string, SqlStorageValue> {
+  automation_id: string;
+  workspace_id: string;
+  phase: AutomationMode;
+  enabled: number;
+  at: number;
+  by: string;
+}
+
 interface Automation {
   id: string;
   name: string;
@@ -381,6 +399,8 @@ interface Automation {
   conditions: AutomationCondition[];
   action: AutomationAction;
   targetName: string;
+  /** Absent: every phase. */
+  phases?: AutomationMode[];
 }
 
 type Firing =
@@ -400,6 +420,8 @@ interface RunPlan {
   workspaceId: string | null;
   targetName: string;
   message: string;
+  /** The phase of the workspace it reaches, read when it is planned; null for the project agent. */
+  phase: AutomationMode | null;
   start: Start | null;
   /** Timeline entries after the firing's own. */
   timeline: string[];
@@ -458,7 +480,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           proposal_json TEXT,
           next_run_at INTEGER,
           created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
+          updated_at INTEGER NOT NULL,
+          phases_json TEXT
         );
         CREATE TABLE IF NOT EXISTS automation_runs(
           id TEXT PRIMARY KEY,
@@ -483,7 +506,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           finished_at INTEGER,
           submitted INTEGER NOT NULL DEFAULT 0,
           attempts INTEGER NOT NULL DEFAULT 0,
-          retry_at INTEGER
+          retry_at INTEGER,
+          phase TEXT
         );
         CREATE INDEX IF NOT EXISTS automation_runs_automation ON automation_runs(automation_id, created_at);
         CREATE INDEX IF NOT EXISTS automation_runs_state ON automation_runs(state, created_at);
@@ -511,12 +535,21 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           PRIMARY KEY (automation_id, key)
         );
         CREATE TABLE IF NOT EXISTS automation_defaults_offered(key TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS automation_exceptions(
+          automation_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          phase TEXT NOT NULL CHECK (phase IN ('plan', 'code', 'review', 'ship')),
+          enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+          at INTEGER NOT NULL,
+          by TEXT NOT NULL,
+          PRIMARY KEY (automation_id, workspace_id, phase)
+        );
       `);
     });
   }
 
   /** Objects written before GitHub events: their automations kept a schedule and a message target in columns, and their
-   * runs table refused event triggers. */
+   * runs table refused event triggers. Objects written before phases lack the automations' phases and the runs' phase. */
   private migrate(): void {
     const sql = this.ctx.storage.sql;
     const columns = (table: string) => sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(column => column.name);
@@ -557,6 +590,10 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
         DROP TABLE automation_runs_schedules;
       `));
     }
+    const automations = columns('automations');
+    if (automations.length > 0 && !automations.includes('phases_json')) sql.exec('ALTER TABLE automations ADD COLUMN phases_json TEXT');
+    const recorded = columns('automation_runs');
+    if (recorded.length > 0 && !recorded.includes('phase')) sql.exec('ALTER TABLE automation_runs ADD COLUMN phase TEXT');
   }
 
   /** The project's automations, the limits and trust list they run under, its subject links, and the model roles a
@@ -638,8 +675,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     });
   }
 
-  /** Deletes an automation, or dismisses a proposal. Its queued runs are skipped; a run already working finishes and
-   * its history stays. */
+  /** Deletes an automation, or dismisses a proposal, with its workspace exceptions. Its queued runs are skipped; a run
+   * already working finishes and its history stays. */
   async delete(input: { projectId: string; automationId: string }): Promise<AutomationOutcome<{ projectId: string; automationId: string; deleted: boolean }>> {
     return settled(async () => {
       const projectId = this.ensureProject(input.projectId);
@@ -648,6 +685,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       this.ctx.storage.transactionSync(() => {
         for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE automation_id=? AND state='queued'", automation.id)) this.finish(run, 'skipped', 'Skipped: its automation was deleted', now);
         this.ctx.storage.sql.exec('DELETE FROM automations WHERE id=?', automation.id);
+        this.ctx.storage.sql.exec('DELETE FROM automation_exceptions WHERE automation_id=?', automation.id);
       });
       await this.changed(projectId);
       return { projectId, automationId: automation.id, deleted: true };
@@ -674,7 +712,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
         runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, { trigger: 'event', event, replayedBy: input.requestedBy }, plan, now));
       } else {
         const firing: Firing = { trigger: 'manual', requestedBy: input.requestedBy };
-        runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, firing, this.messagePlan(projectId, automation, firing), now));
+        const plan = await this.reach(projectId, automation, this.messagePlan(projectId, automation, firing));
+        runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, firing, plan, now));
       }
       await this.changed(projectId);
       return this.runView(projectId, this.requiredRun(runId));
@@ -843,6 +882,36 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return this.settings();
   }
 
+  /** The project's exceptions: per automation, workspace and phase, whether a person turned it on or off there. */
+  exceptions(projectIdInput: string): AutomationException[] {
+    this.ensureProject(projectIdInput);
+    return this.rows<ExceptionRow>('SELECT * FROM automation_exceptions ORDER BY automation_id, workspace_id, phase').map(exceptionView);
+  }
+
+  /** A person turns an automation on or off for one workspace in one phase, whatever its phases; `enabled` null removes
+   * the exception. Returns the exception, or null once removed. */
+  async setException(input: { projectId: string; automationId: string; workspaceId: string; phase: AutomationMode; enabled: boolean | null; by: string }): Promise<AutomationOutcome<AutomationException | null>> {
+    return settled(async () => {
+      const projectId = this.ensureProject(input.projectId);
+      const automation = this.requiredAutomation(input.automationId);
+      const phase = z.enum(AUTOMATION_MODES).parse(input.phase);
+      if (input.enabled === null) {
+        const removed = this.ctx.storage.sql.exec('DELETE FROM automation_exceptions WHERE automation_id=? AND workspace_id=? AND phase=?', automation.id, input.workspaceId, phase).rowsWritten > 0;
+        if (removed) await this.changed(projectId);
+        return null;
+      }
+      const workspace = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getWorkspace(input.workspaceId);
+      if (!workspace || workspace.kind !== 'worktree' || workspace.lifecycle === 'deleting') refuse('workspaceId', `Workspace ${input.workspaceId} is not a workspace of this project`);
+      const row = this.ctx.storage.sql.exec<ExceptionRow>(`
+        INSERT INTO automation_exceptions(automation_id, workspace_id, phase, enabled, at, by) VALUES(?, ?, ?, ?, ?, ?)
+        ON CONFLICT(automation_id, workspace_id, phase) DO UPDATE SET enabled=excluded.enabled, at=excluded.at, by=excluded.by
+        RETURNING *
+      `, automation.id, workspace.id, phase, input.enabled ? 1 : 0, Date.now(), input.by).one();
+      await this.changed(projectId);
+      return exceptionView(row);
+    });
+  }
+
   /** The workspace's word on a run's turn. Idempotent: a report the workspace sends again changes nothing. */
   async runTurnChanged(raw: AutomationTurnReport): Promise<void> {
     const report = AutomationTurnReportSchema.parse(raw);
@@ -872,13 +941,21 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     if (projectId === undefined) return;
     await this.checkWatches(projectId);
     const now = Date.now();
+    // Each due schedule's plan reads its workspace's phase before the transaction records it.
+    const due: Array<{ row: AutomationRow; cron: string; automation: Automation; firing: Firing; plan: RunPlan }> = [];
+    for (const row of this.rows<AutomationRow>('SELECT * FROM automations WHERE next_run_at <= ? ORDER BY next_run_at, id', now)) {
+      if (row.cron === null || row.next_run_at === null) continue;
+      const automation = this.automation(row);
+      const firing: Firing = { trigger: 'schedule', scheduledFor: row.next_run_at };
+      const plan = await this.reach(projectId, automation, this.messagePlan(projectId, automation, firing)).catch((error: unknown) => failedPlan(`Failed: ${errorMessage(error)}`));
+      due.push({ row, cron: row.cron, automation, firing, plan });
+    }
     this.ctx.storage.transactionSync(() => {
-      for (const row of this.rows<AutomationRow>('SELECT * FROM automations WHERE next_run_at <= ? ORDER BY next_run_at, id', now)) {
-        if (row.cron === null || row.next_run_at === null) continue;
-        const automation = this.automation(row);
-        const firing: Firing = { trigger: 'schedule', scheduledFor: row.next_run_at };
-        this.recordRun(automation, firing, this.messagePlan(projectId, automation, firing), now);
-        this.ctx.storage.sql.exec('UPDATE automations SET next_run_at=? WHERE id=?', nextAutomationRunAt(row.cron, now), row.id);
+      for (const { row, cron, automation, firing, plan } of due) {
+        // Changed while its plan was read: the next alarm plans it again.
+        if (this.rows('SELECT id FROM automations WHERE id=? AND revision=? AND next_run_at=?', row.id, row.revision, row.next_run_at).length === 0) continue;
+        this.recordRun(automation, firing, plan, now);
+        this.ctx.storage.sql.exec('UPDATE automations SET next_run_at=? WHERE id=?', nextAutomationRunAt(cron, now), row.id);
       }
       for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND created_at <= ?", now - AUTOMATION_MAX_QUEUE_MS)) {
         this.finish(run, 'skipped', 'Skipped: waited more than a day for a slot', now);
@@ -1068,9 +1145,14 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return true;
   }
 
+  /** What an automation does with an event, as far as the phase of the workspace it reaches lets it. */
+  private async evaluate(projectId: string, automation: Automation, context: EventContext): Promise<RunPlan> {
+    return this.reach(projectId, automation, await this.eventPlan(projectId, automation, context));
+  }
+
   /** What an automation does with an event: trust, then its conditions in order (the first that fails skips it), then
    * its action's target. */
-  private async evaluate(projectId: string, automation: Automation, context: EventContext): Promise<RunPlan> {
+  private async eventPlan(projectId: string, automation: Automation, context: EventContext): Promise<RunPlan> {
     const { event } = context;
     const pending = automation.conditions.map(condition => ({ label: conditionLabel(condition, context.bot), passed: null }));
     const trust = await context.trust();
@@ -1090,7 +1172,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const summary = describeAutomationEvent(event);
     const instruction = renderAutomationInstruction(automation.action.instruction, { ...event.fields, 'automation.name': automation.name });
     const message = `Automation "${automation.name}" · ${automationEventName(event)} · ${summary}\n\n${instruction}\n\nThe event:\n${JSON.stringify(event.fields, null, 2)}`;
-    const plan = { checks, ended: null, message, start: null, timeline, sendsTo: null };
+    const plan = { checks, ended: null, message, start: null, timeline, sendsTo: null, phase: null };
     const { action } = automation;
     switch (action.kind) {
       case 'messageProjectAgent': return { ...plan, kind: 'message', workspaceId: projectId, targetName: 'the project agent', would: 'Would message the project agent' };
@@ -1157,9 +1239,30 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       : { 'automation.name': automation.name, requested_by: when.detail };
     const workspaceId = automation.action.kind === 'messageWorkspace' ? automation.action.workspaceId : projectId;
     return {
-      checks: [], ended: null, kind: 'message', workspaceId, targetName: automation.targetName, start: null, timeline: [], would: '', sendsTo: null,
+      checks: [], ended: null, kind: 'message', workspaceId, targetName: automation.targetName, start: null, timeline: [], would: '', sendsTo: null, phase: null,
       message: `Automation "${automation.name}" (${when.label.toLowerCase()} ${when.detail}):\n\n${renderAutomationInstruction(automation.action.instruction, values)}`,
     };
+  }
+
+  /**
+   * A plan that reaches a workspace records the workspace's phase, read from its Project Authority definition (one
+   * written before phases is at the first phase). It runs in a phase the automation's phases name, or in every phase
+   * when it names none; a person's exception for the automation, workspace and phase decides over both, and the check
+   * says which decided. A started workspace's phase is the one it starts in; the project agent has none.
+   */
+  private async reach(projectId: string, automation: Automation, plan: RunPlan): Promise<RunPlan> {
+    if (plan.start !== null) return { ...plan, phase: plan.start.mode };
+    if (plan.ended !== null || plan.workspaceId === null || plan.workspaceId === projectId) return plan;
+    const workspace = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getWorkspace(plan.workspaceId);
+    if (!workspace) return plan;
+    const phase = workspace.phase ?? 'plan';
+    const exception = this.rows<ExceptionRow>('SELECT * FROM automation_exceptions WHERE automation_id=? AND workspace_id=? AND phase=?', automation.id, workspace.id, phase)[0];
+    if (!exception && automation.phases === undefined) return { ...plan, phase };
+    const passed = exception ? exception.enabled === 1 : automation.phases?.includes(phase) === true;
+    const label = exception ? `a person switched it ${passed ? 'on' : 'off'} for ${workspace.name} in ${MODE_LABEL[phase]}`
+      : `${workspace.name} is in ${MODE_LABEL[phase]}; it runs in ${(automation.phases ?? []).map(entry => MODE_LABEL[entry]).join(', ')}`;
+    const checks = [...plan.checks, { label, passed }];
+    return passed ? { ...plan, phase, checks } : { ...plan, phase, checks, ended: { state: 'skipped', outcome: `Skipped: ${label}` } };
   }
 
   /** A draft's test against recorded deliveries: one, or the recent ones its trigger starts on. A watch is tested on
@@ -1216,12 +1319,12 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const timeline: Timeline = labels.map(label => ({ at: now, label }));
     const trigger = event === null ? firing.trigger === 'schedule' ? 'schedule' : 'manual' : automation.trigger.kind === 'label' ? 'label' : 'github';
     this.ctx.storage.sql.exec(`
-      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, id, automation.id, automation.name, trigger, plan.kind, event === null ? null : automationEventName(event), event?.subjects[0] ? JSON.stringify(event.subjects[0]) : null,
     event === null ? null : JSON.stringify(event), JSON.stringify(plan.checks), plan.start === null ? null : JSON.stringify(plan.start), ended?.state ?? 'queued',
-    plan.ended === null ? plan.workspaceId : null, plan.targetName, plan.message, ended?.outcome ?? null, JSON.stringify(timeline),
-    scheduledFor, now, ended === null ? null : now);
+    plan.ended === null || plan.phase !== null ? plan.workspaceId : null, plan.targetName, plan.message, ended?.outcome ?? null, JSON.stringify(timeline),
+    scheduledFor, now, ended === null ? null : now, plan.phase);
     this.ctx.storage.sql.exec(`
       DELETE FROM automation_runs WHERE automation_id=? AND state IN ('finished', 'skipped', 'failed')
         AND id NOT IN (SELECT id FROM automation_runs WHERE automation_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?)
@@ -1253,19 +1356,19 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const enabled = input.proposal === null && draft.enabled;
     const nextRunAt = cron !== null && enabled ? nextAutomationRunAt(cron, now) : null;
     const proposal = input.proposal === null ? null : JSON.stringify(input.proposal);
-    const definition = [JSON.stringify(draft.trigger), JSON.stringify(draft.conditions), JSON.stringify(draft.action)];
+    const definition = [JSON.stringify(draft.trigger), JSON.stringify(draft.conditions), JSON.stringify(draft.action), draft.phases === undefined ? null : JSON.stringify(draft.phases)];
     return this.ctx.storage.transactionSync(() => {
       if (this.rows('SELECT id FROM automations WHERE name=? AND id IS NOT ?', draft.name, input.id).length > 0) refuse('name', `An automation named "${draft.name}" already exists`);
       if (input.id === null) {
         const id = crypto.randomUUID();
         this.ctx.storage.sql.exec(`
-          INSERT INTO automations(id, revision, name, trigger_json, conditions_json, action_json, cron, target_name, enabled, created_by, default_key, proposal_json, next_run_at, created_at, updated_at)
-          VALUES(?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO automations(id, revision, name, trigger_json, conditions_json, action_json, phases_json, cron, target_name, enabled, created_by, default_key, proposal_json, next_run_at, created_at, updated_at)
+          VALUES(?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, id, draft.name, ...definition, cron, input.targetName, enabled ? 1 : 0, input.createdBy, input.defaultKey, proposal, nextRunAt, now, now);
         return id;
       }
       this.ctx.storage.sql.exec(`
-        UPDATE automations SET revision=revision+1, name=?, trigger_json=?, conditions_json=?, action_json=?, cron=?, target_name=?, enabled=?, proposal_json=?, next_run_at=?, updated_at=?
+        UPDATE automations SET revision=revision+1, name=?, trigger_json=?, conditions_json=?, action_json=?, phases_json=?, cron=?, target_name=?, enabled=?, proposal_json=?, next_run_at=?, updated_at=?
         WHERE id=?
       `, draft.name, ...definition, cron, input.targetName, enabled ? 1 : 0, proposal, nextRunAt, now, input.id);
       return input.id;
@@ -1458,6 +1561,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       trigger: AutomationTriggerSchema.parse(JSON.parse(row.trigger_json)),
       conditions: z.array(AutomationConditionSchema).parse(JSON.parse(row.conditions_json)),
       action: AutomationActionSchema.parse(JSON.parse(row.action_json)),
+      ...(row.phases_json === null ? {} : { phases: AutomationPhasesSchema.parse(JSON.parse(row.phases_json)) }),
     };
   }
 
@@ -1474,6 +1578,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       conditions: automation.conditions,
       action: automation.action,
       enabled: row.enabled === 1,
+      ...(automation.phases === undefined ? {} : { phases: automation.phases }),
       createdBy: row.created_by,
       isDefault: row.default_key !== null,
       proposal: proposal === null ? null : { ...proposal, proposedAt: new Date(proposal.proposedAt) },
@@ -1521,9 +1626,13 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 }
 
+function exceptionView(row: ExceptionRow): AutomationException {
+  return { automationId: row.automation_id, workspaceId: row.workspace_id, phase: row.phase, enabled: row.enabled === 1, at: new Date(row.at).toISOString(), by: row.by };
+}
+
 /** A plan that does not run: skipped or failed with `outcome`. */
 function failedPlan(outcome: string, state: 'skipped' | 'failed' = 'failed'): RunPlan {
-  return { checks: [], ended: { state, outcome }, kind: 'message', workspaceId: null, targetName: '', message: '', start: null, timeline: [], would: '', sendsTo: null };
+  return { checks: [], ended: { state, outcome }, kind: 'message', workspaceId: null, phase: null, targetName: '', message: '', start: null, timeline: [], would: '', sendsTo: null };
 }
 
 /** A condition as the run's checks read it ("base branch is main"), whether the event passes it, and why not. */
@@ -1630,6 +1739,7 @@ function runRecord(projectId: string, row: RunRow): AutomationRunRecord {
     subject: row.subject_json === null ? null : AutomationSubjectSchema.parse(JSON.parse(row.subject_json)),
     state: row.state,
     workspaceId: row.workspace_id,
+    phase: row.phase,
     outcome: row.outcome,
     checks: ChecksSchema.parse(JSON.parse(row.checks_json)),
     timeline: TimelineSchema.parse(JSON.parse(row.timeline_json)),

@@ -91,8 +91,8 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
     : actionKind === 'startWorkspace' ? { kind: 'startWorkspace', mode, ...(role === DEFAULT_ROLE ? {} : { role }), instruction }
       : actionKind === 'sendToLinked' ? { kind: 'sendToLinked', wake, orProjectAgent, instruction }
         : { kind: 'messageProjectAgent', instruction };
-  // A person's automation runs at once; a proposal edited here is switched on when saved.
-  const draft: AutomationDraft = { name: name.trim(), trigger, conditions: shownConditions, action, enabled: source === null || proposal !== null || source.enabled };
+  // A person's automation runs at once; a proposal edited here is switched on when saved. Its phases are kept.
+  const draft: AutomationDraft = { name: name.trim(), trigger, conditions: shownConditions, action, enabled: source === null || proposal !== null || source.enabled, ...(source?.phases ? { phases: [...source.phases] } : {}) };
   const key = JSON.stringify(draft);
   const savedKey = useRef(key).current;
   const unknown = unknownAutomationPlaceholders(instruction, trigger);

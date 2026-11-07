@@ -1,4 +1,5 @@
 export * from './documents.js';
+export { answerPlan, type PlanDecision } from './plan.js';
 export * from './harness.js';
 export * from './tasks.js';
 export { ProcessExitsDoc, recordMachineReconnection, recordProcessExit } from './jobs.js';

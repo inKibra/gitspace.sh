@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   INSPECTOR_EVIDENCE_HISTORY_LIMIT,
   InspectorWorkspaceCodec,
+  changeGuideDraftSchema,
   changeGuideViewSchema,
   goalRecordViewSchema,
   reviewThreadViewSchema,
@@ -126,5 +127,28 @@ describe('Inspector contracts', () => {
       updatedAt: at,
     });
     expect(thread.anchor).toMatchObject({ generation: 7, headCommit: commit });
+  });
+
+  it('requires every change map reference to resolve, steps included, to a section of the same guide', () => {
+    const draft = {
+      headCommit: commit, baseRef: 'main', baseCommit: commit, title: 'Map', createdBy: 'narrator-a',
+      sections: [{ id: 'store', title: 'Store', kind: 'behavior' as const, explanation: 'Stores it.', why: '', exhibits: [{ path: 'src/a.ts', blobId: null, note: '', slowRead: false, ranges: [{ start: 3, end: 3 }] }], requirementIds: [] }],
+      map: {
+        areas: [
+          { id: 'ui', name: 'UI', package: 'account-web', role: 'Shows it', whatItDoes: 'Renders', files: ['src/a.ts'] },
+          { id: 'worker', name: 'Worker', package: 'account-worker', role: 'Stores it', whatItDoes: 'Persists', files: [] },
+        ],
+        paths: [{ id: 'save', from: 'ui', to: 'worker', label: 'save', state: 'added' as const }],
+        steps: [{ paths: ['save'], from: 'ui', to: 'worker', caption: 'The UI saves.', sectionId: 'store' }],
+      },
+    };
+    expect(changeGuideDraftSchema.parse(draft).map?.steps[0]?.sectionId).toBe('store');
+    const rejects = (changed: unknown) => changeGuideDraftSchema.safeParse(changed).error?.issues.map((issue) => issue.path.join('.'));
+    expect(rejects({ ...draft, map: { ...draft.map, steps: [{ ...draft.map.steps[0], sectionId: 'elsewhere' }] } })).toEqual(['map.steps.0.sectionId']);
+    expect(rejects({ ...draft, map: { ...draft.map, paths: [{ ...draft.map.paths[0], to: 'nowhere' }] } })).toEqual(['map.paths.0.to']);
+    expect(rejects({ ...draft, map: { ...draft.map, steps: [{ ...draft.map.steps[0], paths: ['unknown'] }] } })).toEqual(['map.steps.0.paths.0']);
+    expect(rejects({ ...draft, map: { ...draft.map, areas: [...draft.map.areas, draft.map.areas[0]] } })).toEqual(['map.areas']);
+    expect(rejects({ ...draft, map: { ...draft.map, steps: [{ ...draft.map.steps[0], paths: [] }] } })).toEqual(['map.steps.0.paths']);
+    expect(rejects({ ...draft, sections: [{ ...draft.sections[0], exhibits: [{ ...draft.sections[0]!.exhibits[0], ranges: [{ start: 4, end: 3 }] }] }] })).toEqual(['sections.0.exhibits.0.ranges.0.end']);
   });
 });

@@ -660,6 +660,18 @@ describe('cloud workspace lifecycle with no machines', () => {
       await runtime.answer({ ...identity, questionId: 'approved-plan', answer: { approved: true, note: 'Keep the badge behind the flag.' } }, { deviceId: 'browser', canApprove: true });
       expect((await runtime.snapshot()).questions.find(question => question.id === 'approved-plan')?.answer).toEqual({ approved: true, note: 'Keep the badge behind the flag.' });
       expect((await authority.listWorkspaces()).find(workspace => workspace.id === identity.workspaceId)?.phase).toBe('code');
+      // A person's approval and rejection each become a decision entry of the workspace journal.
+      await runtime.harness.commit(async tx => {
+        const plan = await tx.doc(PlanDoc, root.id);
+        plan.status = 'proposed'; plan.questionId = 'rejected-plan';
+        (await tx.doc(QuestionsDoc)).items.push({ id: 'rejected-plan', conversationId: String(root.id), kind: 'approval', prompt: 'Approve this revision?', choices: [], answer: null });
+      }, BACKGROUND_CONTEXT);
+      await runtime.answer({ ...identity, questionId: 'rejected-plan', answer: { approved: false, note: 'Keep the flag.' } }, { deviceId: 'browser', canApprove: true });
+      const journal = await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, project.id, identity.workspaceId])).listJournal({ projectId: project.id, spaceId: identity.workspaceId });
+      expect(journal.filter(entry => entry.kind === 'decision').map(entry => [entry.title, entry.body, entry.createdBy])).toEqual([
+        ['Approved plan revision 1', 'Keep the badge behind the flag.', 'browser'],
+        ['Rejected the proposed plan', 'Keep the flag.', 'browser'],
+      ]);
       await runtime.wake();
       await runtime.harness.close(BACKGROUND_CONTEXT);
       const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);

@@ -37,7 +37,7 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
 // (keeping, uninstalling, forgetting requests and removals).
 const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'mcp.connections.signIn', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
-  'inspector.guide.setApproval', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
+  'inspector.guide.setApproval', 'inspector.requirement.setAcceptance', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
   'github.request.cancel', 'github.request.record', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
   'storageIncidents.list', 'storageIncidents.resume',
 ].includes(path);

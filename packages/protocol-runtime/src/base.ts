@@ -51,6 +51,30 @@ export const RuntimeAnswerInputSchema = z.object({ ...identity, questionId: z.st
 /** The answer to an `approval` question (a proposed plan, a machine-attach request): the decision, and what the person
  * added to it or why they rejected it. */
 export const RuntimeApprovalAnswerSchema = z.strictObject({ approved: z.boolean(), note: z.string().min(1).nullable() });
+const RuntimeWorkStatusSchema = z.enum(['pending', 'active', 'completed']);
+/** A step of a conversation's plan. Its `status` changes only through a todo item that names it (`planStep`). */
+export const RuntimePlanStepSchema = z.object({
+  id: z.string().trim().min(1).max(64), title: z.string().trim().min(1).max(512), detail: z.string().max(32_768),
+  where: z.array(z.string().min(1).max(1024)).max(64), requirementIds: z.array(z.string().min(1).max(128)).max(64), status: RuntimeWorkStatusSchema,
+});
+export type RuntimePlanStep = z.infer<typeof RuntimePlanStepSchema>;
+/** `propose_plan`: `prompt` is the plan's Markdown summary on the approval card; `steps` become the plan once approved. */
+export const RuntimeProposePlanArgumentsSchema = z.object({
+  prompt: z.string(), choices: z.array(z.string()),
+  steps: z.array(RuntimePlanStepSchema.omit({ status: true }).extend({ where: RuntimePlanStepSchema.shape.where.default([]), requirementIds: RuntimePlanStepSchema.shape.requirementIds.default([]) })).min(1).max(64)
+    .superRefine((steps, issues) => {
+      const seen = new Set<string>();
+      for (const [index, step] of steps.entries()) {
+        if (seen.has(step.id)) issues.addIssue({ code: 'custom', path: [index, 'id'], message: `Step id ${step.id} is used by an earlier step` });
+        seen.add(step.id);
+      }
+    }),
+});
+/** One item of a conversation's todo list; `planStep` names the plan step the item's status sets. */
+export const RuntimeTodoItemSchema = z.object({ id: z.string(), text: z.string(), status: RuntimeWorkStatusSchema, planStep: z.string().min(1).optional() });
+export type RuntimeTodoItem = z.infer<typeof RuntimeTodoItemSchema>;
+/** `todo`: `items` replaces the list; `from: 'plan'` loads the approved plan's steps. */
+export const RuntimeTodoArgumentsSchema = z.union([z.strictObject({ items: z.array(RuntimeTodoItemSchema) }), z.strictObject({ from: z.literal('plan') })]);
 export const RuntimeWatchInputSchema = z.object({ ...identity, after: z.number().int().nonnegative().nullable() });
 const segment = z.union([z.string().refine(value => !['__proto__', 'prototype', 'constructor'].includes(value)), z.number().int().nonnegative()]);
 const path = z.array(segment);

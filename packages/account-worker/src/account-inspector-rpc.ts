@@ -25,6 +25,7 @@ import {
   inspectorReviewThreadsContract,
   inspectorPutGoalContract,
   inspectorAttachRequirementEvidenceContract,
+  inspectorSetRequirementAcceptanceContract,
   inspectorPutWorkflowContract,
   inspectorWaiveWorkflowGateContract,
   inspectorPutRubricContract,
@@ -224,6 +225,23 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
       if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
       return err(errors.OperationFailed({ operation: 'Inspector attachEvidence', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const setAcceptance = server.implement(inspectorSetRequirementAcceptanceContract).handler(async ({ input, errors }) => {
+    try {
+      const caller = await currentDevice();
+      if (caller.kind !== 'browser') return err(errors.InspectorState({ resource: 'goal', message: 'Only a person, in the browser, accepts or reopens a requirement' }));
+      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
+      const { goal, entry } = await source.context.setRequirementAcceptance({ ...input.input, ...source.identity }, caller.deviceId);
+      await source.authority.appendEvent({ scope: 'workspace', entity: 'goal', entityId: goal.id, revision: goal.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });
+      await source.authority.appendEvent({ scope: 'workspace', entity: 'journal', entityId: entry.id, revision: entry.sequence, operation: 'append', payload: { spaceId: source.identity.spaceId } });
+      return ok(goal);
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
+      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'Inspector setAcceptance', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const putWorkflow = server.implement(inspectorPutWorkflowContract).handler(async ({ input, errors }) => {
@@ -715,6 +733,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   return {
     view, transcript, transcriptPage, transcriptContent, availability, overview,
     goal: { put: putGoal, attachEvidence },
+    requirement: { setAcceptance },
     workflow: { put: putWorkflow, waiveGate },
     rubric: { put: putRubric, appendJudgment },
     journal: { list: journal, startPhase, endPhase, append: appendJournal },

@@ -157,4 +157,116 @@ describe('SpaceContextDO', () => {
     expect(thread).toMatchObject({ revision: 2, anchorState: 'stale' });
     expect(thread.messages.map((message) => message.id)).toEqual(['message-a', 'message-b']);
   });
+
+  it('reads goals, guides and journal entries stored before their new fields exactly as before', async () => {
+    const section = { id: 'old', title: 'Old section', kind: 'risk', explanation: 'Changed.', why: '', exhibits: [{ path: 'src/a.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] };
+    await runInDurableObject(env.SPACE_CONTEXT.getByName('inspector-legacy'), (context: SpaceContextDO, state) => {
+      context.getGoal(identity);
+      state.storage.sql.exec("INSERT INTO inspector_goals (id, goal_id, revision, title, summary, phase, created_at, updated_at, updated_by) VALUES (1, 'goal-a', 1, 'Old goal', '', 'code', ?, ?, 'human-a')", at, at);
+      state.storage.sql.exec("INSERT INTO inspector_goal_requirements (requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id) VALUES ('old', 0, 'Old', '', 1, 'accepted', NULL, NULL)");
+      state.storage.sql.exec(
+        "INSERT INTO inspector_journal_entries (entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by) VALUES ('decided', 'decision', NULL, 'code', 'Chose SQL', 'Because.', NULL, '[]', '[]', '[]', NULL, NULL, NULL, ?, 'agent-a')",
+        at,
+      );
+      state.storage.sql.exec("INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, base_commit, title, created_at, created_by) VALUES (1, ?, 'main', ?, 'Old guide', ?, 'narrator-a')", head, movedHead, at);
+      state.storage.sql.exec("INSERT INTO inspector_guide_sections (revision, section_id, ordinal, value_json) VALUES (1, 'old', 0, ?)", JSON.stringify(section));
+    });
+    const overview = await inside('inspector-legacy', (context) => context.getOverview(identity));
+    expect(overview.goal?.requirements).toStrictEqual([{ id: 'old', title: 'Old', description: '', required: true, status: 'accepted', workflowNodeId: null, criterionId: null, evidence: [] }]);
+    expect(overview.journal.recent).toStrictEqual([{
+      ...identity, id: 'decided', sequence: 1, kind: 'decision', phaseRunId: null, phase: 'code', title: 'Chose SQL', body: 'Because.', outcome: null,
+      decisions: [], surprises: [], evidence: [], snapshot: null, delta: null, reverted: null, createdAt: at, createdBy: 'agent-a',
+    }]);
+    expect(overview.changeGuide).toStrictEqual({
+      ...identity, revision: 1, headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Old guide', sections: [section], reviewerStates: [], createdAt: at, createdBy: 'narrator-a',
+    });
+  });
+
+  it('round-trips a guide\'s intro, captures, map and section detail, and a decision\'s citations, section and superseded decision', async () => {
+    const section = {
+      id: 'store', title: 'Store', kind: 'decision' as const, explanation: 'Stores the record.', why: 'It survives restarts.', requirementIds: [],
+      exhibits: [{ path: 'src/store.ts', blobId: null, note: 'Read slowly.', slowRead: true, ranges: [{ start: 4, end: 9, note: 'The write.' }] }],
+      summary: 'The worker stores it.', readersGuide: 'Start at the write.', diagram: '```mermaid\ngraph LR; a-->b\n```', evidence: [evidence(2)],
+    };
+    const map = {
+      areas: [
+        { id: 'ui', name: 'UI', package: 'account-web', role: 'Asks', whatItDoes: 'Sends the record', files: ['src/ui.ts'], note: 'Unchanged' },
+        { id: 'worker', name: 'Worker', package: 'account-worker', role: 'Stores', whatItDoes: 'Persists the record', files: ['src/store.ts'] },
+      ],
+      paths: [{ id: 'save', from: 'ui', to: 'worker', label: 'save', state: 'added' as const }],
+      steps: [{ paths: ['save'], from: 'ui', to: 'worker', caption: 'The UI saves the record.', sectionId: 'store' }],
+    };
+    const guide = { headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Store it', createdBy: 'narrator-a', sections: [section], intro: 'Why this change.', captures: [evidence(1)], map };
+    await inside('inspector-narrative', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide }));
+    expect(await inside('inspector-narrative', (context) => context.getChangeGuide(identity))).toMatchObject({ revision: 1, intro: 'Why this change.', captures: [evidence(1)], map, sections: [section] });
+    await expect(inside('inspector-narrative', (context) => context.putChangeGuide({
+      ...identity, expectedRevision: 1, guide: { ...guide, map: { ...map, steps: [{ ...map.steps[0]!, sectionId: 'elsewhere' }] } },
+    }))).rejects.toThrow('missing section');
+
+    const citations = [{ conversationId: 'conversation-a', messageId: 'message-a', who: 'Brad', at, quote: 'Keep it in SQL.' }];
+    const entry = { ...identity, phase: 'code', body: '', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a' };
+    await inside('inspector-narrative', (context) => context.appendJournalEntry({ ...entry, id: 'decision-a', kind: 'decision', title: 'Store in SQL', citations, sectionId: 'store' }));
+    await inside('inspector-narrative', (context) => context.appendJournalEntry({ ...entry, id: 'note-a', kind: 'narrative', title: 'A note' }));
+    for (const supersedes of ['note-a', 'absent']) {
+      await expect(inside('inspector-narrative', (context) => context.appendJournalEntry({ ...entry, id: `decision-${supersedes}`, kind: 'decision', title: 'Replace', supersedes }))).rejects.toThrow('not a decision entry');
+    }
+    await inside('inspector-narrative', (context) => context.appendJournalEntry({ ...entry, id: 'decision-b', kind: 'decision', title: 'Store in KV', supersedes: 'decision-a' }));
+    const journal = await inside('inspector-narrative', (context) => context.listJournal(identity));
+    expect(journal.map((item) => item.id)).toEqual(['decision-a', 'note-a', 'decision-b']);
+    expect(journal[0]).toMatchObject({ citations, sectionId: 'store' });
+    expect(journal[2]).toMatchObject({ supersedes: 'decision-a' });
+  });
+
+  it('records a person accepting and reopening a requirement as decisions, and keeps acceptance out of goal writes', async () => {
+    const requirement = { title: 'Evidenced', description: '', required: true, workflowNodeId: null, criterionId: null };
+    const goal = await inside('inspector-acceptance', (context) => context.putGoal({
+      ...identity, expectedRevision: 0,
+      goal: { id: 'goal-a', title: 'Accept it', summary: '', phase: 'review', updatedBy: 'agent-a', requirements: [
+        { ...requirement, id: 'evidenced', status: 'review', evidence: [evidence(1)] },
+        { ...requirement, id: 'bare', title: 'Bare', status: 'missing', evidence: [] },
+      ] },
+    }));
+    const accepted = await inside('inspector-acceptance', (context) => context.setRequirementAcceptance({ ...identity, expectedRevision: goal.revision, requirementId: 'evidenced', accepted: true }, 'device-a'));
+    expect(accepted.goal.requirements[0]).toMatchObject({ status: 'accepted', acceptedBy: 'device-a', acceptedAt: expect.any(String) });
+    expect(accepted.entry).toMatchObject({ kind: 'decision', title: 'Accepted Evidenced', createdBy: 'device-a' });
+
+    const draft = { id: 'goal-a', title: 'Accept it', summary: '', phase: 'review' as const, updatedBy: 'agent-a', requirements: accepted.goal.requirements };
+    await expect(inside('inspector-acceptance', (context) => context.putGoal({
+      ...identity, expectedRevision: accepted.goal.revision, goal: { ...draft, requirements: [{ ...draft.requirements[0]!, acceptedBy: 'agent-a' }, draft.requirements[1]!] },
+    }))).rejects.toThrow('only a person');
+    const kept = await inside('inspector-acceptance', (context) => context.putGoal({ ...identity, expectedRevision: accepted.goal.revision, goal: draft }));
+    expect(kept.requirements[0]).toMatchObject({ status: 'accepted', acceptedBy: 'device-a' });
+
+    const reopened = await inside('inspector-acceptance', (context) => context.setRequirementAcceptance({ ...identity, expectedRevision: kept.revision, requirementId: 'evidenced', accepted: false }, 'device-a'));
+    expect(reopened.goal.requirements[0]).toMatchObject({ status: 'review', acceptedBy: null, acceptedAt: null });
+    expect(reopened.entry).toMatchObject({ kind: 'decision', title: 'Reopened Evidenced' });
+    const bare = await inside('inspector-acceptance', (context) => context.setRequirementAcceptance({ ...identity, expectedRevision: reopened.goal.revision, requirementId: 'bare', accepted: true }, 'device-a'));
+    const bareReopened = await inside('inspector-acceptance', (context) => context.setRequirementAcceptance({ ...identity, expectedRevision: bare.goal.revision, requirementId: 'bare', accepted: false }, 'device-a'));
+    expect(bareReopened.goal.requirements[1]).toMatchObject({ status: 'missing', acceptedBy: null });
+    await expect(inside('inspector-acceptance', (context) => context.setRequirementAcceptance({ ...identity, expectedRevision: bare.goal.revision, requirementId: 'bare', accepted: true }, 'device-a'))).rejects.toThrow('revision conflict');
+    expect((await inside('inspector-acceptance', (context) => context.listJournal(identity))).map((item) => item.title)).toEqual(['Accepted Evidenced', 'Reopened Evidenced', 'Accepted Bare', 'Reopened Bare']);
+  });
+
+  it('rejects a write whose Markdown holds a bad block, naming the field and the block issue', async () => {
+    const badSpec = '```gitspace-ui\n{ "root": "a", "elements": {} }\n```';
+    await expect(inside('inspector-blocks', (context) => context.putGoal({
+      ...identity, expectedRevision: 0,
+      goal: { id: 'goal-a', title: 'Blocks', summary: '', phase: 'code', updatedBy: 'agent-a', requirements: [
+        { id: 'shown', title: 'Shown', description: `See:\n${badSpec}`, required: true, status: 'missing', workflowNodeId: null, criterionId: null, evidence: [] },
+      ] },
+    }))).rejects.toThrow('goal.requirements[0].description: block 1');
+    expect(await inside('inspector-blocks', (context) => context.getGoal(identity))).toBeNull();
+
+    const section = { id: 'store', title: 'Store', kind: 'risk' as const, explanation: 'Stores.', why: '', exhibits: [], requirementIds: [] };
+    const guide = { headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Blocks', createdBy: 'narrator-a', sections: [section] };
+    await expect(inside('inspector-blocks', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide: { ...guide, sections: [{ ...section, why: '```mermaid\ngraph LR' }] } })))
+      .rejects.toThrow('guide.sections[0].why: block 1: the ```mermaid fence is not closed');
+    await expect(inside('inspector-blocks', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide: { ...guide, sections: [{ ...section, diagram: 'Just prose.' }] } })))
+      .rejects.toThrow('guide.sections[0].diagram: holds 0 blocks');
+    await expect(inside('inspector-blocks', (context) => context.appendJournalEntry({
+      ...identity, id: 'note', kind: 'narrative', phase: 'code', title: 'Note', body: '```svg\n<svg><script/></svg>\n```', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a',
+    }))).rejects.toThrow('body: block 1');
+    expect(await inside('inspector-blocks', (context) => context.getChangeGuide(identity))).toBeNull();
+    expect(await inside('inspector-blocks', (context) => context.listJournal(identity))).toEqual([]);
+  });
 });

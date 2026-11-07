@@ -28,6 +28,16 @@ describe('Cloud workspace authority controls', () => {
     expect(await context.getChangeGuide(owned)).toBeNull();
     expect(await context.getRubric(owned)).toBeNull();
   });
+  it('refuses an agent accepting a requirement, by method or by writing acceptance into the goal', async () => {
+    const { call, context, owned } = await fixture();
+    const requirement = { id: 'saved', title: 'Saved', description: '', required: true, status: 'review', workflowNodeId: null, criterionId: null, evidence: [] };
+    await call('space_goal', { method: 'put', expectedRevision: 0, goal: { ...goal, requirements: [requirement] } });
+    await expect(call('space_goal', { method: 'setAcceptance', expectedRevision: 1, requirementId: 'saved', accepted: true })).rejects.toThrow();
+    await expect(call('space_goal', { method: 'put', expectedRevision: 1, goal: { ...goal, requirements: [{ ...requirement, status: 'accepted', acceptedBy: 'human', acceptedAt: '2026-11-06T10:00:00.000Z' }] } })).rejects.toThrow('only a person');
+    const stored = (await context.getGoal(owned))?.requirements[0];
+    expect(stored?.status).toBe('review');
+    expect(stored).not.toHaveProperty('acceptedBy');
+  });
   it('updates a closed same-project target and rejects stale revisions without overwriting it', async () => {
     const { call } = await fixture();
     await call('space_goal', { method: 'put', expectedRevision: 0, goal: { ...goal, title: 'Current' } });

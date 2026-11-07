@@ -5,7 +5,7 @@ import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRec
 import { defineDoc, GenerationTask } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, PlanDoc, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, recordMachineReconnection, recordProcessExit, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, recordMachineReconnection, recordProcessExit, type PlanDecision, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
@@ -29,7 +29,7 @@ import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, ty
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
 import { createToolResultStore, type WorkspaceToolResults } from './tool-results.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl };
 /** The main conversation's turn for an input submitted with a request id. */
 export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
 /** One message of a turn, its text cut short. */
@@ -700,29 +700,27 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     },
     async cancel(input: RuntimeCancelInput) { await runtime.lifecycle.stop(String((await conversation(input.conversationId)).id)); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
     async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }) {
-      await harness.commit(async tx => {
+      const decision = await harness.commit(async (tx): Promise<PlanDecision | null> => {
         const questions = await tx.doc(QuestionsDoc);
         const question = questions.items.find(item => item.id === input.questionId);
         if (!question) throw new Error('Question not found');
-        if (question.answer !== null) { if (JSON.stringify(question.answer) !== JSON.stringify(input.answer)) throw new Error('Question already answered'); return; }
+        if (question.answer !== null) { if (JSON.stringify(question.answer) !== JSON.stringify(input.answer)) throw new Error('Question already answered'); return null; }
         if (question.kind === 'takeover') throw new Error('A take-over request is answered on its card: Not now, or Take over and then Resume agent');
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
         const approval = question.kind === 'approval' ? RuntimeApprovalAnswerSchema.safeParse(input.answer) : null;
         if (approval && !approval.success) throw new Error('An approval answer is { approved, note }');
         question.answer = input.answer;
-        if (question.kind === 'approval') {
-          const id = conversationIds.get(question.conversationId); if (id === undefined) throw new Error('Approval conversation missing');
-          const plan = await tx.doc(PlanDoc, id);
-          if (plan.questionId === input.questionId) {
-            plan.status = approval?.data?.approved ? 'approved' : 'rejected';
-            if (plan.status === 'approved') {
-              await options.setWorkspacePhase?.('code');
-              const workspace = await tx.doc(WorkspaceDoc);
-              workspace.phase = 'code';
-            }
-          }
+        if (!approval?.data) return null;
+        const id = conversationIds.get(question.conversationId); if (id === undefined) throw new Error('Approval conversation missing');
+        const settled = await answerPlan(tx, id, input.questionId, approval.data);
+        if (settled && approval.data.approved) {
+          await options.setWorkspacePhase?.('code');
+          const workspace = await tx.doc(WorkspaceDoc);
+          workspace.phase = 'code';
         }
+        return settled;
       }, BACKGROUND_CONTEXT);
+      if (decision) await options.recordDecision?.({ ...decision, deviceId: actor.deviceId });
       harness.resume();
       await line; return { accepted: true as const, cursor: snapshot.cursor };
     },

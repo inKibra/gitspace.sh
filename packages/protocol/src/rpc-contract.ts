@@ -23,7 +23,9 @@ import { StreamCursorCodec, streamCodec } from './stream-codec.js';
 import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
 import { DRIVE_FILE_MAX_BYTES } from './artifact-storage.js';
 import {
+  AUTOMATION_MODES,
   AutomationDraftCodec,
+  AutomationExceptionCodec,
   AutomationGitHubCodec,
   AutomationLinkViewCodec,
   AutomationProjectSummaryCodec,
@@ -64,6 +66,7 @@ import {
   RubricViewCodec,
   ServiceViewCodec,
   SetGuideApprovalInputCodec,
+  SetRequirementAcceptanceInputCodec,
   SubmitChangeGuideInputCodec,
   StartJournalPhaseInputCodec,
   WaiveWorkflowGateInputCodec,
@@ -1728,6 +1731,23 @@ export const automationsOverviewContract = gitspaceRpc
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 
+/** A project's per-workspace, per-phase exceptions to its automations' phases. */
+export const listAutomationExceptionsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object(automationProject))
+  .output(wire.array(AutomationExceptionCodec))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** A person turns an automation on (`enabled` true) or off for one workspace in one phase, whatever its phases; null
+ * removes the exception, so its phases decide again. */
+export const setAutomationExceptionContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationTarget, workspaceId: wire.string, phase: wire.enum(AUTOMATION_MODES), enabled: wire.nullable(wire.boolean) }))
+  .output(wire.object({ exception: wire.nullable(AutomationExceptionCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 const inspectorSpaceRequestCodec = wire.object({
   spaceId: wire.string,
   expectedGeneration: wire.integer({ min: 0 }),
@@ -2080,6 +2100,14 @@ export const inspectorPutGoalContract = gitspaceRpc
 export const inspectorAttachRequirementEvidenceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: AttachRequirementEvidenceInputCodec }))
+  .output(GoalRecordViewCodec)
+  .errors(inspectorMutationErrors)
+  .mutation();
+
+/** A person, on a browser device, accepts a requirement or reopens it; agents and API clients cannot. */
+export const inspectorSetRequirementAcceptanceContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: SetRequirementAcceptanceInputCodec }))
   .output(GoalRecordViewCodec)
   .errors(inspectorMutationErrors)
   .mutation();
@@ -2504,6 +2532,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     unlink: unlinkAutomationSubjectContract,
     updateSettings: updateAutomationSettingsContract,
     overview: automationsOverviewContract,
+    exceptions: { list: listAutomationExceptionsContract, set: setAutomationExceptionContract },
   },
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {
@@ -2516,6 +2545,9 @@ export const gitspaceContract = gitspaceRpc.contract({
     goal: {
       put: inspectorPutGoalContract,
       attachEvidence: inspectorAttachRequirementEvidenceContract,
+    },
+    requirement: {
+      setAcceptance: inspectorSetRequirementAcceptanceContract,
     },
     workflow: {
       put: inspectorPutWorkflowContract,

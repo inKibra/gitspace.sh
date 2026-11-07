@@ -124,6 +124,17 @@ export async function createAccountWorkspaceRuntime(
     ...inference,
     workspacePhase,
     async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
+    /** A plan's approval or rejection becomes a `decision` entry of the workspace journal, recorded by the person's device. */
+    async recordDecision(decision) {
+      const owned = { projectId: identity.projectId, spaceId: identity.workspaceId };
+      try {
+        const entry = await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, owned.projectId, owned.spaceId])).appendJournalEntry({
+          ...owned, id: `plan-decision:${crypto.randomUUID()}`, kind: 'decision', phase: 'plan', title: decision.title, body: decision.body,
+          outcome: null, decisions: decision.decisions, evidence: [], createdBy: decision.deviceId,
+        });
+        await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).appendEvent({ scope: 'workspace', entity: 'journal', entityId: entry.id, revision: entry.sequence, operation: 'append', payload: { spaceId: owned.spaceId } });
+      } catch (error) { console.error('Plan decision was not journaled', { workspaceId: identity.workspaceId, conversationId: decision.conversationId, error }); }
+    },
     published: (snapshot, report) => {
       const status = report.summary;
       // The sidebar's row: sent to every tab only when the status changed.

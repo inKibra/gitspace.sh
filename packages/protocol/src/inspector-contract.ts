@@ -82,6 +82,9 @@ export const goalRequirementSchema = z.object({
   workflowNodeId: idSchema.nullable(),
   criterionId: idSchema.nullable(),
   evidence: z.array(evidenceReferenceSchema).max(INSPECTOR_EVIDENCE_HISTORY_LIMIT),
+  /** The device of the person who accepted the requirement; null after they reopen it, absent if no person ever did. */
+  acceptedBy: idSchema.nullable().optional(),
+  acceptedAt: isoDateSchema.nullable().optional(),
 }).strict();
 export type GoalRequirement = z.infer<typeof goalRequirementSchema>;
 
@@ -298,6 +301,22 @@ export const journalDeltaSchema = z.object({
 }).strict();
 export type JournalDelta = z.infer<typeof journalDeltaSchema>;
 
+export const journalCitationSchema = z.object({
+  conversationId: idSchema,
+  messageId: idSchema,
+  who: shortTextSchema,
+  at: isoDateSchema,
+  quote: z.string().trim().max(4_096),
+}).strict();
+export type JournalCitation = z.infer<typeof journalCitationSchema>;
+/** What a decision rests on: the conversation messages it quotes, the guide section it belongs to, and the earlier
+ * decision entry it replaces. */
+const journalDecisionFields = {
+  citations: z.array(journalCitationSchema).max(32).optional(),
+  sectionId: idSchema.optional(),
+  supersedes: idSchema.optional(),
+};
+
 export const journalEntryViewSchema = inspectorIdentitySchema.extend({
   id: idSchema,
   sequence: z.number().int().positive(),
@@ -315,14 +334,21 @@ export const journalEntryViewSchema = inspectorIdentitySchema.extend({
   reverted: z.object({ reason: textSchema, to: z.string().trim().min(1).max(160) }).strict().nullable(),
   createdAt: isoDateSchema,
   createdBy: idSchema,
+  ...journalDecisionFields,
 }).strict();
 export type JournalEntryView = z.infer<typeof journalEntryViewSchema>;
 
+export const changeGuideExhibitRangeSchema = z.object({
+  start: z.number().int().min(1),
+  end: z.number().int().min(1),
+  note: z.string().trim().max(2_048).optional(),
+}).strict().refine((range) => range.end >= range.start, { message: 'Exhibit range end precedes its start', path: ['end'] });
 export const changeGuideExhibitSchema = z.object({
   path: repositoryPathSchema,
   blobId: gitObjectIdSchema.nullable(),
   note: z.string().trim().max(4_096),
   slowRead: z.boolean(),
+  ranges: z.array(changeGuideExhibitRangeSchema).max(64).optional(),
 }).strict();
 export const changeGuideSectionSchema = z.object({
   id: idSchema,
@@ -336,8 +362,77 @@ export const changeGuideSectionSchema = z.object({
   journalEntryIds: z.array(idSchema).max(256).optional(),
   callouts: z.array(z.object({ tone: z.enum(['risk', 'mechanical', 'decision']), text: textSchema }).strict()).max(64).optional(),
   asks: z.array(shortTextSchema).max(64).optional(),
+  summary: z.string().trim().max(4_096).optional(),
+  readersGuide: z.string().trim().max(8_192).optional(),
+  /** Markdown holding one block fence. */
+  diagram: z.string().trim().max(65_536).optional(),
+  evidence: z.array(evidenceReferenceSchema).max(64).optional(),
 }).strict();
 export type ChangeGuideSection = z.infer<typeof changeGuideSectionSchema>;
+
+/** The change as areas of the codebase and the paths between them, walked in steps that each belong to a guide section.
+ * It carries no layout: GitSpace places the areas. */
+export const changeMapSchema = z.object({
+  areas: z.array(z.object({
+    id: idSchema,
+    name: shortTextSchema,
+    package: shortTextSchema,
+    role: z.string().trim().max(512),
+    whatItDoes: z.string().trim().max(2_048),
+    files: z.array(repositoryPathSchema).max(256),
+    note: z.string().trim().max(1_024).optional(),
+  }).strict()).max(64),
+  paths: z.array(z.object({
+    id: idSchema,
+    from: idSchema,
+    to: idSchema,
+    label: z.string().trim().max(160),
+    state: z.enum(['added', 'removed', 'same']),
+  }).strict()).max(128),
+  steps: z.array(z.object({
+    paths: z.array(idSchema).min(1).max(128),
+    from: idSchema,
+    to: idSchema,
+    caption: z.string().trim().max(1_024),
+    sectionId: idSchema,
+  }).strict()).max(32),
+}).strict().superRefine((map, context) => {
+  const areaIds = new Set(map.areas.map((area) => area.id));
+  if (areaIds.size !== map.areas.length) context.addIssue({ code: 'custom', path: ['areas'], message: 'Change map area ids must be unique' });
+  const pathIds = new Set(map.paths.map((path) => path.id));
+  if (pathIds.size !== map.paths.length) context.addIssue({ code: 'custom', path: ['paths'], message: 'Change map path ids must be unique' });
+  const requireArea = (areaId: string, path: (string | number)[]) => {
+    if (!areaIds.has(areaId)) context.addIssue({ code: 'custom', path, message: `Change map names a missing area ${areaId}` });
+  };
+  for (const [index, path] of map.paths.entries()) {
+    requireArea(path.from, ['paths', index, 'from']);
+    requireArea(path.to, ['paths', index, 'to']);
+  }
+  for (const [index, step] of map.steps.entries()) {
+    requireArea(step.from, ['steps', index, 'from']);
+    requireArea(step.to, ['steps', index, 'to']);
+    for (const [pathIndex, pathId] of step.paths.entries()) {
+      if (!pathIds.has(pathId)) context.addIssue({ code: 'custom', path: ['steps', index, 'paths', pathIndex], message: `Change map step names a missing path ${pathId}` });
+    }
+  }
+});
+export type ChangeMap = z.infer<typeof changeMapSchema>;
+
+/** A guide's opening, its captured evidence, and its map. */
+const changeGuideNarrativeFields = {
+  intro: z.string().trim().max(16_384).optional(),
+  captures: z.array(evidenceReferenceSchema).max(64).optional(),
+  map: changeMapSchema.optional(),
+};
+
+/** A map step belongs to a section of the same guide. */
+function refineGuideMapSections(guide: { sections: ChangeGuideSection[]; map?: ChangeMap }, context: z.RefinementCtx): void {
+  if (guide.map === undefined) return;
+  const sectionIds = new Set(guide.sections.map((section) => section.id));
+  for (const [index, step] of guide.map.steps.entries()) {
+    if (!sectionIds.has(step.sectionId)) context.addIssue({ code: 'custom', path: ['map', 'steps', index, 'sectionId'], message: `Change map step names a missing section ${step.sectionId}` });
+  }
+}
 
 export const changeGuideReviewerStateSchema = z.object({
   reviewerId: idSchema,
@@ -362,7 +457,8 @@ export const changeGuideViewSchema = inspectorIdentitySchema.extend({
   reviewerStates: z.array(changeGuideReviewerStateSchema),
   createdAt: isoDateSchema,
   createdBy: idSchema,
-}).strict();
+  ...changeGuideNarrativeFields,
+}).strict().superRefine(refineGuideMapSections);
 export type ChangeGuideView = z.infer<typeof changeGuideViewSchema>;
 
 /** A shared Change Guide as its public viewer reads it: the guide pinned at one revision, its repository, and the merge
@@ -394,7 +490,8 @@ export const changeGuideDraftSchema = z.object({
   title: shortTextSchema,
   sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
   createdBy: idSchema,
-}).strict();
+  ...changeGuideNarrativeFields,
+}).strict().superRefine(refineGuideMapSections);
 export type ChangeGuideDraft = z.infer<typeof changeGuideDraftSchema>;
 
 export const changeGuideWorksheetClusterSchema = z.object({
@@ -427,17 +524,6 @@ export const changeGuideWorksheetSchema = inspectorIdentitySchema.extend({
   covered: z.boolean(),
 }).strict();
 export type ChangeGuideWorksheet = z.infer<typeof changeGuideWorksheetSchema>;
-
-export const submitChangeGuideNarrationInputSchema = inspectorIdentitySchema.extend({
-  expectedRevision: z.number().int().nonnegative(),
-  headCommit: gitObjectIdSchema,
-  baseRef: z.string().trim().min(1).max(512),
-  baseCommit: gitObjectIdSchema,
-  title: shortTextSchema,
-  sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
-  createdBy: idSchema,
-}).strict();
-export type SubmitChangeGuideNarrationInput = z.infer<typeof submitChangeGuideNarrationInputSchema>;
 
 export const reviewAnchorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('workspace') }).strict(),
@@ -579,6 +665,10 @@ export const putGoalInputSchema = inspectorIdentitySchema.extend({ expectedRevis
 export const attachRequirementEvidenceInputSchema = inspectorIdentitySchema.extend({
   expectedRevision: revisionSchema, requirementId: idSchema, evidence: evidenceReferenceSchema,
 }).strict();
+/** A person accepts a requirement, or reopens one they accepted. */
+export const setRequirementAcceptanceInputSchema = inspectorIdentitySchema.extend({
+  expectedRevision: revisionSchema, requirementId: idSchema, accepted: z.boolean(),
+}).strict();
 export const putWorkflowInputSchema = inspectorIdentitySchema.extend({ expectedRevision: z.number().int().nonnegative(), workflow: workflowDraftSchema }).strict();
 export const waiveWorkflowGateInputSchema = inspectorIdentitySchema.extend({
   expectedRevision: revisionSchema, gateId: idSchema, waiverId: idSchema, reason: textSchema, actorId: idSchema, actorKind: z.enum(['human', 'client']),
@@ -598,15 +688,24 @@ export const appendJournalEntryInputSchema = inspectorIdentitySchema.extend({
   id: idSchema, kind: z.enum(['narrative', 'decision', 'artifact']), phase: z.string().trim().min(1).max(160), title: shortTextSchema,
   body: z.string().trim().max(32_768), outcome: z.string().trim().max(32_768).nullable(), decisions: z.array(textSchema).max(256),
   evidence: z.array(evidenceReferenceSchema).max(INSPECTOR_EVIDENCE_HISTORY_LIMIT), createdBy: idSchema,
+  ...journalDecisionFields,
 }).strict();
 export const putChangeGuideInputSchema = inspectorIdentitySchema.extend({ expectedRevision: z.number().int().nonnegative(), guide: changeGuideDraftSchema }).strict();
 export const analyzeChangeGuideInputSchema = inspectorIdentitySchema.extend({
   expectedGeneration: generationSchema,
   baseRef: z.string().trim().min(1).max(512),
 }).strict();
-export const submitChangeGuideInputSchema = submitChangeGuideNarrationInputSchema.extend({
+export const submitChangeGuideInputSchema = inspectorIdentitySchema.extend({
+  expectedRevision: z.number().int().nonnegative(),
   expectedGeneration: generationSchema,
-}).strict();
+  headCommit: gitObjectIdSchema,
+  baseRef: z.string().trim().min(1).max(512),
+  baseCommit: gitObjectIdSchema,
+  title: shortTextSchema,
+  sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
+  createdBy: idSchema,
+  ...changeGuideNarrativeFields,
+}).strict().superRefine(refineGuideMapSections);
 export const markGuideSectionReadInputSchema = inspectorIdentitySchema.extend({ revision: revisionSchema, headCommit: gitObjectIdSchema, sectionId: idSchema, reviewerId: idSchema }).strict();
 export const setGuideApprovalInputSchema = inspectorIdentitySchema.extend({
   revision: revisionSchema, headCommit: gitObjectIdSchema, reviewerId: idSchema,
@@ -630,6 +729,7 @@ export const repositoryReadRequestSchema = inspectorIdentitySchema.extend({
 
 export type PutGoalInput = z.infer<typeof putGoalInputSchema>;
 export type AttachRequirementEvidenceInput = z.infer<typeof attachRequirementEvidenceInputSchema>;
+export type SetRequirementAcceptanceInput = z.infer<typeof setRequirementAcceptanceInputSchema>;
 export type PutWorkflowInput = z.infer<typeof putWorkflowInputSchema>;
 export type WaiveWorkflowGateInput = z.infer<typeof waiveWorkflowGateInputSchema>;
 export type PutRubricInput = z.infer<typeof putRubricInputSchema>;
@@ -668,6 +768,7 @@ export const ServiceViewCodec = asWireCodec(serviceViewSchema, 'gitspace/service
 export const ChangeGuideWorksheetCodec = asWireCodec(changeGuideWorksheetSchema, 'gitspace/change-guide-worksheet/v1');
 export const PutGoalInputCodec = asWireCodec(putGoalInputSchema, 'gitspace/put-goal-input/v1');
 export const AttachRequirementEvidenceInputCodec = asWireCodec(attachRequirementEvidenceInputSchema, 'gitspace/attach-requirement-evidence-input/v1');
+export const SetRequirementAcceptanceInputCodec = asWireCodec(setRequirementAcceptanceInputSchema, 'gitspace/set-requirement-acceptance-input/v1');
 export const PutWorkflowInputCodec = asWireCodec(putWorkflowInputSchema, 'gitspace/put-workflow-input/v1');
 export const WaiveWorkflowGateInputCodec = asWireCodec(waiveWorkflowGateInputSchema, 'gitspace/waive-workflow-gate-input/v2');
 export const PutRubricInputCodec = asWireCodec(putRubricInputSchema, 'gitspace/put-rubric-input/v1');

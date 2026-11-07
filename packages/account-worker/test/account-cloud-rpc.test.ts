@@ -260,6 +260,21 @@ describe('Inspector administrative authority', () => {
     expect(await invoke(ordinary, 'inspector.guide.setApproval', { ...review, decision: 'approved', note: null })).toMatchObject({ status: 'error' });
     expect(await invoke(owner, 'inspector.guide.setApproval', { ...review, decision: 'approved', note: null })).toMatchObject({ status: 'ok', value: { reviewerStates: [{ reviewerId: owner.deviceId, decision: 'approved' }] } });
   });
+
+  it('lets only a person in the browser accept a requirement, recorded as their device', async () => {
+    const person = await account();
+    const client = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
+    const { projectId, spaceId } = await inspectorWorkspace(person.userId);
+    const invoke = async (actor: typeof person, path: string, input: unknown) => parse(await (await SELF.fetch(actor.request(single(path, { expectedGeneration: 0, input })))).text());
+    const identity = { projectId, spaceId };
+    expect(await invoke(person, 'inspector.goal.put', { ...identity, expectedRevision: 0, goal: {
+      id: 'goal', title: 'Goal', summary: '', phase: 'review', updatedBy: 'author',
+      requirements: [{ id: 'saved', title: 'Saved', description: '', required: true, status: 'review', workflowNodeId: null, criterionId: null, evidence: [] }],
+    } })).toMatchObject({ status: 'ok' });
+    const accept = { ...identity, expectedRevision: 1, requirementId: 'saved', accepted: true };
+    expect(await invoke(client, 'inspector.requirement.setAcceptance', accept)).toMatchObject({ status: 'error' });
+    expect(await invoke(person, 'inspector.requirement.setAcceptance', accept)).toMatchObject({ status: 'ok', value: { revision: 2, requirements: [{ status: 'accepted', acceptedBy: person.deviceId }] } });
+  });
 });
 
 describe('account cloud RPC without machines', () => {

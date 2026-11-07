@@ -1,11 +1,14 @@
-import type { RuntimeQuestionTool, RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
+import type { RuntimePlanStep, RuntimeQuestionTool, RuntimeTakeoverQuestion, RuntimeTodoItem } from '@gitspace/protocol-runtime';
 import { defineDoc } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 export const WorkspaceDoc = defineDoc<{ phase: 'plan' | 'code' | 'review' | 'ship'; instructions: string; goal: string }>({ kind: 'gitspace.workspace', version: 1, scope: 'session', initial: () => ({ phase: 'code', instructions: '', goal: '' }) });
 export const MachinesDoc = defineDoc<{ attachments: RuntimeAttachment[] }>({ kind: 'gitspace.machines', version: 1, scope: 'session', initial: () => ({ attachments: [] }) });
-export const TodosDoc = defineDoc<{ items: { id: string; text: string; status: 'pending' | 'active' | 'completed' }[] }>({ kind: 'gitspace.todos', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ items: [] }) });
-export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 'approved' | 'rejected'; questionId: string | null }>({ kind: 'gitspace.plan', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ text: '', status: 'draft', questionId: null }) });
+export const TodosDoc = defineDoc<{ items: RuntimeTodoItem[] }>({ kind: 'gitspace.todos', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ items: [] }) });
+/** A conversation's plan. `text`, `steps`, `status` and `questionId` are its latest proposal's; once that is approved
+ * they are the plan in effect, and `revision` counts approvals. While a later proposal waits or after it is rejected,
+ * `approved` holds the plan in effect. Records from before plans had steps have no `steps`, `revision` or `approved`. */
+export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 'approved' | 'rejected'; questionId: string | null; steps?: RuntimePlanStep[]; revision?: number; approved?: { text: string; steps: RuntimePlanStep[] } | null }>({ kind: 'gitspace.plan', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ text: '', status: 'draft', questionId: null, steps: [], revision: 0, approved: null }) });
 /** Questions for the user: the agent's `ask`, plan and machine approvals, and ask_takeover cards (`takeover`). */
 export const QuestionsDoc = defineDoc<{ items: { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover'; prompt: string; choices: string[]; answer: JsonValue | null; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion }[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }) });
 export const EnvironmentDoc = defineDoc<{ profile: string | null; runs: JsonValue[] }>({ kind: 'gitspace.environment', version: 1, scope: 'session', initial: () => ({ profile: null, runs: [] }) });

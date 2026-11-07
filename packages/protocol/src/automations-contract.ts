@@ -388,12 +388,18 @@ export type AutomationRecordedEvent = InputOf<typeof AutomationRecordedEventCode
 
 // Automations, proposals and runs.
 
+/** The workspace phases an automation reaches a workspace in: unique, 1 to 4. */
+export const AutomationPhasesSchema = z.array(z.enum(AUTOMATION_MODES)).min(1).max(AUTOMATION_MODES.length)
+  .refine(phases => new Set(phases).size === phases.length, 'Name each phase once')
+  .describe('The workspace phases (plan, code, review, ship) in which it messages or sends to a workspace; absent, every phase. A workspace in another phase skips the run unless a person made an exception for that workspace and phase. Starting a workspace and messaging the project agent are not limited by phase.');
+
 export const AutomationDraftSchema = z.object({
   name: z.string().max(200),
   trigger: AutomationTriggerSchema,
   conditions: z.array(AutomationConditionSchema).max(12),
   action: AutomationActionSchema,
   enabled: z.boolean(),
+  phases: AutomationPhasesSchema.optional(),
 }).strict();
 export type AutomationDraft = z.infer<typeof AutomationDraftSchema>;
 export const AutomationDraftCodec = wire.serializable((value): value is AutomationDraft => AutomationDraftSchema.safeParse(value).success, { id: 'gitspace/automation-draft/v2', jsonSchema: AutomationDraftSchema });
@@ -433,6 +439,8 @@ export const AutomationViewCodec = wire.object({
   conditions: wire.array(AutomationConditionCodec),
   action: AutomationActionCodec,
   enabled: wire.boolean,
+  /** The workspace phases it reaches a workspace in; absent, every phase. */
+  phases: wire.optional(wire.array(wire.enum(AUTOMATION_MODES))),
   createdBy: wire.enum(['person', 'projectAgent']),
   /** One of the automations installing the GitHub App adds; editable and removable like any other. */
   isDefault: wire.boolean,
@@ -457,6 +465,9 @@ export const AutomationRunViewCodec = wire.object({
   state: AutomationRunStateCodec,
   /** Null until it has a target: skipped before it had one, or a workspace not yet started. */
   workspaceId: wire.nullable(wire.string),
+  /** The workspace's phase when the run reached it (a started workspace's first phase); null for the project agent or
+   * a run that reached no workspace. */
+  phase: wire.nullable(wire.enum(AUTOMATION_MODES)),
   /** Why it was skipped or failed, or what it did. */
   outcome: wire.nullable(wire.string),
   checks: wire.array(AutomationCheckCodec),
@@ -476,6 +487,19 @@ export const AutomationSettingsCodec = wire.object({
 });
 export type AutomationSettings = InputOf<typeof AutomationSettingsCodec>;
 export const AUTOMATION_DEFAULT_SETTINGS: AutomationSettings = { concurrency: 2, dailyRunCap: 50, trusted: [] };
+
+/** A person's choice for one workspace and phase: the automation runs there (`enabled`) or not, whatever its phases. */
+export const AutomationExceptionSchema = z.object({
+  automationId: z.string().min(1),
+  workspaceId: z.string().min(1),
+  phase: z.enum(AUTOMATION_MODES),
+  enabled: z.boolean(),
+  at: z.iso.datetime(),
+  /** The device of the person who made it. */
+  by: z.string().min(1),
+}).strict();
+export type AutomationException = z.infer<typeof AutomationExceptionSchema>;
+export const AutomationExceptionCodec = wire.serializable((value): value is AutomationException => AutomationExceptionSchema.safeParse(value).success, { id: 'gitspace/automation-exception/v1', jsonSchema: AutomationExceptionSchema });
 
 /** The project's GitHub side, as the page shows it: its repository and the tenant's bot to mention. */
 export const AutomationGitHubCodec = wire.object({ repository: wire.nullable(wire.string), bot: wire.nullable(wire.string) });

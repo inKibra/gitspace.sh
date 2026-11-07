@@ -5,10 +5,12 @@ import { z } from 'zod';
 import type { JsonValue, Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
-import { RuntimeApprovalAnswerSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeApprovalAnswerSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimePlanStep, type RuntimeTakeoverTab, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT } from '@gitspace/blocks';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, startJournalPhaseInputSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
+import { validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
+import { planTodos } from './plan.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS } from './subagent-state.js';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
@@ -186,6 +188,8 @@ function askResults(answer: JsonValue): { selectedOptions: string[]; customInput
 }
 
 const ASK_TAKEOVER = 'Ask the user to take over one tab for a step only a person should do: a sign-in, a CAPTCHA, a two-factor code, a payment, or anything that needs their identity or judgment. source "relay" names a tab of the workspace\'s group on the user\'s Chrome (pairingId as for web_browser), source "headless" a tab of the cloud browser; targetId is the tab, as web_browser tabs lists it. reason tells the user, in a sentence or two, what to do there. It shows a card in the chat with your reason, the browser and the tab, and the buttons Take over and Not now; it changes nothing by itself. While the user holds the tab none of your browser commands reach it. The call waits, without polling, until the user hands the tab back (observe it again before acting: the page has changed and earlier refs are gone), chooses Not now, or timeoutMinutes pass (default 30, at most 120; the card stays open, and if the user takes the tab later you are told when they hand it back). You never get the tab back by yourself: only the user hands it back. Main agent only; a machine\'s headless browser cannot be taken over.';
+const TODO = 'Set your durable todo list. `items` replaces it with any list (a detour from the plan included). An item with `planStep` names a step of your approved plan, and the item\'s status (pending, active, completed) becomes the step\'s: that is the only way a plan step changes. `{ from: "plan" }` loads the approved plan\'s steps, to start it or resume it after a detour.';
+const PROPOSE_PLAN = 'Propose an implementation plan and wait for explicit human approval. `prompt` is the plan\'s summary, in Markdown, shown on the approval card. `steps` are its steps: `id` (unique, at most 64 characters), `title`, `detail` (Markdown; a gitspace-ui, svg or mermaid block in it must be valid, or the call fails with each issue), `where` (the files or areas it touches) and `requirementIds` (the goal requirements it advances). Once approved, your todo list is loaded from the steps, each item linked to its step by `planStep`. A revised proposal keeps the steps already completed, matched by id; until it is approved, and if it is rejected, the approved plan stays in effect. The answer is `{ approved, note }`: the note adds to an approved plan or says why it was rejected. Never required for conversational replies.';
 /** How an ask_takeover call ends: its card's answer (`TAKEOVER_ANSWERS`), or its wait ran out. */
 const TakeoverOutcomeSchema = z.enum([TAKEOVER_ANSWERS.handedBack, TAKEOVER_ANSWERS.declined, 'timeout']);
 /** What an ask_takeover call returns to the model for each way it ends. */
@@ -328,16 +332,53 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       return keepWholeOutput(result, services.results, { conversationId: String(api.conversationId), callId: api.callId }, TOOL_OUTPUT_LIMITS);
     },
   }));
-  tools.push(defineTool({ name: 'todo', description: 'Replace the durable work checklist.', parameters: Type.Object({ items: Type.Array(Type.Object({ id: Type.String(), text: Type.String(), status: Type.Union([Type.Literal('pending'), Type.Literal('active'), Type.Literal('completed')]) })) }), replay: 'safe', async execute(input, api, context) { return serialized(String(api.conversationId), async () => { await api.commit(async tx => { const doc = await tx.doc(TodosDoc, api.conversationId); doc.items = input.items; }, context); return { output: [{ type: 'text', text: 'Checklist updated.' }] }; }); } }));
-  for (const kind of ['ask', 'approval'] as const) tools.push(defineTool({ name: kind === 'ask' ? 'ask' : 'propose_plan', description: kind === 'ask' ? 'Ask the user and durably wait for their answer.' : 'Propose an implementation plan, in Markdown, as `prompt`; wait for explicit human approval. The answer is `{ approved, note }`: the note adds to an approved plan or says why it was rejected. Never required for conversational replies.', parameters: Type.Object({ prompt: Type.String(), choices: Type.Array(Type.String()) }), replay: 'safe', async execute(input, api, context) {
+  tools.push(defineTool({ name: 'todo', description: TODO, parameters: runtimeToolParameters(RuntimeTodoArgumentsSchema), prepareArguments: input => parseToolArguments('todo', RuntimeTodoArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
+    const args = parseToolArguments('todo', RuntimeTodoArgumentsSchema, input);
+    return serialized(String(api.conversationId), async () => {
+      const items = await api.commit(async tx => {
+        const todos = await tx.doc(TodosDoc, api.conversationId);
+        const listed = 'items' in args ? args.items : null;
+        // Items without planStep never touch the plan.
+        if (listed && listed.every(item => item.planStep === undefined)) { todos.items = listed; return listed; }
+        const plan = await tx.doc(PlanDoc, api.conversationId);
+        const steps = plan.status === 'approved' ? plan.steps ?? [] : plan.approved?.steps;
+        if (!steps || steps.length === 0) throw new Error(listed ? 'There is no approved plan with steps: remove planStep from the items' : 'There is no approved plan with steps to load: propose_plan first, or set items');
+        if (!listed) { const loaded = planTodos(steps); todos.items = loaded; return loaded; }
+        for (const item of listed) {
+          if (item.planStep === undefined) continue;
+          const step = steps.find(candidate => candidate.id === item.planStep);
+          if (!step) throw new Error(`Item ${item.id} names plan step ${item.planStep}, which the approved plan does not have; its steps are ${steps.map(candidate => candidate.id).join(', ')}`);
+          step.status = item.status;
+        }
+        todos.items = listed;
+        return listed;
+      }, context);
+      return { output: [{ type: 'text', text: 'items' in args ? 'Checklist updated.' : `Checklist loaded from the plan: ${JSON.stringify(items)}` }] };
+    });
+  } }));
+  /** Records a question for the person once per task, with the plan it proposes when it has `steps`, and waits for the answer. */
+  async function askPerson(kind: 'ask' | 'approval', prompt: string, choices: string[], api: ToolExecutionApi, context: Context, steps?: z.output<typeof RuntimeProposePlanArgumentsSchema>['steps']): Promise<JsonValue> {
     const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
     await api.commit(async tx => {
       const doc = await tx.doc(QuestionsDoc);
-      if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind, prompt: input.prompt, choices: input.choices, answer: null });
-      if (kind === 'approval') { const plan = await tx.doc(PlanDoc, api.conversationId); plan.text = input.prompt; plan.status = 'proposed'; plan.questionId = id; }
+      if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind, prompt, choices, answer: null });
+      if (!steps) return;
+      const plan = await tx.doc(PlanDoc, api.conversationId);
+      if (plan.questionId === id) return;
+      if (plan.status === 'approved') plan.approved = { text: plan.text, steps: (plan.steps ?? []).map(step => ({ ...step, where: [...step.where], requirementIds: [...step.requirementIds] })) };
+      plan.text = prompt; plan.steps = steps.map((step): RuntimePlanStep => ({ ...step, status: 'pending' })); plan.status = 'proposed'; plan.questionId = id;
     }, context);
-    const answer = await services.question(id, api, context);
-    if (kind === 'ask') return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: askResults(answer) } };
+    return services.question(id, api, context);
+  }
+  tools.push(defineTool({ name: 'ask', description: 'Ask the user and durably wait for their answer.', parameters: Type.Object({ prompt: Type.String(), choices: Type.Array(Type.String()) }), replay: 'safe', async execute(input, api, context) {
+    const answer = await askPerson('ask', input.prompt, input.choices, api, context);
+    return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: askResults(answer) } };
+  } }));
+  tools.push(defineTool({ name: 'propose_plan', description: PROPOSE_PLAN, parameters: runtimeToolParameters(RuntimeProposePlanArgumentsSchema), prepareArguments: input => parseToolArguments('propose_plan', RuntimeProposePlanArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
+    const args = parseToolArguments('propose_plan', RuntimeProposePlanArgumentsSchema, input);
+    const issues = args.steps.flatMap((step, index) => validateMarkdownBlocks(step.detail).map(issue => `steps/${index}/detail: ${issue.path}: ${issue.message}`));
+    if (issues.length > 0) throw new Error(`The plan's steps hold invalid blocks:\n${issues.join('\n')}`);
+    const answer = await askPerson('approval', args.prompt, args.choices, api, context, args.steps);
     const { approved, note } = RuntimeApprovalAnswerSchema.parse(answer);
     // The card's answers, as the transcript's ask block reads them (`planQuestions`).
     return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: [{ id: APPROVAL_DECISION, selectedOptions: [approved ? APPROVE : REJECT], customInput: null }, { id: APPROVAL_NOTE, selectedOptions: [], customInput: note }] } };

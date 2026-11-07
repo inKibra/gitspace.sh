@@ -236,7 +236,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
   const run: AutomationRunView = {
     id: 'run-1144', projectId: 'project', automationId: 'review', automationName: 'Review pull requests', trigger: 'github', event: 'pull_request.opened',
     subject: { kind: 'pullRequest', number: 1144, branch: 'tone', title: 'Faster tone detection', url: 'https://github.com/inKibra/inkibra-core/pull/1144' },
-    state: 'running', workspaceId: 'review-pr-1144', outcome: 'Started in Review and linked to PR #1144', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: null,
+    state: 'running', workspaceId: 'review-pr-1144', phase: 'review', outcome: 'Started in Review and linked to PR #1144', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: null,
   };
   rpc.runOnEvent.mockResolvedValue({ status: 'ok', value: run });
   await renderProject([review]);

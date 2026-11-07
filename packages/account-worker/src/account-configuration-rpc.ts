@@ -44,6 +44,8 @@ import {
   unlinkAutomationSubjectContract,
   updateAutomationSettingsContract,
   automationsOverviewContract,
+  listAutomationExceptionsContract,
+  setAutomationExceptionContract,
 } from '@gitspace/protocol/rpc-contract';
 import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { err, ok } from 'result-rpc';
@@ -527,11 +529,31 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'automationsOverview', message: failure(error) }));
     }
   });
+  const listAutomationExceptions = server.implement(listAutomationExceptionsContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId); return ok(await automations(input.projectId).exceptions(input.projectId));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'listAutomationExceptions', message: failure(error) }));
+    }
+  });
+  const setAutomationException = server.implement(setAutomationExceptionContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).setException({ ...input, by: deviceId });
+      if (outcome.status === 'ok') return ok({ exception: outcome.value });
+      const refused = outcome.failure;
+      if (refused.kind === 'invalid') return err(errors.AutomationInvalid({ field: refused.field, message: refused.message }));
+      if (refused.kind === 'notFound') return err(errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }));
+      return err(errors.OperationFailed({ operation: 'setAutomationException', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'setAutomationException', message: failure(error) }));
+    }
+  });
   return {
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
-    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview },
+    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview, exceptions: { list: listAutomationExceptions, set: setAutomationException } },
     mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus, signIn }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

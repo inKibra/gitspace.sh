@@ -9,6 +9,7 @@ import {
   endJournalPhaseInputSchema,
   evidenceReferenceSchema,
   goalRecordViewSchema,
+  goalRequirementSchema,
   inspectorIdentitySchema,
   inspectorOverviewSchema,
   journalEntryViewSchema,
@@ -25,6 +26,7 @@ import {
   rubricJudgmentSchema,
   rubricViewSchema,
   setGuideApprovalInputSchema,
+  setRequirementAcceptanceInputSchema,
   startJournalPhaseInputSchema,
   waiveWorkflowGateInputSchema,
   workflowGateWaiverSchema,
@@ -55,12 +57,14 @@ import {
   type RubricJudgment,
   type RubricView,
   type SetGuideApprovalInput,
+  type SetRequirementAcceptanceInput,
   type StartJournalPhaseInput,
   type WaiveWorkflowGateInput,
   type WorkflowGateWaiver,
   type WorkflowNode,
   type WorkflowView,
 } from '@gitspace/protocol/inspector-contract';
+import { extractBlocks, validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 import type { z } from 'zod';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
@@ -88,6 +92,7 @@ interface RequirementRow extends Record<string, SqlStorageValue> {
   status: GoalRecordView['requirements'][number]['status'];
   workflow_node_id: string | null;
   criterion_id: string | null;
+  acceptance_json: string | null;
 }
 interface EvidenceRow extends Record<string, SqlStorageValue> {
   value_json: string;
@@ -132,6 +137,9 @@ interface JournalRow extends Record<string, SqlStorageValue> {
   reverted_json: string | null;
   created_at: string;
   created_by: string;
+  citations_json: string | null;
+  section_id: string | null;
+  supersedes: string | null;
 }
 interface GuideRow extends Record<string, SqlStorageValue> {
   revision: number;
@@ -141,6 +149,9 @@ interface GuideRow extends Record<string, SqlStorageValue> {
   title: string;
   created_at: string;
   created_by: string;
+  intro: string | null;
+  captures_json: string | null;
+  map_json: string | null;
 }
 interface ReviewerStateRow extends Record<string, SqlStorageValue> {
   reviewer_id: string;
@@ -221,6 +232,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
   putGoal(input: PutGoalInput): GoalRecordView {
     const parsed = putGoalInputSchema.parse(input);
+    assertMarkdownBlocks([['goal.summary', parsed.goal.summary], ...parsed.goal.requirements.map((requirement, index): MarkdownField => [`goal.requirements[${index}].description`, requirement.description])]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
       const current = this.goalRow();
@@ -238,12 +250,21 @@ export class SpaceContextDO extends BudgetedDurableObject {
           parsed.goal.id, revision, parsed.goal.title, parsed.goal.summary, parsed.goal.phase, timestamp, timestamp, parsed.goal.updatedBy,
         );
       }
+      const recorded = new Map(this.ctx.storage.sql.exec<{ requirement_id: string; acceptance_json: string | null }>('SELECT requirement_id, acceptance_json FROM inspector_goal_requirements')
+        .toArray().map((row) => [row.requirement_id, row.acceptance_json]));
       this.ctx.storage.sql.exec('DELETE FROM inspector_goal_requirements');
       this.ctx.storage.sql.exec('DELETE FROM inspector_requirement_evidence');
       for (const [ordinal, requirement] of parsed.goal.requirements.entries()) {
+        const stored = recorded.get(requirement.id) ?? null;
+        const acceptance = stored === null ? null : parseJson(requirementAcceptanceSchema, stored);
+        if ((requirement.acceptedBy !== undefined && requirement.acceptedBy !== (acceptance?.acceptedBy ?? null))
+          || (requirement.acceptedAt !== undefined && requirement.acceptedAt !== (acceptance?.acceptedAt ?? null))) {
+          throw new InspectorStateError(`goal.requirements[${ordinal}]: only a person records a requirement's acceptance, through inspector.requirement.setAcceptance`);
+        }
         this.ctx.storage.sql.exec(
-          'INSERT INTO inspector_goal_requirements (requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO inspector_goal_requirements (requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id, acceptance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
           requirement.id, ordinal, requirement.title, requirement.description, requirement.required ? 1 : 0, requirement.status, requirement.workflowNodeId, requirement.criterionId,
+          acceptance !== null && acceptance.acceptedBy !== null && requirement.status !== 'accepted' ? REOPENED_ACCEPTANCE : stored,
         );
         for (const [evidenceOrdinal, evidence] of requirement.evidence.entries()) {
           this.ctx.storage.sql.exec(
@@ -265,7 +286,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
       if (!goal) throw new InspectorStateError('Goal does not exist');
       this.assertRevision('goal', parsed.expectedRevision, goal.revision);
       const requirement = this.ctx.storage.sql.exec<RequirementRow>(
-        'SELECT requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id FROM inspector_goal_requirements WHERE requirement_id = ?',
+        'SELECT requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id, acceptance_json FROM inspector_goal_requirements WHERE requirement_id = ?',
         parsed.requirementId,
       ).toArray()[0];
       if (!requirement) throw new InspectorStateError(`Requirement ${parsed.requirementId} does not exist`);
@@ -282,10 +303,54 @@ export class SpaceContextDO extends BudgetedDurableObject {
       );
       const nextRevision = goal.revision + 1;
       const timestamp = new Date().toISOString();
-      this.ctx.storage.sql.exec('UPDATE inspector_goal_requirements SET status = ? WHERE requirement_id = ?', 'review', parsed.requirementId);
+      this.ctx.storage.sql.exec(
+        'UPDATE inspector_goal_requirements SET status = ?, acceptance_json = CASE WHEN acceptance_json IS NULL THEN NULL ELSE ? END WHERE requirement_id = ?',
+        'review', REOPENED_ACCEPTANCE, parsed.requirementId,
+      );
       this.ctx.storage.sql.exec('UPDATE inspector_goals SET revision = ?, updated_at = ? WHERE id = 1', nextRevision, timestamp);
       this.bump();
       return this.readGoal(identity)!;
+    });
+  }
+
+  /** A person accepts a requirement or reopens it; the caller has verified that `actorId` is a person's device. Reopening
+   * returns the requirement to review when it has evidence, otherwise to missing. Each change is a journal decision. */
+  setRequirementAcceptance(input: SetRequirementAcceptanceInput, actorId: string): { goal: GoalRecordView; entry: JournalEntryView } {
+    const parsed = setRequirementAcceptanceInputSchema.parse(input);
+    const identity = this.requireIdentity(parsed);
+    return this.ctx.storage.transactionSync(() => {
+      const goal = this.goalRow();
+      if (!goal) throw new InspectorStateError('Goal does not exist');
+      this.assertRevision('goal', parsed.expectedRevision, goal.revision);
+      const requirement = this.ctx.storage.sql.exec<{ title: string }>('SELECT title FROM inspector_goal_requirements WHERE requirement_id = ?', parsed.requirementId).toArray()[0];
+      if (!requirement) throw new InspectorStateError(`Requirement ${parsed.requirementId} does not exist`);
+      const timestamp = new Date().toISOString();
+      const evidenced = this.ctx.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM inspector_requirement_evidence WHERE requirement_id = ?', parsed.requirementId).one().count > 0;
+      this.ctx.storage.sql.exec(
+        'UPDATE inspector_goal_requirements SET status = ?, acceptance_json = ? WHERE requirement_id = ?',
+        parsed.accepted ? 'accepted' : evidenced ? 'review' : 'missing',
+        parsed.accepted ? JSON.stringify({ acceptedBy: actorId, acceptedAt: timestamp }) : REOPENED_ACCEPTANCE,
+        parsed.requirementId,
+      );
+      this.ctx.storage.sql.exec('UPDATE inspector_goals SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = 1', timestamp, actorId);
+      const entry = this.insertJournal(identity, {
+        id: `acceptance:${crypto.randomUUID()}`,
+        kind: 'decision',
+        phaseRunId: null,
+        phase: goal.phase,
+        title: `${parsed.accepted ? 'Accepted' : 'Reopened'} ${requirement.title}`.slice(0, 512),
+        body: '',
+        outcome: null,
+        decisions: [],
+        surprises: [],
+        evidence: [],
+        snapshot: null,
+        delta: null,
+        reverted: null,
+        createdBy: actorId,
+      });
+      this.bump();
+      return { goal: this.readGoal(identity)!, entry };
     });
   }
 
@@ -396,7 +461,10 @@ export class SpaceContextDO extends BudgetedDurableObject {
       const timestamp = new Date().toISOString();
       this.ctx.storage.sql.exec('UPDATE inspector_rubrics SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = 1', timestamp, parsed.judgment.actorId);
       const status = parsed.judgment.verdict === 'pass' ? 'accepted' : 'review';
-      const goalChanges = this.ctx.storage.sql.exec('UPDATE inspector_goal_requirements SET status = ? WHERE criterion_id = ?', status, parsed.criterionId).rowsWritten;
+      const goalChanges = this.ctx.storage.sql.exec(
+        "UPDATE inspector_goal_requirements SET status = ?, acceptance_json = CASE WHEN ? = 'accepted' OR acceptance_json IS NULL THEN acceptance_json ELSE ? END WHERE criterion_id = ?",
+        status, status, REOPENED_ACCEPTANCE, parsed.criterionId,
+      ).rowsWritten;
       if (goalChanges > 0) this.ctx.storage.sql.exec('UPDATE inspector_goals SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = 1', timestamp, parsed.judgment.actorId);
       this.bump();
       return this.readRubric(identity)!;
@@ -406,12 +474,13 @@ export class SpaceContextDO extends BudgetedDurableObject {
   listJournal(input: InspectorIdentity): JournalEntryView[] {
     const identity = this.requireIdentity(input);
     return this.ctx.storage.sql.exec<JournalRow>(
-      'SELECT sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by FROM inspector_journal_entries ORDER BY sequence',
+      `SELECT ${JOURNAL_COLUMNS} FROM inspector_journal_entries ORDER BY sequence`,
     ).toArray().map((row) => this.journalRecord(identity, row));
   }
 
   startJournalPhase(input: StartJournalPhaseInput): JournalEntryView {
     const parsed = startJournalPhaseInputSchema.parse(input);
+    assertMarkdownBlocks([['intent', parsed.intent]]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
       const snapshot = this.captureSnapshot(identity, parsed.repository);
@@ -438,16 +507,17 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
   endJournalPhase(input: EndJournalPhaseInput): JournalEntryView {
     const parsed = endJournalPhaseInputSchema.parse(input);
+    assertMarkdownBlocks([['outcome', parsed.outcome]]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
       const start = this.ctx.storage.sql.exec<JournalRow>(
-        "SELECT sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-start' ORDER BY sequence DESC LIMIT 1",
+        `SELECT ${JOURNAL_COLUMNS} FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-start' ORDER BY sequence DESC LIMIT 1`,
         parsed.phaseRunId,
       ).toArray()[0];
       if (!start) throw new InspectorStateError(`Journal phase run ${parsed.phaseRunId} does not exist`);
       // Ending a phase twice (a retry after a lost response) returns the existing end entry.
       const ended = this.ctx.storage.sql.exec<JournalRow>(
-        "SELECT sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-end' LIMIT 1",
+        `SELECT ${JOURNAL_COLUMNS} FROM inspector_journal_entries WHERE phase_run_id = ? AND kind = 'phase-end' LIMIT 1`,
         parsed.phaseRunId,
       ).toArray()[0];
       if (ended) return this.journalRecord(identity, ended);
@@ -476,8 +546,13 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
   appendJournalEntry(input: AppendJournalEntryInput): JournalEntryView {
     const parsed = appendJournalEntryInputSchema.parse(input);
+    assertMarkdownBlocks([['body', parsed.body], ['outcome', parsed.outcome]]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
+      if (parsed.supersedes !== undefined) {
+        const superseded = this.ctx.storage.sql.exec<{ kind: string }>('SELECT kind FROM inspector_journal_entries WHERE entry_id = ?', parsed.supersedes).toArray()[0];
+        if (superseded?.kind !== 'decision') throw new InspectorStateError(`supersedes: ${parsed.supersedes} is not a decision entry in this journal`);
+      }
       const entry = this.insertJournal(identity, {
         id: parsed.id,
         kind: parsed.kind,
@@ -493,6 +568,9 @@ export class SpaceContextDO extends BudgetedDurableObject {
         delta: null,
         reverted: null,
         createdBy: parsed.createdBy,
+        citations: parsed.citations,
+        sectionId: parsed.sectionId,
+        supersedes: parsed.supersedes,
       });
       this.bump();
       return entry;
@@ -505,6 +583,18 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
   putChangeGuide(input: PutChangeGuideInput): ChangeGuideView {
     const parsed = putChangeGuideInputSchema.parse(input);
+    const fields: MarkdownField[] = [['guide.intro', parsed.guide.intro]];
+    const diagrams: MarkdownField[] = [];
+    for (const [index, section] of parsed.guide.sections.entries()) {
+      const at = `guide.sections[${index}]`;
+      fields.push([`${at}.explanation`, section.explanation], [`${at}.why`, section.why], [`${at}.summary`, section.summary], [`${at}.readersGuide`, section.readersGuide], [`${at}.diagram`, section.diagram]);
+      diagrams.push([`${at}.diagram`, section.diagram]);
+      for (const [exhibitIndex, exhibit] of section.exhibits.entries()) {
+        fields.push([`${at}.exhibits[${exhibitIndex}].note`, exhibit.note]);
+        for (const [rangeIndex, range] of (exhibit.ranges ?? []).entries()) fields.push([`${at}.exhibits[${exhibitIndex}].ranges[${rangeIndex}].note`, range.note]);
+      }
+    }
+    assertMarkdownBlocks(fields, diagrams);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
       const actual = this.latestGuideRow()?.revision ?? 0;
@@ -512,8 +602,9 @@ export class SpaceContextDO extends BudgetedDurableObject {
       const revision = actual + 1;
       const timestamp = new Date().toISOString();
       this.ctx.storage.sql.exec(
-        'INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, base_commit, title, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         revision, parsed.guide.headCommit, parsed.guide.baseRef, parsed.guide.baseCommit, parsed.guide.title, timestamp, parsed.guide.createdBy,
+        parsed.guide.intro ?? null, parsed.guide.captures === undefined ? null : JSON.stringify(parsed.guide.captures), parsed.guide.map === undefined ? null : JSON.stringify(parsed.guide.map),
       );
       for (const [ordinal, section] of parsed.guide.sections.entries()) {
         this.ctx.storage.sql.exec('INSERT INTO inspector_guide_sections (revision, section_id, ordinal, value_json) VALUES (?, ?, ?, ?)', revision, section.id, ordinal, JSON.stringify(section));
@@ -620,6 +711,18 @@ export class SpaceContextDO extends BudgetedDurableObject {
     if (version < 3) this.ctx.storage.transactionSync(() => this.ctx.storage.sql.exec(`
       ALTER TABLE inspector_guide_revisions ADD COLUMN base_commit TEXT;
       INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (3, datetime('now'));
+    `));
+    // Requirements record a person's acceptance; decision entries their citations, guide section and superseded decision;
+    // guides their intro, captured evidence and map. Rows written earlier have none.
+    if (version < 4) this.ctx.storage.transactionSync(() => this.ctx.storage.sql.exec(`
+      ALTER TABLE inspector_goal_requirements ADD COLUMN acceptance_json TEXT;
+      ALTER TABLE inspector_journal_entries ADD COLUMN citations_json TEXT;
+      ALTER TABLE inspector_journal_entries ADD COLUMN section_id TEXT;
+      ALTER TABLE inspector_journal_entries ADD COLUMN supersedes TEXT;
+      ALTER TABLE inspector_guide_revisions ADD COLUMN intro TEXT;
+      ALTER TABLE inspector_guide_revisions ADD COLUMN captures_json TEXT;
+      ALTER TABLE inspector_guide_revisions ADD COLUMN map_json TEXT;
+      INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (4, datetime('now'));
     `));
   }
 
@@ -749,7 +852,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
     const goal = this.goalRow();
     if (!goal) return null;
     const requirements = this.ctx.storage.sql.exec<RequirementRow>(
-      'SELECT requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id FROM inspector_goal_requirements ORDER BY ordinal',
+      'SELECT requirement_id, ordinal, title, description, required, status, workflow_node_id, criterion_id, acceptance_json FROM inspector_goal_requirements ORDER BY ordinal',
     ).toArray().map((requirement) => ({
       id: requirement.requirement_id,
       title: requirement.title,
@@ -760,6 +863,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
       criterionId: requirement.criterion_id,
       evidence: this.ctx.storage.sql.exec<EvidenceRow>('SELECT value_json FROM inspector_requirement_evidence WHERE requirement_id = ? ORDER BY ordinal', requirement.requirement_id)
         .toArray().map((row) => parseJson(evidenceReferenceSchema, row.value_json)),
+      ...(requirement.acceptance_json === null ? {} : parseJson(requirementAcceptanceSchema, requirement.acceptance_json)),
     }));
     return goalRecordViewSchema.parse({
       ...identity,
@@ -843,8 +947,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
 
   private openJournalPhase(): JournalRow | undefined {
     return this.ctx.storage.sql.exec<JournalRow>(`
-      SELECT s.sequence, s.entry_id, s.kind, s.phase_run_id, s.phase, s.title, s.body, s.outcome,
-        s.decisions_json, s.surprises_json, s.evidence_json, s.snapshot_json, s.delta_json, s.reverted_json, s.created_at, s.created_by
+      SELECT ${JOURNAL_COLUMNS}
       FROM inspector_journal_entries s
       WHERE s.kind = 'phase-start' AND NOT EXISTS (
         SELECT 1 FROM inspector_journal_entries e WHERE e.kind = 'phase-end' AND e.phase_run_id = s.phase_run_id
@@ -854,17 +957,18 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   private insertJournal(identity: InspectorIdentity, input: Omit<JournalEntryView, keyof InspectorIdentity | 'sequence' | 'createdAt'>): JournalEntryView {
-    const createdAt = new Date().toISOString();
-    const result = this.ctx.storage.sql.exec<{ sequence: number }>(
+    const row = this.ctx.storage.sql.exec<JournalRow>(
       `INSERT INTO inspector_journal_entries
-        (entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING sequence`,
+        (entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by,
+         citations_json, section_id, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${JOURNAL_COLUMNS}`,
       input.id, input.kind, input.phaseRunId, input.phase, input.title, input.body, input.outcome,
       JSON.stringify(input.decisions), JSON.stringify(input.surprises), JSON.stringify(input.evidence),
       input.snapshot === null ? null : JSON.stringify(input.snapshot), input.delta === null ? null : JSON.stringify(input.delta),
-      input.reverted === null ? null : JSON.stringify(input.reverted), createdAt, input.createdBy,
+      input.reverted === null ? null : JSON.stringify(input.reverted), new Date().toISOString(), input.createdBy,
+      input.citations === undefined ? null : JSON.stringify(input.citations), input.sectionId ?? null, input.supersedes ?? null,
     ).one();
-    return journalEntryViewSchema.parse({ ...identity, ...input, sequence: result.sequence, createdAt });
+    return this.journalRecord(identity, row);
   }
 
   private journalRecord(identity: InspectorIdentity, row: JournalRow): JournalEntryView {
@@ -886,6 +990,9 @@ export class SpaceContextDO extends BudgetedDurableObject {
       reverted: row.reverted_json === null ? null : JSON.parse(row.reverted_json),
       createdAt: row.created_at,
       createdBy: row.created_by,
+      ...(row.citations_json === null ? {} : { citations: JSON.parse(row.citations_json) }),
+      ...(row.section_id === null ? {} : { sectionId: row.section_id }),
+      ...(row.supersedes === null ? {} : { supersedes: row.supersedes }),
     });
   }
 
@@ -920,7 +1027,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   private latestGuideRow(): GuideRow | undefined {
-    return this.ctx.storage.sql.exec<GuideRow>('SELECT revision, head_commit, base_ref, base_commit, title, created_at, created_by FROM inspector_guide_revisions ORDER BY revision DESC LIMIT 1').toArray()[0];
+    return this.ctx.storage.sql.exec<GuideRow>('SELECT revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json FROM inspector_guide_revisions ORDER BY revision DESC LIMIT 1').toArray()[0];
   }
 
   private requireGuideVersion(revision: number, headCommit: string): GuideRow {
@@ -958,6 +1065,9 @@ export class SpaceContextDO extends BudgetedDurableObject {
       reviewerStates,
       createdAt: guide.created_at,
       createdBy: guide.created_by,
+      ...(guide.intro === null ? {} : { intro: guide.intro }),
+      ...(guide.captures_json === null ? {} : { captures: JSON.parse(guide.captures_json) }),
+      ...(guide.map_json === null ? {} : { map: JSON.parse(guide.map_json) }),
     });
   }
 
@@ -995,6 +1105,31 @@ export class SpaceContextDO extends BudgetedDurableObject {
       updatedAt: row.updated_at,
     });
   }
+}
+
+/** Every column of a journal row, in `JournalRow` order. */
+const JOURNAL_COLUMNS = 'sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by, citations_json, section_id, supersedes';
+const requirementAcceptanceSchema = goalRequirementSchema.pick({ acceptedBy: true, acceptedAt: true }).required();
+/** A requirement whose acceptance a person recorded and that is no longer accepted. */
+const REOPENED_ACCEPTANCE = JSON.stringify({ acceptedBy: null, acceptedAt: null });
+
+/** A Markdown field of a write, named by its path in the write's input. */
+type MarkdownField = [string, string | null | undefined];
+
+/** Rejects a write when a Markdown field holds an invalid gitspace-ui, svg or mermaid block, or a diagram field is not
+ * exactly one block; each problem reads `<field path>: <issue path>: <message>`. */
+function assertMarkdownBlocks(fields: MarkdownField[], diagrams: MarkdownField[] = []): void {
+  const problems: string[] = [];
+  for (const [field, markdown] of diagrams) {
+    if (markdown === null || markdown === undefined) continue;
+    const blocks = extractBlocks(markdown).length;
+    if (blocks !== 1) problems.push(`${field}: holds ${blocks} blocks; a diagram is one gitspace-ui, svg or mermaid fence`);
+  }
+  for (const [field, markdown] of fields) {
+    if (!markdown) continue;
+    for (const issue of validateMarkdownBlocks(markdown)) problems.push(`${field}: ${issue.path}: ${issue.message}`);
+  }
+  if (problems.length > 0) throw new InspectorStateError(problems.join('\n'));
 }
 
 function parseJson<T>(schema: z.ZodType<T>, value: string): T {

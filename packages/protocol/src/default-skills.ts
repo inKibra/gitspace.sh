@@ -1,30 +1,41 @@
+import { uiBlockPrompt } from './gitspace-ui.js';
+
 const REVIEW_GUIDE_NARRATOR = `---
 name: review-guide-narrator
-description: Delegate and write a reviewable Change Guide grounded in the typed Journal and current Git diff. Use when asked to generate or refresh the Change Guide.
+description: Write a reviewable Change Guide grounded in the Goal, the Journal and the current Git diff. Use when asked to generate or refresh the Change Guide.
 ---
 
 # Review Guide Narrator
 
-Turn the analyzed diff into the PR as a build-order story, not a file inventory.
+Turn the diff into the PR as a build-order story a reviewer reads top to bottom, not a file inventory.
 
-## Process
+## Gather
 
-1. Use \`space_workspace({ args: { method: 'current' } })\` and the typed goal, workflow, and rubric tools to load context.
-2. Call \`space_guide({ args: { method: 'get' } })\`; inspect the current Git diff with repository tools.
-3. Delegate one focused narrator subagent with the complete typed context and diff clusters.
-4. Narrate stale clusters in reader order. Ground motivation in \`space_journal({ args: { method: 'list' } })\`; never invent missing intent.
-5. Read the guide input schema with \`space_guide({ args: { method: 'describe', operation: 'put' } })\`, then submit with method \`put\`.
-6. Fix every validation error and resubmit until accepted.
+1. \`space_workspace({ args: { method: 'current' } })\`, \`space_goal({ args: { method: 'get' } })\` for the requirements, and \`space_journal({ args: { method: 'list' } })\` for decisions and their conversation citations.
+2. \`space_guide({ args: { method: 'get' } })\` for the current revision; reuse sections whose code did not change.
+3. In the checkout: \`baseCommit\` is \`git merge-base <baseRef> HEAD\`; read \`git diff <baseCommit>..HEAD\` and the files it touches. For a large diff, delegate reading to one subagent with the goal, the journal and the file list.
+
+## Write
+
+- \`intro\`: what changed and why, in a few plain sentences a reader understands before any code.
+- \`captures\`: artifact references to screenshots or recordings of the change, when it is visible.
+- \`map\`: \`areas\` (each part of the system the change touches: name, package, role, what it does, its changed files), \`paths\` between areas (\`added\`, \`removed\` or \`same\`), and \`steps\` walking the main path, each naming the section that explains it. GitSpace lays the map out; never send coordinates.
+- \`sections\` in reader order, each readable in under a minute:
+  - \`title\`, \`kind\` (decision, behavior, risk, mechanical), \`summary\` (one sentence), \`explanation\`;
+  - \`why\`: grounded in journal decisions and their citations; never invent missing intent;
+  - \`readersGuide\`: what to look at in the code and what to check;
+  - \`exhibits\`: path, blob, note, and \`ranges\` with a note on the lines that matter;
+  - \`requirementIds\` the section proves, and \`evidence\` (the command, test or bench run, or commit that proves it);
+  - \`diagram\` only when a picture explains more than the prose: one block, written as the gitspace-ui skill describes.
+
+Read the input schema with \`space_guide({ args: { method: 'describe', operation: 'put' } })\`, then \`put\` with the revision from \`get\` (0 creates). Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted.
 
 ## Hard rules
 
-- HEAD and base ref must match the worksheet.
-- \`baseCommit\` is \`git merge-base <baseRef> HEAD\` run in the checkout: the guide's diffs compare against it.
+- HEAD and \`baseCommit\` are the checkout's; the guide's diffs compare against \`baseCommit\`.
+- Every changed file appears in some section's exhibits; leftovers go in one mechanical section.
 - Reader order is authoritative.
-- Every stale cluster must have one section.
-- Section id and content hash must match its cluster.
-- Exhibits must belong to the cluster.
-- Keep each section readable in under one minute.
+- Only a person approves a guide or accepts a requirement; never claim either.
 `;
 
 function gitSpaceSkill(name: string, description: string, body: string): string {
@@ -38,8 +49,11 @@ Use the typed cloud tools directly, not a JavaScript space namespace. Pass optio
 - Each tool accepts \`{ args: { method: 'describe', operation: 'put' } }\` for its input schema.
 - To write, supply \`{ args: { method: 'put', workspaceId, expectedRevision, goal } }\` to space_goal; use workflow or rubric with its matching tool. space_goal also supports attachEvidence.
 - Preserve the revision returned by get; use 0 only to create an absent record. A stale write rejects: reload and reconcile rather than blindly retry.
+- Requirements: keep each one observable and attach evidence by stable reference (a commit, test or bench run, artifact). Only a person accepts a requirement, in the Goal or the Change Guide; never mark one accepted or claim it was.
 
-The host supplies projectId and spaceId; never send a foreign project or infer workspace identity from a session id. Changes become the affected agent's instructions at its next turn boundary, without interrupting tools or starting an idle turn. Keep requirements observable, attach evidence by stable reference, and never claim a human decision or judge result that did not happen.`);
+Plan and todo list: \`propose_plan\` takes steps (id, title, detail, where, requirementIds) and a Markdown summary, and waits for the person's approval. Approval makes them the plan and loads your todo list from them. Your todo list stays yours: \`todo({ from: 'plan' })\` loads or resumes the plan's unfinished steps, \`todo({ items })\` sets any list (a detour, such as a failing check), and an item with \`planStep: '<step id>'\` marks that step done when you complete it. Without an approved plan, todo works as a plain checklist. A new proposal revises the plan; steps with the same id keep their progress.
+
+The host supplies projectId and spaceId; never send a foreign project or infer workspace identity from a session id. Changes become the affected agent's instructions at its next turn boundary, without interrupting tools or starting an idle turn. Never claim a human decision or judge result that did not happen.`);
 const SPACE_CHAIN = gitSpaceSkill('space-chain', 'Discover and manage workspaces and their goals within the current project.', `
 Use typed workspace tools:
 - \`space_workspace({ args: { method: 'current' } })\` inspects this workspace; method list returns project workspace definitions.
@@ -60,7 +74,9 @@ Use \`drive://base/<path>\` and \`drive://workspace/<path>\` through read, write
 
 In a reply, link or show a file by its full address: \`[SUMMARY.md](drive://workspace/ux-review/SUMMARY.md)\`, \`![Sign-in](drive://workspace/ux-review/shots/signin.jpg)\`, \`[app.ts](repo://src/app.ts)\`. A reply has no folder of its own, so a relative path there opens nothing. Inside a Markdown file in the drive or repository, paths relative to that file (\`shots/signin.jpg\`, \`../notes.md\`) show and open their files. A folder has no view yet: name its address in prose.`);
 const PHASE_JOURNAL = gitSpaceSkill('phase-journal', 'Record phase narrative, decisions, snapshots, and state deltas.', `
-Use \`space_journal({ args: { method: 'list' } })\` and methods startPhase, endPhase, and append. Read each mutation's schema with method describe and operation set to its name. Start a typed phase before material work and end it with outcome, decisions, surprises, repository identity, and any revert. Append entries instead of rewriting history.`);
+Use \`space_journal({ args: { method: 'list' } })\` and methods startPhase, endPhase, and append. Read each mutation's schema with method describe and operation set to its name. Start a typed phase before material work and end it with outcome, decisions, surprises, repository identity, and any revert. Append entries instead of rewriting history.
+
+Record a decision as an appended \`decision\` entry: what was decided and why, \`citations\` quoting the conversation messages it came from (conversationId, messageId, who, at, quote), \`sectionId\` when a Change Guide section explains it, and \`supersedes\` naming the earlier decision entry it replaces when a choice changes. Never record a decision the person did not make as theirs.`);
 const WORKSPACE_SERVICES = gitSpaceSkill('workspace-services', 'Declare stable-port workspace services and use supervised processes.', `
 Declare durable services in .gitspace/services.json with name, command, args, cwd, env, and named ports. GitSpace's service manager injects stable PORT values and owns these processes through the machine supervisor. Service commands and agent bash commands resolve tools through the .gitspace/bundle.json terminal section, so a project tool such as node_modules/.bin/vite can be a bare command once terminal.path lists node_modules/.bin. Use the Services controls to start or stop configured services. For separate agent-owned processes, use the proc tool. Never bypass protected lifecycle terminals or infer readiness from process creation; verify the health URL.`);
 const WORKSPACE_LIFECYCLE = gitSpaceSkill('workspace-lifecycle', 'Inspect a repository and configure approved, portable workspace lifecycle scripts. Use for repository setup, machine preparation, cloud resource adoption, and lifecycle migration.', `
@@ -152,7 +168,7 @@ Use \`codemode({ args: { code: '...' } })\`. A fresh cloud Worker isolate expose
 - \`mcp.call({ name, args })\`
 
 Search before guessing names. Describe unfamiliar tools before calling them. Compose loops, filtering, joins, pagination, and bounded aggregation in one codemode execution so intermediate results stay out of model context. An empty grant set produces an empty catalog. Provider and MCP credentials are never exposed. There is no \`space\` object: older conversations used \`space.create(...)\` and similar in a removed eval tool; call \`tools.space_workspace\`, \`tools.space_goal\` and the other space_* tools instead.`);
-
+const GITSPACE_UI = gitSpaceSkill('gitspace-ui', 'Write gitspace-ui, svg and mermaid blocks in chat replies and Markdown fields. Use before writing a block.', uiBlockPrompt());
 
 export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'space-goal': SPACE_GOAL,
@@ -164,5 +180,6 @@ export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'workspace-services': WORKSPACE_SERVICES,
   'workspace-lifecycle': WORKSPACE_LIFECYCLE,
   'integration-code-mode': INTEGRATION_CODE_MODE,
+  'gitspace-ui': GITSPACE_UI,
 };
 

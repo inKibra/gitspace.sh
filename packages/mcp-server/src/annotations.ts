@@ -543,6 +543,16 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
+  "automations.exceptions.list": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "automations.exceptions.set": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "skills.list": {
     "readOnlyHint": true,
     "openWorldHint": false

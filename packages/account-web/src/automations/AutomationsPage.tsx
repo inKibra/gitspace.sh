@@ -126,7 +126,7 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
   const handlers: CardHandlers = {
     toggle: automation => void perform(automation.id, automation.enabled ? 'Switch off' : 'Switch on', () => settle(rpcClient.automations.update({
       projectId: automation.projectId, automationId: automation.id,
-      draft: { name: automation.name, trigger: automation.trigger, conditions: [...automation.conditions], action: automation.action, enabled: !automation.enabled },
+      draft: { name: automation.name, trigger: automation.trigger, conditions: [...automation.conditions], action: automation.action, enabled: !automation.enabled, ...(automation.phases ? { phases: [...automation.phases] } : {}) },
     }))),
     runNow: automation => void perform(automation.id, 'Run now', () => settle(rpcClient.automations.runNow({ projectId: automation.projectId, automationId: automation.id }))),
     test: automation => openEditor(automation, true),
