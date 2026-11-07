@@ -9,6 +9,7 @@ import { accountAccessResponse, activeAccount } from './account-access.js';
 import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
 import type { AutomationWatchOn } from '@gitspace/protocol/automations-contract';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
+import { mergedPullRequestOf, readMergedLifecycleScripts, type MergedLifecycleScript } from './lifecycle-approvals.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
@@ -310,6 +311,13 @@ export class GitHubAppDO extends BudgetedDurableObject {
         repository TEXT,
         received_at INTEGER NOT NULL,
         outcome TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS lifecycle_commit_pulls (
+        repository TEXT NOT NULL,
+        commit_id TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        pull_request INTEGER,
+        PRIMARY KEY (repository, commit_id, branch)
       );
     `);
     const added: Array<[table: string, column: string, type: string]> = [
@@ -669,6 +677,24 @@ export class GitHubAppDO extends BudgetedDurableObject {
       if (files.length < REPOSITORY_PAGE_SIZE) break;
     }
     return paths;
+  }
+
+  /** The trust rule's read of `repository` at `tip` of its base branch `branch` (`readMergedLifecycleScripts`). Which
+   * merged pull request carried a commit is kept per commit, so a later tip asks GitHub only about commits it has not. */
+  async mergedLifecycleScripts(repository: string, branch: string, tip: string): Promise<MergedLifecycleScript[]> {
+    const token = this.coverage(repository) === null ? await this.readToken(repository)
+      : (await this.installationToken(repository, { contents: 'read', pull_requests: 'read', metadata: 'read' })).token;
+    const key = repository.toLowerCase();
+    return readMergedLifecycleScripts({
+      repository, branch, tip, token,
+      mergedPullRequest: async (commit) => {
+        const kept = this.ctx.storage.sql.exec<{ pull_request: number | null }>('SELECT pull_request FROM lifecycle_commit_pulls WHERE repository = ? AND commit_id = ? AND branch = ?', key, commit, branch).toArray()[0];
+        if (kept) return kept.pull_request;
+        const pullRequest = await mergedPullRequestOf({ repository, branch, commit, token });
+        this.ctx.storage.sql.exec('INSERT OR REPLACE INTO lifecycle_commit_pulls(repository, commit_id, branch, pull_request) VALUES (?, ?, ?, ?)', key, commit, branch, pullRequest);
+        return pullRequest;
+      },
+    });
   }
 
   /**

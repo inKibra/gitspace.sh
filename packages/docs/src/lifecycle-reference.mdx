@@ -123,6 +123,10 @@ Permission to edit configuration is separate from permission to execute it. The 
 
 The runtime checks approvals at execution and runs the approved script bytes. It does not treat approval as permission to execute a later file at the same path.
 
+Script content that came through a merged pull request is approved automatically for the project. When the content's hash equals the file at the tip of the project's base branch on GitHub, and the commit that last changed that file reached the base branch through a merged pull request, GitSpace records a project approval by `github:merged:#<number>`. GitSpace checks each new base branch tip once, and checks again when a workspace's derived scripts include unapproved content. Content on a pull request branch or another branch, content pushed straight to the base branch, and anything a workspace changed or added still needs a person's approval. A repository GitSpace cannot read on GitHub gets no automatic approvals. Content approved this way and later revoked is not approved automatically again.
+
+When an agent's run needs approval, the person sees an approval card in the agent's chat. The card shows the script content and offers approval for the project, for this workspace only, or not now. Approving from the card needs the same lifecycle-control authority as approving in Environment.
+
 Approval permits repository code to run as the machine user, with access to that user's home configuration and available credentials. It is not a sandbox. Secret grants control GitSpace-injected secrets, not every credential a script can find on the machine. Hashing an entry script does not pin every helper, package install hook, executable, or remote payload it invokes. Review those dependencies and their effects too. Log redaction does not prevent a script from reading other files or sending data over the network.
 
 Initial setup is an explicit `cloud/provision` request, including for a local-only repository with no provisioning script. It enables the workspace's automatic local-preparation policy, then runs approved `machine/prepare`, `checks`, `cloud/provision`, and `workspace/materialize` in that order. A failure stops later phases. An empty provisioning phase still records successful local-only setup. Creating or selecting a workspace does not enable the policy.
@@ -131,7 +135,7 @@ Automatic preparation on a fresh arrival requires both the policy and a successf
 
 Cloud claims prevent concurrent effects. A failed or abandoned cloud attempt requires explicit recovery or rerun authorization. Do not turn an uncertain result into a retry loop. The recovery control only abandons a claim when the recorded machine has been confirmed destroyed. Offline or asleep is not proof that its process stopped. Recovery does not execute a new run.
 
-Approval, recovery, and `cloud/destroy` require a human browser action. The workspace agent cannot grant itself content approval or invoke destruction.
+Approval and recovery require a person. The workspace agent cannot grant itself content approval. An agent may run `cloud/destroy` for its own workspace, non-interactively and with approved content only. It deletes only the resources that workspace recorded as its own. GitSpace refuses an agent's `cloud/destroy` on the project's base workspace. Every ended `cloud/destroy` run adds an entry to the workspace journal that names the recorded resources and the outcome.
 
 The cloud Pi runtime owns conversations and durable task records. The machine supervisor runs lifecycle scripts and owns their processes. Runtime recovery does not authorize replay of an unresolved effect; an offline machine is not evidence of process exit.
 
@@ -173,7 +177,7 @@ Approved scripts still receive their secrets and can intentionally write a `.env
 
 Attach an authorized online machine to the workspace and select it in Environment before explicitly requesting `cloud/destroy`. The request requires its `machineId`; the cloud refuses a missing, stale, or unattached machine instead of choosing another runner. A paused cache resumes through normal setup and approval gates before execution.
 
-The chosen cache provides the workspace checkout and repository helpers. Retirement remains a separate human confirmation, and API/MCP clients need lifecycle-control authority. Selecting or resuming a cache does not authorize destruction or a cloud provisioning rerun.
+The chosen cache provides the workspace checkout and repository helpers. In Environment, retirement needs a separate confirmation, and API/MCP clients need lifecycle-control authority. Selecting or resuming a cache does not authorize destruction or a cloud provisioning rerun.
 
 Cloud bindings and logs remain available after retirement. Failed or uncertain destruction does not erase the records needed to recover.
 
@@ -293,7 +297,7 @@ Use the typed `environment` tool directly:
 
 Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, `cancelRun`, and `runLog`. Arguments go inside `args`; all operations target the current workspace. A run request supplies `runId`, optional `deadlineAt`, and a phase for `runPhase`. A log request supplies `runId` and optional `offset`. Agent calls cannot request protected interactive execution.
 
-An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Content approval governs the runs GitSpace starts; an agent asked by the user to set up a workspace may run its scripts directly with bash.
+An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface runs noninteractively only, and refuses `cloud/destroy` on the project's base workspace. Content approval governs the runs GitSpace starts; an agent asked by the user to set up a workspace may run its scripts directly with bash.
 
 The browser and MCP RPC contracts are separate from the agent tool: `environment.runChecks({ spaceId, machineId, runId })` and `environment.runPhase({ spaceId, machineId, runId, phase, rerun })` require an explicit attached machine ID. They accept the request in the cloud and dispatch only to the named ready or resumable cache. Keep the same machine ID and inputs when reconciling an existing run ID; attach a machine before requesting execution if none is available.
 
@@ -414,4 +418,4 @@ JS
 
 Keep the local materialization script from the previous example. Select `preview`, approve the final script content, and separately authorize setup. Later materialization reads the saved bindings rather than adopting or creating resources again.
 
-There is intentionally no `cloud/destroy` script here. Adoption records a resource reference, not permission to delete a shared resource. For a dedicated workspace-owned resource, write a separately reviewed destroy script that verifies the provider resource ID against the recorded binding and deletes only that resource. Never search by a broad name prefix and delete every match. Retirement requires explicit human authorization even when the destroy script already has content approval.
+There is intentionally no `cloud/destroy` script here. Adoption records a resource reference, not permission to delete a shared resource. For a dedicated workspace-owned resource, write a separately reviewed destroy script that verifies the provider resource ID against the recorded binding and deletes only that resource. Never search by a broad name prefix and delete every match. Content approval of a destroy script lets the workspace's agent run it, so approve it only for resources the workspace owns.

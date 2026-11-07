@@ -152,8 +152,8 @@ export class SpaceEnvironmentStore {
     return { output: page.map((row) => row.output).join(''), nextOffset: rows[LOG_PAGE_SIZE]?.offset ?? null, cursor: page.length ? page[page.length - 1]!.offset + 1 : offset };
   }
 
-
-  mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor, shared: SharedEnvironment): { state: LifecycleState; shared: SharedEnvironmentChange | null } {
+  /** `ended`: the runs this mutation ended. */
+  mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor, shared: SharedEnvironment): { state: LifecycleState; shared: SharedEnvironmentChange | null; ended: LifecycleRun[] } {
     const ended: LifecycleRun[] = [];
     const result = this.storage.transactionSync(() => {
       const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,data FROM lifecycle_runs')
@@ -183,7 +183,7 @@ export class SpaceEnvironmentStore {
       for (const resolve of this.settled.get(run.id) ?? []) resolve(run);
       this.settled.delete(run.id);
     }
-    return result;
+    return { ...result, ended };
   }
 
   /** Resolves when the run ends: it finished, was cancelled, replaced or interrupted. */

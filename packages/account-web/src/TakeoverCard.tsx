@@ -1,20 +1,23 @@
 import { createContext, useState, type ReactNode } from 'react';
-import { TAKEOVER_ANSWERS, TAKEOVER_CHOICES, type RuntimeQuestion, type RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
+import { TAKEOVER_ANSWERS, TAKEOVER_CHOICES, type RuntimeLifecycleApprovalAnswer, type RuntimeQuestion, type RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { Cloud01, Monitor01 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
-/** What a transcript needs to show ask_takeover cards: the workspace's questions (each card finds its own by the agent
- * call it belongs to), the main conversation's session commands, and the Watch dialog for a cloud tab. */
+/** What a transcript needs to show the cards agent calls wait on (ask_takeover, and an `environment` run's lifecycle
+ * approval): the workspace's questions (each card finds its own by the agent call it belongs to), the main
+ * conversation's session commands, a lifecycle approval's answer, and the Watch dialog for a cloud tab. */
 export interface TakeoverCards {
   questions: readonly RuntimeQuestion[];
   request(command: RuntimeSessionCommand): Promise<RuntimeSessionResult>;
+  /** Answers a lifecycle approval card as the person; approving needs their lifecycle control. */
+  answer(questionId: string, answer: RuntimeLifecycleApprovalAnswer): Promise<void>;
   /** The Watch dialog on the card's cloud tab, until `onClose`. */
   watch(card: RuntimeTakeoverQuestion, onClose: () => void): ReactNode;
 }
-/** Absent outside a cloud workspace's transcript: ask_takeover calls then show as plain tool calls. */
+/** Absent outside a cloud workspace's transcript: ask_takeover and environment calls then show as plain tool calls. */
 export const TakeoverCardsContext = createContext<TakeoverCards | null>(null);
 
 /**

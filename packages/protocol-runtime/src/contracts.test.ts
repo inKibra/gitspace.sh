@@ -49,12 +49,11 @@ describe('durable rule interruption contract', () => {
   });
 });
 
-test('agent lifecycle boundary excludes interactive and destruction without narrowing human lifecycle requests', () => {
+test('agent lifecycle boundary excludes interactive runs without narrowing human lifecycle requests', () => {
   for (const interactive of [true, false]) {
     expect(RuntimeEnvironmentArgumentsSchema.safeParse({ method: 'runChecks', runId: 'checks', interactive }).success).toBe(false);
     expect(RuntimeEnvironmentArgumentsSchema.safeParse({ method: 'runPhase', runId: 'prepare', phase: 'machine/prepare', interactive }).success).toBe(false);
   }
-  expect(RuntimeEnvironmentArgumentsSchema.safeParse({ method: 'runPhase', runId: 'destroy', phase: 'cloud/destroy' }).success).toBe(false);
   expect(LifecycleRunRequestSchema.safeParse({ runId: 'human-destroy', phase: 'cloud/destroy', interactive: true }).success).toBe(true);
 });
 

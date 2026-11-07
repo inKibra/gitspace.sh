@@ -22,7 +22,7 @@ beforeEach(() => { container = document.createElement('div'); document.body.appe
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 async function render(questions: RuntimeQuestion[]) {
   const cards: TakeoverCards = {
-    questions, async request(command) { requested.push(command); return { control }; },
+    questions, async request(command) { requested.push(command); return { control }; }, async answer() { throw new Error('A take-over card has no lifecycle answer'); },
     watch: (card, onClose) => { watched.push(card.targetId); return <button type="button" onClick={onClose}>Watching {card.title}</button>; },
   };
   await act(async () => root.render(<TakeoverCardsContext.Provider value={cards}><TranscriptItemView item={block} active /></TakeoverCardsContext.Provider>));
@@ -91,7 +91,7 @@ it('an ended card is read-only: handed back, or Not now; a call without its ques
 });
 
 it('an action that fails says why on the card', async () => {
-  const failing: TakeoverCards = { questions: [question(chrome)], request: vi.fn(async () => { throw new Error('This Chrome is offline'); }), watch: () => null };
+  const failing: TakeoverCards = { questions: [question(chrome)], request: vi.fn(async () => { throw new Error('This Chrome is offline'); }), answer: vi.fn(), watch: () => null };
   await act(async () => root.render(<TakeoverCardsContext.Provider value={failing}><TranscriptItemView item={block} active /></TakeoverCardsContext.Provider>));
   await click('Take over');
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('This Chrome is offline');

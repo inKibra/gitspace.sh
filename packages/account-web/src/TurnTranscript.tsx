@@ -14,6 +14,7 @@ import { glyph } from './glyph.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
 import { useContext, useState, type ReactNode } from 'react';
 import { TakeoverCard, TakeoverCardsContext } from './TakeoverCard.js';
+import { LifecycleApprovalCard } from './LifecycleApprovalCard.js';
 
 function RichContent({ block }: { block: RichContentBlock }) {
   switch (block.type) {
@@ -334,6 +335,14 @@ function AskTakeoverCall({ block, state, onStateChange }: { block: ToolCallBlock
   return cards && question?.takeover ? <TakeoverCard question={question} card={question.takeover} cards={cards} /> : <ToolCall block={block} state={state} onStateChange={onStateChange} />;
 }
 
+/** An `environment` call that waits, or waited, on a lifecycle approval card shows the card above the call. */
+function EnvironmentCall({ block, state, onStateChange }: { block: ToolCallBlock } & ItemInteractionProps) {
+  const cards = useContext(TakeoverCardsContext);
+  const question = cards?.questions.find(item => item.kind === 'lifecycle-approval' && item.lifecycle?.callId === block.toolCallId);
+  const call = <ToolCall block={block} state={state} onStateChange={onStateChange} />;
+  return cards && question?.lifecycle ? <div className="flex min-w-0 flex-col gap-2"><LifecycleApprovalCard question={question} card={question.lifecycle} cards={cards} />{call}</div> : call;
+}
+
 export function TranscriptItemView({ item, active, onAnswer, state, onStateChange, renderExecutionHistory }: { item: TranscriptItem; active: boolean; onAnswer?: TurnTranscriptProps['onAnswer']; renderExecutionHistory?: ExecutionHistoryRenderer } & ItemInteractionProps) {
   switch (item.type) {
     case 'message': {
@@ -356,7 +365,9 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
     case 'tool-call':
-      return item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} /> : <ToolCall block={item} state={state} onStateChange={onStateChange} />;
+      return item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} />
+        : item.tool === 'environment' ? <EnvironmentCall block={item} state={state} onStateChange={onStateChange} />
+        : <ToolCall block={item} state={state} onStateChange={onStateChange} />;
     case 'execution':
       return <Execution block={item} state={state} onStateChange={onStateChange} renderHistory={renderExecutionHistory} />;
     case 'ask':

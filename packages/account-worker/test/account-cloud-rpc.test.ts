@@ -20,9 +20,12 @@ import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
-import { RuntimeAttachmentSchema, RuntimeLifecycleDispatchArgumentsSchema, type RuntimeGitCheckpoint, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { LIFECYCLE_APPROVAL_CHOICES, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeSnapshotSchema, type RuntimeGitCheckpoint, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalRequest, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { Result } from 'better-result';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
+import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
+import { QuestionsDoc } from '@gitspace/runtime-core';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 afterEach(() => vi.restoreAllMocks());
 function emptyCommittedSource() {
@@ -206,6 +209,44 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     expect(await rpc('environment.get', { spaceId })).toMatchObject({ status: 'ok', value: {
       executions: [{ content: blobs[id('d')], hash: await executionHash({ kind: 'script', command: blobs[id('d')]! }), approval: null }],
     } });
+  });
+
+  it.each<RuntimeLifecycleApprovalAnswer>(['project', 'workspace'])('approves a lifecycle card\'s scripts at the chosen scope (%s) as the answering person, who needs lifecycle control', async (scope) => {
+    emptyCommittedSource();
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, spaceId, placement } = await inspectorWorkspace(fixture.userId);
+    const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: spaceId });
+    const id = (digit: string) => digit.repeat(40);
+    const checkpoint = { checkpointRef: `refs/gitspace/spaces/${spaceId}/checkpoints`, headCommit: id('1'), branch: 'review', indexCommit: id('2'), trackedWorktreeCommit: id('3'), worktreeCommit: id('4'), indexTree: id('5'), worktreeTree: id('6') };
+    const script = '#!/usr/bin/env bash\nbun install --frozen-lockfile\n';
+    const worktree: Record<string, string> = { '.gitspace/bundle.json': id('b'), '.gitspace/lifecycle/machine/prepare/10-install.sh': id('c') };
+    const blobs: Record<string, string> = { [id('b')]: JSON.stringify({ version: 1, defaultProfile: 'base', profiles: { base: {} } }), [id('c')]: script };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readFile').mockResolvedValue(null);
+    flatTreeReader(tree => tree === checkpoint.worktreeTree ? worktree : undefined, oid => blobs[oid]);
+    const hash = await executionHash({ kind: 'script', command: script });
+    await placement.runtimeAccess(identity, false);
+    // The agent's environment call waits on two cards: one the person declines, one they approve.
+    await runInDurableObject(placement, async (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
+      state.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
+      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, async () => { throw new Error('Unexpected machine attach'); });
+      const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+      const lifecycle: RuntimeLifecycleApprovalRequest = { phase: 'machine/prepare', scripts: [{ hash, kind: 'script', label: '10-install.sh', phase: 'machine/prepare', fileName: '10-install.sh', content: script, previous: null }] };
+      await runtime.harness.commit(async tx => {
+        for (const card of ['declined', 'approved']) (await tx.doc(QuestionsDoc)).items.push({ id: card, conversationId: String(root.id), kind: 'lifecycle-approval', prompt: 'The agent wants to run machine/prepare.', choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), answer: null, lifecycle: { ...lifecycle, callId: `${card}-call` } });
+      }, BACKGROUND_CONTEXT);
+      await runtime.wake();
+      await runtime.harness.close(BACKGROUND_CONTEXT);
+    });
+    const answer = async (questionId: string, choice: RuntimeLifecycleApprovalAnswer, lifecycleControl: boolean) => { await placement.runtimeAnswer({ ...identity, questionId, answer: choice }, { deviceId: fixture.deviceId, kind: 'browser', canApprove: lifecycleControl, lifecycleControl }); };
+    const questions = async () => RuntimeSnapshotSchema.parse(await (await placement.runtimeSnapshot(identity)).json()).questions;
+    await answer('declined', 'not-now', false);
+    await expect(answer('approved', scope, false)).rejects.toThrow('lifecycle control');
+    expect((await placement.getLifecycleState(identity)).approvals).toEqual([]);
+    expect((await questions()).map(question => question.answer)).toEqual(['not-now', null]);
+    await answer('approved', scope, true);
+    expect((await placement.getLifecycleState(identity)).approvals).toMatchObject([{ scope, executionHash: hash, approvedBy: fixture.deviceId }]);
+    expect((await questions()).map(question => question.answer)).toEqual(['not-now', scope]);
   });
 
   it('derives the routes a checkpoint\'s services.json opens to signed callers as one execution to approve', async () => {
