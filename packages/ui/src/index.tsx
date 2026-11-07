@@ -1,4 +1,4 @@
-// @gitspace/ui — the Fluid Functionalism registry, re-exported unchanged.
+// @gitspace/ui — the Fluid Functionalism registry, re-exported unchanged, and the overtrue/ui pieces copied onto its tokens.
 // Nothing in this package styles inside a Fluid component; product code
 // composes these parts with Tailwind utilities on the Fluid token set.
 
@@ -102,3 +102,7 @@ export { SidebarUserFooter } from './fluid-vendor/components/sidebar-app/user-fo
 export type { SidebarUserFooterProps } from './fluid-vendor/components/sidebar-app/user-footer.js';
 export { SidebarWorkspaceHeader, WorkspaceTile } from './fluid-vendor/components/sidebar-app/workspace-header.js';
 export type { SidebarWorkspaceHeaderProps } from './fluid-vendor/components/sidebar-app/workspace-header.js';
+
+// ── overtrue/ui copies (overtrue-vendor/, MIT), on the Fluid token set ──
+export { StatTile } from './overtrue-vendor/stat-tile.js';
+export type { StatTileProps, StatTileTone } from './overtrue-vendor/stat-tile.js';

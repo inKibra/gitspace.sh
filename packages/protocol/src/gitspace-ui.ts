@@ -56,7 +56,7 @@ const cell = z.union([z.string(), z.number()]);
 const pane = z.strictObject({ label: z.string(), title: z.string().nullish(), body: z.string().describe('Markdown') });
 const option = z.strictObject({ value: z.string(), label: z.string(), description: z.string().nullish() });
 
-const components: Readonly<Record<string, UiComponent>> = {
+const components = {
   Card: {
     props: z.strictObject({ title: z.string().nullish(), description: z.string().nullish(), eyebrow: z.string().nullish() }),
     slots: ['default', 'footer'],
@@ -179,9 +179,9 @@ const components: Readonly<Record<string, UiComponent>> = {
     props: z.strictObject({ source: z.string().describe('Mermaid source, at most 16 KiB') }),
     description: 'A Mermaid diagram: flowchart, sequence, state, class or gantt.',
   },
-};
+} satisfies Record<string, UiComponent>;
 
-const actions: Readonly<Record<string, UiAction>> = {
+const actions = {
   record_decision: {
     params: z.strictObject({ question: z.string(), choice: z.string(), rationale: z.string().nullish() }),
     description: 'Record the person\'s decision in the workspace journal.',
@@ -216,7 +216,7 @@ const actions: Readonly<Record<string, UiAction>> = {
     params: z.strictObject({ url: z.string(), label: z.string().nullish() }),
     description: 'Open a link (a GitHub thread, a run log) in a new tab.',
   },
-};
+} satisfies Record<string, UiAction>;
 
 /** json-render's built-in actions; the renderer implements them. */
 const builtInActions: Readonly<Record<string, UiAction>> = {
@@ -248,8 +248,8 @@ const functions: Readonly<Record<string, UiFunction>> = {
 /** The whole vocabulary of a gitspace-ui spec: components, the actions GitSpace implements, and `$computed` functions. */
 export const gitspaceUiCatalog = { components, actions, functions };
 
-const componentByType = new Map(Object.entries(components));
-const actionByName = new Map([...Object.entries(builtInActions), ...Object.entries(actions)]);
+const componentByType = new Map<string, UiComponent>(Object.entries(components));
+const actionByName = new Map<string, UiAction>([...Object.entries(builtInActions), ...Object.entries(actions)]);
 const functionNames = new Set(Object.keys(functions));
 const confirmSchema = z.strictObject({ title: z.string(), message: z.string(), confirmLabel: z.string().nullish(), cancelLabel: z.string().nullish(), variant: z.enum(['default', 'danger']).nullish() });
 
@@ -850,7 +850,7 @@ const EXAMPLE_SPEC = {
 /** The agent's instructions for writing blocks; the body of the `gitspace-ui` skill. */
 export function uiBlockPrompt(): string {
   const fence = '```';
-  const componentLines = Object.entries(components).map(([name, component]) => {
+  const componentLines = [...componentByType].map(([name, component]) => {
     const named = component.slots?.filter((slot) => slot !== 'default') ?? [];
     const children = component.slots === undefined ? '' : ` [children${named.length > 0 ? `; slots: ${named.join(', ')}` : ''}]`;
     return `- ${name} ${renderSchema(z.toJSONSchema(component.props, { io: 'input' }))} — ${component.description}${children}`;

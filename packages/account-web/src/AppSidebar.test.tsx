@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { verticalSliceFixture } from './App.js';
-import { AppSidebar, type AppSidebarProps, type SidebarDeploymentProps } from './AppSidebar.js';
+import { AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject } from './AppSidebar.js';
 
 const base: AppSidebarProps = {
   view: 'agent',
@@ -62,7 +62,7 @@ describe('AppSidebar Source pill', () => {
     expect(html).toContain('Saved workspace');
     expect(html).not.toContain('Space actions for');
     // Nothing has been read for these rows yet: no status is not a warning.
-    expect(html).not.toContain('#f97316');
+    expect(html.slice(html.indexOf('>Projects<'))).not.toContain('#f97316');
   });
 
   it('uses status circles for unknown and stale scopes, pulsing only freshly confirmed running status', () => {
@@ -145,5 +145,52 @@ describe('AppSidebar selected status', () => {
     expect(html.match(/aria-label="Behind origin"/gu)).toHaveLength(2);
     expect(html).toContain('title="Behind origin/feature/ahead"');
     expect(html).not.toContain('title="Behind origin/feature/current"');
+  });
+});
+
+/** inkibra-like stacks: shared-code with executor (and workload on it) and a fork, audit; router waits on ledger. Listed
+ * out of stacking order, as the directory lists them. */
+const stackedProject: SidebarProject = {
+  id: 'stacks', name: 'Stacks',
+  workspaces: ['workload', 'router', 'executor', 'shared', 'audit', 'ledger'].map((id) => ({ id, projectId: 'stacks', name: id, branch: `feature/${id}`, closedAt: null, phase: id === 'router' ? 'review' : 'code' })),
+  graph: {
+    baseBranch: 'develop',
+    relations: {
+      executor: { dependsOn: ['shared'], stackedOn: 'shared' },
+      workload: { dependsOn: ['executor'], stackedOn: 'executor' },
+      audit: { dependsOn: ['shared'], stackedOn: 'shared' },
+      router: { dependsOn: ['ledger'], stackedOn: null },
+    },
+    pullRequests: { router: { number: 1336, title: 'Router-only cell transports', url: null } },
+  },
+};
+
+describe('AppSidebar stacks', () => {
+  it('nests each stack under the workspace it builds on, depth-first through a fork, never deeper than one level', () => {
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[stackedProject]} /></SidebarProvider>);
+    // Each row in sidebar order with its left inset.
+    expect([...html.matchAll(/data-workspace="([^"]+)"[^>]*><button[^>]*?style="padding-left:(\d+)px"/gu)].map((match) => [match[1], Number(match[2])]))
+      .toEqual([['router', 14], ['shared', 14], ['executor', 30], ['workload', 30], ['audit', 30], ['ledger', 14]]);
+    expect(html).toContain('title="Stacked on shared: it merges after it"');
+    expect(html).toContain('title="Stacked on executor: it merges after it"');
+    expect(html).toContain('waits on ledger');
+    expect(html).toContain('blocks router');
+    expect(html).toContain('#1336');
+    // No lane without an open workspace.
+    expect(html).not.toContain('data-sidebar-lane');
+  });
+
+  it('puts the lane directly above the open row: what it waits on and blocks, its stack, and the chain with each position', () => {
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} deployment={null} projects={[stackedProject]} selected={{ projectId: 'stacks', workspaceId: 'executor' }}
+      stackStatuses={new Map([['executor', { parentId: 'shared', parentBranch: 'feature/shared', baseBranch: 'develop', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', instruction: null }]])} /></SidebarProvider>);
+    const lane = html.indexOf('data-sidebar-lane');
+    expect(lane).toBeGreaterThan(html.indexOf('data-workspace="shared"'));
+    expect(lane).toBeLessThan(html.indexOf('data-workspace="executor"'));
+    expect(html).toContain('waits on 0</span><span>·</span>');
+    expect(html).toContain('stack 4');
+    expect([...html.matchAll(/data-stack-link="([^"]+)"/gu)].map((match) => match[1])).toEqual(['shared', 'executor', 'workload', 'audit']);
+    expect(html).toContain('bottom of the stack · merges into develop');
+    expect(html).toContain('merges after shared · 2 commits behind shared');
+    expect(html).toContain('git rebase feature/shared');
   });
 });

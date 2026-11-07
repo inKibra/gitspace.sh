@@ -28,6 +28,9 @@ export function diffIdentities(diff: RepositoryDiffView, path: string): ThreadId
   return { base: { ...context, blobId: file?.oldBlobId ?? null }, head: { ...context, blobId: file?.newBlobId ?? null } };
 }
 export const RuntimeAvailability = createContext(true);
+/** The pane the Inspector is mounted in: beside the conversation, or at full width in its place. Absent where the
+ * Inspector has no conversation to replace. */
+export const InspectorLayout = createContext<{ full: boolean; onFull(full: boolean): void } | null>(null);
 export const openWorkspaceFirst = 'Open this workspace on a machine first';
 export const repositoryModes: ReadonlyArray<{ id: RepositoryMode; label: string }> = [
   { id: 'current', label: 'Current files' },

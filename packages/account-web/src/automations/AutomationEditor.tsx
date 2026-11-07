@@ -11,7 +11,7 @@ import { Code, ConditionRow } from './AutomationConditions.js';
 import { CheckList, TestResults } from './AutomationRuns.js';
 import { type AutomationWorkspace } from './AutomationsPage.js';
 import { Field, TextInput, options } from './automation-fields.js';
-import { ACTION_LABEL, type ActionKind, CONDITION_LABEL, DEFAULT_ROLE, DELIVERY_OPTIONS, EVENT_NOUN, type EventChoice, LABEL_MODE, MINUTES, MODE_LABEL, NEW_AUTOMATION_CRON, NEW_EVENT, PRESET_LABEL, PlayGlyph, PlusGlyph, RECENT_EVENTS, RECORDED_EVENT_LIMIT, SCHEDULE_PRESETS, type ScheduleChoice, TRIGGER_ACTIONS, TRIGGER_KINDS, TRIGGER_NOUN, TRIGGER_OPTION_LABEL, TestGlyph, WATCH_EVERY, WATCH_NOUN, WATCH_ONS, WEEKDAYS, conditionPhrase, formatUtc, newCondition, scheduleChoice, scheduleCron, settle, subjectNoun, twoDigits } from './automation-formatters.js';
+import { ACTION_LABEL, type ActionKind, CONDITION_LABEL, DEFAULT_ROLE, DELIVERY_OPTIONS, EVENT_NOUN, type EventChoice, LABEL_MODE, MINUTES, MODE_LABEL, NEW_AUTOMATION_CRON, NEW_EVENT, PHASE_ACTIONS, PRESET_LABEL, PlayGlyph, PlusGlyph, RECENT_EVENTS, RECORDED_EVENT_LIMIT, SCHEDULE_PRESETS, type ScheduleChoice, TRIGGER_ACTIONS, TRIGGER_KINDS, TRIGGER_NOUN, TRIGGER_OPTION_LABEL, TestGlyph, WATCH_EVERY, WATCH_NOUN, WATCH_ONS, WEEKDAYS, conditionPhrase, formatUtc, newCondition, phasesLabel, scheduleChoice, scheduleCron, settle, subjectNoun, twoDigits } from './automation-formatters.js';
 
 type EditorField = 'name' | 'cron' | 'events' | 'conditions' | 'action' | 'mode' | 'role' | 'workspace' | 'instruction';
 /** The `field` an `automationInvalid` error names, mapped to the editor control that shows it. */
@@ -49,6 +49,8 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
   const [orProjectAgent, setOrProjectAgent] = useState(source?.action.kind === 'sendToLinked' ? source.action.orProjectAgent : false);
   const [workspaceId, setWorkspaceId] = useState(source?.action.kind === 'messageWorkspace' ? source.action.workspaceId : '');
   const [instruction, setInstruction] = useState(source?.action.instruction ?? '');
+  /** Null: every phase. */
+  const [phases, setPhases] = useState<readonly AutomationMode[] | null>(source?.phases ?? null);
   const [deliveryChoice, setDeliveryChoice] = useState<string | null>(null);
   const [attempted, setAttempted] = useState(false);
   const [pending, setPending] = useState<'save' | 'test' | 'run' | null>(null);
@@ -91,8 +93,9 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
     : actionKind === 'startWorkspace' ? { kind: 'startWorkspace', mode, ...(role === DEFAULT_ROLE ? {} : { role }), instruction }
       : actionKind === 'sendToLinked' ? { kind: 'sendToLinked', wake, orProjectAgent, instruction }
         : { kind: 'messageProjectAgent', instruction };
-  // A person's automation runs at once; a proposal edited here is switched on when saved. Its phases are kept.
-  const draft: AutomationDraft = { name: name.trim(), trigger, conditions: shownConditions, action, enabled: source === null || proposal !== null || source.enabled, ...(source?.phases ? { phases: [...source.phases] } : {}) };
+  // A person's automation runs at once; a proposal edited here is switched on when saved. Phases apply only to an action
+  // that reaches a workspace by phase.
+  const draft: AutomationDraft = { name: name.trim(), trigger, conditions: shownConditions, action, enabled: source === null || proposal !== null || source.enabled, ...(phases && PHASE_ACTIONS.includes(actionKind) ? { phases: [...phases] } : {}) };
   const key = JSON.stringify(draft);
   const savedKey = useRef(key).current;
   const unknown = unknownAutomationPlaceholders(instruction, trigger);
@@ -145,6 +148,12 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
   const addEvent = (): void => {
     const event = AUTOMATION_GITHUB_EVENTS.find(entry => !events.some(chosen => chosen.event === entry));
     if (event) setEvents(current => [...current, { event, actions: AUTOMATION_EVENT_ACTIONS[event].slice(0, 1) }]);
+  };
+  /** Every phase pressed off one at a time; the last phase stays, and all four read as every phase. */
+  const togglePhase = (phase: AutomationMode): void => {
+    const chosen = phases ?? AUTOMATION_MODES;
+    const next = AUTOMATION_MODES.filter(entry => entry === phase ? !chosen.includes(entry) : chosen.includes(entry));
+    if (next.length) setPhases(next.length === AUTOMATION_MODES.length ? null : next);
   };
 
   const insertField = (path: string): void => {
@@ -322,6 +331,17 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
           </Select></Field> : null}
         </div>
         {actionKind === 'sendToLinked' ? <Switch label="When it has no linked workspace, send it to the project agent" checked={orProjectAgent} onToggle={() => setOrProjectAgent(current => !current)} /> : null}
+        {PHASE_ACTIONS.includes(actionKind) ? <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-caption font-medium text-muted-foreground">Only while {actionKind === 'sendToLinked' ? 'the linked workspace' : 'the workspace'} is in</span>
+          <div role="group" aria-label="Phases" className="flex flex-wrap gap-1.5">
+            {AUTOMATION_MODES.map(entry => {
+              const chosen = phases === null || phases.includes(entry);
+              return <Button key={entry} size="compact" type="button" aria-pressed={chosen} variant={chosen ? 'primary' : 'secondary'} disabled={chosen && phases?.length === 1} onClick={() => togglePhase(entry)}>{MODE_LABEL[entry]}</Button>;
+            })}
+            <Button size="compact" type="button" aria-pressed={phases === null} variant={phases === null ? 'primary' : 'secondary'} onClick={() => setPhases(null)}>Every phase</Button>
+          </div>
+          <p aria-label="Phases readback" className="text-caption text-muted-foreground"><span className="font-medium text-foreground">{phasesLabel(phases)}</span>. A workspace in another phase skips it, unless you make an exception for that workspace and phase under By workspace.</p>
+        </div> : null}
         <Field label="Instruction" error={errors.instruction}>
           <textarea ref={instructionRef} aria-label="Instruction" aria-invalid={errors.instruction !== undefined || undefined} rows={5} value={instruction}
             placeholder={eventTrigger ? 'What the agent should do, e.g. Review {{pull_request.html_url}} against {{pull_request.base.ref}}.' : 'What the agent should do, e.g. Check for outdated dependencies and open a pull request for the ones whose tests pass.'}

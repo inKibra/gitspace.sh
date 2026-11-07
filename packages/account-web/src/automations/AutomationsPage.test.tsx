@@ -2,12 +2,12 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { AUTOMATION_DEFAULT_SETTINGS, automationErrors, parseAutomationSchedule, type AutomationLinkView, type AutomationRecordedEvent, type AutomationRunView, type AutomationSettings, type AutomationView } from '@gitspace/protocol/automations-contract';
+import { AUTOMATION_DEFAULT_SETTINGS, automationErrors, parseAutomationSchedule, type AutomationException, type AutomationLinkView, type AutomationRecordedEvent, type AutomationRunView, type AutomationSettings, type AutomationView } from '@gitspace/protocol/automations-contract';
 import { AutomationsPage, type AutomationWorkspace } from './AutomationsPage.js';
 
-const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn() }));
+const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), update: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn(), setException: vi.fn() }));
 const queries = vi.hoisted(() => new Map<string, unknown>());
-vi.mock('../rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', ...rpc } } }));
+vi.mock('../rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', exceptions: { list: 'exceptions', set: rpc.setException }, ...rpc } } }));
 vi.mock('result-rpc/react', async () => ({
   ...await vi.importActual<object>('result-rpc/react'),
   useResultQuery: (procedure: string) => ({ state: 'success', value: queries.get(procedure), fetch: 'idle', refetch: async () => {} }),
@@ -34,7 +34,15 @@ const review: AutomationView = {
   nextRunAt: null, lastRun: null, createdAt: at, updatedAt: at,
 };
 
-const workspaces: readonly AutomationWorkspace[] = [{ id: 'ws-recovery', name: 'session-recovery', active: true }, { id: 'ws-old', name: 'old-work', active: false }];
+const linked: AutomationView = {
+  id: 'feedback', projectId: 'project', revision: 1, name: 'Review feedback',
+  trigger: { kind: 'github', events: [{ event: 'pull_request_review_comment', actions: ['created'] }] }, conditions: [],
+  action: { kind: 'sendToLinked', wake: false, orProjectAgent: false, instruction: 'Address the review comment.' },
+  enabled: true, createdBy: 'person', isDefault: true, proposal: null,
+  nextRunAt: null, lastRun: null, createdAt: at, updatedAt: at,
+};
+
+const workspaces: readonly AutomationWorkspace[] = [{ id: 'ws-recovery', name: 'session-recovery', active: true, phase: 'code' }, { id: 'ws-old', name: 'old-work', active: false, phase: 'ship' }];
 
 let root: Root;
 let container: HTMLDivElement;
@@ -54,6 +62,7 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
+  queries.set('exceptions', []);
 });
 
 afterEach(async () => {
@@ -236,7 +245,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
   const run: AutomationRunView = {
     id: 'run-1144', projectId: 'project', automationId: 'review', automationName: 'Review pull requests', trigger: 'github', event: 'pull_request.opened',
     subject: { kind: 'pullRequest', number: 1144, branch: 'tone', title: 'Faster tone detection', url: 'https://github.com/inKibra/inkibra-core/pull/1144' },
-    state: 'running', workspaceId: 'review-pr-1144', phase: 'review', outcome: 'Started in Review and linked to PR #1144', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: null,
+    state: 'running', workspaceId: 'review-pr-1144', phase: 'review', skipReason: null, outcome: 'Started in Review and linked to PR #1144', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: null,
   };
   rpc.runOnEvent.mockResolvedValue({ status: 'ok', value: run });
   await renderProject([review]);
@@ -295,4 +304,83 @@ it('saves the trust list with a login added without its @, and without one remov
   expect(rpc.updateSettings).toHaveBeenLastCalledWith({ projectId: 'project', settings: { ...settings, trusted: ['mira-contract', 'renovate[bot]'] } });
   await act(async () => field('[aria-label="Stop trusting @mira-contract"]').click());
   expect(rpc.updateSettings).toHaveBeenLastCalledWith({ projectId: 'project', settings: { ...settings, trusted: [] } });
+});
+
+function phases(): [string | null, string | null, boolean][] {
+  return [...field('[role="group"][aria-label="Phases"]').querySelectorAll('button')].map(element => [element.textContent, element.getAttribute('aria-pressed'), element.disabled]);
+}
+
+it('shows the phases of each automation that reaches a workspace, and saves the phases chosen in the editor', async () => {
+  rpc.update.mockResolvedValue({ status: 'ok', value: linked });
+  const checks: AutomationView = { ...linked, id: 'checks', name: 'Failed checks', phases: ['review'] };
+  await renderProject([linked, checks, { ...linked, id: 'mentions', name: 'Mentions', phases: ['code', 'review'] }, review]);
+  const chips = [...document.body.querySelectorAll('button[aria-label^="Phases:"]')].map(chip => chip.textContent);
+  expect(chips).toEqual(['Every phase', 'Review only', 'Code · Review']);
+
+  await act(() => field('[aria-label="Phases: Review only. Edit"]').click());
+  expect(phases()).toEqual([['Plan', 'false', false], ['Code', 'false', false], ['Review', 'true', true], ['Ship', 'false', false], ['Every phase', 'false', false]]);
+  await act(() => button('Code').click());
+  expect(field('[aria-label="Phases readback"]').textContent).toContain('Code · Review.');
+  await act(async () => button('Save changes').click());
+  expect(rpc.update).toHaveBeenLastCalledWith({ projectId: 'project', automationId: 'checks', draft: {
+    name: 'Failed checks', trigger: checks.trigger, conditions: [], action: checks.action, enabled: true, phases: ['code', 'review'],
+  } });
+
+  await act(() => field('[aria-label="Phases: Code · Review. Edit"]').click());
+  await act(() => button('Plan').click());
+  await act(() => button('Ship').click());
+  expect(phases().map(([label, pressed]) => [label, pressed])).toEqual([['Plan', 'true'], ['Code', 'true'], ['Review', 'true'], ['Ship', 'true'], ['Every phase', 'true']]);
+  await act(async () => button('Save changes').click());
+  expect(rpc.update).toHaveBeenLastCalledWith({ projectId: 'project', automationId: 'mentions', draft: {
+    name: 'Mentions', trigger: linked.trigger, conditions: [], action: linked.action, enabled: true,
+  } });
+});
+
+it('records a workspace\'s exception when a cell leaves the automation\'s phases, and removes it when the cell returns', async () => {
+  rpc.setException.mockImplementation(async (input: { automationId: string; workspaceId: string; phase: AutomationException['phase']; enabled: boolean | null }) => {
+    const exception = input.enabled === null ? null : { automationId: input.automationId, workspaceId: input.workspaceId, phase: input.phase, enabled: input.enabled, at: '2026-10-27T11:00:00.000Z', by: 'device' };
+    queries.set('exceptions', exception ? [exception] : []);
+    return { status: 'ok', value: { exception } };
+  });
+  await renderProject([{ ...linked, phases: ['review'] }]);
+  const cell = (phase: string) => field(`[role="switch"][aria-label^="Review feedback in ${phase}"]`);
+  expect(['Plan', 'Code', 'Review', 'Ship'].map(phase => cell(phase).getAttribute('aria-checked'))).toEqual(['false', 'false', 'true', 'false']);
+
+  await act(async () => cell('Review').click());
+  expect(rpc.setException).toHaveBeenLastCalledWith({ projectId: 'project', automationId: 'feedback', workspaceId: 'ws-recovery', phase: 'review', enabled: false });
+  expect(cell('Review').getAttribute('aria-label')).toBe('Review feedback in Review (exception)');
+  expect(cell('Review').getAttribute('aria-checked')).toBe('false');
+  expect(field('[aria-label="Exceptions for session-recovery"]').textContent).toContain('Review feedback off in Review for this workspace');
+
+  await act(async () => cell('Review').click());
+  expect(rpc.setException).toHaveBeenLastCalledWith({ projectId: 'project', automationId: 'feedback', workspaceId: 'ws-recovery', phase: 'review', enabled: null });
+  expect(cell('Review').getAttribute('aria-label')).toBe('Review feedback in Review');
+  expect(cell('Review').getAttribute('aria-checked')).toBe('true');
+
+  await act(async () => cell('Code').click());
+  expect(rpc.setException).toHaveBeenLastCalledWith({ projectId: 'project', automationId: 'feedback', workspaceId: 'ws-recovery', phase: 'code', enabled: true });
+  expect(cell('Code').getAttribute('aria-checked')).toBe('true');
+  await act(() => button('1 workspace exception').click());
+  await act(async () => field('[aria-label="Remove the exception for session-recovery in Code"]').click());
+  expect(rpc.setException).toHaveBeenLastCalledWith({ projectId: 'project', automationId: 'feedback', workspaceId: 'ws-recovery', phase: 'code', enabled: null });
+  expect(cell('Code').getAttribute('aria-checked')).toBe('false');
+  expect(container.textContent).toContain('No workspace exceptions');
+});
+
+it('shows the workspace\'s phase a run reached, and a skip its phase decided apart from other skips', async () => {
+  const run = { projectId: 'project', automationId: 'feedback', automationName: 'Review feedback', trigger: 'github', event: 'pull_request_review_comment.created', subject: null, timeline: [], scheduledFor: at, startedAt: null, finishedAt: at } satisfies Partial<AutomationRunView>;
+  const trust = { label: '@bradleat has write access', passed: true };
+  queries.set('runs', [
+    { ...run, id: 'by-phase', state: 'skipped', workspaceId: 'ws-recovery', phase: 'code', skipReason: 'phase', outcome: 'Skipped: session-recovery is in Code; it runs in Review', checks: [trust, { label: 'session-recovery is in Code; it runs in Review', passed: false }] },
+    { ...run, id: 'unlinked', state: 'skipped', workspaceId: null, phase: null, skipReason: null, outcome: 'Skipped: no linked workspace', checks: [trust] },
+    { ...run, id: 'sent', state: 'finished', workspaceId: 'ws-recovery', phase: 'review', skipReason: null, outcome: 'Sent to session-recovery as a notice', checks: [trust] },
+  ] satisfies AutomationRunView[]);
+  await renderProject([linked]);
+  const cells = (id: string) => [...field(`tr[data-run="${id}"]`).querySelectorAll('td')].map(cell => cell.textContent);
+  expect(cells('by-phase')).toEqual(['skipped · phase', 'Review feedbackSkipped: session-recovery is in Code; it runs in Review', 'Review feedbackpull_request_review_comment.created', 'session-recoveryin Code', '3h ago']);
+  expect(cells('unlinked')).toEqual(['skipped', 'Review feedbackSkipped: no linked workspace', 'Review feedbackpull_request_review_comment.created', '—', '3h ago']);
+  expect(cells('sent')[3]).toBe('session-recoveryin Review');
+
+  await act(() => field('tr[data-run="by-phase"]').click());
+  expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('session-recovery was in Code');
 });

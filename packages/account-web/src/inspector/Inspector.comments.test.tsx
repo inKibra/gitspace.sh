@@ -6,7 +6,23 @@ import type { RepositoryDiffView, ReviewThreadView } from '@gitspace/protocol';
 import { Inspector, type InspectorProps } from './Inspector.js';
 import { RuntimeSubagentRecordSchema } from '@gitspace/protocol-runtime';
 
-vi.mock('@pierre/diffs/react', () => ({ FileDiff: ({ options }: { options: { onLineSelectionEnd(range: unknown): void } }) => <button onClick={() => options.onLineSelectionEnd({ side: 'deletions', start: 1, end: 1 })}>Select old line</button> }));
+vi.mock('@pierre/diffs', async (importOriginal) => {
+  const actual: object = await importOriginal();
+  /** Stands in for Pierre's viewer: one button that ends a selection on the first old line. */
+  class FileDiff {
+    button = document.createElement('button');
+    options: { onLineSelectionEnd(range: unknown): void };
+    constructor(options: { onLineSelectionEnd(range: unknown): void }) { this.options = options; }
+    hydrate({ fileContainer }: { fileContainer: HTMLElement }) {
+      this.button.textContent = 'Select old line';
+      this.button.onclick = () => this.options.onLineSelectionEnd({ side: 'deletions', start: 1, end: 1 });
+      fileContainer.append(this.button);
+    }
+    render() { return true; }
+    cleanUp() { this.button.remove(); }
+  }
+  return { ...actual, FileDiff };
+});
 vi.mock('@pierre/trees/react', () => ({
   useFileTree: ({ onSelectionChange }: { onSelectionChange(paths: string[]): void }) => ({ model: { resetPaths() {}, setGitStatus() {}, open: () => onSelectionChange(['file.ts']) } }),
   FileTree: ({ model }: { model: { open(): void } }) => <button onClick={model.open}>Open file.ts</button>,

@@ -1,13 +1,18 @@
 import { Badge, Button, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@gitspace/ui';
 import { CheckCircle, MinusCircle, XCircle } from '@untitledui/icons';
 import { useState, type ReactElement } from 'react';
-import { type AutomationCheck, type AutomationRunState, type AutomationRunView, type AutomationTestResult } from '@gitspace/protocol/automations-contract';
+import { type AutomationCheck, type AutomationMode, type AutomationRunState, type AutomationRunView, type AutomationTestResult } from '@gitspace/protocol/automations-contract';
 import { formatRelativeTime } from '../relative-time.js';
 import { type AutomationsProject } from './AutomationsPage.js';
-import { RUN_STATE_COLOR, UTC_CLOCK, formatUtc, subjectTitle, workspaceLabel } from './automation-formatters.js';
+import { MODE_COLOR, MODE_LABEL, RUN_STATE_COLOR, UTC_CLOCK, formatUtc, subjectTitle, workspaceLabel } from './automation-formatters.js';
 
-export function RunBadge({ state }: { state: AutomationRunState }): ReactElement {
-  return <Badge variant="dot" size="compact" color={RUN_STATE_COLOR[state]}>{state}</Badge>;
+/** A skip the workspace's phase decided reads "skipped · phase". */
+export function RunBadge({ state, byPhase = false }: { state: AutomationRunState; byPhase?: boolean }): ReactElement {
+  return <Badge variant="dot" size="compact" color={RUN_STATE_COLOR[state]}>{byPhase ? `${state} · phase` : state}</Badge>;
+}
+
+function PhaseBadge({ phase }: { phase: AutomationMode }): ReactElement {
+  return <Badge size="compact" color={MODE_COLOR[phase]}>{MODE_LABEL[phase]}</Badge>;
 }
 
 export function TestResults({ results }: { results: readonly AutomationTestResult[] }): ReactElement {
@@ -30,11 +35,12 @@ export function RunsTable({ runs, projects, showProject, now, onOpen }: { runs: 
   const project = (run: AutomationRunView) => projects.find(entry => entry.id === run.projectId);
   return <>
     <ul aria-label="Runs" className="flex flex-col divide-y divide-border border-y border-border sm:hidden">
-      {runs.map(run => <li key={run.id}><button type="button" className="flex w-full min-w-0 flex-col gap-0.5 py-3 text-left" onClick={() => onOpen(run)}>
-        <span className="flex items-center justify-between gap-2"><RunBadge state={run.state} /><span className="text-caption tabular-nums text-muted-foreground">{formatRelativeTime(run.finishedAt ?? run.startedAt ?? run.scheduledFor, now)}</span></span>
+      {runs.map(run => <li key={run.id}><button type="button" data-run={run.id} className="flex w-full min-w-0 flex-col gap-0.5 py-3 text-left" onClick={() => onOpen(run)}>
+        <span className="flex items-center justify-between gap-2"><RunBadge state={run.state} byPhase={run.skipReason === 'phase'} /><span className="text-caption tabular-nums text-muted-foreground">{formatRelativeTime(run.finishedAt ?? run.startedAt ?? run.scheduledFor, now)}</span></span>
         <span className="text-body [overflow-wrap:anywhere]">{showProject ? <span className="text-muted-foreground">{project(run)?.name ?? run.projectId} · </span> : null}{run.subject ? subjectTitle(run.subject) : run.automationName}</span>
-        {run.outcome ? <span className="text-caption text-muted-foreground [overflow-wrap:anywhere]">{run.outcome}</span> : null}
+        {run.outcome ? <span className={`text-caption [overflow-wrap:anywhere] ${run.skipReason === 'phase' ? 'text-foreground' : 'text-muted-foreground'}`}>{run.outcome}</span> : null}
         <span className="text-caption text-muted-foreground [overflow-wrap:anywhere]">{run.automationName} · <span className="font-mono">{run.event ?? run.trigger}</span></span>
+        {run.workspaceId !== null && run.phase !== null ? <span className="flex min-w-0 items-center gap-1 text-caption text-muted-foreground"><span className="min-w-0 truncate">{workspaceLabel(project(run), run.projectId, run.workspaceId)}</span><span className="shrink-0">in</span><PhaseBadge phase={run.phase} /></span> : null}
       </button></li>)}
     </ul>
     <div className="hidden sm:block"><Table size="compact">
@@ -43,23 +49,24 @@ export function RunsTable({ runs, projects, showProject, now, onOpen }: { runs: 
         {showProject ? <TableHead className="w-[14%]">Project</TableHead> : null}
         <TableHead className={showProject ? 'w-[30%]' : 'w-[40%]'}>Subject</TableHead>
         <TableHead>From · event</TableHead>
-        <TableHead>Workspace</TableHead>
+        <TableHead>Workspace · phase then</TableHead>
         <TableHead className="w-24 text-right">When</TableHead>
       </TableRow></TableHeader>
       <TableBody>
-        {runs.map((run, index) => <TableRow key={run.id} index={index} className="cursor-pointer" onClick={() => onOpen(run)}>
-          <TableCell><RunBadge state={run.state} /></TableCell>
+        {runs.map((run, index) => <TableRow key={run.id} index={index} data-run={run.id} className="cursor-pointer" onClick={() => onOpen(run)}>
+          <TableCell><RunBadge state={run.state} byPhase={run.skipReason === 'phase'} /></TableCell>
           {showProject ? <TableCell className="max-w-0"><span className="block truncate">{project(run)?.name ?? run.projectId}</span></TableCell> : null}
           <TableCell className="max-w-0">
             <button type="button" className="block w-full truncate text-left text-foreground" onClick={(event) => { event.stopPropagation(); onOpen(run); }}>{run.subject ? subjectTitle(run.subject) : run.automationName}</button>
-            {run.outcome ? <span className="block truncate text-caption text-muted-foreground">{run.outcome}</span> : null}
+            {run.outcome ? <span className={`block truncate text-caption ${run.skipReason === 'phase' ? 'text-foreground' : 'text-muted-foreground'}`}>{run.outcome}</span> : null}
           </TableCell>
           <TableCell className="max-w-0">
             <span className="block truncate">{run.automationName}</span>
             <span className="block truncate font-mono text-caption text-muted-foreground">{run.event ?? run.trigger}</span>
           </TableCell>
           <TableCell className="max-w-0">{run.workspaceId === null ? <span className="text-muted-foreground">—</span>
-            : <span className={`block truncate text-caption ${run.workspaceId === run.projectId ? '' : 'font-mono underline decoration-dotted underline-offset-2'}`}>{workspaceLabel(project(run), run.projectId, run.workspaceId)}</span>}</TableCell>
+            : <span className={`block truncate text-caption ${run.workspaceId === run.projectId ? '' : 'font-mono underline decoration-dotted underline-offset-2'}`}>{workspaceLabel(project(run), run.projectId, run.workspaceId)}</span>}
+            {run.phase === null ? null : <span className="flex items-center gap-1 text-caption text-muted-foreground">in <PhaseBadge phase={run.phase} /></span>}</TableCell>
           <TableCell className="text-right tabular-nums text-muted-foreground">{formatRelativeTime(run.finishedAt ?? run.startedAt ?? run.scheduledFor, now)}</TableCell>
         </TableRow>)}
       </TableBody>
@@ -74,8 +81,8 @@ export function RunDetail({ run, project, busy, onCancel, onOpenWorkspace }: { r
   const stopping = run.state === 'running' && confirmStop;
   return <>
     <DialogHeader>
-      <DialogTitle><span className="flex flex-wrap items-center gap-2"><span className="[overflow-wrap:anywhere]">{run.subject ? subjectTitle(run.subject) : run.automationName}</span><RunBadge state={run.state} /></span></DialogTitle>
-      <DialogDescription>{run.automationName} · <span className="font-mono">{run.event ?? run.trigger}</span> · {formatUtc(run.scheduledFor)}</DialogDescription>
+      <DialogTitle><span className="flex flex-wrap items-center gap-2"><span className="[overflow-wrap:anywhere]">{run.subject ? subjectTitle(run.subject) : run.automationName}</span><RunBadge state={run.state} byPhase={run.skipReason === 'phase'} /></span></DialogTitle>
+      <DialogDescription>{run.automationName} · <span className="font-mono">{run.event ?? run.trigger}</span> · {formatUtc(run.scheduledFor)}{run.phase === null ? null : <> · {workspace ?? 'its workspace'} was in {MODE_LABEL[run.phase]}</>}</DialogDescription>
     </DialogHeader>
     <div className="flex flex-col gap-5">
       {run.outcome ? <p className="text-body [overflow-wrap:anywhere]">{run.outcome}</p> : null}

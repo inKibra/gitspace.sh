@@ -39,6 +39,7 @@ import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { gitLfsObjectKey } from './git-lfs-store.js';
 import { tenantStore } from './tenant-store.js';
 import { behindOrigin } from './cloud-stack-status.js';
+import { noticeStackChanges } from './stack-notices.js';
 import { GUIDE_SHARE_MAX_BYTES, guideShareRecordSchema, type GuideShareRecord } from './guide-shares.js';
 import { AutomationRunRecordSchema, automationRunView, utcDay, type AutomationRunRecord } from './project-automations.js';
 import type { AutomationProjectSummary, AutomationRunView } from '@gitspace/protocol/automations-contract';
@@ -1447,14 +1448,18 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
    * cycles). A domain refusal is returned, not thrown, so its typed failure survives the Durable Object boundary. */
   setWorkspaceRelations(workspaceId: string, input: WorkspaceRelationsInput): { status: 'ok'; value: WorkspaceRelations } | { status: 'error'; failure: WorkspaceFailure } {
     try {
-      return { status: 'ok', value: this.commit('workspace', workspaceId, () => {
+      const previous = this.listWorkspaceRelations()[workspaceId]?.stackedOn ?? null;
+      const value = this.commit('workspace', workspaceId, () => {
         const project = this.requireProject();
         if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') throw new Error(`Cannot change workspace relations of a ${project.lifecycle} project`);
         const workspaces = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting');
         const relations = resolveWorkspaceRelations(workspaceId, input, workspaces, new Map(Object.entries(this.listWorkspaceRelations())));
         this.ctx.storage.sql.exec('INSERT INTO workspace_relations(workspace_id,relations_json) VALUES(?,?) ON CONFLICT(workspace_id) DO UPDATE SET relations_json=excluded.relations_json', workspaceId, JSON.stringify(relations));
         return relations;
-      }) };
+      });
+      // Restacked: the workspace's agent is told where it now merges, without waking.
+      if (value.stackedOn !== previous) this.ctx.waitUntil(noticeStackChanges(this.env, this.env.ACCOUNT_ID, this.requireProject().id, workspaceId).catch((error: unknown) => console.error('Stack notices were not sent', { workspaceId, error })));
+      return { status: 'ok', value };
     } catch (error) {
       if (error instanceof WorkspaceDomainError) return { status: 'error', failure: error.toJSON() };
       throw error;

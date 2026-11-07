@@ -2,7 +2,7 @@ import { Badge, Button, CardGroup, Dialog, DialogContent, DialogDescription, Dia
 import { ChevronDown } from '@untitledui/icons';
 import { useRef, useState, type ReactElement } from 'react';
 import { useResultQuery } from 'result-rpc/react';
-import { AUTOMATION_DEFAULT_SETTINGS, automationSubjectKey, type AutomationRunView, type AutomationSubjectRef, type AutomationView } from '@gitspace/protocol/automations-contract';
+import { AUTOMATION_DEFAULT_SETTINGS, automationSubjectKey, type AutomationMode, type AutomationRunView, type AutomationSubjectRef, type AutomationView } from '@gitspace/protocol/automations-contract';
 import { BUILT_IN_MODEL_ROLES } from '@gitspace/protocol/inference';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { EmptyState, PageCanvas, PageHeader } from '../GitSpaceShell.js';
@@ -15,16 +15,19 @@ import { AutomationCard, type CardHandlers } from './AutomationCard.js';
 import { AutomationEditor } from './AutomationEditor.js';
 import { LimitsEditor } from './AutomationLimits.js';
 import { LinkDialog, LinksTable } from './AutomationLinks.js';
+import { AutomationPhaseGrid } from './AutomationPhaseGrid.js';
 import { RunDetail, RunsTable } from './AutomationRuns.js';
 import { TrustList } from './AutomationTrustedAuthors.js';
 import { Section, Stat } from './automation-fields.js';
-import { LimitsGlyph, LinkGlyph, NO_GITHUB, PROJECT_RUN_LIMIT, PlusGlyph, settle } from './automation-formatters.js';
+import { LimitsGlyph, LinkGlyph, NO_GITHUB, PHASE_ACTIONS, PROJECT_RUN_LIMIT, PlusGlyph, settle } from './automation-formatters.js';
 
 export interface AutomationWorkspace {
   id: string;
   name: string;
   /** Closed (archived) workspaces only name past runs; automations cannot message them. */
   active: boolean;
+  /** Its phase now, which decides whether an automation reaches it. */
+  phase: AutomationMode;
 }
 
 export interface AutomationsProject {
@@ -72,7 +75,9 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
   const listRead = useRetainedRead(list, projectId);
   const runs = useResultQuery(rpcClient.automations.runs, { projectId: projectId ?? '', limit: PROJECT_RUN_LIMIT }, { enabled: projectId !== null });
   const runsRead = useRetainedRead(runs, projectId);
-  const refresh = (): Promise<unknown> => Promise.all(projectId === null ? [overview.refetch()] : [overview.refetch(), list.refetch(), runs.refetch()]);
+  const exceptionsQuery = useResultQuery(rpcClient.automations.exceptions.list, { projectId: projectId ?? '' }, { enabled: projectId !== null });
+  const exceptionsRead = useRetainedRead(exceptionsQuery, projectId);
+  const refresh = (): Promise<unknown> => Promise.all(projectId === null ? [overview.refetch()] : [overview.refetch(), list.refetch(), runs.refetch(), exceptionsQuery.refetch()]);
   useEventRefresh(useLiveChanges(accountLiveKey('automations')), refresh);
 
   const [editor, setEditor] = useState<{ id: number; source: AutomationView | null; test: boolean } | null>(null);
@@ -109,6 +114,7 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
   const links = listRead.value?.links ?? [];
   const github = listRead.value?.github ?? NO_GITHUB;
   const modelRoles = listRead.value?.modelRoles ?? BUILT_IN_MODEL_ROLES;
+  const exceptions = exceptionsRead.value ?? [];
   const bot = github.bot ?? 'the GitSpace bot';
   const ordered = [...automations.filter(automation => automation.proposal !== null), ...automations.filter(automation => automation.proposal === null)];
   const groups = [
@@ -135,6 +141,7 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
     approve: automation => void perform(automation.id, 'Switch on', () => settle(rpcClient.automations.approve({ projectId: automation.projectId, automationId: automation.id, revision: automation.revision }))),
     dismiss: automation => void perform(automation.id, 'Dismiss', () => settle(rpcClient.automations.delete({ projectId: automation.projectId, automationId: automation.id }))),
     openConversation: automation => onOpenWorkspace(automation.projectId, automation.projectId),
+    setException: (automation, workspaceId, phase, enabled) => void perform(automation.id, enabled === null ? 'Remove the exception' : 'Make an exception', () => settle(rpcClient.automations.exceptions.set({ projectId: automation.projectId, automationId: automation.id, workspaceId, phase, enabled }))),
   };
 
   const cancelRun = async (run: AutomationRunView): Promise<void> => {
@@ -142,7 +149,7 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
     if (done) setOpenRun(done.value);
   };
 
-  const readError = [overviewRead.error ? rpcErrorMessage(overviewRead.error, 'Read automations overview') : null, projectId !== null && listRead.error ? rpcErrorMessage(listRead.error, 'Read automations') : null, projectId !== null && runsRead.error ? rpcErrorMessage(runsRead.error, 'Read runs') : null].filter(Boolean).join(' · ');
+  const readError = [overviewRead.error ? rpcErrorMessage(overviewRead.error, 'Read automations overview') : null, projectId !== null && listRead.error ? rpcErrorMessage(listRead.error, 'Read automations') : null, projectId !== null && runsRead.error ? rpcErrorMessage(runsRead.error, 'Read runs') : null, projectId !== null && exceptionsRead.error ? rpcErrorMessage(exceptionsRead.error, 'Read workspace exceptions') : null].filter(Boolean).join(' · ');
 
   return <PageCanvas>
     <PageHeader kicker={<ProjectPicker projects={projects} project={projectName} onPick={onSelectProject} />} title="Automations"
@@ -194,9 +201,12 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
         : listRead.value ? <>
           {groups.filter(group => group.automations.length).map(group => <Section key={group.title} title={group.title} aside={group.aside ? <span className="text-caption text-muted-foreground">{group.aside}</span> : undefined}>
             <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-              {group.automations.map((automation, index) => <AutomationCard key={automation.id} automation={automation} index={index} project={project} bot={bot} busy={busy === automation.id} now={now} handlers={handlers} />)}
+              {group.automations.map((automation, index) => <AutomationCard key={automation.id} automation={automation} exceptions={exceptions.filter(exception => exception.automationId === automation.id)} index={index} project={project} bot={bot} busy={busy === automation.id} now={now} handlers={handlers} />)}
             </CardGroup>
           </Section>)}
+          {automations.some(automation => PHASE_ACTIONS.includes(automation.action.kind)) ? <Section title="By workspace" aside={<span className="text-caption text-muted-foreground">{exceptions.length} workspace {exceptions.length === 1 ? 'exception' : 'exceptions'}</span>}>
+            <AutomationPhaseGrid automations={automations} workspaces={project?.workspaces ?? []} exceptions={exceptions} busy={busy} now={now} onSet={handlers.setException} />
+          </Section> : null}
           <Section title="Linked pull requests and issues"
             aside={<Button variant="secondary" size="compact" type="button" leadingIcon={LinkGlyph} onClick={() => setLinking({ id: Date.now(), subject: null })}>Link a pull request or issue</Button>}>
             <p className="text-caption text-muted-foreground">Each has one workspace in this project, linked when GitSpace starts the workspace for it, when an agent or you link it, or by branch. What reaches the workspace is set by the automations under Sent to linked workspaces.</p>

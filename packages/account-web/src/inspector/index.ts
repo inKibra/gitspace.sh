@@ -1,8 +1,6 @@
 export { Inspector } from './Inspector.js';
 export type {
   CreateInspectorThread,
-  InspectorDocumentKind,
-  InspectorOpenDocument,
   InspectorPermanentView,
   InspectorProps,
   InspectorUsageState,

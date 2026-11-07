@@ -110,7 +110,7 @@ export function GuideWalkthroughSection({ section, index, root, done, openedGate
   </AccordionItem>;
 }
 
-export function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMarkRead, onGenerate, shares }: {
+export function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMarkRead, onGenerate, shares, focusSection }: {
   guide: ChangeGuideView | null;
   reviewerId: string;
   review: GuideReview;
@@ -118,6 +118,8 @@ export function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMa
   onMarkRead: InspectorProps['onMarkGuideSectionRead'];
   onGenerate?: InspectorProps['onGenerateChangeGuide'];
   shares?: GuideShareHandlers;
+  /** A link to one section (a Journal decision's): opens it and scrolls to it, once per serial. */
+  focusSection?: { id: string; serial: number } | null;
 }) {
   const viewKey = guide ? `${guide.projectId}:${guide.spaceId}:${guide.revision}` : 'empty';
   const cached = guideViewCache.get(viewKey);
@@ -159,7 +161,6 @@ export function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMa
     }
     guideViewCache.set(viewKey, { active, anchor, openedGates: new Set(openedGates) });
   }, [viewKey, active, openedGates]);
-  if (!guide || !activeSection) return <Padded><EmptyState icon={ic(File02, 22)} title="No Change Guide" description="Ask the canonical agent to delegate a narrator grounded in the Journal and current diff." action={onGenerate ? <Button variant="secondary" size="compact" type="button" onClick={() => settle(onGenerate())}>Generate Change Guide</Button> : undefined} /></Padded>;
   const go = (index: number): void => {
     setActive(index);
     let frame = 0;
@@ -173,6 +174,13 @@ export function ChangeGuideSurface({ guide, reviewerId, review, onLoadDiff, onMa
     };
     requestAnimationFrame(converge);
   };
+  useEffect(() => {
+    const index = focusSection ? guide?.sections.findIndex((section) => section.id === focusSection.id) ?? -1 : -1;
+    if (!focusSection || index < 0) return;
+    setOpen((current) => current.includes(focusSection.id) ? current : [...current, focusSection.id]);
+    go(index);
+  }, [focusSection?.serial]);
+  if (!guide || !activeSection) return <Padded><EmptyState icon={ic(File02, 22)} title="No Change Guide" description="Ask the canonical agent to delegate a narrator grounded in the Journal and current diff." action={onGenerate ? <Button variant="secondary" size="compact" type="button" onClick={() => settle(onGenerate())}>Generate Change Guide</Button> : undefined} /></Padded>;
   const onOpenChange = (next: string[]): void => {
     const opened = next.find((id) => !open.includes(id));
     setOpen(next);

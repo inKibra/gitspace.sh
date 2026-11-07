@@ -46,7 +46,9 @@ import { loadDriveArtifact, loadInspectorResource } from './resource-content.js'
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
 import { liveTicks, useLiveChanges } from './live-notices.js';
-import { accountLiveKey } from '@gitspace/protocol/live-notice';
+import { accountLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
+import { stackOf } from './sidebar/graph.js';
+import { ProjectGraphsContext, useProjectGraphs, useStackStatuses } from './sidebar/project-graph.js';
 import type { GitHubAppManifestForm, GitHubAppOwner } from '@gitspace/protocol/github';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
 import { useRuntimeInspectorState } from './useRuntimeInspectorState.js';
@@ -118,14 +120,14 @@ export function LiveInspector({
   const repository = useRepositoryTree(spaceId, generation, repositoryMode, readKey, runtimeAvailable && secondaryQueries.repository);
   const journal = useResultQuery(rpcClient.inspector.journal.list, request, { enabled: secondaryQueries.journal });
   const threads = useResultQuery(rpcClient.inspector.review.list, request, { enabled: secondaryQueries.threads });
-  const stackedOn = scope?.kind === 'workspace' ? scope.relations.stackedOn : null;
-  const stackStatus = useResultQuery(rpcClient.workspace.stackStatus, { workspaceId: spaceId }, { enabled: stackedOn !== null && scope?.kind === 'workspace' && !scope.closedAt });
+  // Every stacked workspace of this workspace's stack, whose positions the Relations tab's chain shows.
+  const stackLinks = scope?.kind === 'workspace' ? stackOf(workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => ({ id: workspace.id, dependsOn: workspace.relations.dependsOn, stackedOn: workspace.relations.stackedOn })), scope.id).flatMap((link) => link.stackedOn === null ? [] : [link.id]) : [];
+  const stackStatus = useStackStatuses(stackLinks, refreshToken);
   const overviewRead = useRetainedRead(overview, readKey);
   const artifactValue = useRetainedQueryValue(artifactCatalog, readKey);
   const repositoryValue = useRetainedQueryValue(repository, JSON.stringify([readKey, repositoryMode]));
   const journalValue = useRetainedQueryValue(journal, readKey);
   const threadsValue = useRetainedQueryValue(threads, readKey);
-  const stackValue = useRetainedQueryValue(stackStatus, JSON.stringify([readKey, stackedOn]));
   const [repositoryFile, setRepositoryFile] = useState<RepositoryFileView | null>(null);
   const [repositoryDiff, setRepositoryDiff] = useState<RepositoryDiffView | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -157,7 +159,6 @@ export function LiveInspector({
   useEventRefresh(refreshToken === mountedRefreshToken.current ? null : refreshToken, () => Promise.all([
     overview.refetch(), journal.refetch(), threads.refetch(), artifactCatalog.refetch(),
     ...(runtimeAvailable ? [repository.refetch()] : []),
-    ...(stackedOn !== null ? [stackStatus.refetch()] : []),
   ]));
 
   const projectChanges = useProjectChanges(projectId);
@@ -223,7 +224,7 @@ export function LiveInspector({
     {overviewRead.refreshing ? <p role="status" className="sr-only">Refreshing Inspector…</p> : null}
     {overviewRead.error ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Inspector overview refresh failed; showing the last accepted state. {rpcErrorMessage(overviewRead.error, 'inspector.overview')}<Button variant="ghost" size="compact" onClick={() => void overview.refetch()}>Retry overview</Button></p> : null}
     {threads.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Review threads {threadsValue ? 'refresh failed; showing the last accepted state.' : 'could not load.'} {rpcErrorMessage(threads.error, 'inspector.review.list')}<Button variant="ghost" size="compact" onClick={() => void threads.refetch()}>Retry review threads</Button></p> : null}
-    {stackStatus.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Stack status {stackValue ? 'refresh failed; showing the last accepted state.' : 'could not load.'} {rpcErrorMessage(stackStatus.error, 'workspace.stackStatus')}<Button variant="ghost" size="compact" onClick={() => void stackStatus.refetch()}>Retry stack status</Button></p> : null}
+    {stackStatus.error ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Stack status could not load. {stackStatus.error}<Button variant="ghost" size="compact" onClick={stackStatus.retry}>Retry stack status</Button></p> : null}
     {actionError ? <p role="alert" className="px-3 py-1 text-caption text-destructive">{actionError}</p> : null}
   </div><Inspector
     overview={overviewValue}
@@ -252,7 +253,7 @@ export function LiveInspector({
     browserCount={browsersActive?.open}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
-    stackStatus={stackValue ?? null}
+    stackStatus={stackStatus.statuses}
     repositoryEntries={repositoryValue ?? []}
     lfsHeldBack={runtimeLfsHeldBack(runtimeContext?.snapshot)}
     repositoryMode={repositoryMode}
@@ -490,11 +491,17 @@ function AccountFrame({ children }: { children: ReactNode }) {
   // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
   const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
   const operations = useAccountOperations();
+  const { graphs, readers: graphReaders } = useProjectGraphs(projectValues.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting').map((project) => project.id));
   const sidebarProjects: SidebarProject[] = projectValues.map((project) => ({
     id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote,
     ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [],
     operations: operations.filter((operation) => operation.projectId === project.id),
+    graph: graphs[project.id],
   }));
+  // The selected workspace's stack, whose positions its sidebar lane shows; read again as its runtime publishes.
+  const selectedGraph = projectId ? graphs[projectId] : undefined;
+  const selectedStack = selectedGraph && workspaceId ? stackOf(Object.entries(selectedGraph.relations).map(([id, relations]) => ({ id, ...relations })), workspaceId).flatMap((link) => link.stackedOn === null ? [] : [link.id]) : [];
+  const selectedStackStatuses = useStackStatuses(selectedStack, useLiveChanges(workspaceLiveKey(workspaceId ?? '', 'runtime', projectId)));
   const frameView = route === 'agent' && !projectId ? 'projects' : route;
   useEffect(() => { if (frameView !== 'projects') setSettingsProjectId(null); }, [frameView]);
   const globalSidebar = frameView !== 'agent' && runtimeSidebar?.view === frameView && runtimeSidebar.selected === null ? runtimeSidebar : null;
@@ -521,8 +528,9 @@ function AccountFrame({ children }: { children: ReactNode }) {
     else url.searchParams.delete('section');
     navigateProductUrl(url);
   };
-  return <AccountWorkActionsContext.Provider value={actions}><ProjectSettingsContext.Provider value={projectSettings}><AccountSidebarContext.Provider value={setRuntimeSidebar}><AccountDirectoryContext.Provider value={accountDirectory}>
-    <SidebarProvider className="gitspace-shell" persist={false}>
+  return <AccountWorkActionsContext.Provider value={actions}><ProjectSettingsContext.Provider value={projectSettings}><AccountSidebarContext.Provider value={setRuntimeSidebar}><AccountDirectoryContext.Provider value={accountDirectory}><ProjectGraphsContext.Provider value={graphs}>
+    {graphReaders}
+    <SidebarProvider className="gitspace-shell" persist={false} width="19rem">
       <AppSidebar {...(live ?? globalSidebar)} view={frameView} onView={navigate} selected={route === 'agent' && projectId ? { projectId, workspaceId } : null} projects={sidebarProjects} machines={(machineValues ?? []).filter((machine) => machine.state === 'online' && machine.rpcEndpoint !== null).map(({ id, label }) => ({ id, label }))} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(workspace) => selectInspection(workspace.projectId, workspace.id)} onOpenSettings={(section) => navigate('settings', section)} user={settingsValue ? { name: settingsValue.profile.displayName, handle: settingsValue.profile.handle } : undefined}
         releasePendingSpaceId={releasePendingSpaceId}
         onReleaseMachines={async (spaceId) => {
@@ -538,6 +546,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         onOpenProjectSettings={(id) => { setSettingsProjectId(id); navigate('projects'); }}
         onOpenProjectAutomations={(id) => navigateProductUrl(automationsUrl(id))}
         failedAutomationRuns={automationSummaries.reduce((sum, summary) => sum + summary.failedToday, 0)}
+        stackStatuses={selectedStackStatuses.statuses}
       />
       <SidebarInset className="min-w-0 overflow-hidden">
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
@@ -554,7 +563,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         finally { createPendingRef.current = false; setCreatePending(false); }
       }} />
     </SidebarProvider>
-  </AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
+  </ProjectGraphsContext.Provider></AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
 }
 
 type LiveWorkspaceProps = { onOpenSettings: (section?: 'source' | 'github') => void };
@@ -1428,7 +1437,8 @@ function AccountAutomations() {
   const projects = account.projects.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting').map((project) => ({
     id: project.id,
     name: project.name,
-    workspaces: (account.directory[project.id]?.workspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.name, active: !workspace.closedAt })),
+    // Automations read a workspace with no phase as in Plan.
+    workspaces: (account.directory[project.id]?.workspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.name, active: !workspace.closedAt, phase: workspace.definition?.phase ?? 'plan' })),
   }));
   return <AutomationsPage projects={projects} projectId={location.searchParams.get(AUTOMATIONS_PROJECT_PARAM)}
     onSelectProject={(projectId) => navigateProductUrl(automationsUrl(projectId))}

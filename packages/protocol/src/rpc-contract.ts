@@ -1561,7 +1561,8 @@ export const StackStatusCodec = wire.object({
   mergeBase: wire.nullable(wire.string),
   parentAhead: wire.number,
   parentMerged: wire.enum(['merged', 'not-merged', 'unknown']),
-  /** Agent-facing rebase instruction, or null when nothing needs to happen. */
+  /** Information for the workspace's agent: what the parent has that this branch lacks and the optional command; null
+   * while this branch holds everything its parent has. */
   instruction: wire.nullable(wire.string),
 });
 export type StackStatus = InputOf<typeof StackStatusCodec>;

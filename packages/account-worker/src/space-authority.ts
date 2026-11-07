@@ -33,6 +33,7 @@ import { committedBrowserOrigins } from './committed-browser-origins.js';
 import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetadataTables, projectAcceptsWrites, readWorkspaceMetadata, readWorkspaceReport, readWorkspaceStatus, writeSourceCheckpoint, writeWorkspaceMetadata, type WorkspaceMetadata } from './workspace-metadata.js';
 import { projectProgress, startFromProject, type ProjectProgress } from './project-watch.js';
 import { cancelAutomationTurn, submitAutomationTurn } from './automation-turns.js';
+import { StackObservationSchema, StackPositionSchema, stackNoticeText } from './stack-notices.js';
 import { AUTOMATION_REQUEST_PREFIX } from './project-automations.js';
 import { workspaceTurnReportSchema, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { z } from 'zod';
@@ -1105,6 +1106,20 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1) }).parse(raw);
     await this.runtimeAccess(input, true);
     await (await this.getRuntime(input)).notice(input.text, input.requestId, 'GitHub');
+  }
+
+  /** A reading of this workspace's stack position. Its agent gets a line it reads on its next turn, never a turn of its
+   * own, and only when the position differs from the one it was last told; the position is recorded before the line is
+   * sent, so a reading that arrives meanwhile says nothing again. */
+  async runtimeStackNotice(raw: unknown, observation: unknown): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const next = StackObservationSchema.parse(observation);
+    const stored: unknown = await this.ctx.storage.get('stack.position');
+    await this.ctx.storage.put('stack.position', next.position);
+    const text = stackNoticeText(stored === undefined ? null : StackPositionSchema.parse(stored), next);
+    if (text === null) return;
+    await this.runtimeAccess(identity, true);
+    await (await this.getRuntime(identity)).notice(text, undefined, 'Stack');
   }
 
   async runtimeTranscript(raw: unknown, format: 'json' | 'ndjson' = 'json', range: unknown = {}): Promise<Response> {

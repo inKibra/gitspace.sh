@@ -57,7 +57,10 @@ body { overflow: hidden; }
 .workspace-workbench[data-terminal-open] { grid-template-rows: minmax(180px, 1fr) auto var(--terminal-height, 300px); }
 .workspace-content { display: flex; width: 100%; min-width: 0; min-height: 0; }
 .conversation-stage { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
-.inspector-pane { width: var(--inspector-width, 440px); min-width: 300px; max-width: min(1200px, 70vw); flex: none; min-height: 0; }
+.inspector-pane { width: var(--inspector-width, 560px); min-width: 300px; max-width: min(1200px, 70vw); flex: none; min-height: 0; }
+/* Full width: the Inspector takes the conversation's place; the conversation stays mounted, hidden. */
+.workspace-content[data-inspector-full] > .conversation-stage, .workspace-content[data-inspector-full] > .inspector-resize-handle { display: none; }
+.workspace-content[data-inspector-full] > .inspector-pane { position: static; flex: 1 1 auto; width: auto; max-width: none; box-shadow: none; }
 
 /* ── Resize handles (keyboard-focusable; the visible line reads from Fluid tokens) ── */
 .inspector-resize-handle { position: relative; z-index: 12; width: 7px; flex: 0 0 7px; margin-inline: -3px; cursor: col-resize; touch-action: none; }

@@ -1,5 +1,5 @@
 import { Edit03, Link01, LinkBroken01, Play, Plus, RefreshCcw01, Settings01, Trash01 } from '@untitledui/icons';
-import { AUTOMATION_WATCH_LABEL, automationSubjectName, type AutomationAction, type AutomationCondition, type AutomationConditionKind, type AutomationGitHub, type AutomationGitHubEvent, type AutomationLinkSource, type AutomationMode, type AutomationRunState, type AutomationSubject, type AutomationSubjectRef, type AutomationTrigger, type AutomationTriggerKind, type AutomationWatchEvery, type AutomationWatchOn } from '@gitspace/protocol/automations-contract';
+import { AUTOMATION_MODES, AUTOMATION_WATCH_LABEL, automationSubjectName, type AutomationAction, type AutomationCondition, type AutomationConditionKind, type AutomationGitHub, type AutomationGitHubEvent, type AutomationLinkSource, type AutomationMode, type AutomationRunState, type AutomationSubject, type AutomationSubjectRef, type AutomationTrigger, type AutomationTriggerKind, type AutomationWatchEvery, type AutomationWatchOn } from '@gitspace/protocol/automations-contract';
 import { glyph } from '../glyph.js';
 import { type AutomationsProject } from './AutomationsPage.js';
 
@@ -11,6 +11,8 @@ type BadgeColor = 'blue' | 'amber' | 'green' | 'gray' | 'red';
 export const RUN_STATE_COLOR: Record<AutomationRunState, BadgeColor> = { running: 'blue', queued: 'amber', finished: 'green', skipped: 'gray', failed: 'red' };
 export const MODE_LABEL: Record<AutomationMode, string> = { plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship' };
 export const MODE_COLOR: Record<AutomationMode, 'indigo' | 'emerald' | 'violet' | 'amber'> = { plan: 'indigo', code: 'emerald', review: 'violet', ship: 'amber' };
+/** The actions a workspace's phase limits: the others start a workspace or message the project agent. */
+export const PHASE_ACTIONS: readonly AutomationAction['kind'][] = ['sendToLinked', 'messageWorkspace'];
 export const TRIGGER_KINDS: readonly AutomationTriggerKind[] = ['github', 'label', 'watch', 'schedule', 'manual'];
 export const TRIGGER_OPTION_LABEL: Record<AutomationTriggerKind, string> = { github: 'GitHub event', label: 'Label added', watch: 'Watch a repository', schedule: 'Schedule', manual: 'Manual only' };
 /** What an instruction's placeholders are checked against, in the editor's refusal. */
@@ -155,6 +157,14 @@ export function scheduleCron(choice: ScheduleChoice): string {
 export function workspaceLabel(project: AutomationsProject | undefined, projectId: string, workspaceId: string): string {
   if (workspaceId === projectId) return 'Project agent';
   return project?.workspaces.find(workspace => workspace.id === workspaceId)?.name ?? workspaceId;
+}
+
+/** "Every phase" (no phases), "Review only", "Code · Review"; all four read as every phase. */
+export function phasesLabel(phases: readonly AutomationMode[] | undefined | null): string {
+  if (!phases || phases.length === AUTOMATION_MODES.length) return 'Every phase';
+  const [only] = phases;
+  if (phases.length === 1 && only) return `${MODE_LABEL[only]} only`;
+  return AUTOMATION_MODES.filter(mode => phases.includes(mode)).map(mode => MODE_LABEL[mode]).join(' · ');
 }
 
 /** "PR #1140 · Bounded history for sessions". */

@@ -3,6 +3,7 @@ import { SidebarProvider } from '@gitspace/ui';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { verticalSliceFixture } from './App.js';
 import { AppSidebar, type AppSidebarProps, type SidebarWorkspace } from './AppSidebar.js';
 
 let root: Root;
@@ -121,4 +122,35 @@ it('opens project settings from the project row menu', async () => {
   expect(item).not.toBeNull();
   await act(() => item!.click());
   expect(onOpenProjectSettings).toHaveBeenCalledWith('project');
+});
+
+it('regroups the same rows by state or phase with their stack caption, filters them, and remembers the grouping', async () => {
+  const summary = (primaryColor: 'green' | 'orange' | 'blue'): SidebarWorkspace['summary'] => ({ holder: { kind: 'cloud' }, closedAt: null, freshness: 'fresh', status: { ...verticalSliceFixture.baseSpace.status, primaryColor } });
+  const workspace = (id: string, phase: 'code' | 'review', color: 'green' | 'orange' | 'blue'): SidebarWorkspace => ({ id, projectId: 'stacks', name: id, branch: id, closedAt: null, phase, summary: summary(color) });
+  const project = {
+    id: 'stacks', name: 'Stacks', workspaces: [workspace('shared', 'code', 'green'), workspace('executor', 'code', 'orange'), workspace('router', 'review', 'blue')],
+    graph: { baseBranch: 'main', relations: { executor: { dependsOn: ['shared'], stackedOn: 'shared' } }, pullRequests: {} },
+  };
+  const render = () => renderProject({ projects: [project] });
+  /** The project's list as headings and rows, in order. */
+  const listed = () => Array.from(container.querySelectorAll('[data-sidebar="menu-sub"] > li'), (item) => item.getAttribute('data-workspace') ?? item.textContent?.replace(/\d+$/u, '') ?? '');
+  const press = async (group: string, label: string) => {
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>(`[aria-label="${group}"] button`)).find((candidate) => candidate.textContent?.startsWith(label));
+    expect(button).toBeDefined();
+    await act(() => button!.click());
+  };
+  await render();
+  expect(listed()).toEqual(['shared', 'executor', 'router']);
+  await press('Group by', 'State');
+  expect(listed()).toEqual(['Needs you', 'executor', 'Running', 'shared', 'Waiting', 'router']);
+  expect(container.querySelector('[data-workspace="executor"]')?.textContent).toContain('on shared');
+  await press('Group by', 'Phase');
+  expect(listed()).toEqual(['Review', 'router', 'Code', 'shared', 'executor']);
+  await press('Filter workspaces', 'Needs you');
+  expect(listed()).toEqual(['Code', 'executor']);
+
+  await act(() => root.unmount());
+  root = createRoot(container);
+  await render();
+  expect(listed()).toEqual(['Review', 'router', 'Code', 'shared', 'executor']);
 });

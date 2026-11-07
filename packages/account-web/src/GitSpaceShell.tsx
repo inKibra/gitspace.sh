@@ -33,6 +33,7 @@ import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, u
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
 import { Composer, type ComposerProps, type SendBehavior } from './Composer.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
+import { InspectorLayout } from './inspector/inspector-shared.js';
 import { useInference } from './InferenceContext.js';
 import { AccountDirectoryContext } from './useAccountDirectory.js';
 import type { AppView } from './routes.js';
@@ -48,6 +49,8 @@ import { glyph } from './glyph.js';
 import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 import { ResourceFiles, type ResourceFile } from './resource-files.js';
 import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
+import { PrChip, StatusBadge } from './sidebar/parts.js';
+import { ProjectGraphsContext } from './sidebar/project-graph.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -202,7 +205,7 @@ export interface GitSpaceShellProps {
   access?: { card: ReactNode; notice: string };
 }
 
-const STATUS_COLOR: Record<WorkspaceStatusColor, string> = { dim: 'var(--muted-foreground)', green: '#22c55e', blue: '#3b82f6', orange: '#f97316', red: '#ef4444' };
+export const STATUS_COLOR: Record<WorkspaceStatusColor, string> = { dim: 'var(--muted-foreground)', green: '#22c55e', blue: '#3b82f6', orange: '#f97316', red: '#ef4444' };
 export const PHASE_LABEL: Record<WorkspaceView['phase'], string> = { plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship' };
 export const PHASES: readonly WorkspaceView['phase'][] = ['plan', 'code', 'review', 'ship'];
 export function workspacePhaseLabel(phase: WorkspaceView['phase'] | null | undefined): string {
@@ -560,7 +563,7 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'p
 
 // ── Resize handles ──
 function InspectorResizeHandle({ width, onWidth }: { width: number; onWidth: (width: number) => void }) {
-  return <div className="inspector-resize-handle" role="separator" aria-label="Resize inspector" aria-orientation="vertical" tabIndex={0} onDoubleClick={() => onWidth(440)} onPointerDown={(event) => {
+  return <div className="inspector-resize-handle" role="separator" aria-label="Resize inspector" aria-orientation="vertical" tabIndex={0} onDoubleClick={() => onWidth(560)} onPointerDown={(event) => {
     const handle = event.currentTarget;
     const startX = event.clientX;
     const startWidth = width;
@@ -612,12 +615,14 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   // which plays it.
   const capturing = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('capture');
   const [inspectorOpen, setInspectorOpen] = useState(capturing);
+  /** The Inspector in the conversation's place, its tab strip on top; Escape or "Back to conversation" returns. */
+  const [inspectorFull, setInspectorFull] = useState(false);
   const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | undefined>(capturing ? 'browser' : undefined);
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
-    if (typeof window === 'undefined') return 440;
+    if (typeof window === 'undefined') return 560;
     const stored = Number(window.localStorage.getItem('gitspace:inspector-width'));
-    return Number.isFinite(stored) && stored > 0 ? Math.min(1200, Math.max(300, stored)) : 440;
+    return Number.isFinite(stored) && stored > 0 ? Math.min(1200, Math.max(300, stored)) : 560;
   });
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [requestedTerminal, setRequestedTerminal] = useState<{ spaceId: string; name: string } | null>(null);
@@ -635,7 +640,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   };
   const navigate = (nextView: AppView): void => {
     onNavigateView?.(nextView);
-    if (nextView !== 'agent') { setInspectorOpen(false); setTerminalOpen(false); }
+    if (nextView !== 'agent') { setInspectorOpen(false); setInspectorFull(false); setTerminalOpen(false); }
   };
   const fallbackSummary = useMemo<SidebarSpaceSummary>(() => ({
     holder: workspace.holder,
@@ -660,11 +665,17 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     byProject.set(baseSpace.projectId, { ...byProject.get(baseSpace.projectId), id: baseSpace.projectId, name: baseSpace.projectName, base: baseSpace, ...(workspace.id === baseSpace.id ? { baseSummary: selectedSummary } : {}), workspaces: [] });
     for (const item of workspaces) {
       const entry: SidebarProject = byProject.get(item.projectId) ?? { id: item.projectId, name: item.projectName, workspaces: [] };
-      entry.workspaces.push({ id: item.id, projectId: item.projectId, name: item.name, branch: item.branch, closedAt: item.closedAt, summary: (workspace.id === item.id ? selectedSummary : undefined) ?? item });
+      entry.workspaces.push({ id: item.id, projectId: item.projectId, name: item.name, branch: item.branch, closedAt: item.closedAt, phase: item.phase, summary: (workspace.id === item.id ? selectedSummary : undefined) ?? item });
       byProject.set(item.projectId, entry);
     }
+    // The pane's own listing carries its project's relations; it knows of no linked pull requests.
+    const own = byProject.get(baseSpace.projectId);
+    if (own) own.graph = { baseBranch: baseSpace.branch, relations: Object.fromEntries(workspaces.filter((item) => item.projectId === baseSpace.projectId).map((item) => [item.id, { dependsOn: item.relations.dependsOn, stackedOn: item.relations.stackedOn }])), pullRequests: {} };
     return [...byProject.values()];
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
+  const projectGraph = useContext(ProjectGraphsContext)[workspace.projectId];
+  const pullRequest = workspace.kind === 'workspace' ? projectGraph?.pullRequests[workspace.id] : undefined;
+  const [phaseRefusal, setPhaseRefusal] = useState<{ workspaceId: string; message: string } | null>(null);
   const recovering = selectedSummary.detail === 'Agent is recovering';
   const inferenceState = useInference()?.state;
   const assignedProfileId = inferenceState?.assignments.find((entry) => entry.projectId === workspace.projectId)?.profileId;
@@ -692,29 +703,38 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
-          <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-md:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
-          {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-md:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
+          <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-xl:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
+          {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-xl:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
+          <span className="max-md:hidden"><StatusBadge color={workspaceStatusColor(selectedSummary)} label={recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)} /></span>
+          {workspace.kind === 'workspace' && projectGraph ? pullRequest ? <PrChip pr={pullRequest} full /> : <span className="shrink-0 text-caption text-muted-foreground max-lg:hidden">no PR</span> : null}
         </nav>
         <div className="flex items-center gap-1">
             {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
-            <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><WorkspaceStatusDot space={selectedSummary} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)}{profileChange ? ` · ${profileChange}` : ''}</span></span>
+            {profileChange ? <span className="px-2 text-caption text-muted-foreground max-md:hidden">{profileChange}</span> : null}
             {workspace.kind === 'project' ? projectOperation : null}
             {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
-            {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
+            {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => {
+              const next = PHASES.find((phase) => phase === value);
+              if (!next) return;
+              setPhaseRefusal(null);
+              // The server keeps the phase ceiling: a refusal leaves the phase as it was and says why.
+              void Promise.resolve(onSetWorkspacePhase(workspace.id, next)).catch((failure: unknown) => setPhaseRefusal({ workspaceId: workspace.id, message: rpcErrorMessage(failure, 'Change phase') }));
+            }}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-            {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+            {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => { if (inspectorOpen && inspectorFull) setInspectorFull(false); else setInspectorOpen((value) => !value); }}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
         </div>
       </SidebarInsetTopbar>
+      {phaseRefusal?.workspaceId === workspace.id ? <div role="alert" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-destructive"><span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{phaseRefusal.message}</span><Button variant="ghost" size="compact" onClick={() => setPhaseRefusal(null)}>Dismiss</Button></div> : null}
 
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
-            <div className="workspace-content">
+            <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
                 <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} access={access} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}</aside> : null}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}</InspectorLayout.Provider></aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? () => { setInspectorSection('environment'); setInspectorOpen(true); } : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
@@ -734,5 +754,5 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
   </ResourceNavigation.Provider></ResourceFiles.Provider>;
-  return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false}><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
+  return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false} width="19rem"><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

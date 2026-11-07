@@ -20,9 +20,10 @@ import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
-import { RuntimeAttachmentSchema, RuntimeLifecycleDispatchArgumentsSchema, type RuntimeGitCheckpoint, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeSnapshotSchema, type RuntimeGitCheckpoint, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { Result } from 'better-result';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
+import { noticeStackChanges } from '../src/stack-notices.js';
 
 afterEach(() => vi.restoreAllMocks());
 function emptyCommittedSource() {
@@ -1117,7 +1118,7 @@ describe('workspace environment edits and stack status with no machines', () => 
     const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
     await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`), checkpointAt(parentId, 'review', parentHead));
     await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
-    expect(await stack(childId)).toEqual({ parentId, parentBranch: 'review', baseBranch: 'main', mergeBase: fork, parentAhead: 2, parentMerged: 'not-merged', instruction: 'Rebase onto the parent: `git rebase review`' });
+    expect(await stack(childId)).toEqual({ parentId, parentBranch: 'review', baseBranch: 'main', mergeBase: fork, parentAhead: 2, parentMerged: 'not-merged', instruction: "You merge after Review. Its branch has 2 commits yours doesn't. If you want to build on them: `git rebase review`. Optional." });
 
     // Merging the parent into the child reaches its commits only through a second parent.
     history.copy(childRepository, second, parentHead);
@@ -1127,9 +1128,70 @@ describe('workspace environment edits and stack status with no machines', () => 
     // The base workspace's checkpoint, not the imported branch, says whether the parent landed.
     history.copy(baseRepository, fork, second, parentHead);
     await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${projectId}`), checkpointAt(projectId, 'main', history.commit([main, parentHead], baseRepository)));
-    expect(await stack(childId)).toMatchObject({ parentAhead: 0, parentMerged: 'merged', instruction: 'The parent merged into main. Rebase only your own commits: `git rebase --onto main review`, then this workspace is no longer stacked.' });
+    expect(await stack(childId)).toMatchObject({ parentAhead: 0, parentMerged: 'merged', instruction: 'Review merged into main. If you want your branch to hold only your own commits: `git rebase --onto main review`. Optional.' });
 
     expect(await stack(parentId)).toEqual({ parentId: null, parentBranch: null, baseBranch: 'main', mergeBase: null, parentAhead: 0, parentMerged: 'unknown', instruction: null });
     expect(await client.workspace.stackStatus({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: rpcErrors.workspaceNotFound.tag, data: { workspaceId: 'missing' } } });
+  });
+
+  it('tells a stacked workspace’s agent of each change of its stack position once, as a notice that starts no turn', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
+    const childId = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
+    expect(await authority.setWorkspaceRelations(childId, { dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok' });
+    const [projectRepository, baseRepository, parentRepository, childRepository] = [`project-${projectId}`, `workspace-${projectId}`, `workspace-${parentId}`, `workspace-${childId}`];
+    const history = artifactsHistory();
+    const root = history.commit([], projectRepository, baseRepository, parentRepository, childRepository);
+    const main = history.commit([root], projectRepository, baseRepository, parentRepository, childRepository);
+    const fork = history.commit([main], parentRepository, childRepository);
+    const parentCommits = [history.commit([fork], parentRepository)];
+    const parentCommit = () => { const next = history.commit([parentCommits.at(-1) ?? fork], parentRepository); parentCommits.push(next); return next; };
+    let parentHead = parentCommit();
+    let childHead = history.commit([fork], childRepository);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => repository === projectRepository && ref === 'refs/heads/main' ? main : null);
+    const parent = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`);
+    const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
+    await seedCheckpoint(parent, checkpointAt(parentId, 'review', parentHead));
+    await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
+    const identity = { projectId, workspaceId: childId };
+    const notices = async () => (await (await child.runtimeTranscript(identity, 'ndjson')).text()).split('\n').filter(Boolean).flatMap(line => {
+      const message = JSON.parse(line)?.payload?.message;
+      return message?.customType === 'gitspace.machine-notice' ? [String(message.content)] : [];
+    });
+    const ahead = (commits: string) => `Stack · You merge after Review. Its branch has ${commits} yours doesn't. If you want to build on them: \`git rebase review\`. Optional.`;
+
+    // The parent's new head reaches what is stacked on it; reading the same position again says nothing.
+    await noticeStackChanges(env, fixture.userId, projectId, parentId);
+    await noticeStackChanges(env, fixture.userId, projectId, parentId);
+    expect(await notices()).toEqual([ahead('2 commits')]);
+
+    // Still behind after another parent commit: the position has not changed, so nothing more is said.
+    parentHead = parentCommit();
+    await seedCheckpoint(parent, checkpointAt(parentId, 'review', parentHead));
+    await noticeStackChanges(env, fixture.userId, projectId, parentId);
+    expect(await notices()).toEqual([ahead('2 commits')]);
+
+    // Caught up (merged the parent in), then the parent moves on again: a new change, told once.
+    history.copy(childRepository, ...parentCommits);
+    childHead = history.commit([childHead, parentHead], childRepository);
+    await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
+    await noticeStackChanges(env, fixture.userId, projectId, childId);
+    parentHead = parentCommit();
+    await seedCheckpoint(parent, checkpointAt(parentId, 'review', parentHead));
+    await noticeStackChanges(env, fixture.userId, projectId, parentId);
+    expect(await notices()).toEqual([ahead('2 commits'), ahead('1 commit')]);
+
+    // Restacked onto nothing: told where it merges now.
+    expect(await authority.setWorkspaceRelations(childId, { dependsOn: [], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'ok' });
+    await noticeStackChanges(env, fixture.userId, projectId, childId);
+    expect(await notices()).toEqual([ahead('2 commits'), ahead('1 commit'), 'Stack · Restacked: you no longer merge after another workspace; you merge into main on your own.']);
+
+    // None of it woke the agent: no conversation runs and no turn was started.
+    const snapshot = RuntimeSnapshotSchema.parse(await (await child.runtimeSnapshot(identity)).json());
+    expect(snapshot.conversations.map(conversation => conversation.status)).toEqual(snapshot.conversations.map(() => 'idle'));
+    expect(snapshot.conversations.flatMap(conversation => conversation.messages).filter(message => message.role === 'assistant')).toEqual([]);
+    expect(snapshot.tasks.filter(task => task.conversationId !== null && (task.state === 'pending' || task.state === 'running'))).toEqual([]);
   });
 });

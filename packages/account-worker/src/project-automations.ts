@@ -98,6 +98,7 @@ export const AutomationRunRecordSchema = z.object({
   state: z.enum(['queued', 'running', 'finished', 'skipped', 'failed']),
   workspaceId: z.string().nullable(),
   phase: z.enum(AUTOMATION_MODES).nullable().default(null),
+  skipReason: z.enum(['phase']).nullable().default(null),
   outcome: z.string().nullable(),
   checks: ChecksSchema.default([]),
   timeline: TimelineSchema,
@@ -370,6 +371,8 @@ interface RunRow extends Record<string, SqlStorageValue> {
   retry_at: number | null;
   /** The workspace's phase when the run reached it; null for the project agent, or no workspace. */
   phase: AutomationMode | null;
+  /** `phase` when the workspace's phase ruled the run out; null otherwise, and on runs recorded before it. */
+  skip_reason: 'phase' | null;
 }
 
 interface LinkRow extends Record<string, SqlStorageValue> {
@@ -415,7 +418,7 @@ interface LinkedTarget { workspaceId: string; name: string; source: AutomationLi
 interface RunPlan {
   checks: AutomationCheck[];
   /** Why it does not run ("Skipped: …" or "Failed: …"), or null. */
-  ended: { state: 'skipped' | 'failed'; outcome: string } | null;
+  ended: { state: 'skipped' | 'failed'; outcome: string; skipReason?: 'phase' } | null;
   kind: RunKind;
   workspaceId: string | null;
   targetName: string;
@@ -507,7 +510,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           submitted INTEGER NOT NULL DEFAULT 0,
           attempts INTEGER NOT NULL DEFAULT 0,
           retry_at INTEGER,
-          phase TEXT
+          phase TEXT,
+          skip_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS automation_runs_automation ON automation_runs(automation_id, created_at);
         CREATE INDEX IF NOT EXISTS automation_runs_state ON automation_runs(state, created_at);
@@ -594,6 +598,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     if (automations.length > 0 && !automations.includes('phases_json')) sql.exec('ALTER TABLE automations ADD COLUMN phases_json TEXT');
     const recorded = columns('automation_runs');
     if (recorded.length > 0 && !recorded.includes('phase')) sql.exec('ALTER TABLE automation_runs ADD COLUMN phase TEXT');
+    if (recorded.length > 0 && !recorded.includes('skip_reason')) sql.exec('ALTER TABLE automation_runs ADD COLUMN skip_reason TEXT');
   }
 
   /** The project's automations, the limits and trust list they run under, its subject links, and the model roles a
@@ -1262,7 +1267,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const label = exception ? `a person switched it ${passed ? 'on' : 'off'} for ${workspace.name} in ${MODE_LABEL[phase]}`
       : `${workspace.name} is in ${MODE_LABEL[phase]}; it runs in ${(automation.phases ?? []).map(entry => MODE_LABEL[entry]).join(', ')}`;
     const checks = [...plan.checks, { label, passed }];
-    return passed ? { ...plan, phase, checks } : { ...plan, phase, checks, ended: { state: 'skipped', outcome: `Skipped: ${label}` } };
+    return passed ? { ...plan, phase, checks } : { ...plan, phase, checks, ended: { state: 'skipped', outcome: `Skipped: ${label}`, skipReason: 'phase' } };
   }
 
   /** A draft's test against recorded deliveries: one, or the recent ones its trigger starts on. A watch is tested on
@@ -1319,12 +1324,12 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const timeline: Timeline = labels.map(label => ({ at: now, label }));
     const trigger = event === null ? firing.trigger === 'schedule' ? 'schedule' : 'manual' : automation.trigger.kind === 'label' ? 'label' : 'github';
     this.ctx.storage.sql.exec(`
-      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, id, automation.id, automation.name, trigger, plan.kind, event === null ? null : automationEventName(event), event?.subjects[0] ? JSON.stringify(event.subjects[0]) : null,
     event === null ? null : JSON.stringify(event), JSON.stringify(plan.checks), plan.start === null ? null : JSON.stringify(plan.start), ended?.state ?? 'queued',
     plan.ended === null || plan.phase !== null ? plan.workspaceId : null, plan.targetName, plan.message, ended?.outcome ?? null, JSON.stringify(timeline),
-    scheduledFor, now, ended === null ? null : now, plan.phase);
+    scheduledFor, now, ended === null ? null : now, plan.phase, ended?.skipReason ?? null);
     this.ctx.storage.sql.exec(`
       DELETE FROM automation_runs WHERE automation_id=? AND state IN ('finished', 'skipped', 'failed')
         AND id NOT IN (SELECT id FROM automation_runs WHERE automation_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?)
@@ -1740,6 +1745,7 @@ function runRecord(projectId: string, row: RunRow): AutomationRunRecord {
     state: row.state,
     workspaceId: row.workspace_id,
     phase: row.phase,
+    skipReason: row.skip_reason,
     outcome: row.outcome,
     checks: ChecksSchema.parse(JSON.parse(row.checks_json)),
     timeline: TimelineSchema.parse(JSON.parse(row.timeline_json)),

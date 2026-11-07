@@ -229,7 +229,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       controlsError={session.error ?? (providers.state === 'failure' ? rpcErrorMessage(providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
-      onSetWorkspacePhase={async (_id, phase) => { await perform(async () => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }); }}
+      onSetWorkspacePhase={async (_id, phase) => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }}
       projectOperation={props.projectOperation
         ? <Button variant="ghost" size="compact" onClick={props.onOpenProjectSettings}><span className="flex min-w-0 items-center gap-1 text-caption text-muted-foreground"><OperationStatusLine operation={props.projectOperation} /><span className="shrink-0">· Details</span></span></Button>
         : undefined}

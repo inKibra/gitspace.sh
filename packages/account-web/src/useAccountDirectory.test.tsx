@@ -125,7 +125,7 @@ function workspaceSummary() {
 }
 
 function row(label: string): HTMLElement {
-  const element = [...container.querySelectorAll<HTMLElement>('[data-sidebar="menu-button"], [data-sidebar="menu-sub-button"]')].find((candidate) => candidate.textContent?.startsWith(label));
+  const element = [...container.querySelectorAll<HTMLElement>('[data-sidebar="menu-button"], [data-workspace] > button')].find((candidate) => candidate.textContent?.startsWith(label));
   if (!element) throw new Error(`Missing sidebar row: ${label}`);
   return element;
 }

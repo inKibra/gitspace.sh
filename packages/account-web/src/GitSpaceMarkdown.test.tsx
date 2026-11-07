@@ -61,4 +61,13 @@ $$E = mc^2$$`}</GitSpaceMarkdown>);
     expect(html).toContain('Working');
     expect(html).toContain('answer');
   });
+
+  it('never shows a block fence as code, even before the block code has loaded', () => {
+    const html = renderToStaticMarkup(<GitSpaceMarkdown>{'Plan:\n\n```gitspace-ui\n{ "root": "card", "elements": {} }\n```\n\n```svg\n<svg viewBox="0 0 1 1"></svg>\n```'}</GitSpaceMarkdown>);
+    expect(html).toContain('Plan:');
+    expect(html).toContain('Drawing…');
+    expect(html).not.toContain('&quot;root&quot;');
+    expect(html).not.toContain('viewBox');
+    expect(html).not.toContain('data-streamdown="code-block"');
+  });
 });

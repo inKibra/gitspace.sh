@@ -11,7 +11,6 @@ import { Inspector, type InspectorProps } from './Inspector.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
 import type { DriveFileView, InspectorDrive } from './DriveSurface.js';
 
-vi.mock('@pierre/diffs/react', () => ({ FileDiff: () => null }));
 vi.mock('@pierre/trees/react', () => ({ useFileTree: () => ({ model: { resetPaths() {}, setGitStatus() {} } }), FileTree: () => null }));
 
 const url = 'drive://workspace/data.zip';
@@ -207,7 +206,7 @@ describe('Inspector artifact uploads', () => {
     expect(remove).toHaveBeenCalledExactlyOnceWith([`drive://workspace/${capture}/capture.json`, `drive://workspace/${capture}/image.jpg`, `drive://workspace/${capture}/thumbnail.jpg`]);
   });
 
-  it('keeps the open folder after a file is opened and the Drive tab is chosen again', async () => {
+  it('keeps the open folder after a file is opened and Back returns to the drive', async () => {
     props.drive = { ...props.drive!, files: [driveFile('notes/plan.md'), driveFile('notes/call.m4a'), driveFile('readme.md')] };
     props.artifactReferences = [{ kind: 'artifact', url: 'drive://workspace/notes/plan.md', hash: 'hash', label: 'notes/plan.md', mediaType: null, generation: 1 }];
     props.onRequestArtifact = () => Promise.withResolvers<never>().promise;
@@ -215,9 +214,9 @@ describe('Inspector artifact uploads', () => {
     await act(async () => [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('notes'))!.click());
     await act(async () => [...container.querySelectorAll('button')].find((node) => node.textContent?.startsWith('plan.md'))!.click());
     expect(container.querySelector('[aria-label="Workspace Inspector"] header strong')?.textContent).toBe('notes/plan.md');
-    expect(container.querySelector('nav[aria-label="Folder"]')?.closest('[role="tabpanel"]')?.hasAttribute('hidden') ?? true).toBe(true);
+    expect(container.querySelector('nav[aria-label="Folder"]')?.closest('[hidden]')).not.toBeNull();
 
-    await act(async () => [...container.querySelectorAll('[role="tab"]')].find((node) => node.textContent?.startsWith('Drive'))!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await click('Drive');
 
     expect(container.querySelector('nav[aria-label="Folder"]')?.textContent).toContain('notes');
     expect(container.textContent).toContain('call.m4a');

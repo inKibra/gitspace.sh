@@ -18,6 +18,7 @@ import { projectWatchHooks, reconcileProjectWatch } from './project-watch.js';
 import { automationTurnHooks, reconcileAutomationTurns } from './automation-turns.js';
 import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
+import { noticeStackHead } from './stack-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { remoteDefaultBranch } from './cloud-project.js';
@@ -150,6 +151,8 @@ export async function createAccountWorkspaceRuntime(
       waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
       // The environment is derived from the workspace's files: derive it when they change, not when it is read.
       waitUntil('environment derivation', environment.currentLifecycleState(identity).catch((error: unknown) => console.error('Environment was not derived', { workspaceId: identity.workspaceId, error })));
+      // A new head of this branch can move what is stacked on it; its agents are told without waking.
+      waitUntil('stack notices', noticeStackHead(ctx.storage, env, identity).catch((error: unknown) => console.error('Stack notices were not sent', { workspaceId: identity.workspaceId, error })));
     },
     code,
     lfs,

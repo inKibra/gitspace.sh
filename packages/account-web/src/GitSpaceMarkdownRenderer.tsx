@@ -4,6 +4,7 @@ import type { Components, PluginConfig } from 'streamdown';
 import 'streamdown/styles.css';
 import { useEffect, useState } from 'react';
 import type { GitSpaceMarkdownProps } from './GitSpaceMarkdown.js';
+import { BLOCK_RENDERERS } from './blocks/MarkdownBlocks.js';
 import { rehypeResourceAnchors, rehypeResourceLinks } from './ResourceNavigation.js';
 import { MarkdownResourceAnchor, MarkdownResourceMedia, rehypeResourceAddresses, rehypeResourceMedia, rehypeResourceMediaMarkers } from './resource-media.js';
 
@@ -19,12 +20,13 @@ export function GitSpaceMarkdownRenderer({ children, streaming = false, classNam
   const needsMermaid = /(?:```|~~~)mermaid(?:\s|\n)/u.test(children);
   const needsMath = /\$\$|\\\(|\\\[/u.test(children);
   const needsCjk = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff]/u.test(children);
-  const [plugins, setPlugins] = useState<PluginConfig>({});
+  // ```gitspace-ui and ```svg fences draw as blocks; ```mermaid goes to the Mermaid plugin.
+  const [plugins, setPlugins] = useState<PluginConfig>({ renderers: BLOCK_RENDERERS });
   useEffect(() => {
     let cancelled = false;
     // Runtime-selected plugin loading keeps Mermaid, Shiki, KaTeX, and CJK code off Markdown surfaces that do not use them.
     void (async () => {
-      const next: PluginConfig = {};
+      const next: PluginConfig = { renderers: BLOCK_RENDERERS };
       if (needsCode) next.code = (await import('@streamdown/code')).code;
       if (needsMermaid) next.mermaid = (await import('@streamdown/mermaid')).mermaid;
       if (needsMath) {

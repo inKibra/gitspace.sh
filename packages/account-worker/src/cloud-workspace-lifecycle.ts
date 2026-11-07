@@ -7,6 +7,7 @@ import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from 
 import { ArtifactsCodeStore, GitDiscoveryError, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
 import { forwardPosition, type ForwardPosition } from './cloud-stack-status.js';
+import { noticeStackChanges } from './stack-notices.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 import { refreshProjectRemote } from './project-remote.js';
@@ -586,6 +587,8 @@ async function runProjectUpdateBase({ env, userId, authority, operation, advance
   const outcome = position.kind === 'forward' ? `Base branch ${branch} updated to ${head.slice(0, 7)} from origin.` : `Base branch ${branch} already holds origin's ${head.slice(0, 7)}.`;
   const text = left === null ? outcome : `${outcome} The base workspace was left for later: ${left}`;
   await space.runtimeProjectNotice(identity, text);
+  // A moved base can mean a stack parent merged: what is stacked is told, without waking.
+  if (position.kind === 'forward') await noticeStackChanges(env, userId, projectId, projectId).catch((error: unknown) => console.error('Stack notices were not sent', { projectId, error }));
   if (left !== null) throw new Error(text);
 }
 

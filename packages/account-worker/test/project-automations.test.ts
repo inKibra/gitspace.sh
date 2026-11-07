@@ -175,8 +175,8 @@ describe('ProjectAutomationsDO', () => {
         const automation = automationValue(await automations.create({ projectId, draft }));
         return automationValue(await automations.runNow({ projectId, automationId: automation.id, requestedBy: 'Brad' }));
       };
-      expect(await run(toWorkspace('Any phase', workspaceId))).toMatchObject({ state: 'queued', workspaceId, phase: 'code', outcome: null, checks: [] });
-      expect(await run(toWorkspace('Plan and review', workspaceId, ['plan', 'review']))).toMatchObject({ state: 'skipped', workspaceId, phase: 'code', outcome: 'Skipped: release-work is in Code; it runs in Plan, Review', checks: [{ label: 'release-work is in Code; it runs in Plan, Review', passed: false }] });
+      expect(await run(toWorkspace('Any phase', workspaceId))).toMatchObject({ state: 'queued', workspaceId, phase: 'code', skipReason: null, outcome: null, checks: [] });
+      expect(await run(toWorkspace('Plan and review', workspaceId, ['plan', 'review']))).toMatchObject({ state: 'skipped', workspaceId, phase: 'code', skipReason: 'phase', outcome: 'Skipped: release-work is in Code; it runs in Plan, Review', checks: [{ label: 'release-work is in Code; it runs in Plan, Review', passed: false }] });
       await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).commitWorkspacePhase(workspaceId, 'review');
       expect(await run(toWorkspace('Review only', workspaceId, ['review']))).toMatchObject({ state: 'queued', workspaceId, phase: 'review', outcome: null });
       // The project agent has no phase, so phases do not limit a run to it.
@@ -200,7 +200,7 @@ describe('ProjectAutomationsDO', () => {
       await set(codeOnly.id, 'review', false);
       expect(await run(codeOnly.id)).toMatchObject({ state: 'queued', phase: 'code' });
       expect(await set(codeOnly.id, 'code', false)).toEqual({ automationId: codeOnly.id, workspaceId, phase: 'code', enabled: false, at: new Date(midnight + HOUR).toISOString(), by: 'device-1' });
-      expect(await run(codeOnly.id)).toMatchObject({ state: 'skipped', phase: 'code', outcome: 'Skipped: a person switched it off for release-work in Code' });
+      expect(await run(codeOnly.id)).toMatchObject({ state: 'skipped', phase: 'code', skipReason: 'phase', outcome: 'Skipped: a person switched it off for release-work in Code' });
       await set(planOnly.id, 'code', true);
       expect(await run(planOnly.id)).toMatchObject({ state: 'queued', phase: 'code', checks: [{ label: 'a person switched it on for release-work in Code', passed: true }] });
       expect(await set(codeOnly.id, 'code', null)).toBeNull();

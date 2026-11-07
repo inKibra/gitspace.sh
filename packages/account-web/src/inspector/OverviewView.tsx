@@ -10,7 +10,6 @@ import {
   CardGroup,
   CardHeader,
   CardTitle,
-  InputCopy,
   ScrollArea,
   Select,
   SelectContent,
@@ -23,8 +22,12 @@ import {
   type BadgeProps,
 } from '@gitspace/ui';
 import { AlertTriangle, XClose } from '@untitledui/icons';
-import { useState, type ReactNode } from 'react';
+import { useContext, useState, type ReactNode } from 'react';
 import { EmptyState, PHASE_LABEL, workspaceStatusColor, WorkspaceStatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
+import { stackOf } from '../sidebar/graph.js';
+import { MiniGraph } from '../sidebar/Lane.js';
+import { ProjectGraphsContext } from '../sidebar/project-graph.js';
+import { StackChain, type ChainWorkspace } from '../sidebar/StackChain.js';
 import { isBlocking, useRelationWriter, WorkspaceGraph, type SetWorkspaceRelations } from '../WorkspaceGraph.js';
 import { WorkspacePicker } from '../WorkspacePicker.js';
 
@@ -33,8 +36,9 @@ export interface OverviewViewProps {
   workspaces: readonly WorkspaceView[];
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: SetWorkspaceRelations;
-  /** Git position against the `stackedOn` parent; null while loading or when it cannot be computed. */
-  stackStatus?: StackStatus | null;
+  /** The git position of each stacked workspace of this workspace's stack against its parent, by workspace id; a link
+   * missing from it shows no position. */
+  stackStatus?: ReadonlyMap<string, StackStatus>;
 }
 
 const FINDING_COLOR: Record<string, NonNullable<BadgeProps['color']>> = { 'dependency-open': 'amber', 'dependency-archived': 'gray', 'phase-ceiling': 'red', cycle: 'red' };
@@ -102,25 +106,9 @@ function CeilingNotice({ finding, parent, onOpen }: { finding: WorkspaceView['st
   </div>;
 }
 
-function StackStatusLine({ status }: { status: StackStatus }) {
-  const summary = status.parentMerged === 'merged'
-    ? { color: 'green' as const, text: `Parent merged into ${status.baseBranch}` }
-    : status.parentMerged === 'unknown'
-      ? { color: 'gray' as const, text: 'Parent position unknown' }
-      : status.parentAhead > 0
-        ? { color: 'amber' as const, text: `Parent is ${status.parentAhead} ${status.parentAhead === 1 ? 'commit' : 'commits'} ahead` }
-        : { color: 'green' as const, text: 'Up to date with the parent' };
-  return <div className="flex flex-col gap-2">
-    <span className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
-      <Badge variant="dot" size="compact" color={summary.color}>{summary.text}</Badge>
-      {status.parentBranch ? <span className="font-mono">{status.parentBranch}</span> : null}
-      {status.mergeBase ? <span className="font-mono">base {status.mergeBase.slice(0, 10)}</span> : null}
-    </span>
-    {status.instruction ? <InputCopy label="Agent instruction" value={status.instruction} size="compact" /> : null}
-  </div>;
-}
-
-function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelations, stackStatus = null }: OverviewViewProps & { scope: WorkspaceView }) {
+function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelations, stackStatus = new Map() }: OverviewViewProps & { scope: WorkspaceView }) {
+  const [hovered, setHovered] = useState<string | null>(null);
+  const graphs = useContext(ProjectGraphsContext);
   const { apply, error } = useRelationWriter(onSetRelations);
   const [addKind, setAddKind] = useState<(typeof RELATION_KINDS)[number]>('dependsOn');
   const byId: Record<string, WorkspaceView> = {};
@@ -132,7 +120,9 @@ function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelation
   const dependsOnEdges = new Map<string, readonly string[]>();
   for (const workspace of workspaces) if (workspace.projectId === scope.projectId) dependsOnEdges.set(workspace.id, workspace.relations.dependsOn);
   const dependents = transitiveDependents(scope.id, dependsOnEdges);
-  const parent = scope.relations.stackedOn ? byId[scope.relations.stackedOn] : undefined;
+  const chainItems: ChainWorkspace[] = workspaces.filter((workspace) => workspace.projectId === scope.projectId && !workspace.closedAt).map((workspace) => ({ id: workspace.id, name: workspace.name, branch: workspace.branch, dependsOn: workspace.relations.dependsOn, stackedOn: workspace.relations.stackedOn, status: workspace }));
+  const stackSize = stackOf(chainItems, scope.id).length;
+  const baseBranch = [...stackStatus.values()][0]?.baseBranch ?? graphs[scope.projectId]?.baseBranch ?? 'the base branch';
   const ceilings = scope.stack.findings.filter((finding) => finding.code === 'phase-ceiling');
   const otherFindings = scope.stack.findings.filter((finding) => finding.code !== 'phase-ceiling');
   const addRelation = (id: string): void => {
@@ -158,23 +148,17 @@ function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelation
   </Select> : null;
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-4 p-4">
     <header className="flex items-start justify-between gap-3">
-      <span className="flex min-w-0 flex-col gap-1"><span className="text-caption text-muted-foreground">Workspace stack</span><h2 className="text-title font-semibold text-foreground">{scope.name}</h2><p className="text-caption text-muted-foreground tabular-nums">{scope.stack.blockedBy.length ? `Blocked by ${scope.stack.blockedBy.length}` : 'Not blocked'}{scope.stack.blocking.length ? ` · blocking ${scope.stack.blocking.length}` : ''}</p></span>
+      <span className="flex min-w-0 flex-col gap-1"><span className="text-caption text-muted-foreground">Relations</span><h2 className="text-title font-semibold text-foreground">{scope.name}</h2><p className="text-caption text-muted-foreground tabular-nums">{scope.stack.blockedBy.length ? `Blocked by ${scope.stack.blockedBy.length}` : 'Not blocked'}{scope.stack.blocking.length ? ` · blocking ${scope.stack.blocking.length}` : ''}</p></span>
     </header>
     {ceilings.map((finding) => <CeilingNotice key={`${finding.code}:${finding.workspaceId ?? ''}`} finding={finding} parent={finding.workspaceId ? byId[finding.workspaceId] : undefined} onOpen={onSelectWorkspace} />)}
-    <section className="flex flex-col gap-2">
-      <header className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Stack</h3>{stackedOnSelect}</header>
-      <CardGroup border="outlined" proximityHover={false}>
-        {scope.relations.stackedOn ? <WorkspaceRow id={scope.relations.stackedOn} workspace={parent} badge={<Badge variant="dot" size="compact" color="blue">parent</Badge>} onOpen={onSelectWorkspace} /> : null}
-        <Card size="compact" selected>
-          <CardHeader>
-            <CardTitle><span className="flex items-center gap-2"><WorkspaceStatusDot space={scope} />{scope.name}</span></CardTitle>
-            <CardDescription><span className="font-mono">{scope.branch}</span></CardDescription>
-          </CardHeader>
-          <CardContent><span className="flex flex-wrap items-center gap-1"><Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[scope.phase]}</Badge><Badge size="compact" color="gray">{scope.relations.stackedOn ? 'this workspace' : 'not stacked'}</Badge></span></CardContent>
-        </Card>
-        {scope.stack.blocking.map((id) => <WorkspaceRow key={id} id={id} workspace={byId[id]} badge={<Badge variant="dot" size="compact" color={byId[id]?.relations.stackedOn === scope.id ? 'blue' : 'amber'}>{byId[id]?.relations.stackedOn === scope.id ? 'stacked child' : 'waiting'}</Badge>} onOpen={onSelectWorkspace} />)}
-      </CardGroup>
-      {scope.relations.stackedOn && stackStatus?.parentId === scope.relations.stackedOn ? <StackStatusLine status={stackStatus} /> : null}
+    {scope.relations.dependsOn.length || scope.stack.blocking.length ? <section className="flex flex-col gap-2">
+      <h3 className="text-caption font-medium text-muted-foreground">Dependency graph</h3>
+      <div className="overflow-x-auto rounded-xl bg-surface-1 py-1 ring-1 ring-border"><MiniGraph items={chainItems} open={scope.id} hovered={hovered} onHover={setHovered} onOpen={onSelectWorkspace} /></div>
+    </section> : null}
+    <section className="flex flex-col gap-1.5">
+      <header className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Stack{stackSize > 1 ? ` · ${stackSize} workspaces, merged in this order` : ''}</h3>{stackedOnSelect}</header>
+      {stackSize > 1 ? <div className="rounded-xl bg-surface-1 p-1.5 ring-1 ring-border"><StackChain items={chainItems} id={scope.id} baseBranch={baseBranch} statuses={stackStatus} compact={false} onOpen={onSelectWorkspace} /></div>
+        : <p className="text-caption text-muted-foreground">Not in a stack: it merges into {baseBranch} on its own.</p>}
     </section>
     {onSetRelations && others.length ? <section className="flex flex-col gap-2">
       <header className="flex items-center justify-between gap-2">

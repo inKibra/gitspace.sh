@@ -198,8 +198,14 @@ export async function readCloudStackStatus(env: Env, userId: string, projectId: 
     await authority.putStackComparison(workspaceId, source, JSON.stringify(comparison));
   }
   const { mergeBase, parentAhead, parentMerged } = comparison;
-  const instruction = parentMerged === 'merged'
-    ? `The parent merged into ${baseBranch}. Rebase only your own commits: \`git rebase --onto ${baseBranch} ${parent.branch}\`, then this workspace is no longer stacked.`
-    : parentAhead > 0 ? `Rebase onto the parent: \`git rebase ${parent.branch}\`` : null;
+  const instruction = stackPositionNote({ name: parent.name, branch: parent.branch }, baseBranch, parentAhead, parentMerged);
   return { parentId: parent.id, parentBranch: parent.branch, baseBranch, mergeBase, parentAhead, parentMerged, instruction };
+}
+
+/** What a stacked workspace's parent has that its branch lacks, told to its agent as information with the optional
+ * command; null while the branch holds everything its parent has. */
+export function stackPositionNote(parent: { name: string; branch: string }, baseBranch: string, parentAhead: number, parentMerged: StackStatus['parentMerged']): string | null {
+  if (parentMerged === 'merged') return `${parent.name} merged into ${baseBranch}. If you want your branch to hold only your own commits: \`git rebase --onto ${baseBranch} ${parent.branch}\`. Optional.`;
+  if (parentAhead > 0) return `You merge after ${parent.name}. Its branch has ${parentAhead} ${parentAhead === 1 ? 'commit' : 'commits'} yours doesn't. If you want to build on them: \`git rebase ${parent.branch}\`. Optional.`;
+  return null;
 }

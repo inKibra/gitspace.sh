@@ -468,6 +468,9 @@ export const AutomationRunViewCodec = wire.object({
   /** The workspace's phase when the run reached it (a started workspace's first phase); null for the project agent or
    * a run that reached no workspace. */
   phase: wire.nullable(wire.enum(AUTOMATION_MODES)),
+  /** `phase`: skipped because the workspace's phase (or a person's exception for it) ruled the run out; null for
+   * every other run, and for runs recorded before skip reasons. */
+  skipReason: wire.nullable(wire.enum(['phase'])),
   /** Why it was skipped or failed, or what it did. */
   outcome: wire.nullable(wire.string),
   checks: wire.array(AutomationCheckCodec),
