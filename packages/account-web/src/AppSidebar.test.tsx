@@ -148,20 +148,20 @@ describe('AppSidebar selected status', () => {
   });
 });
 
-/** inkibra-like stacks: shared-code with executor (and workload on it) and a fork, audit; router waits on ledger. Listed
- * out of stacking order, as the directory lists them. */
+/** A bakery's stacks: bakery-api on bakery-core (and bakery-web on bakery-api), a fork bakery-admin on bakery-core;
+ * bakery-payments waits on bakery-stock. Listed out of stacking order, as the directory lists them. */
 const stackedProject: SidebarProject = {
   id: 'stacks', name: 'Stacks',
-  workspaces: ['workload', 'router', 'executor', 'shared', 'audit', 'ledger'].map((id) => ({ id, projectId: 'stacks', name: id, branch: `feature/${id}`, closedAt: null, phase: id === 'router' ? 'review' : 'code' })),
+  workspaces: ['bakery-web', 'bakery-payments', 'bakery-api', 'bakery-core', 'bakery-admin', 'bakery-stock'].map((id) => ({ id, projectId: 'stacks', name: id, branch: `feature/${id}`, closedAt: null, phase: id === 'bakery-payments' ? 'review' : 'code' })),
   graph: {
     baseBranch: 'develop',
     relations: {
-      executor: { dependsOn: ['shared'], stackedOn: 'shared' },
-      workload: { dependsOn: ['executor'], stackedOn: 'executor' },
-      audit: { dependsOn: ['shared'], stackedOn: 'shared' },
-      router: { dependsOn: ['ledger'], stackedOn: null },
+      'bakery-api': { dependsOn: ['bakery-core'], stackedOn: 'bakery-core' },
+      'bakery-web': { dependsOn: ['bakery-api'], stackedOn: 'bakery-api' },
+      'bakery-admin': { dependsOn: ['bakery-core'], stackedOn: 'bakery-core' },
+      'bakery-payments': { dependsOn: ['bakery-stock'], stackedOn: null },
     },
-    pullRequests: { router: { number: 1336, title: 'Router-only cell transports', url: null } },
+    pullRequests: { 'bakery-payments': { number: 42, title: 'Card payments at checkout', url: null } },
   },
 };
 
@@ -170,27 +170,27 @@ describe('AppSidebar stacks', () => {
     const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[stackedProject]} /></SidebarProvider>);
     // Each row in sidebar order with its left inset.
     expect([...html.matchAll(/data-workspace="([^"]+)"[^>]*><button[^>]*?style="padding-left:(\d+)px"/gu)].map((match) => [match[1], Number(match[2])]))
-      .toEqual([['router', 14], ['shared', 14], ['executor', 30], ['workload', 30], ['audit', 30], ['ledger', 14]]);
-    expect(html).toContain('title="Stacked on shared: it merges after it"');
-    expect(html).toContain('title="Stacked on executor: it merges after it"');
-    expect(html).toContain('waits on ledger');
-    expect(html).toContain('blocks router');
-    expect(html).toContain('#1336');
+      .toEqual([['bakery-payments', 14], ['bakery-core', 14], ['bakery-api', 30], ['bakery-web', 30], ['bakery-admin', 30], ['bakery-stock', 14]]);
+    expect(html).toContain('title="Stacked on bakery-core: it merges after it"');
+    expect(html).toContain('title="Stacked on bakery-api: it merges after it"');
+    expect(html).toContain('waits on bakery-stock');
+    expect(html).toContain('blocks bakery-payments');
+    expect(html).toContain('#42');
     // No lane without an open workspace.
     expect(html).not.toContain('data-sidebar-lane');
   });
 
   it('puts the lane directly above the open row: what it waits on and blocks, its stack, and the chain with each position', () => {
-    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} deployment={null} projects={[stackedProject]} selected={{ projectId: 'stacks', workspaceId: 'executor' }}
-      stackStatuses={new Map([['executor', { parentId: 'shared', parentBranch: 'feature/shared', baseBranch: 'develop', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', instruction: null }]])} /></SidebarProvider>);
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} deployment={null} projects={[stackedProject]} selected={{ projectId: 'stacks', workspaceId: 'bakery-api' }}
+      stackStatuses={new Map([['bakery-api', { parentId: 'bakery-core', parentBranch: 'feature/bakery-core', baseBranch: 'develop', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', instruction: null }]])} /></SidebarProvider>);
     const lane = html.indexOf('data-sidebar-lane');
-    expect(lane).toBeGreaterThan(html.indexOf('data-workspace="shared"'));
-    expect(lane).toBeLessThan(html.indexOf('data-workspace="executor"'));
+    expect(lane).toBeGreaterThan(html.indexOf('data-workspace="bakery-core"'));
+    expect(lane).toBeLessThan(html.indexOf('data-workspace="bakery-api"'));
     expect(html).toContain('waits on 0</span><span>·</span>');
     expect(html).toContain('stack 4');
-    expect([...html.matchAll(/data-stack-link="([^"]+)"/gu)].map((match) => match[1])).toEqual(['shared', 'executor', 'workload', 'audit']);
+    expect([...html.matchAll(/data-stack-link="([^"]+)"/gu)].map((match) => match[1])).toEqual(['bakery-core', 'bakery-api', 'bakery-web', 'bakery-admin']);
     expect(html).toContain('bottom of the stack · merges into develop');
-    expect(html).toContain('merges after shared · 2 commits behind shared');
-    expect(html).toContain('git rebase feature/shared');
+    expect(html).toContain('merges after bakery-core · 2 commits behind bakery-core');
+    expect(html).toContain('git rebase feature/bakery-core');
   });
 });

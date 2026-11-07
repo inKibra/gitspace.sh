@@ -54,15 +54,15 @@ async function click(text: string): Promise<void> {
 }
 
 const EXPECTED: Record<string, readonly string[]> = {
-  benchmark: ['First visible text, per message', 'Live chunks (abc1234)', '4.5 s', 'main · text shows after the whole attempt is saved', '4 replies per message.', 'What the member sees'],
-  options: ['Where does the live text come from?', 'How text leaves the flow', 'Keep the side channel', 'Use live chunks'],
-  question: ['Accept the brief flicker?', '160 benched replies', 'Accept the flicker', 'Hold text until the reply is committed', 'Note for the agent', 'Add to message'],
-  steps: ['One reply chunk, end to end', 'provider', 'Step 1 of 4', 'The model streams', 'Play', 'Open this step in the Change Guide'],
-  review: ['Three open review threads', '3 of 3 threads included', 'Guard the empty chunk', 'src/processor.ts:88', 'Outdated', 'Open thread'],
-  evidence: ['Is first text sooner, with no slower total?', '120 replies · def5678', '18 of 18', 'Total p95', 'abc1234'],
-  requirements: ['Requirements', '1 of 3 requirements accepted', 'A withdrawn attempt leaves no text', 'optional'],
-  ask: ['Keep the batch-searches prompt rule?', 'Drop it', 'Keep it'],
-  drawing: ['Where the chunk goes', 'processor'],
+  benchmark: ['Menu ready, per page', 'Menu cache (abc1234)', '1.1 s', 'main · menu read from the database', '4 loads per page.', 'What the customer sees'],
+  options: ['Where should the menu cache live?', 'Survives a deploy', 'Keep it in memory', 'Use Redis'],
+  question: ['Show sold-out items greyed out?', '40 test orders', 'Grey them out', 'Hide them until restocked', 'Note for the agent', 'Add to message'],
+  steps: ['One order, end to end', 'storefront', 'Step 1 of 4', 'The customer taps', 'Play', 'Open this step in the Change Guide'],
+  review: ['Three open review threads', '3 of 3 threads included', 'Guard the empty basket', 'src/kitchen.ts:88', 'Outdated', 'Open thread'],
+  evidence: ['Is the menu faster, with no slower checkout?', '200 loads · def5678', '17 of 18', 'Checkout p95', 'abc1234'],
+  requirements: ['Requirements', '1 of 3 requirements accepted', 'An edited item shows within a minute', 'optional'],
+  ask: ['Keep the pastry photos on the menu?', 'Drop them', 'Keep them'],
+  drawing: ['Where an order goes', 'kitchen'],
 };
 
 describe('gitspace-ui blocks in Markdown', () => {
@@ -78,11 +78,11 @@ describe('gitspace-ui blocks in Markdown', () => {
 
   it('redraws from state when a bound control changes', async () => {
     await render(<GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('benchmark').spec))}</GitSpaceMarkdown>);
-    await waitFor(() => container.textContent?.includes('4.5 s') ?? false);
-    await click('Live chunks (abc1234)');
-    await waitFor(() => container.textContent?.includes('3.6 s') ?? false);
-    expect(container.textContent).toContain('3 replies per message.');
-    expect(container.textContent).not.toContain('4.5 s');
+    await waitFor(() => container.textContent?.includes('1.1 s') ?? false);
+    await click('Menu cache (abc1234)');
+    await waitFor(() => container.textContent?.includes('0.4 s') ?? false);
+    expect(container.textContent).toContain('5 loads per page.');
+    expect(container.textContent).not.toContain('1.1 s');
   });
 
   it('shows the issues of a spec the validator rejects, and its JSON on request', async () => {
@@ -116,6 +116,36 @@ describe('gitspace-ui blocks in Markdown', () => {
     expect(container.textContent).toContain('event handler attributes are not allowed');
   });
 
+  it.each([
+    '<svg viewBox="0 0 10 10"><!-- --!><img src=x onerror=alert(1)> --></svg>',
+    '<svg viewBox="0 0 10 10"><!--><img src=x onerror=alert(1)>--></svg>',
+    '<svg viewBox="0 0 10 10"><![CDATA[<img src=x onerror=alert(1)>]]></svg>',
+    '<svg viewBox="0 0 10 10"></svg><img src=x onerror=alert(1)>',
+    '<svg viewBox="0 0 10 10"><title><img src=x onerror=alert(1)></title></svg>',
+    '<svg viewBox="0 0 10 10"><foreignObject><div onclick="alert(1)">x</div></foreignObject></svg>',
+  ])('puts no element or handler from %s in the page', async (svg) => {
+    await render(<GitSpaceMarkdown>{fence('svg', svg)}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="svg"]') !== null || (container.textContent?.includes('could not be drawn') ?? false));
+    expect(container.querySelector('img, script, foreignObject, div[onclick]')).toBeNull();
+    expect([...container.querySelectorAll('*')].flatMap((element) => element.getAttributeNames()).filter((name) => /^on/i.test(name))).toEqual([]);
+  });
+
+  it('draws a themed drawing element by element', async () => {
+    const themed = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20"><defs><marker id="arrow"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>'
+      + '<line x1="0" y1="10" x2="30" y2="10" stroke="var(--muted-foreground)" marker-end="url(#arrow)"/><text x="2" y="8" style="fill: var(--foreground)">a &amp; b</text><use xlink:href="#arrow"/></svg>';
+    await render(<GitSpaceMarkdown>{fence('svg', themed)}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="svg"] svg') !== null);
+    const drawing = container.querySelector('[data-gitspace-block="svg"] svg')!;
+    expect(drawing.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    expect(drawing.getAttribute('viewBox')).toBe('0 0 40 20');
+    expect(drawing.querySelector('defs > marker#arrow > path')?.getAttribute('fill')).toBe('currentColor');
+    expect(drawing.querySelector('line')?.getAttribute('stroke')).toBe('var(--muted-foreground)');
+    expect(drawing.querySelector('line')?.getAttribute('marker-end')).toBe('url(#arrow)');
+    expect(drawing.querySelector('text')?.textContent).toBe('a & b');
+    expect(drawing.querySelector('text')?.getAttribute('style')).toBe('fill: var(--foreground)');
+    expect(drawing.querySelector('use')?.getAttributeNS('http://www.w3.org/1999/xlink', 'href')).toBe('#arrow');
+  });
+
   it('shows a quiet placeholder while a block fence is still streaming', async () => {
     await render(<GitSpaceMarkdown streaming>{'Here is the plan:\n\n```gitspace-ui\n{ "root": "card", "elem'}</GitSpaceMarkdown>);
     await waitFor(() => container.textContent?.includes('Drawing…') ?? false);
@@ -136,32 +166,32 @@ describe('block actions', () => {
       },
     };
     await render(<BlockActionsProvider actions={actions}><GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('options').spec))}</GitSpaceMarkdown></BlockActionsProvider>);
-    await waitFor(() => container.textContent?.includes('Use live chunks') ?? false);
+    await waitFor(() => container.textContent?.includes('Use Redis') ?? false);
     expect(container.textContent).not.toContain('staged · in your message');
-    await click('Use live chunks');
+    await click('Use Redis');
     await waitFor(() => calls.length === 1);
-    expect(calls[0]).toEqual({ kind: 'decision', key: 'decision', label: 'Live chunks (over the side channel)', payload: { choice: 'Live chunks' } });
+    expect(calls[0]).toEqual({ kind: 'decision', key: 'decision', label: 'Redis (over in-memory)', payload: { choice: 'Redis' } });
     await waitFor(() => container.textContent?.includes('staged · in your message') ?? false);
-    await act(async () => { staged?.setSent('decision', 'Live chunks'); });
-    expect(container.textContent).toContain('sent · Live chunks');
+    await act(async () => { staged?.setSent('decision', 'Redis'); });
+    expect(container.textContent).toContain('sent · Redis');
     expect(container.textContent).not.toContain('staged · in your message');
   });
 
   it('resolves $computed params from state before the handler runs', async () => {
     const calls: unknown[] = [];
     await render(<BlockActionsProvider actions={{ stage: (params) => { calls.push(params); } }}><GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('question').spec))}</GitSpaceMarkdown></BlockActionsProvider>);
-    await waitFor(() => container.textContent?.includes('Hold text until the reply is committed') ?? false);
-    await click('Hold text until the reply is committed');
-    await waitFor(() => container.textContent?.includes('No flicker, but text starts later.') ?? false);
+    await waitFor(() => container.textContent?.includes('Hide them until restocked') ?? false);
+    await click('Hide them until restocked');
+    await waitFor(() => container.textContent?.includes('A shorter menu, but regulars lose sight of their favourites.') ?? false);
     await click('Add to message');
     await waitFor(() => calls.length === 1);
-    expect(calls[0]).toEqual({ kind: 'answer', key: 'flicker', label: 'Hold text until the reply is committed', payload: { answer: 'hold', note: '' } });
+    expect(calls[0]).toEqual({ kind: 'answer', key: 'soldout', label: 'Hide them until restocked', payload: { answer: 'hide', note: '' } });
   });
 
   it('says an action is not available here when no surface handles it', async () => {
     await render(<GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('options').spec))}</GitSpaceMarkdown>);
-    await waitFor(() => container.textContent?.includes('Use live chunks') ?? false);
-    await click('Use live chunks');
+    await waitFor(() => container.textContent?.includes('Use Redis') ?? false);
+    await click('Use Redis');
     await waitFor(() => container.textContent?.includes('Adding to your message is not available here.') ?? false);
 
     await render(<BlockActionsProvider actions={{ stage: () => undefined }}><GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('steps').spec))}</GitSpaceMarkdown></BlockActionsProvider>);
@@ -172,8 +202,8 @@ describe('block actions', () => {
 
   it('shows a handler\'s failure under the block', async () => {
     await render(<BlockActionsProvider actions={{ stage: () => { throw new Error('the composer is closed'); } }}><GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('options').spec))}</GitSpaceMarkdown></BlockActionsProvider>);
-    await waitFor(() => container.textContent?.includes('Use live chunks') ?? false);
-    await click('Use live chunks');
+    await waitFor(() => container.textContent?.includes('Use Redis') ?? false);
+    await click('Use Redis');
     await waitFor(() => container.textContent?.includes('Adding to your message failed: the composer is closed') ?? false);
   });
 });

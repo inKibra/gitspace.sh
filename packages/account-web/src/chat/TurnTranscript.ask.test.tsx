@@ -34,14 +34,14 @@ describe('an answered ask', () => {
   });
 
   it('shows a plan with its decision and note, and leaves out a note that was skipped', () => {
-    const questions = planQuestions('## Streaks\n\nMark a day per completed session.');
-    render({ id: 'plan', type: 'ask', kind: 'plan', toolCallId: 'plan', status: 'answered', questions: questions.map((question) => question.id === 'decision' ? { ...question, answer: 'Reject' } : { ...question, answer: 'Keep the badge behind the flag.' }) });
+    const questions = planQuestions('## Loyalty stamps\n\nOne stamp per paid order.');
+    render({ id: 'plan', type: 'ask', kind: 'plan', toolCallId: 'plan', status: 'answered', questions: questions.map((question) => question.id === 'decision' ? { ...question, answer: 'Reject' } : { ...question, answer: 'Keep the stamp card behind the flag.' }) });
     expect(container.textContent).toContain('Plan approval · answered');
     expect(container.textContent).toContain('Rejected');
-    expect(container.querySelector('h2')?.textContent).toBe('Streaks');
+    expect(container.querySelector('h2')?.textContent).toBe('Loyalty stamps');
     expect(row('Reject').querySelector('[aria-label="Chosen"]')).not.toBeNull();
     expect(row('Approve').querySelector('[aria-label="Chosen"]')).toBeNull();
-    expect(row('Keep the badge behind the flag.').querySelector('[aria-label="Chosen"]')).not.toBeNull();
+    expect(row('Keep the stamp card behind the flag.').querySelector('[aria-label="Chosen"]')).not.toBeNull();
 
     render({ id: 'plan', type: 'ask', kind: 'plan', toolCallId: 'plan', status: 'answered', questions: questions.map((question) => question.id === 'decision' ? { ...question, answer: 'Approve' } : question) });
     expect(container.textContent).toContain('Approved');
@@ -49,10 +49,10 @@ describe('an answered ask', () => {
   });
 
   it('says above the card what it asks and that it was answered, and draws the plan\'s heading as its title', () => {
-    render({ id: 'plan', type: 'ask', kind: 'plan', toolCallId: 'plan', status: 'answered', questions: planQuestions('### Streaks\n\nMark a day.').map((question) => question.id === 'decision' ? { ...question, answer: 'Approve' } : question) });
+    render({ id: 'plan', type: 'ask', kind: 'plan', toolCallId: 'plan', status: 'answered', questions: planQuestions('### Loyalty stamps\n\nOne stamp per order.').map((question) => question.id === 'decision' ? { ...question, answer: 'Approve' } : question) });
     expect(container.querySelector('[data-ask-origin]')?.textContent).toBe('Plan approvalasked by the workspace agent· answered');
     const title = container.querySelector('h2');
-    expect(title?.textContent).toBe('Streaks');
+    expect(title?.textContent).toBe('Loyalty stamps');
     expect(title?.className).toContain('text-display');
     expect(container.textContent).not.toContain('###');
   });

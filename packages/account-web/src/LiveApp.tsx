@@ -426,14 +426,6 @@ export function LiveInspector({
       if (result.status === 'error') throw result.error;
       await overview.refetch();
     }}
-    onSetGuideApproval={async (decision, note, revision, headCommit) => {
-      const result = await rpcClient.inspector.guide.setApproval({
-        expectedGeneration: generation,
-        input: { projectId, spaceId, decision, note, revision, headCommit, reviewerId },
-      });
-      if (result.status === 'error') throw result.error;
-      await overview.refetch();
-    }}
     onSubmitHumanJudgment={overviewValue.rubric ? async (criterionId, verdict, summary) => {
       const result = await rpcClient.inspector.rubric.appendJudgment({
         expectedGeneration: generation,

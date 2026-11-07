@@ -109,7 +109,6 @@ export interface InspectorProps {
   onReplyThread(threadId: string, expectedRevision: number, body: string): Promise<void>;
   onResolveThread(threadId: string, expectedRevision: number, resolved: boolean, decision: ReviewThreadView['decision']): Promise<void>;
   onMarkGuideSectionRead(sectionId: string, revision: number, headCommit: string): Promise<void>;
-  onSetGuideApproval(decision: 'pending' | 'approved' | 'changes-requested', note: string | null, revision: number, headCommit: string): Promise<void>;
   onGenerateChangeGuide?(): Promise<void>;
   guideShares?: GuideShareHandlers;
   guideRevisions?: GuideRevisionHandlers;

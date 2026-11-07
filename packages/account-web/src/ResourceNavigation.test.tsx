@@ -48,7 +48,7 @@ function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactCon
       agentSetup={{ sessionId: null, report: null, status: 'idle', load: unavailable, refresh: unavailable, save: unavailable }}
       reviewerId="reviewer" resourceRequest={request} onRequestResource={read} onRequestArtifact={unavailable}
       onRequestRepositoryFile={unavailable} onRequestRepositoryDiff={unavailable} onLoadGuideDiff={unavailable}
-      onCreateThread={unavailable} onReplyThread={unavailable} onResolveThread={unavailable} onMarkGuideSectionRead={unavailable} onSetGuideApproval={unavailable}
+      onCreateThread={unavailable} onReplyThread={unavailable} onResolveThread={unavailable} onMarkGuideSectionRead={unavailable}
     />
   </ResourceNavigation.Provider>;
 }

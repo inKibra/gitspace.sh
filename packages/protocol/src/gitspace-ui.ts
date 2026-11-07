@@ -21,6 +21,19 @@ export interface UiBlock {
   closed: boolean;
 }
 
+/** One element of a parsed SVG drawing; attribute values and text are entity-decoded. */
+export interface SvgElementNode {
+  name: string;
+  attributes: [name: string, value: string][];
+  children: (SvgElementNode | string)[];
+}
+
+export interface ParsedSvg {
+  /** The first root element; null when there is none. Draw it only when `issues` is empty. */
+  root: SvgElementNode | null;
+  issues: UiBlockIssue[];
+}
+
 export interface UiComponent {
   props: z.ZodObject<z.core.$ZodShape, z.core.$strict>;
   slots?: readonly string[];
@@ -43,7 +56,8 @@ const MAX_SVG_BYTES = 64 * 1024;
 const MAX_MERMAID_BYTES = 16 * 1024;
 /** State roots GitSpace writes: a spec may read them without seeding them. */
 const GITSPACE_STATE_ROOTS = new Set(['answered', 'staged', 'sent', 'gitspaceNotices']);
-const SVG_ELEMENTS = new Set([
+/** The SVG elements a drawing may use. */
+export const SVG_ELEMENTS: ReadonlySet<string> = new Set([
   'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'title', 'desc', 'defs',
   'marker', 'linearGradient', 'radialGradient', 'stop', 'clipPath', 'mask', 'pattern', 'use', 'symbol',
 ]);
@@ -695,36 +709,44 @@ function checkStateRead(statePath: string, path: string, check: SpecCheck): bool
 
 /** Validates an SVG drawing against GitSpace's allowlist. Issue paths are element positions under the root (`/2/0`). */
 export function validateSvg(svg: string): UiBlockIssue[] {
+  return parseSvg(svg).issues;
+}
+
+/**
+ * Parses an SVG drawing and checks it against GitSpace's allowlist. A renderer builds the drawing from `root`, never from
+ * the source string, so the tree that was checked is the tree that is drawn. Comments, CDATA, DOCTYPE and processing
+ * instructions are refused (only a leading <?xml …?> declaration is skipped): the HTML parser also ends a comment at
+ * `--!>` and `<!-->`, so a comment could hide markup from any tokenizer that ends it only at `-->`.
+ */
+export function parseSvg(svg: string): ParsedSvg {
   const bytes = byteLength(svg);
-  if (bytes > MAX_SVG_BYTES) return [{ path: '', message: `the SVG is ${bytes} bytes; the limit is ${MAX_SVG_BYTES}` }];
+  if (bytes > MAX_SVG_BYTES) return { root: null, issues: [{ path: '', message: `the SVG is ${bytes} bytes; the limit is ${MAX_SVG_BYTES}` }] };
   const issues: UiBlockIssue[] = [];
-  const stack: { name: string; path: string; children: number }[] = [];
-  const tag = /<(\/?)([A-Za-z_][\w.:-]*)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/y;
+  const stack: { node: SvgElementNode; path: string; children: number }[] = [];
+  const tag = /<(\/?)([A-Za-z_][\w.:-]*)((?:\s+[A-Za-z_][\w.:-]*\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/y;
+  const declaration = /<\?xml(?:\s+[A-Za-z_][\w.:-]*\s*=\s*(?:"[^"<>]*"|'[^'<>]*'))*\s*\?>/y;
+  let root: SvgElementNode | null = null;
   let roots = 0;
   let index = 0;
   while (index < svg.length) {
     const next = svg.indexOf('<', index);
     const text = svg.slice(index, next === -1 ? svg.length : next);
-    const where = stack.at(-1)?.path ?? '';
-    if (stack.length === 0 && text.trim() !== '') issues.push({ path: '', message: 'text outside the <svg> element' });
+    const open = stack.at(-1);
+    if (open === undefined && text.trim() !== '') issues.push({ path: '', message: 'text outside the <svg> element' });
+    else if (open !== undefined && text !== '') open.node.children.push(text.replace(ENTITY, decodeEntity));
     if (next === -1) break;
-    if (svg.startsWith('<!--', next)) {
-      const end = svg.indexOf('-->', next + 4);
-      if (end === -1) {
-        issues.push({ path: where, message: 'a comment is not closed' });
+    const where = open?.path ?? '';
+    if (svg.startsWith('<?xml', next) && roots === 0 && svg.slice(0, next).trim() === '') {
+      declaration.lastIndex = next;
+      if (declaration.exec(svg) === null) {
+        issues.push({ path: '', message: 'malformed <?xml …?> declaration; quote every value' });
         break;
       }
-      index = end + 3;
-      continue;
-    }
-    if (svg.startsWith('<?xml ', next) && roots === 0 && svg.slice(0, next).trim() === '') {
-      const end = svg.indexOf('?>', next);
-      if (end === -1) break;
-      index = end + 2;
+      index = declaration.lastIndex;
       continue;
     }
     if (svg.startsWith('<!', next) || svg.startsWith('<?', next)) {
-      issues.push({ path: where, message: 'DOCTYPE, CDATA and processing instructions are not allowed' });
+      issues.push({ path: where, message: 'comments, CDATA, DOCTYPE and processing instructions are not allowed' });
       break;
     }
     tag.lastIndex = next;
@@ -737,45 +759,52 @@ export function validateSvg(svg: string): UiBlockIssue[] {
     const [, closing, name, attributes, selfClosing] = match;
     if (closing === '/') {
       const top = stack.pop();
-      if (top?.name !== name || attributes.trim() !== '' || selfClosing === '/') {
-        issues.push({ path: top?.path ?? '', message: top === undefined ? `</${name}> closes nothing` : `</${name}> does not close <${top.name}>` });
+      if (top?.node.name !== name || attributes.trim() !== '' || selfClosing === '/') {
+        issues.push({ path: top?.path ?? '', message: top === undefined ? `</${name}> closes nothing` : `</${name}> does not close <${top.node.name}>` });
         break;
       }
       continue;
     }
-    const parent = stack.at(-1);
-    const path = parent === undefined ? '' : `${parent.path}/${parent.children++}`;
-    if (parent === undefined) {
+    const path = open === undefined ? '' : `${open.path}/${open.children++}`;
+    const node: SvgElementNode = { name, attributes: checkSvgAttributes(attributes, path, issues), children: [] };
+    if (open === undefined) {
       roots += 1;
+      root ??= node;
       if (roots > 1) issues.push({ path: '', message: 'an SVG holds one <svg> root element' });
       else if (name !== 'svg') issues.push({ path: '', message: `the root element is <${name}>; it must be <svg>` });
+    } else {
+      open.node.children.push(node);
     }
     if (!SVG_ELEMENTS.has(name)) issues.push({ path, message: `<${name}> is not allowed; use ${[...SVG_ELEMENTS].join(', ')}` });
-    checkSvgAttributes(attributes, path, issues);
-    if (selfClosing !== '/') stack.push({ name, path, children: 0 });
+    if (selfClosing !== '/') stack.push({ node, path, children: 0 });
   }
   const unclosed = stack.at(-1);
-  if (unclosed !== undefined) issues.push({ path: unclosed.path, message: `<${unclosed.name}> is not closed` });
+  if (unclosed !== undefined) issues.push({ path: unclosed.path, message: `<${unclosed.node.name}> is not closed` });
   if (roots === 0) issues.push({ path: '', message: 'no <svg> element' });
-  return issues;
+  return { root, issues };
 }
 
 const LOCAL_REFERENCE = /^#[\w.:-]+$/;
 const ENTITY = /&(?:#x([0-9a-fA-F]{1,6})|#(\d{1,7})|(amp|lt|gt|quot|apos));/g;
 const NAMED_ENTITIES: Readonly<Record<string, string>> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: '\'' };
 
-function checkSvgAttributes(attributes: string, path: string, issues: UiBlockIssue[]): void {
-  for (const [, name, doubleQuoted, singleQuoted] of attributes.matchAll(/\s+([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+function decodeEntity(entity: string, hex: string | undefined, decimal: string | undefined, named: string | undefined): string {
+  const code = hex !== undefined ? Number.parseInt(hex, 16) : decimal !== undefined ? Number(decimal) : undefined;
+  if (code === undefined) return NAMED_ENTITIES[named ?? ''] ?? entity;
+  return code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
+}
+
+/** Checks a tag's attributes and returns them decoded. */
+function checkSvgAttributes(attributes: string, path: string, issues: UiBlockIssue[]): [string, string][] {
+  const decoded: [string, string][] = [];
+  for (const [, name, doubleQuoted, singleQuoted] of attributes.matchAll(/\s+([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
     const raw = doubleQuoted ?? singleQuoted ?? '';
     if (raw.replace(ENTITY, '').includes('&')) {
       issues.push({ path, message: `${name}: "&" must start an entity such as &amp;` });
       continue;
     }
-    const value = raw.replace(ENTITY, (_, hex: string | undefined, decimal: string | undefined, named: string | undefined) => {
-      const code = hex !== undefined ? Number.parseInt(hex, 16) : decimal !== undefined ? Number(decimal) : undefined;
-      if (code === undefined) return NAMED_ENTITIES[named ?? ''] ?? '';
-      return code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
-    });
+    const value = raw.replace(ENTITY, decodeEntity);
+    decoded.push([name, value]);
     const lower = name.toLowerCase();
     if (lower.startsWith('on')) issues.push({ path, message: `${name}: event handler attributes are not allowed` });
     else if (lower === 'href' || lower.endsWith(':href')) {
@@ -784,10 +813,12 @@ function checkSvgAttributes(attributes: string, path: string, issues: UiBlockIss
     else if (SVG_PAINT_PROPERTIES.has(lower)) checkSvgPaint(lower, value, path, issues);
     if (!lower.startsWith('xmlns')) checkSvgUrls(name, value, path, issues);
   }
+  return decoded;
 }
 
 function checkSvgStyle(style: string, path: string, issues: UiBlockIssue[]): void {
   if (/@import/i.test(style)) issues.push({ path, message: 'style: @import is not allowed' });
+  if (style.includes('\\')) issues.push({ path, message: 'style: CSS escapes are not allowed' });
   for (const declaration of style.split(';')) {
     const colon = declaration.indexOf(':');
     if (colon === -1) continue;
@@ -807,6 +838,7 @@ function checkSvgUrls(name: string, value: string, path: string, issues: UiBlock
   const opened = value.match(/url\s*\(/gi)?.length ?? 0;
   const local = [...value.matchAll(/url\(\s*(['"]?)(#[\w.:-]+)\1\s*\)/gi)].length;
   if (opened > local) issues.push({ path, message: `${name}: url() may only name a local "#id"` });
+  if (/(?:image-set|src)\s*\(/i.test(value)) issues.push({ path, message: `${name}: image-set() and src() are not allowed` });
 }
 
 function renderSchema(schema: z.core.JSONSchema._JSONSchema): string {
@@ -901,5 +933,5 @@ Conditions ("visible" and $cond): true or false; {"$state": "/path"} is truthy; 
 - Put the data the block shows in "state" and read it with $state, $item and $cond; never repeat a value that state holds.
 - A choice the person makes for you (a decision, an answer, a batch to send) uses the stage action: it waits in their message bar so they can add context. Only sign-offs (accept_requirement) act at once.
 - GitSpace owns /answered, /staged/<key>, /sent/<key> and /gitspaceNotices: read /answered, /staged and /sent with $state to show progress without seeding them; never write them, and never read /gitspaceNotices.
-- SVG (a ${fence}svg block or the Svg component's literal svg string): one <svg> root; only ${[...SVG_ELEMENTS].join(', ')}; no script, style, foreignObject or on* attributes; href only a local "#id"; colours (fill, stroke, color, stop-color, also inside style) only currentColor, none or a theme variable such as ${SVG_THEME_VARIABLES.map((name) => `var(${name})`).join(', ')}, and url(#id) for fill and stroke; at most ${MAX_SVG_BYTES / 1024} KiB.`;
+- SVG (a ${fence}svg block or the Svg component's literal svg string): one <svg> root; only ${[...SVG_ELEMENTS].join(', ')}; every attribute value quoted; no comments, CDATA or DOCTYPE; no script, style, foreignObject or on* attributes; href only a local "#id"; colours (fill, stroke, color, stop-color, also inside style) only currentColor, none or a theme variable such as ${SVG_THEME_VARIABLES.map((name) => `var(${name})`).join(', ')}, and url(#id) for fill and stroke; at most ${MAX_SVG_BYTES / 1024} KiB.`;
 }

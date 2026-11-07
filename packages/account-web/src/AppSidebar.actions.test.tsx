@@ -128,8 +128,8 @@ it('regroups the same rows by state or phase with their stack caption, filters t
   const summary = (primaryColor: 'green' | 'orange' | 'blue'): SidebarWorkspace['summary'] => ({ holder: { kind: 'cloud' }, closedAt: null, freshness: 'fresh', status: { ...verticalSliceFixture.baseSpace.status, primaryColor } });
   const workspace = (id: string, phase: 'code' | 'review', color: 'green' | 'orange' | 'blue'): SidebarWorkspace => ({ id, projectId: 'stacks', name: id, branch: id, closedAt: null, phase, summary: summary(color) });
   const project = {
-    id: 'stacks', name: 'Stacks', workspaces: [workspace('shared', 'code', 'green'), workspace('executor', 'code', 'orange'), workspace('router', 'review', 'blue')],
-    graph: { baseBranch: 'main', relations: { executor: { dependsOn: ['shared'], stackedOn: 'shared' } }, pullRequests: {} },
+    id: 'stacks', name: 'Stacks', workspaces: [workspace('bakery-core', 'code', 'green'), workspace('bakery-api', 'code', 'orange'), workspace('bakery-payments', 'review', 'blue')],
+    graph: { baseBranch: 'main', relations: { 'bakery-api': { dependsOn: ['bakery-core'], stackedOn: 'bakery-core' } }, pullRequests: {} },
   };
   const render = () => renderProject({ projects: [project] });
   /** The project's list as headings and rows, in order. */
@@ -140,17 +140,17 @@ it('regroups the same rows by state or phase with their stack caption, filters t
     await act(() => button!.click());
   };
   await render();
-  expect(listed()).toEqual(['shared', 'executor', 'router']);
+  expect(listed()).toEqual(['bakery-core', 'bakery-api', 'bakery-payments']);
   await press('Group by', 'State');
-  expect(listed()).toEqual(['Needs you', 'executor', 'Running', 'shared', 'Waiting', 'router']);
-  expect(container.querySelector('[data-workspace="executor"]')?.textContent).toContain('on shared');
+  expect(listed()).toEqual(['Needs you', 'bakery-api', 'Running', 'bakery-core', 'Waiting', 'bakery-payments']);
+  expect(container.querySelector('[data-workspace="bakery-api"]')?.textContent).toContain('on bakery-core');
   await press('Group by', 'Phase');
-  expect(listed()).toEqual(['Review', 'router', 'Code', 'shared', 'executor']);
+  expect(listed()).toEqual(['Review', 'bakery-payments', 'Code', 'bakery-core', 'bakery-api']);
   await press('Filter workspaces', 'Needs you');
-  expect(listed()).toEqual(['Code', 'executor']);
+  expect(listed()).toEqual(['Code', 'bakery-api']);
 
   await act(() => root.unmount());
   root = createRoot(container);
   await render();
-  expect(listed()).toEqual(['Review', 'router', 'Code', 'shared', 'executor']);
+  expect(listed()).toEqual(['Review', 'bakery-payments', 'Code', 'bakery-core', 'bakery-api']);
 });

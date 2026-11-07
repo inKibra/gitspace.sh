@@ -193,6 +193,8 @@ function askResults(answer: JsonValue): { selectedOptions: string[]; customInput
 const ASK_TAKEOVER = 'Ask the user to take over one tab for a step only a person should do: a sign-in, a CAPTCHA, a two-factor code, a payment, or anything that needs their identity or judgment. source "relay" names a tab of the workspace\'s group on the user\'s Chrome (pairingId as for web_browser), source "headless" a tab of the cloud browser; targetId is the tab, as web_browser tabs lists it. reason tells the user, in a sentence or two, what to do there. It shows a card in the chat with your reason, the browser and the tab, and the buttons Take over and Not now; it changes nothing by itself. While the user holds the tab none of your browser commands reach it. The call waits, without polling, until the user hands the tab back (observe it again before acting: the page has changed and earlier refs are gone), chooses Not now, or timeoutMinutes pass (default 30, at most 120; the card stays open, and if the user takes the tab later you are told when they hand it back). You never get the tab back by yourself: only the user hands it back. Main agent only; a machine\'s headless browser cannot be taken over.';
 const TODO = 'Set your durable todo list. `items` replaces it with any list (a detour from the plan included). An item with `planStep` names a step of your approved plan, and the item\'s status (pending, active, completed) becomes the step\'s: that is the only way a plan step changes. `{ from: "plan" }` loads the approved plan\'s steps, to start it or resume it after a detour.';
 const PROPOSE_PLAN = 'Propose an implementation plan and wait for explicit human approval. `prompt` is the plan\'s summary, in Markdown, shown on the approval card. `steps` are its steps: `id` (unique, at most 64 characters), `title`, `detail` (Markdown; a gitspace-ui, svg or mermaid block in it must be valid, or the call fails with each issue), `where` (the files or areas it touches) and `requirementIds` (the goal requirements it advances). Once approved, your todo list is loaded from the steps, each item linked to its step by `planStep`. A revised proposal keeps the steps already completed, matched by id; until it is approved, and if it is rejected, the approved plan stays in effect. The answer is `{ approved, note }`: the note adds to an approved plan or says why it was rejected. Never required for conversational replies.';
+/** The arguments a `propose_plan` call runs with: those recorded before plans had steps have no `steps`. */
+const RecordedProposePlanArgumentsSchema = RuntimeProposePlanArgumentsSchema.extend({ steps: RuntimeProposePlanArgumentsSchema.shape.steps.optional() });
 /** How an ask_takeover call ends: its card's answer (`TAKEOVER_ANSWERS`), or its wait ran out. */
 const TakeoverOutcomeSchema = z.enum([TAKEOVER_ANSWERS.handedBack, TAKEOVER_ANSWERS.declined, 'timeout']);
 /** What an ask_takeover call returns to the model for each way it ends. */
@@ -374,13 +376,13 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       return { output: [{ type: 'text', text: 'items' in args ? 'Checklist updated.' : `Checklist loaded from the plan: ${JSON.stringify(items)}` }], details: { items } };
     });
   } }));
-  /** Records a question for the person once per task, with the plan it proposes when it has `steps`, and waits for the answer. */
-  async function askPerson(kind: 'ask' | 'approval', prompt: string, choices: string[], api: ToolExecutionApi, context: Context, steps?: z.output<typeof RuntimeProposePlanArgumentsSchema>['steps']): Promise<JsonValue> {
+  /** Records a question for the person once per task, and for an approval the plan it proposes, then waits for the answer. */
+  async function askPerson(kind: 'ask' | 'approval', prompt: string, choices: string[], api: ToolExecutionApi, context: Context, steps: z.output<typeof RuntimeProposePlanArgumentsSchema>['steps'] = []): Promise<JsonValue> {
     const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
     await api.commit(async tx => {
       const doc = await tx.doc(QuestionsDoc);
       if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind, prompt, choices, answer: null });
-      if (!steps) return;
+      if (kind !== 'approval') return;
       const plan = await tx.doc(PlanDoc, api.conversationId);
       if (plan.questionId === id) return;
       if (plan.status === 'approved') plan.approved = { text: plan.text, steps: (plan.steps ?? []).map(step => ({ ...step, where: [...step.where], requirementIds: [...step.requirementIds] })) };
@@ -393,8 +395,10 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: askResults(answer) } };
   } }));
   tools.push(defineTool({ name: 'propose_plan', description: PROPOSE_PLAN, parameters: runtimeToolParameters(RuntimeProposePlanArgumentsSchema), prepareArguments: input => parseToolArguments('propose_plan', RuntimeProposePlanArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
-    const args = parseToolArguments('propose_plan', RuntimeProposePlanArgumentsSchema, input);
-    const issues = args.steps.flatMap((step, index) => validateMarkdownBlocks(step.detail).map(issue => `steps/${index}/detail: ${issue.path}: ${issue.message}`));
+    // A model's call is checked against the advertised schema (steps required) before it runs. A recovered call runs
+    // with its recorded arguments only, and one recorded before plans had steps has none: it proposes a Markdown-only plan.
+    const args = parseToolArguments('propose_plan', RecordedProposePlanArgumentsSchema, input);
+    const issues = (args.steps ?? []).flatMap((step, index) => validateMarkdownBlocks(step.detail).map(issue => `steps/${index}/detail: ${issue.path}: ${issue.message}`));
     if (issues.length > 0) throw new Error(`The plan's steps hold invalid blocks:\n${issues.join('\n')}`);
     const answer = await askPerson('approval', args.prompt, args.choices, api, context, args.steps);
     const { approved, note } = RuntimeApprovalAnswerSchema.parse(answer);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { extractBlocks, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
+import { extractBlocks, parseSvg, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
 
 const fence = '```';
 
@@ -119,6 +119,41 @@ describe('SVG drawings', () => {
     expect(paths(validateSvg('<svg><rect fill="url(https://example.com/p.svg#g)"/></svg>'))).toHaveLength(2);
     expect(paths(validateSvg('<svg><circle r="2" fill="#ff0000"/></svg>'))).toEqual(['/0']);
     expect(paths(validateSvg('<svg/><svg/>'))).toEqual(['']);
+  });
+
+  it('refuses markup an HTML parser reads differently from the validator', () => {
+    const refused = [
+      '<svg viewBox="0 0 10 10"><!-- --!><img src=x onerror=alert(1)> --></svg>',
+      '<svg viewBox="0 0 10 10"><!--><img src=x onerror=alert(1)>--></svg>',
+      '<svg viewBox="0 0 10 10"><!---><img src=x onerror=alert(1)>--></svg>',
+      '<svg viewBox="0 0 10 10"><!-- a note --></svg>',
+      '<svg viewBox="0 0 10 10"><![CDATA[<img src=x onerror=alert(1)>]]></svg>',
+      '<!DOCTYPE svg><svg viewBox="0 0 10 10"/>',
+      '<svg viewBox="0 0 10 10"><?pi <img src=x onerror=alert(1)> ?></svg>',
+      '<?xml version="1.0"?><?xml-stylesheet href="https://example.com/x.css"?><svg viewBox="0 0 10 10"/>',
+      '<svg viewBox="0 0 10 10"></svg><img src=x onerror=alert(1)>',
+      '<svg viewBox="0 0 10 10"></svg>trailing',
+      '<SVG viewBox="0 0 10 10"></SVG>',
+      '<svg viewBox="0 0 10 10"><Script>alert(1)</Script></svg>',
+      '<svg viewBox="0 0 10 10"><svg:script>alert(1)</svg:script></svg>',
+      '<svg viewBox="0 0 10 10"><title><img src=x onerror=alert(1)></title></svg>',
+      '<svg viewBox="0 0 10 10"><rect/onload="alert(1)"/></svg>',
+      '<svg viewBox="0 0 10 10"><rect o&#110;load="alert(1)"/></svg>',
+      '<svg viewBox="0 0 10 10"><rect width=10 onload=alert(1) /></svg>',
+      '<svg viewBox="0 0 10 10"><rect ONLOAD="alert(1)"/></svg>',
+      '<svg viewBox="0 0 10 10"><rect style="fill: none; mask: u\\72l(https://example.com/m)"/></svg>',
+      '<svg viewBox="0 0 10 10"><rect style="mask-image: image-set(\'https://example.com/m.png\' 1x)"/></svg>',
+    ];
+    expect(refused.filter((svg) => validateSvg(svg).length === 0)).toEqual([]);
+  });
+
+  it('parses the tree a renderer draws: decoded attributes and text, nothing else', () => {
+    const { root, issues } = parseSvg('<?xml version="1.0" encoding="UTF-8"?>\n<svg viewBox="0 0 10 10"><rect id="a>b" fill="none"/><text>&lt;img src=x onerror=alert(1)&gt; &amp; more</text></svg>');
+    expect(issues).toEqual([]);
+    expect(root).toEqual({ name: 'svg', attributes: [['viewBox', '0 0 10 10']], children: [
+      { name: 'rect', attributes: [['id', 'a>b'], ['fill', 'none']], children: [] },
+      { name: 'text', attributes: [], children: ['<img src=x onerror=alert(1)> & more'] },
+    ] });
   });
 
   it('applies the same rules to the Svg component', () => {

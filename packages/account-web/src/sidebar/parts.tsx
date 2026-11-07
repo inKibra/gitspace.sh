@@ -17,7 +17,7 @@ export function StatusBadge({ color, label }: { color: WorkspaceStatusColor; lab
   </span>;
 }
 
-/** `#1336`, or `#1336 · open` in the header: the pull request linked to the workspace, its title on hover. */
+/** `#42`, or `#42 · open` in the header: the pull request linked to the workspace, its title on hover. */
 export function PrChip({ pr, full = false }: { pr: LinkedPullRequest; full?: boolean }) {
   const chip = <span className="inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full px-1.5 font-mono text-[10.5px] tabular-nums text-foreground/80" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
     #{pr.number}{full ? <span className="max-w-64 truncate font-sans text-muted-foreground">· {pr.title}</span> : null}
@@ -48,7 +48,7 @@ export function DependencyText({ waitsOn, blocks }: { waitsOn: readonly string[]
   </span>;
 }
 
-/** "↳ on health-in-chat": the workspace a stacked row builds on and merges after. */
+/** "↳ on bakery-core": the workspace a stacked row builds on and merges after. */
 export function StackCaption({ parent }: { parent: string }) {
   return <span className="inline-flex min-w-0 shrink items-center gap-0.5" title={`Stacked on ${parent}: it merges after it`}><CornerDownRight width={11} height={11} strokeWidth={1.75} className="shrink-0" /><span className="truncate">on {parent}</span></span>;
 }
