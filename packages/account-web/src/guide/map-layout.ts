@@ -18,7 +18,8 @@ export type MapPath = ChangeMap['paths'][number];
 export type MapSide = 'top' | 'right' | 'bottom' | 'left';
 
 export interface PlacedPackage { name: string; x: number; y: number; width: number; height: number }
-export interface PlacedArea { area: MapArea; layer: number; x: number; y: number }
+/** `column`: the package column's place from the left; `row`: the area's place in its column from the top. */
+export interface PlacedArea { area: MapArea; layer: number; column: number; row: number; x: number; y: number }
 /** `passesOver`: the path crosses a column between its two areas, where its middle would sit on another area. */
 export interface PlacedPath { path: MapPath; from: MapSide; to: MapSide; passesOver: boolean }
 export interface ChangeMapLayout {
@@ -126,13 +127,13 @@ export function layoutChangeMap(map: ChangeMap): ChangeMapLayout {
     return rows.length ? rows.reduce((sum, value) => sum + value, 0) / rows.length : Number.POSITIVE_INFINITY;
   };
   let x = 0;
-  for (const column of columns) {
+  for (const [columnIndex, column] of columns.entries()) {
     const stacked = [...column.areas].sort((left, right) => (level(left) - level(right)) || before(rank(left), rank(right)));
     const width = AREA_WIDTH + PACKAGE_PAD * 2;
     const height = PACKAGE_HEAD + stacked.length * AREA_HEIGHT + (stacked.length - 1) * AREA_GAP + PACKAGE_PAD;
     packages.push({ name: column.name, x, y: 0, width, height });
     for (const [index, area] of stacked.entries()) {
-      placed.set(area.id, { area, layer: depth.get(area.id) ?? 0, x: x + PACKAGE_PAD, y: PACKAGE_HEAD + index * (AREA_HEIGHT + AREA_GAP) });
+      placed.set(area.id, { area, layer: depth.get(area.id) ?? 0, column: columnIndex, row: index, x: x + PACKAGE_PAD, y: PACKAGE_HEAD + index * (AREA_HEIGHT + AREA_GAP) });
       row.set(area.id, index);
     }
     x += width + PACKAGE_GAP;

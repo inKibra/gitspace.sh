@@ -8,6 +8,7 @@ import { ChangeGuideSurface } from '../inspector/ChangeGuideSurface.js';
 import { SharedGuide } from '../SharedGuide.js';
 import { ChangeMapView } from './ChangeMap.js';
 import { narrowExhibit } from './exhibit-segments.js';
+import { projectIsoMap, type FileChange } from './iso-layout.js';
 import { AREA_HEIGHT, AREA_WIDTH, layoutChangeMap } from './map-layout.js';
 
 const date = '2026-01-01T00:00:00.000Z';
@@ -115,6 +116,79 @@ describe('change map layout', () => {
     for (const area of map.areas) expect(html).toContain(`data-area="${area.id}"`);
     for (const path of map.paths) expect(html).toContain(`data-path="${path.id}" data-state="${path.state}"`);
   });
+
+  it('projects the layout onto an isometric plane the same way every time, each box on its package plate and none overlapping', () => {
+    const iso = projectIsoMap(layoutChangeMap(map), null);
+    expect(projectIsoMap(layoutChangeMap(structuredClone(map)), null)).toEqual(iso);
+    expect(iso.boxes.map((box) => box.area.id).sort()).toEqual(map.areas.map((area) => area.id).sort());
+    expect(iso.plates.map((plate) => plate.name)).toEqual(['kettle/ui', 'kettle/core', 'kettle/firmware']);
+    for (const box of iso.boxes) {
+      const plate = iso.plates.find((candidate) => candidate.name === box.area.package)!;
+      expect(box.footprint.u).toBeGreaterThanOrEqual(plate.footprint.u);
+      expect(box.footprint.v).toBeGreaterThanOrEqual(plate.footprint.v);
+      expect(box.footprint.u + box.footprint.w).toBeLessThanOrEqual(plate.footprint.u + plate.footprint.w);
+      expect(box.footprint.v + box.footprint.d).toBeLessThanOrEqual(plate.footprint.v + plate.footprint.d);
+      for (const other of iso.boxes) {
+        if (other === box) continue;
+        const apart = other.footprint.u >= box.footprint.u + box.footprint.w || box.footprint.u >= other.footprint.u + other.footprint.w
+          || other.footprint.v >= box.footprint.v + box.footprint.d || box.footprint.v >= other.footprint.v + other.footprint.d;
+        expect(apart).toBe(true);
+      }
+    }
+    for (const plate of iso.plates) for (const other of iso.plates) if (other !== plate) expect(other.footprint.u >= plate.footprint.u + plate.footprint.w || plate.footprint.u >= other.footprint.u + other.footprint.w).toBe(true);
+  });
+
+  it('stands an area taller the more lines its files change, flat with no changed files, and level until counted', () => {
+    const height = (changes: ReadonlyMap<string, FileChange> | null) => new Map(projectIsoMap(layoutChangeMap(map), changes).boxes.map((box) => [box.area.id, box.height]));
+    const before = height(null);
+    expect(new Set(['panel', 'scheduler', 'heater', 'timer'].map((id) => before.get(id))).size).toBe(1);
+    expect(before.get('audit')).toBeLessThan(before.get('panel')!);
+    const after = height(new Map([['ui/panel.tsx', { additions: 4, deletions: 1 }], ['core/scheduler.ts', { additions: 60, deletions: 20 }], ['firmware/heater.c', { additions: 15, deletions: 5 }]]));
+    expect(after.get('panel')).toBeLessThan(after.get('heater')!);
+    expect(after.get('heater')).toBeLessThan(after.get('scheduler')!);
+    expect(after.get('audit')).toBeLessThan(after.get('panel')!);
+    expect(projectIsoMap(layoutChangeMap(map), new Map([['core/scheduler.ts', { additions: 60, deletions: 20 }]])).boxes.find((box) => box.area.id === 'scheduler')?.lines).toBe(80);
+  });
+
+  it('opens in the overview unless the map is crowded, and switches to the flow view', async () => {
+    const view = () => container.querySelector('[data-map-view]')?.getAttribute('data-map-view');
+    await act(async () => root.render(<ChangeMapView map={map} sections={sections} />));
+    expect(view()).toBe('overview');
+    expect(container.querySelector('svg [data-area="heater"]')).not.toBeNull();
+    await act(async () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.textContent?.includes('Flow'))?.click());
+    expect(view()).toBe('flow');
+    expect(container.querySelector('.react-flow [data-area="heater"]')).not.toBeNull();
+    const extra = (count: number, pkg: (index: number) => string): ChangeMap => ({ ...map, areas: [...map.areas, ...Array.from({ length: count }, (_, index) => ({ id: `extra-${index}`, name: `Extra ${index}`, package: pkg(index), role: '', whatItDoes: '', files: [] }))] });
+    await act(async () => root.render(<ChangeMapView key="many-areas" map={extra(8, () => 'kettle/core')} sections={sections} />));
+    expect(view()).toBe('flow');
+    await act(async () => root.render(<ChangeMapView key="twelve-areas" map={extra(7, () => 'kettle/core')} sections={sections} />));
+    expect(view()).toBe('overview');
+    await act(async () => root.render(<ChangeMapView key="many-packages" map={extra(3, (index) => `kettle/extra-${index}`)} sections={sections} />));
+    expect(view()).toBe('flow');
+  });
+
+  it('lights a playing step\'s areas and paths the same in the overview and the flow view', async () => {
+    await act(async () => root.render(<ChangeMapView map={map} sections={sections} />));
+    const lit = (selector: string) => [...container.querySelectorAll(`${selector}[data-lit="true"]`)].map((node) => node.getAttribute('data-area') ?? node.getAttribute('data-path')).sort();
+    await act(async () => button('Next step').click());
+    const overview = { areas: lit('svg [data-area]'), paths: lit('svg [data-path]') };
+    expect(overview).toEqual({ areas: ['panel', 'scheduler'], paths: ['press'] });
+    await act(async () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.textContent?.includes('Flow'))?.click());
+    expect({ areas: lit('.react-flow [data-area]'), paths: lit('.react-flow [data-path]') }).toEqual(overview);
+  });
+
+  it('tells what an area is and what changed in it on hover, and opens the flow view on it when pressed', async () => {
+    const changes = new Map([['ui/panel.tsx', { additions: 4, deletions: 1 }]]);
+    await act(async () => root.render(<ChangeMapView map={map} sections={sections} changes={changes} />));
+    const panel = container.querySelector('svg [data-area="panel"]')!;
+    await act(async () => panel.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })));
+    const card = container.querySelector('[data-area-card="panel"]')?.textContent ?? '';
+    for (const text of ['Control panel', 'kettle/ui', 'what the person presses', 'Shows the brew button.', '5 lines changed', 'ui/panel.tsx', '+4', '−1']) expect(card).toContain(text);
+    await act(async () => panel.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(container.querySelector('[data-map-view]')?.getAttribute('data-map-view')).toBe('flow');
+    expect(container.querySelector('.react-flow [data-area="panel"]')?.getAttribute('data-lit')).toBe('true');
+    expect(container.querySelector('.react-flow [data-area="heater"]')?.getAttribute('data-lit')).toBe('false');
+  });
 });
 
 describe('Change Guide tab', () => {
@@ -155,6 +229,17 @@ describe('Change Guide tab', () => {
     expect(drawn('4-4')).toContain('brewButton');
     expect(drawn('4-4')).not.toContain('brewLabel');
     expect(drawn('11-12')).not.toContain('brewButton');
+  });
+
+  it('measures each mapped file the guide shows from the diff its exhibit reads, once per file', async () => {
+    const loadDiff = vi.fn(async (path: string) => diffFor(path));
+    await surface({ onLoadDiff: loadDiff });
+    await vi.waitFor(() => expect(container.querySelector('svg [data-area="panel"]')?.getAttribute('data-lines')).toBe('2'));
+    expect(container.querySelector('svg [data-area="heater"]')?.getAttribute('data-lines')).toBe('2');
+    // The scheduler's file is not one the guide shows, so it is not measured.
+    expect(container.querySelector('svg [data-area="scheduler"]')?.hasAttribute('data-lines')).toBe(false);
+    await vi.waitFor(() => expect(container.querySelectorAll('[data-range-lines]').length).toBe(2));
+    expect(loadDiff.mock.calls.filter(([path]) => path === 'ui/panel.tsx')).toHaveLength(1);
   });
 });
 

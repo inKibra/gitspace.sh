@@ -5,13 +5,17 @@
 import type { ChangeGuideSection, ChangeMap, EvidenceReference, RepositoryDiffView } from '@gitspace/protocol';
 import { badgeColors, useShape } from '@gitspace/ui';
 import { Image01 } from '@untitledui/icons';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { artifactId, type ArtifactReference, type InspectorArtifactContent } from '../inspector/inspector-shared.js';
+import { artifactId, RuntimeAvailability, type ArtifactReference, type InspectorArtifactContent } from '../inspector/inspector-shared.js';
 import { Source, SourceLegend } from './Authorship.js';
 import { ChangeMapView } from './ChangeMap.js';
+import type { FileChange } from './iso-layout.js';
 import { EvidenceLinks, GuideSection, MEASURE, type GuideWorkspace } from './GuideSection.js';
 import { ComparisonSummary, type GuideComparison } from './GuideRevisions.js';
+
+/** How many of the map's files are measured at once. */
+const MEASURING = 4;
 
 /** The parts of a guide both the workspace and a shared link read. */
 export interface GuideContent {
@@ -52,6 +56,30 @@ function Capture({ reference, captures }: { reference: ArtifactReference; captur
   </figure>;
 }
 
+/** The lines each of the map's files changes, read from the same diffs the walkthrough shows; null until all are read,
+ * and while the workspace cannot serve diffs. Only files the guide shows can be read, so an area whose files it does
+ * not show is not measured. */
+function useFileChanges(map: ChangeMap | undefined, sections: readonly ChangeGuideSection[], loadDiff: (path: string) => Promise<RepositoryDiffView>): ReadonlyMap<string, FileChange> | null {
+  const runtimeAvailable = useContext(RuntimeAvailability);
+  const [changes, setChanges] = useState<ReadonlyMap<string, FileChange> | null>(null);
+  useEffect(() => {
+    if (!map || !runtimeAvailable) return;
+    const shown = new Set(sections.flatMap((section) => section.exhibits.map((exhibit) => exhibit.path)));
+    const queue = [...new Set(map.areas.flatMap((area) => area.files))].filter((path) => shown.has(path));
+    const measured = new Map<string, FileChange>();
+    let active = true;
+    const measure = async (): Promise<void> => {
+      for (let path = queue.shift(); active && path !== undefined; path = queue.shift()) {
+        const file = (await loadDiff(path).catch(() => null))?.files.find((candidate) => candidate.path === path);
+        if (file && file.additions !== null && file.deletions !== null) measured.set(path, { additions: file.additions, deletions: file.deletions });
+      }
+    };
+    void Promise.all(Array.from({ length: Math.min(MEASURING, queue.length) }, measure)).then(() => { if (active) setChanges(measured); });
+    return () => { active = false; };
+  }, [map, sections, runtimeAvailable]);
+  return changes;
+}
+
 export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, workspace, captures, comparison, focusSection, initialOpen, onOpenChange }: {
   guide: GuideContent;
   /** The line above the title: where the guide is from. */
@@ -74,6 +102,17 @@ export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, work
 }) {
   const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set(initialOpen ?? guide.sections.slice(0, 1).map((section) => section.id)));
   useEffect(() => { onOpenChange?.(open); }, [open]);
+  // Each file's diff is read once: the map measures its lines from the same diff its exhibit shows.
+  const diffs = useRef(new Map<string, Promise<RepositoryDiffView>>());
+  const loadDiff = (path: string): Promise<RepositoryDiffView> => {
+    const cached = diffs.current.get(path);
+    if (cached) return cached;
+    const loading = onLoadDiff(path);
+    diffs.current.set(path, loading);
+    void loading.catch(() => diffs.current.delete(path));
+    return loading;
+  };
+  const changes = useFileChanges(guide.map, guide.sections, loadDiff);
   const [mapSection, setMapSection] = useState<string | null>(null);
   const openSection = (id: string): void => {
     setOpen((current) => current.has(id) ? current : new Set(current).add(id));
@@ -117,8 +156,8 @@ export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, work
 
     {guide.map?.areas.length ? <>
       <PartHeading id="guide-map" title="The change map" source={<Source by="agent" what="the map's areas, paths and steps" />}
-        detail="The areas the change touches, grouped by package; paths are green when new, red when removed, grey when they stay." />
-      <ChangeMapView map={guide.map} sections={guide.sections} onOpenSection={openSection} onStep={setMapSection} />
+        detail="The areas the change touches, grouped by package; in the overview, an area stands taller the more lines its files change. Paths are green when new, red when removed, grey when they stay." />
+      <ChangeMapView map={guide.map} sections={guide.sections} changes={changes} onOpenSection={openSection} onStep={setMapSection} />
     </> : null}
 
     <PartHeading id="guide-walkthrough" title="Walkthrough" source={<Source by="agent" what="the order the sections are read in" />}
@@ -127,7 +166,7 @@ export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, work
       {guide.sections.map((section, index) => <GuideSection key={section.id} section={section} index={index} map={guide.map} open={open.has(section.id)} onMapNow={mapSection === section.id}
         onToggle={() => setOpen((current) => { const next = new Set(current); if (next.has(section.id)) next.delete(section.id); else next.add(section.id); return next; })}
         onReadNext={workspace && !workspace.readOnly ? () => { workspace.onMarkRead(section.id); const next = guide.sections[index + 1]; if (next) openSection(next.id); } : null}
-        onLoadDiff={onLoadDiff} workspace={workspace} comparison={comparison ?? null} />)}
+        onLoadDiff={loadDiff} workspace={workspace} comparison={comparison ?? null} />)}
     </div>
   </article>;
 }

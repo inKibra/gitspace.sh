@@ -1,23 +1,29 @@
-// The Change Guide's map: packages as columns, areas as boxes in them, paths between areas green when the change adds
-// them, red and dashed when it removes them, grey when they stay. The agent names the areas, paths and steps; GitSpace
-// lays them out (map-layout.ts). Playing the steps lights each step's paths and names the section that explains it.
+// The Change Guide's map, in two views. The overview (IsoMap.tsx) draws each package as a plate and each area as a box
+// as tall as the lines its files change; the flow view draws packages as columns and areas as boxes in them. In both,
+// paths between areas are green when the change adds them, red and dashed when it removes them, grey when they stay.
+// The agent names the areas, paths and steps; GitSpace lays them out (map-layout.ts, iso-layout.ts). Playing the
+// steps lights each step's areas and paths in either view and names the section that explains it.
 import type { ChangeMap } from '@gitspace/protocol';
-import { Button, badgeColors, useShape } from '@gitspace/ui';
+import { Button, TabsSubtle, TabsSubtleItem, badgeColors, useShape } from '@gitspace/ui';
 import { ChevronLeft, ChevronRight, PauseCircle, Play } from '@untitledui/icons';
-import { Handle, MarkerType, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type FitViewOptions, type Node, type NodeProps, type ReactFlowInstance } from '@xyflow/react';
+import { Handle, MarkerType, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type FitViewOptions, type Node, type NodeProps, type ProOptions, type ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useDarkScheme } from '../appearance.js';
 import { Source } from './Authorship.js';
+import type { FileChange } from './iso-layout.js';
+import { IsoMap, PATH_COLOR, PATH_STATES } from './IsoMap.js';
 import { AREA_HEIGHT, AREA_WIDTH, layoutChangeMap, mapAround, type MapArea, type MapPath, type MapSide } from './map-layout.js';
 
 const STEP_MS = 2400;
 const FIT: FitViewOptions = { padding: 0.04, maxZoom: 1 };
-const PATH_COLOR: Record<MapPath['state'], string> = { added: badgeColors.green, removed: badgeColors.red, same: 'var(--muted-foreground)' };
+const PRO_OPTIONS: ProOptions = { hideAttribution: true };
+/** Past this many areas or packages, the map opens in the flow view. */
+const CROWDED_AREAS = 12;
+const CROWDED_PACKAGES = 5;
 const SIDE_POSITION: Record<MapSide, Position> = { top: Position.Top, right: Position.Right, bottom: Position.Bottom, left: Position.Left };
 const SIDES: readonly MapSide[] = ['top', 'right', 'bottom', 'left'];
 const HANDLE_TYPES: readonly ('source' | 'target')[] = ['source', 'target'];
-const PATH_STATES: readonly MapPath['state'][] = ['added', 'removed', 'same'];
 const HIDDEN_HANDLE: CSSProperties = { opacity: 0, width: 1, height: 1, minWidth: 0, minHeight: 0, border: 'none', pointerEvents: 'none' };
 /** Where each side's handle sits on an area box, for edges drawn before the browser measures the box. */
 const HANDLE_AT: Record<MapSide, { x: number; y: number }> = { top: { x: AREA_WIDTH / 2, y: 0 }, right: { x: AREA_WIDTH, y: AREA_HEIGHT / 2 }, bottom: { x: AREA_WIDTH / 2, y: AREA_HEIGHT }, left: { x: 0, y: AREA_HEIGHT / 2 } };
@@ -72,8 +78,9 @@ function PathEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
 const nodeTypes = { package: PackageNodeView, area: AreaNodeView };
 const edgeTypes = { path: PathEdgeView };
 
-/** The map drawn: `lit` paths and areas stand out and the rest fade; `faded` areas fade on their own. */
-function MapCanvas({ map, litPaths, litAreas, faded, label }: { map: ChangeMap; litPaths: ReadonlySet<string>; litAreas: ReadonlySet<string>; faded: ReadonlySet<string>; label: string }) {
+/** The map drawn: `lit` paths and areas stand out and the rest fade; `faded` areas fade on their own. With `focus`,
+ * the view fits that area and the areas one path away instead of the whole map. */
+function MapCanvas({ map, litPaths, litAreas, faded, label, focus = null }: { map: ChangeMap; litPaths: ReadonlySet<string>; litAreas: ReadonlySet<string>; faded: ReadonlySet<string>; label: string; focus?: string | null }) {
   const shape = useShape();
   // React Flow marks its canvas light or dark, and the theme's tokens resolve again under that class.
   const dark = useDarkScheme();
@@ -93,6 +100,15 @@ function MapCanvas({ map, litPaths, litAreas, faded, label }: { map: ChangeMap; 
     markerEnd: { type: MarkerType.ArrowClosed, color: PATH_COLOR[path.state], width: 14, height: 14 },
     data: { path, passesOver, lit: litPaths.has(path.id), faded: (playing && !litPaths.has(path.id)) || faded.has(path.from) || faded.has(path.to) },
   })), [layout, litPaths, faded, playing]);
+  const fit = useMemo((): FitViewOptions => {
+    if (focus === null) return FIT;
+    const near = new Set([focus]);
+    for (const path of map.paths) {
+      if (path.from === focus) near.add(path.to);
+      if (path.to === focus) near.add(path.from);
+    }
+    return { ...FIT, nodes: [...near].map((id) => ({ id })) };
+  }, [map.paths, focus]);
   const pad = 48;
   const host = useRef<HTMLDivElement>(null);
   const flow = useRef<ReactFlowInstance<PackageNode | AreaNode, PathEdge> | null>(null);
@@ -100,14 +116,14 @@ function MapCanvas({ map, litPaths, litAreas, faded, label }: { map: ChangeMap; 
   useEffect(() => {
     const element = host.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => { void flow.current?.fitView(FIT); });
+    const observer = new ResizeObserver(() => { void flow.current?.fitView(fit); });
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [fit]);
   // FLUID-GAP: node graph canvas — @xyflow/react draws the canvas and edges; the area and package chrome is ours.
   return <div ref={host} role="img" aria-label={label} className={`max-h-[480px] min-h-[180px] w-full overflow-hidden border border-border bg-surface-2 ${shape.container}`} style={{ aspectRatio: `${layout.width + pad} / ${layout.height + pad}` }}>
     <ReactFlow<PackageNode | AreaNode, PathEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onInit={(instance) => { flow.current = instance; }} colorMode={dark ? 'dark' : 'light'}
-      style={{ background: 'transparent' }} width={layout.width + pad} height={layout.height + pad} fitView fitViewOptions={FIT} minZoom={0.15} maxZoom={1.5}
+      style={{ background: 'transparent' }} width={layout.width + pad} height={layout.height + pad} fitView fitViewOptions={fit} minZoom={0.15} maxZoom={1.5} proOptions={PRO_OPTIONS}
       nodesDraggable={false} nodesConnectable={false} nodesFocusable={false} edgesFocusable={false} elementsSelectable={false}
       zoomOnScroll={false} zoomOnDoubleClick={false} preventScrolling={false} />
   </div>;
@@ -121,19 +137,25 @@ function MapLegend({ map }: { map: ChangeMap }) {
       <svg width="18" height="6" aria-hidden><line x1="0" y1="3" x2="18" y2="3" style={{ stroke: PATH_COLOR[state], strokeWidth: 2, strokeDasharray: state === 'removed' ? '4 3' : undefined }} /></svg>
       {state === 'added' ? 'new path' : state === 'removed' ? 'removed' : 'unchanged'}
     </span>)}
-    <span className="inline-flex items-center gap-1 tabular-nums">{map.areas.length} area{map.areas.length === 1 ? '' : 's'} in {packages} package{packages === 1 ? '' : 's'}<Source by="agent" what="the areas, their packages and roles, and the paths between them" /><Source by="gitspace" what="where each area and path is drawn" /></span>
+    <span className="inline-flex items-center gap-1 tabular-nums">{map.areas.length} area{map.areas.length === 1 ? '' : 's'} in {packages} package{packages === 1 ? '' : 's'}<Source by="agent" what="the areas, their packages and roles, and the paths between them" /><Source by="gitspace" what="where each area and path is drawn, and how tall each area stands: the lines its files change in the guide's diffs" /></span>
   </p>;
 }
 
-/** The whole map with its steps: play them, or step through; each step lights its paths and names its section. */
-export function ChangeMapView({ map, sections, onOpenSection, onStep }: {
+/** The whole map with its steps: play them, or step through; each step lights its areas and paths in the view shown
+ * and names its section. The overview opens first unless the map is crowded; pressing an area there opens the flow
+ * view on it. */
+export function ChangeMapView({ map, sections, changes = null, onOpenSection, onStep }: {
   map: ChangeMap;
   /** The guide's sections in reading order, for numbering the section each step belongs to. */
   sections: readonly { id: string; title: string }[];
+  /** The lines each file changes, once the guide's diffs are measured. */
+  changes?: ReadonlyMap<string, FileChange> | null;
   onOpenSection?(sectionId: string): void;
   /** The section of the step shown, or null when no step is. */
   onStep?(sectionId: string | null): void;
 }) {
+  const [view, setView] = useState<'overview' | 'flow'>(() => map.areas.length > CROWDED_AREAS || new Set(map.areas.map((area) => area.package)).size > CROWDED_PACKAGES ? 'flow' : 'overview');
+  const [focus, setFocus] = useState<string | null>(null);
   const [step, setStep] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
   const steps = map.steps;
@@ -155,15 +177,23 @@ export function ChangeMapView({ map, sections, onOpenSection, onStep }: {
     return lit;
   }, [current, map.paths, litPaths]);
   const none = useMemo(() => new Set<string>(), []);
+  const focused = useMemo(() => new Set(focus === null ? [] : [focus]), [focus]);
   const sectionIndex = current ? sections.findIndex((section) => section.id === current.sectionId) : -1;
   const play = (): void => {
     if (playing) { setPlaying(false); return; }
     setStep((value) => value === null || value + 1 >= steps.length ? 0 : value);
     setPlaying(true);
   };
-  return <div className="flex flex-col gap-2">
-    <MapLegend map={map} />
-    <MapCanvas map={map} litPaths={litPaths} litAreas={litAreas} faded={none} label="The change map: the areas the change touches and the paths between them" />
+  return <div className="flex flex-col gap-2" data-map-view={view}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <TabsSubtle size="compact" selectedIndex={view === 'overview' ? 0 : 1} onSelect={(index) => { setFocus(null); setView(index === 0 ? 'overview' : 'flow'); }} idPrefix="change-map-view" aria-label="Map view">
+        <TabsSubtleItem index={0} label="Overview" /><TabsSubtleItem index={1} label="Flow" />
+      </TabsSubtle>
+      <MapLegend map={map} />
+    </div>
+    {view === 'overview'
+      ? <IsoMap map={map} changes={changes} litPaths={litPaths} litAreas={litAreas} onOpenArea={(areaId) => { setFocus(areaId); setView('flow'); }} />
+      : <MapCanvas map={map} litPaths={litPaths} litAreas={current ? litAreas : focused} faded={none} focus={focus} label="The change map: the areas the change touches and the paths between them" />}
     {steps.length ? <div className="flex flex-wrap items-center gap-2">
       <Button variant="secondary" size="compact" type="button" onClick={play}>{playing ? <PauseCircle width={14} height={14} /> : <Play width={14} height={14} />}{playing ? 'Pause' : 'Play the steps'}</Button>
       <Button variant="ghost" size="icon-compact" type="button" aria-label="Previous step" disabled={step === null || step === 0} onClick={() => { setPlaying(false); setStep((value) => Math.max(0, (value ?? 0) - 1)); }}><ChevronLeft width={14} height={14} /></Button>
