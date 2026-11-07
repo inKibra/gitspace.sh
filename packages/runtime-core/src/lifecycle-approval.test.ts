@@ -12,7 +12,7 @@ const unused = async (): Promise<never> => { throw new Error('Unexpected service
 const run = { method: 'runPhase', phase: 'machine/prepare', runId: 'prepare-1' };
 const pending: RuntimeLifecycleApprovalRequest = { phase: 'machine/prepare', scripts: [{
   hash: `sha256:${'a'.repeat(64)}`, kind: 'script', label: '10-install.sh', phase: 'machine/prepare', fileName: '10-install.sh',
-  content: '#!/bin/sh\nbun install --frozen-lockfile\n', previous: { content: '#!/bin/sh\nbun install\n', approvedBy: 'github:merged:#1340' },
+  content: '#!/bin/sh\nbun install --frozen-lockfile\n', previous: { content: '#!/bin/sh\nbun install\n', approvedBy: 'device-1' },
 }] };
 
 /** A workspace runtime whose model runs `machine/prepare` once through `environment` and then answers "Done."; its

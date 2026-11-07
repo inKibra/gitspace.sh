@@ -835,19 +835,13 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       throw error;
     }
   }
-  /** A configure, from the cloud's derivation or a machine's, that leaves a script without approval then applies the
-   * trust rule (`ProjectAuthorityDO.trustMergedLifecycle`), which reads GitHub at most once per base branch tip. A
-   * cloud/destroy run this mutation ends is recorded in the workspace journal. */
+  /** A cloud/destroy run this mutation ends is recorded in the workspace journal. */
   async mutateLifecycleState(raw: unknown, input: LifecycleMutation, actor: LifecycleActor): Promise<{ status: 'ok'; state: LifecycleState } | { status: 'error'; failure: EnvironmentFailure }> {
     const { identity, project } = await this.environmentReady(raw);
     try {
       const result = this.environment.mutate(identity.projectId, identity.workspaceId, input, actor, await project.environmentShared());
       if (result.shared) await project.applyEnvironmentShared(result.shared);
-      let state = result.state;
-      if (input.op === 'configure' && state.executions.some(execution => execution.kind === 'script' && !state.approvals.some(approval => approval.executionHash === execution.hash))
-        && (await project.trustMergedLifecycle()).length > 0) {
-        state = this.environment.get(identity.projectId, identity.workspaceId, await project.environmentShared());
-      }
+      const state = result.state;
       // A claim ends a run only by skipping it: the workspace's resources were already destroyed.
       if (input.op !== 'claim') for (const run of result.ended) {
         if (run.phase === 'cloud/destroy') await this.journalDestroy(identity, state, run);
