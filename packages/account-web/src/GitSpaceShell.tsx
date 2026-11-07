@@ -460,7 +460,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
           : <TurnTranscript turns={turns} transport={transport} onAnswer={answerInline} />}
     </ScrollArea>
     {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
-    <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
+    <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
         {standaloneAsk && pendingAsk && sessionControls
           ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
