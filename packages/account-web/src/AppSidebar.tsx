@@ -39,10 +39,9 @@ import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.
 import { operationActive } from './OperationProgress.js';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
 import { blocks, lit, relation, stackTree, waitsOn, type Lit, type Relation } from './sidebar/graph.js';
-import { SidebarLane } from './sidebar/Lane.js';
 import { DependencyText, DOWNSTREAM_TONE, GroupHeading, PhaseTag, PrChip, StackCaption, UPSTREAM_TONE } from './sidebar/parts.js';
 import type { ProjectGraph } from './sidebar/project-graph.js';
-import type { ChainWorkspace } from './sidebar/StackChain.js';
+import { stackPosition, type ChainWorkspace } from './sidebar/StackChain.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
   { view: 'kanban', icon: glyph(Columns03) },
@@ -178,7 +177,7 @@ export interface AppSidebarProps {
   user?: { name: string; handle?: string | null };
   /** Null or absent when this install has no deployment status (not a GitSpace tenant). */
   deployment?: SidebarDeploymentProps | null;
-  /** The git position of each stacked workspace in the selected workspace's stack, which its lane shows. */
+  /** The git position of each stacked workspace in the selected workspace's stack, which its row's caption shows. */
   stackStatuses?: ReadonlyMap<string, StackStatus>;
 }
 
@@ -291,7 +290,7 @@ const INSET = { first: 14, stacked: 30, grouped: 8 };
 const FIRST_GUIDES: readonly number[] = [7];
 const STACK_GUIDES: readonly number[] = [7, 21];
 
-/** An open workspace as its row, lane and stack chain read it. */
+/** An open workspace as its row and the stack chain read it. */
 interface RowItem extends ChainWorkspace { workspace: SidebarWorkspace; summary: SidebarSpaceSummary | undefined; state: RowState; phase: WorkspaceView['phase'] | null }
 
 function rowItem(workspace: SidebarWorkspace, graph: ProjectGraph | undefined): RowItem {
@@ -358,12 +357,10 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   groupBy: SidebarGroupBy;
   hovered: string | null;
   onHover(id: string | null): void;
-  laneOpen: boolean;
-  onLaneOpen(open: boolean): void;
   stackStatuses: ReadonlyMap<string, StackStatus>;
 }
 
-function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, laneOpen, onLaneOpen, stackStatuses }: ProjectRowsProps) {
+function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, stackStatuses }: ProjectRowsProps) {
   const { base, workspaces, graph } = project;
   const [showArchived, setShowArchived] = useState(false);
   const items = workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, graph));
@@ -376,19 +373,18 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
   const baseReleased = baseSummary && !baseSummary.closedAt && baseSummary.holder.kind === 'released';
   const createWorkspace = onNewWorkspace && project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' ? () => onNewWorkspace(project.id) : undefined;
   const names = new Map(items.map((item) => [item.id, item.name]));
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const caption = (item: RowItem) => {
+    const parent = item.stackedOn ? byId.get(item.stackedOn) : undefined;
+    return parent ? <StackCaption parent={parent.name} position={stackPosition(stackStatuses.get(item.id), parent)} /> : null;
+  };
   // A focus with nothing related lights nothing, rather than fading every other row.
   const focus = [hovered, selectedId].map((id) => lit(items, id)).find((light): light is Lit => light !== null && light.upstream.size + light.downstream.size > 0) ?? null;
   const row = (item: RowItem, inset: number, guides: readonly number[], meta: ReactNode, dimmed: boolean) => {
     const summary = item.summary;
-    const element = <WorkspaceRow key={item.id} item={item} kin={relation(focus, item.id)} selected={selectedId === item.id} inset={inset} guides={guides} dimmed={dimmed} onHover={onHover} onSelect={() => onSelectWorkspace(item.workspace)} meta={meta}
+    return <WorkspaceRow key={item.id} item={item} kin={relation(focus, item.id)} selected={selectedId === item.id} inset={inset} guides={guides} dimmed={dimmed} onHover={onHover} onSelect={() => onSelectWorkspace(item.workspace)} meta={meta}
       flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{summary?.holder.kind === 'released' && !summary.closedAt ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
       actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} />} />;
-    if (item.id !== selectedId || !graph || item.workspace.closedAt) return element;
-    return <Fragment key={item.id}>
-      <li className="list-none"><SidebarLane items={items} open={item.id} hovered={hovered} onHover={onHover} onOpen={(id) => { const target = items.find((entry) => entry.id === id); if (target) onSelectWorkspace(target.workspace); }}
-        expanded={laneOpen} onExpanded={onLaneOpen} inset={inset} baseBranch={graph.baseBranch} statuses={stackStatuses} /></li>
-      {element}
-    </Fragment>;
   };
   /** The second line after the stack caption and phase or state: the linked pull request and the written markers. */
   const markers = (item: RowItem) => {
@@ -402,10 +398,8 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
       if (!entry.stacked || !runs.length) runs.push([entry]);
       else runs.at(-1)?.push(entry);
     }
-    return runs.filter((run) => run.some(({ item }) => matches(item, filter))).flat().map(({ item, stacked }) => {
-      const parent = stacked && item.stackedOn ? names.get(item.stackedOn) : undefined;
-      return row(item, stacked ? INSET.stacked : INSET.first, stacked ? STACK_GUIDES : FIRST_GUIDES, <>{parent ? <StackCaption parent={parent} /> : null}<PhaseTag phase={item.phase} />{markers(item)}</>, !matches(item, filter));
-    });
+    return runs.filter((run) => run.some(({ item }) => matches(item, filter))).flat().map(({ item, stacked }) =>
+      row(item, stacked ? INSET.stacked : INSET.first, stacked ? STACK_GUIDES : FIRST_GUIDES, <>{stacked ? caption(item) : null}<PhaseTag phase={item.phase} />{markers(item)}</>, !matches(item, filter)));
   };
   const grouped = (by: 'state' | 'phase') => {
     const shown = items.filter((item) => matches(item, filter));
@@ -414,10 +408,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
       : [...[...PHASES].reverse().map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, items: shown.filter((item) => item.phase === phase) })), { key: 'unknown', label: 'Phase unknown', tone: undefined, items: shown.filter((item) => item.phase === null) }];
     return groups.filter((group) => group.items.length).map((group) => <Fragment key={group.key}>
       <li className="list-none"><GroupHeading tone={group.tone} count={group.items.length}>{group.label}</GroupHeading></li>
-      {group.items.map((item) => {
-        const parent = item.stackedOn ? names.get(item.stackedOn) : undefined;
-        return row(item, INSET.grouped, [], <>{parent ? <StackCaption parent={parent} /> : null}{by === 'state' ? <PhaseTag phase={item.phase} /> : <span className="shrink-0">{STATE_LABEL[item.state]}</span>}{markers(item)}</>, false);
-      })}
+      {group.items.map((item) => row(item, INSET.grouped, [], <>{caption(item)}{by === 'state' ? <PhaseTag phase={item.phase} /> : <span className="shrink-0">{STATE_LABEL[item.state]}</span>}{markers(item)}</>, false))}
     </Fragment>);
   };
   return <SidebarMenuItem>
@@ -467,7 +458,6 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [groupBy, setGroupBy] = useState(readGroupBy);
   const [hovered, setHovered] = useState<string | null>(null);
-  const [laneOpen, setLaneOpen] = useState(true);
   const collapseProject = (projectId: string, collapse: boolean): void => {
     const next = new Set(collapsedProjects);
     if (collapse) next.add(projectId);
@@ -531,7 +521,7 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
         </SidebarGroupActions>
         <SidebarMenu>
           {shown.map((project) => <ProjectRows key={project.id} project={project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} onOpenProjectAutomations={onOpenProjectAutomations}
-            filter={filter} groupBy={groupBy} hovered={hovered} onHover={setHovered} laneOpen={laneOpen} onLaneOpen={setLaneOpen} stackStatuses={stackStatuses} />)}
+            filter={filter} groupBy={groupBy} hovered={hovered} onHover={setHovered} stackStatuses={stackStatuses} />)}
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>

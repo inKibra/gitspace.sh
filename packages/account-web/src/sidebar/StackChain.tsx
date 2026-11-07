@@ -5,13 +5,16 @@ import { stackOf, type GraphWorkspace } from './graph.js';
 /** A workspace of a stack as the chain shows it; `status` absent while it is unknown. */
 export interface ChainWorkspace extends GraphWorkspace { name: string; branch: string; status?: SpaceStatusView }
 
-/** A stacked workspace's git position against its parent, as information: what the parent has that it lacks, and the
- * optional command that takes it in. Null while the position is unread. */
-function stackPosition(status: StackStatus | undefined, parent: ChainWorkspace): { text: string; command: string | null } | null {
+/** A stacked workspace's git position against its parent, as information: what the parent has that it lacks, the
+ * same in a few words for its sidebar row (null when up to date), and the optional command that takes it in. */
+export interface StackPosition { text: string; short: string | null; command: string | null }
+
+/** The position of a stacked workspace against `parent`; null while it is unread. */
+export function stackPosition(status: StackStatus | undefined, parent: ChainWorkspace): StackPosition | null {
   if (!status || status.parentId !== parent.id) return null;
-  if (status.parentMerged === 'merged') return { text: `${parent.name} merged into ${status.baseBranch}`, command: `git rebase --onto ${status.baseBranch} ${parent.branch}` };
-  if (status.parentAhead > 0) return { text: `${status.parentAhead} ${status.parentAhead === 1 ? 'commit' : 'commits'} behind ${parent.name}`, command: `git rebase ${parent.branch}` };
-  return { text: `up to date with ${parent.name}`, command: null };
+  if (status.parentMerged === 'merged') return { text: `${parent.name} merged into ${status.baseBranch}`, short: `merged into ${status.baseBranch}`, command: `git rebase --onto ${status.baseBranch} ${parent.branch}` };
+  if (status.parentAhead > 0) return { text: `${status.parentAhead} ${status.parentAhead === 1 ? 'commit' : 'commits'} behind ${parent.name}`, short: `${status.parentAhead} behind`, command: `git rebase ${parent.branch}` };
+  return { text: `up to date with ${parent.name}`, short: null, command: null };
 }
 
 /**

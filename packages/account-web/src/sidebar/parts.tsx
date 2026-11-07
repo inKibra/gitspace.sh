@@ -4,6 +4,7 @@ import { ArrowNarrowDown, ArrowNarrowUp, CornerDownRight } from '@untitledui/ico
 import type { ReactNode } from 'react';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, type WorkspaceView } from '../GitSpaceShell.js';
 import type { LinkedPullRequest } from './project-graph.js';
+import type { StackPosition } from './StackChain.js';
 
 /** What the focused workspace waits on (violet) and what waits on it (teal); neither is a status colour. */
 export const UPSTREAM_TONE = '#a855f7';
@@ -48,9 +49,11 @@ export function DependencyText({ waitsOn, blocks }: { waitsOn: readonly string[]
   </span>;
 }
 
-/** "↳ on bakery-core": the workspace a stacked row builds on and merges after. */
-export function StackCaption({ parent }: { parent: string }) {
-  return <span className="inline-flex min-w-0 shrink items-center gap-0.5" title={`Stacked on ${parent}: it merges after it`}><CornerDownRight width={11} height={11} strokeWidth={1.75} className="shrink-0" /><span className="truncate">on {parent}</span></span>;
+/** "↳ on bakery-core · 2 behind": the workspace a stacked row builds on and merges after, with its git position
+ * against it when that is read and not up to date; the full position and the command that takes it in on hover. */
+export function StackCaption({ parent, position }: { parent: string; position: StackPosition | null }) {
+  const title = [`Stacked on ${parent}: it merges after it`, position?.text, position?.command ? `to take it in: ${position.command}` : null].filter(Boolean).join('. ');
+  return <span className="inline-flex min-w-0 shrink items-center gap-0.5" title={title}><CornerDownRight width={11} height={11} strokeWidth={1.75} className="shrink-0" /><span className="truncate">on {parent}{position?.short ? ` · ${position.short}` : ''}</span></span>;
 }
 
 /** A group heading inside a project: its label, its count and a rule. */

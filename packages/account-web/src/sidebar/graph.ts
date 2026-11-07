@@ -1,4 +1,4 @@
-/** A workspace as the sidebar's stack tree, its lane and the Relations tab's chain read it: `stackedOn` is the branch it
+/** A workspace as the sidebar's stack tree and the Relations tab's chain and graph read it: `stackedOn` is the branch it
  * builds on and merges after (always also one of `dependsOn`). */
 export interface GraphWorkspace { id: string; dependsOn: readonly string[]; stackedOn: string | null }
 
@@ -92,7 +92,7 @@ export interface LaneNode { id: string; column: number; row: number }
 export interface LaneEdge { from: string; to: string; kind: 'depends' | 'stacked' }
 export interface Lane { nodes: readonly LaneNode[]; edges: readonly LaneEdge[]; columns: number }
 
-/** The workspaces a lane draws around one: it, everything it waits on and everything that waits on it. */
+/** The workspaces the mini graph draws around one: it, everything it waits on and everything that waits on it. */
 export function neighbourhood(items: readonly GraphWorkspace[], id: string): ReadonlySet<string> {
   const light = lit(items, id);
   return new Set([id, ...light?.upstream ?? [], ...light?.downstream ?? []]);

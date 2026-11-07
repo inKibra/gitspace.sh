@@ -516,7 +516,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
     operations: operations.filter((operation) => operation.projectId === project.id),
     graph: graphs[project.id],
   }));
-  // The selected workspace's stack, whose positions its sidebar lane shows; read again as its runtime publishes.
+  // The selected workspace's stack, whose positions its stacked rows' captions show; read again as its runtime publishes.
   const selectedGraph = projectId ? graphs[projectId] : undefined;
   const selectedStack = selectedGraph && workspaceId ? stackOf(Object.entries(selectedGraph.relations).map(([id, relations]) => ({ id, ...relations })), workspaceId).flatMap((link) => link.stackedOn === null ? [] : [link.id]) : [];
   const selectedStackStatuses = useStackStatuses(selectedStack, useLiveChanges(workspaceLiveKey(workspaceId ?? '', 'runtime', projectId)));

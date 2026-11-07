@@ -176,21 +176,22 @@ describe('AppSidebar stacks', () => {
     expect(html).toContain('waits on bakery-stock');
     expect(html).toContain('blocks bakery-payments');
     expect(html).toContain('#42');
-    // No lane without an open workspace.
-    expect(html).not.toContain('data-sidebar-lane');
   });
 
-  it('puts the lane directly above the open row: what it waits on and blocks, its stack, and the chain with each position', () => {
+  it('shows each workspace once, in the same order with one open, its stacked row carrying its git position against its parent', () => {
+    const rows = (html: string) => [...html.matchAll(/data-workspace="([^"]+)"/gu)].map((match) => match[1]);
+    const closed = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[stackedProject]} /></SidebarProvider>);
     const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} deployment={null} projects={[stackedProject]} selected={{ projectId: 'stacks', workspaceId: 'bakery-api' }}
-      stackStatuses={new Map([['bakery-api', { parentId: 'bakery-core', parentBranch: 'feature/bakery-core', baseBranch: 'develop', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', instruction: null }]])} /></SidebarProvider>);
-    const lane = html.indexOf('data-sidebar-lane');
-    expect(lane).toBeGreaterThan(html.indexOf('data-workspace="bakery-core"'));
-    expect(lane).toBeLessThan(html.indexOf('data-workspace="bakery-api"'));
-    expect(html).toContain('waits on 0</span><span>·</span>');
-    expect(html).toContain('stack 4');
-    expect([...html.matchAll(/data-stack-link="([^"]+)"/gu)].map((match) => match[1])).toEqual(['bakery-core', 'bakery-api', 'bakery-web', 'bakery-admin']);
-    expect(html).toContain('bottom of the stack · merges into develop');
-    expect(html).toContain('merges after bakery-core · 2 commits behind bakery-core');
-    expect(html).toContain('git rebase feature/bakery-core');
+      stackStatuses={new Map([
+        ['bakery-api', { parentId: 'bakery-core', parentBranch: 'feature/bakery-core', baseBranch: 'develop', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', instruction: null }],
+        ['bakery-web', { parentId: 'bakery-api', parentBranch: 'feature/bakery-api', baseBranch: 'develop', mergeBase: null, parentAhead: 0, parentMerged: 'not-merged', instruction: null }],
+      ])} /></SidebarProvider>);
+    expect(rows(html)).toEqual(rows(closed));
+    expect(new Set(rows(html)).size).toBe(rows(html).length);
+    expect(html).toContain('title="Stacked on bakery-core: it merges after it. 2 commits behind bakery-core. to take it in: git rebase feature/bakery-core"');
+    expect(html).toContain('on bakery-core · 2 behind');
+    // Up to date: the caption stays short, the position only on hover.
+    expect(html).toContain('title="Stacked on bakery-api: it merges after it. up to date with bakery-api"');
+    expect(html).not.toContain('on bakery-api · ');
   });
 });

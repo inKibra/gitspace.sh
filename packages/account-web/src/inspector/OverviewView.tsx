@@ -25,7 +25,7 @@ import { AlertTriangle, XClose } from '@untitledui/icons';
 import { useContext, useState, type ReactNode } from 'react';
 import { EmptyState, PHASE_LABEL, workspaceStatusColor, WorkspaceStatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { stackOf } from '../sidebar/graph.js';
-import { MiniGraph } from '../sidebar/Lane.js';
+import { MiniGraph } from '../sidebar/MiniGraph.js';
 import { ProjectGraphsContext } from '../sidebar/project-graph.js';
 import { StackChain, type ChainWorkspace } from '../sidebar/StackChain.js';
 import { isBlocking, useRelationWriter, WorkspaceGraph, type SetWorkspaceRelations } from '../WorkspaceGraph.js';
