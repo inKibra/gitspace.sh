@@ -33,7 +33,7 @@ import { ServiceAccessApproval } from './ServiceAccessApproval.js';
 import { SkillsPage } from './SkillsPage.js';
 import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
-import { AUTOMATIONS_OVERVIEW_INPUT, AutomationsPage } from './AutomationsPage.js';
+import { AUTOMATIONS_OVERVIEW_INPUT, AutomationsPage } from './automations/AutomationsPage.js';
 import { MonitoringPage } from './MonitoringPage.js';
 import { AccountDirectoryContext, useWorkspaceProjection } from './useAccountDirectory.js';
 import { useOriginCheck } from './useOriginCheck.js';

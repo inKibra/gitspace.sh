@@ -2,7 +2,7 @@ import { Accordion, Button, ThinkingIndicator } from '@gitspace/ui';
 import { repositoryDiffViewSchema, sharedGuideDeniedSchema, sharedGuideSchema, type SharedGuide as SharedGuideView, type SharedGuideDenied } from '@gitspace/protocol/inspector-contract';
 import { useEffect, useState } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
-import { GuideWalkthroughSection } from './inspector/Inspector.js';
+import { GuideWalkthroughSection } from './inspector/ChangeGuideSurface.js';
 
 /** Diffs load as they near the browser viewport: the page itself scrolls. */
 const VIEWPORT = { current: null };

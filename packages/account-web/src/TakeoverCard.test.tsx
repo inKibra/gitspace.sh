@@ -6,7 +6,7 @@ import type { ToolCallBlock } from '@gitspace/blocks';
 import { SessionControlSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import type { RuntimeQuestion, RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
 import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
-import { TranscriptItemView } from './TurnTranscript.js';
+import { TranscriptItemView } from './chat/TranscriptItemView.js';
 
 const groupId = '00000000-0000-4000-8000-0000000000a1';
 const control = SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null });

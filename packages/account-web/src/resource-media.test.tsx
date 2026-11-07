@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceFiles, type ResourceFile } from './resource-files.js';
 import { ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
-import { TurnTranscript } from './TurnTranscript.js';
+import { TurnTranscript } from './chat/TurnTranscript.js';
 
 let root: Root;
 let container: HTMLDivElement;

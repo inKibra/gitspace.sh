@@ -1,7 +1,8 @@
 import { TRANSCRIPT_CACHE_ROWS, type ExecutionBlock, type TranscriptItem, type TranscriptRow, type TransportBlock } from '@gitspace/blocks';
 import { Button } from '@gitspace/ui';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { TranscriptItemView, TransportNotice, type ExecutionHistoryRenderer, type TranscriptItemState, type TranscriptReadingPosition, type TurnTranscriptProps } from './TurnTranscript.js';
+import { TranscriptItemView, type ExecutionHistoryRenderer, type TranscriptItemState, type TranscriptReadingPosition } from './chat/TranscriptItemView.js';
+import { TransportNotice, type TurnTranscriptProps } from './chat/TurnTranscript.js';
 import { useTranscriptHistory, type TranscriptHistory } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
 

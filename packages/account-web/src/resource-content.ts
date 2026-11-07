@@ -1,6 +1,6 @@
 import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, RESOURCE_TEXT_PREVIEW_BYTES, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { RuntimeBrowserArtifactPage } from '@gitspace/protocol-runtime';
-import type { InspectorArtifactContent } from './inspector/Inspector.js';
+import type { InspectorArtifactContent } from './inspector/inspector-shared.js';
 
 type ReadResult = { status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown };
 type ArtifactInput = { spaceId: string; expectedGeneration: number; url: string; hash: string | null };

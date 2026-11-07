@@ -7,7 +7,7 @@ import { AutomationsPage, type AutomationWorkspace } from './AutomationsPage.js'
 
 const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn() }));
 const queries = vi.hoisted(() => new Map<string, unknown>());
-vi.mock('./rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', ...rpc } } }));
+vi.mock('../rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', ...rpc } } }));
 vi.mock('result-rpc/react', async () => ({
   ...await vi.importActual<object>('result-rpc/react'),
   useResultQuery: (procedure: string) => ({ state: 'success', value: queries.get(procedure), fetch: 'idle', refetch: async () => {} }),

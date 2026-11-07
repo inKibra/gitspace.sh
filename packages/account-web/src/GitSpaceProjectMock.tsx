@@ -23,7 +23,7 @@ import '@gitspace/ui/fluid-theme.css';
 import './styles.css';
 import { glyph } from './glyph.js';
 import { PageCanvas, PageHeader, StatusDot } from './GitSpaceShell.js';
-import { AskBlockView } from './TurnTranscript.js';
+import { AskBlockView } from './chat/AskCards.js';
 import { restoreAppearance } from './appearance.js';
 
 /** Whether the GitSpace project's repository is upstream GitSpace or anything else (a fork, in this mock). */

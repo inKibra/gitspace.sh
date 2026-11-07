@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { userMessageMarkdown } from './TurnTranscript.js';
+import { userMessageMarkdown } from './RichContent.js';
 
 it('links an uploaded attachment to its drive file and fences an inline text attachment', () => {
   const message = [

@@ -16,7 +16,7 @@ import '@gitspace/ui/fluid-theme.css';
 import './styles.css';
 import { glyph } from './glyph.js';
 import { PageCanvas, PageHeader, StatusDot } from './GitSpaceShell.js';
-import { AskBlockView } from './TurnTranscript.js';
+import { AskBlockView } from './chat/AskCards.js';
 import { restoreAppearance } from './appearance.js';
 
 const STAGE = { width: 1280, height: 800 };

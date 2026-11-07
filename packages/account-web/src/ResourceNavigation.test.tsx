@@ -7,7 +7,7 @@ import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceNavigation } from './ResourceNavigation.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { Inspector } from './inspector/Inspector.js';
-import type { InspectorArtifactContent } from './inspector/Inspector.js';
+import type { InspectorArtifactContent } from './inspector/inspector-shared.js';
 import { loadInspectorResource } from './resource-content.js';
 
 let root: Root;

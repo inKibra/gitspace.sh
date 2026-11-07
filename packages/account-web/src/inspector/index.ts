@@ -1,13 +1,13 @@
 export { Inspector } from './Inspector.js';
 export type {
   CreateInspectorThread,
-  InspectorArtifactContent,
   InspectorDocumentKind,
   InspectorOpenDocument,
   InspectorPermanentView,
   InspectorProps,
   InspectorUsageState,
 } from './Inspector.js';
+export type { InspectorArtifactContent } from './inspector-shared.js';
 export { UsageView } from './UsageView.js';
 export type { UsageStatus, UsageViewProps } from './UsageView.js';
 export { AgentSetupView } from './AgentSetupView.js';
