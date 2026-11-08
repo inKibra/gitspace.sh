@@ -9,7 +9,7 @@ import { RuntimeBrowserApprovalCardSchema, RuntimeFullOutputDetailsSchema, Runti
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, parseToolArguments, runtimeToolParameters, type ToolServices } from './tools.js';
-import type { ToolResultKey } from './tool-results.js';
+import { CODEMODE_CHILD_OUTPUT_LIMITS, type ToolResultKey } from './tool-results.js';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { DurableJobsDoc, createJobTask, createJobTool, type JobServices } from './jobs.js';
 import { RuntimeBashArgumentsSchema } from '@gitspace/protocol-runtime/tool-arguments';
@@ -60,10 +60,11 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
     const reply: AssistantMessage = { role: 'assistant', content: calls ?? [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: calls ? 'toolUse' : 'stop', timestamp: generation, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
   } };
-  const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
+  const storage = new MemoryStorage();
+  const harness = await Harness.open(storage, { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: chatModel.provider, modelId: chatModel.id }, tools } });
   await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
-  return { harness, root, tools };
+  return { harness, root, tools, storage };
 }
 const call = (name: string, args: ToolCall['arguments'], id = name): ToolCall => ({ type: 'toolCall', name, arguments: args, id });
 
@@ -527,6 +528,31 @@ test('a codemode child gets the whole output the transcript cut, and one past 25
     expect(keptHuge.length).toBeLessThanOrEqual(TOOL_RESULT_MAX_BYTES);
     expect(keptHuge.length).toBeGreaterThan(TOOL_RESULT_MAX_BYTES - 30);
     expect(huge.startsWith(keptHuge)).toBe(true);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 15_000);
+
+test('a codemode child\'s stored entry keeps a stub and the reference, while a model-issued call keeps the same output inline', async () => {
+  // Longer than a child's entry keeps, shorter than a model-issued call's.
+  const output = numbered(200);
+  const outcomes: unknown[] = [];
+  const { harness, root, storage } = await registered([[call('codemode', { code: 'filter' }), call('bash', { command: 'cat out.txt' }, 'direct')]], async input => {
+    if (input.tool === 'read' || input.tool === 'bash') return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: output }] };
+    if (!input.codemodeTools) throw new Error('Missing codemode authority');
+    outcomes.push(await input.codemodeTools({ tool: 'read', args: { path: 'out.txt' }, callId: 'child', signal: AbortSignal.timeout(5000) }));
+    return completed(input);
+  });
+  try {
+    await root.submit({ type: 'input', content: 'Read it both ways.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
+    expect(outcomes).toEqual([{ status: 'completed', value: [{ type: 'text', text: output }] }]);
+    const stored = (await storage.scanEntries({ conversationId: root.id }, 1000, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []);
+    const text = (id: string) => resultOf(stored, id).content.flatMap(item => item.type === 'text' ? [item.text] : []).join('');
+    const reference = keptReference({ conversationId: String(root.id), callId: 'child' });
+    expect(kept.get(reference)).toBe(output);
+    expect(new TextEncoder().encode(text('child')).length).toBeLessThanOrEqual(CODEMODE_CHILD_OUTPUT_LIMITS.maxBytes);
+    expect(text('child')).toContain(reference);
+    expect(output.startsWith(text('child').split('\n').slice(0, -1).join('\n'))).toBe(true);
+    expect(text('direct')).toBe(output);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 15_000);
 

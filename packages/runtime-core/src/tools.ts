@@ -17,7 +17,7 @@ import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { admitToolImages, imageLimits } from './inference/image-limits.js';
 import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
 import { isTakeoverEvent } from './takeover.js';
-import { keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
+import { CODEMODE_CHILD_OUTPUT_LIMITS, keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
 export type CodemodeToolOutcome =
   | { status: 'completed'; value: JsonValue }
@@ -351,7 +351,11 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         return { output, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
       };
       const result = await (safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run));
-      return keepWholeOutput(result, services.results, { conversationId: String(api.conversationId), callId: api.callId }, TOOL_OUTPUT_LIMITS);
+      // A codemode child's task is owned by the codemode call's tool task, a model-issued call's by its generation.
+      const task = await api.getTask(api.taskId, context);
+      const owner = task?.owner === undefined ? undefined : await api.getTask(task.owner, context);
+      const limits = owner?.kind === ToolTask.definition.name ? CODEMODE_CHILD_OUTPUT_LIMITS : TOOL_OUTPUT_LIMITS;
+      return keepWholeOutput(result, services.results, { conversationId: String(api.conversationId), callId: api.callId }, limits);
     },
   }));
   tools.push(defineTool({ name: 'todo', description: TODO, parameters: runtimeToolParameters(RuntimeTodoArgumentsSchema), prepareArguments: input => parseToolArguments('todo', RuntimeTodoArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
