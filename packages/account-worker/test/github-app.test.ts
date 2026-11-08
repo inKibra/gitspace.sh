@@ -3,8 +3,8 @@ import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
-import type { RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
-import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { RuntimeAttachInputSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
+import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import { readInspectorContext } from '../src/account-inspector-data.js';
 import { withCloudCheckout } from '../src/cloud-repository.js';
 import { createGuideShare } from '../src/guide-shares.js';
@@ -327,6 +327,31 @@ describe('GitHub App', () => {
     expect(view.removed).toEqual([{ account: 'inKibra', installedBy: 'stranger', removedAt: expect.any(String) }]);
   });
 
+  it('names the machine attached to the base workspace as the bridge to a private repository the App does not cover', async () => {
+    const app = await project('Octo App', 'git@github.com:octo-labs/private-app.git');
+    network.use(http.get('https://github.com/octo-labs/private-app.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })));
+    await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).putMachine({
+      id: 'darktop', label: 'Darktop', state: 'online', rpcEndpoint: '/tunnel/darktop/rpc', kind: 'physical', provider: 'physical',
+      notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
+    });
+    const needsApp = { state: 'needs-app', repository: 'octo-labs/private-app', organization: 'octo-labs', appName: null };
+    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: null });
+
+    const base = RuntimeIdentitySchema.parse({ projectId: app.id, workspaceId: app.id });
+    const attachments = (change: (store: AttachmentStore) => Promise<unknown>) => runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${app.id}`), async (_instance: SpaceAuthorityDO, state) => {
+      await state.storage.put('runtime.identity', base);
+      await change(new AttachmentStore(state.storage, { seal: async () => 'sealed', open: async () => 'secret', dispatch: async () => { throw new Error('No dispatch in access tests'); } }));
+    });
+    // Attached while its relay connection is down.
+    await attachments(store => store.attach(RuntimeAttachInputSchema.parse({ ...base, machineId: 'darktop', generation: 1, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), false));
+    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: { machineId: 'darktop', label: 'Darktop', online: false } });
+    await attachments(async store => store.presence(RuntimeMachineIdSchema.parse('darktop'), true));
+    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: { machineId: 'darktop', label: 'Darktop', online: true } });
+    // A detached checkout bridges nothing.
+    await attachments(async store => store.remove(RuntimeMachineIdSchema.parse('darktop')));
+    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: null });
+  });
+
   it("keeps an installation that answers a project's request for its organization, and one the App's owner made", async () => {
     const key = await rsaKey('pkcs1');
     await createApp(key);
@@ -335,7 +360,7 @@ describe('GitHub App', () => {
       http.get(`${API}/users/BrandByX`, () => HttpResponse.json({ id: 160976157, login: 'BrandByX' })),
       http.get('https://github.com/BrandByX/payne-portals.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })),
     );
-    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test' });
+    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test', bridge: null });
 
     // Started from the project, GitHub opens with the repository's owner chosen, and the request names it.
     for (let attempt = 0; attempt < 2; attempt++) {

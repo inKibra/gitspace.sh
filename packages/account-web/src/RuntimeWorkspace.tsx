@@ -31,7 +31,7 @@ import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useLiveChanges } from './live-notices.js';
 import { useEventRefresh } from './SynchronizationProvider.js';
-import { RepositoryAccessCard, rememberGitHubInstall } from './GitHubAccess.js';
+import { RepositoryAccessCard, RepositoryBridgeBanner, rememberGitHubInstall } from './GitHubAccess.js';
 import { operationActive, OperationStatusLine } from './OperationProgress.js';
 
 export interface RuntimeInspectorContext {
@@ -95,20 +95,28 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const [launchRequest, setLaunchRequest] = useState<{ source: LaunchSourceView; targets: typeof RELEASE_TARGETS } | null>(null);
   const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
-  // A project whose private repository the GitHub App does not reach shows how to get access instead of a transcript.
+  // A project whose private repository the GitHub App does not reach syncs through the machine attached to its base
+  // workspace under a banner; with no such machine it shows the ways in instead of a transcript.
   const projectView = inspection.workspace.kind === 'base' && inspection.project.repositoryReference !== null;
   const accessQuery = useResultQuery(rpcClient.github.projectAccess, { projectId: props.projectId }, { enabled: projectView });
   const accessValue = useRetainedQueryValue(accessQuery, props.projectId);
   useEventRefresh(useLiveChanges(accountLiveKey('github')), () => accessQuery.refetch(), projectView);
   const blocked = projectView && accessValue && accessValue.state !== 'ready' ? accessValue : null;
-  // The agent's start, which imports the repository, was refused while access was missing: it starts again once it is not.
-  const wasBlocked = useRef(false);
+  const walled = blocked && blocked.bridge === null ? blocked : null;
+  // The agent's start, which imports the repository, was refused while there was no way in: it starts again once there is.
+  const wasWalled = useRef(false);
   useEffect(() => {
-    if (blocked) { wasBlocked.current = true; return; }
-    if (!wasBlocked.current) return;
-    wasBlocked.current = false;
+    if (walled) { wasWalled.current = true; return; }
+    if (!wasWalled.current) return;
+    wasWalled.current = false;
     void session.run({ type: 'control' }).catch(() => {});
-  }, [blocked === null]);
+  }, [walled === null]);
+  const installApp = async () => {
+    const result = await rpcClient.github.install.start({ projectId: props.projectId });
+    if (result.status === 'error') throw result.error;
+    rememberGitHubInstall(props.projectId);
+    return result.value.url;
+  };
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalChoice, setTerminalChoice] = useState<{ spaceId: string; machineId: string } | null>(null);
   const scope = useMemo(() => runtimeScope(snapshot, inspection, relationValue), [snapshot, inspection, relationValue]);
@@ -265,15 +273,11 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
         setLaunchRequest({ source: { kind: 'canonical', repository, branch, commit }, targets: RELEASE_TARGETS });
       }), onBackToDefault: () => perform(launch.backToDefault) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onBackToDefault={() => perform(launch.backToDefault)} onDismiss={launch.dismiss} /> : undefined}
-      access={blocked ? {
-        card: <RepositoryAccessCard access={blocked} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={async () => {
-          const result = await rpcClient.github.install.start({ projectId: props.projectId });
-          if (result.status === 'error') throw result.error;
-          rememberGitHubInstall(props.projectId);
-          return result.value.url;
-        }} />,
-        notice: `The project agent starts once GitSpace can read ${blocked.repository}.`,
+      access={walled ? {
+        card: onAttachMachine => <RepositoryAccessCard access={walled} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} onAttachMachine={onAttachMachine} />,
+        notice: `The project agent starts once GitSpace can read ${walled.repository}.`,
       } : undefined}
+      accessBanner={blocked?.bridge ? <RepositoryBridgeBanner access={blocked} bridge={blocked.bridge} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
       sessionCommand={sessionCommand}

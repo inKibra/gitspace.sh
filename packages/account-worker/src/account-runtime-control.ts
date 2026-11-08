@@ -5,7 +5,7 @@ import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace
 import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentLeaseSchema, RuntimeGitHubTokenInputSchema, RuntimeRepositoryCredentialsInputSchema, type RuntimeRepositoryCredentialsInput } from '@gitspace/protocol-runtime/machine-controls';
-import type { GitHubRepositoryToken, MachineOriginAccess } from '@gitspace/protocol/github';
+import { githubRepositoryOf, type GitHubRepositoryToken, type MachineOriginAccess } from '@gitspace/protocol/github';
 import { ArtifactsCodeStore, ArtifactsNotFoundSchema, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 import { requireWorkspaceAccess } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
@@ -47,7 +47,11 @@ async function checkoutOrigin(env: Env, userId: string, machine: string, operati
   if (!project) throw new Error('Runtime project is unavailable');
   const origin = project.repositoryReference === null ? null : await originAccess(env, project.repositoryReference);
   if (!token) return origin?.kind === 'github-app' ? { kind: 'github-app', repository: origin.repository } : { kind: 'ssh' };
-  if (origin?.kind !== 'github-app') throw new Error('No GitHub App installation covers this project origin');
+  if (origin?.kind !== 'github-app') {
+    const repository = project.repositoryReference === null ? null : githubRepositoryOf(project.repositoryReference);
+    if (repository === null) throw new Error('This project\'s origin is not on GitHub, so no GitHub App token reaches it');
+    throw new Error(`A GitHub App token for ${repository} needs the GitSpace App on ${repository.slice(0, repository.indexOf('/'))}: install it from the project's page.`);
+  }
   return env.GITHUB_APP.getByName(env.ACCOUNT_ID).repositoryToken(origin.repository, token.access);
 }
 

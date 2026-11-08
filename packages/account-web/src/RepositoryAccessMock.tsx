@@ -1,6 +1,7 @@
-// Throwaway design mock: a project whose private repository the GitHub App does not cover yet. It says plainly that
-// the App is the only way in, tracks the install request (who, which organization, which repository, since when), and
-// tells an organization owner exactly where to approve it. "Today" shows the current dead-end message. Static data only.
+// Throwaway design mock: a project whose private repository the GitHub App does not cover yet and no machine bridges.
+// It offers both ways in (the App, or a machine that can read the repository), tracks the install request (who, which
+// organization, which repository, since when), and tells an organization owner exactly where to approve it. "Today"
+// shows the old dead-end message. Static data only.
 import {
   Badge, Button, Card, CardDescription, CardFooter, CardGroup, CardHeader, CardMedia, DropdownContent, DropdownMenu, DropdownTrigger, IconProvider,
   MenuItem, ShapeProvider, Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarInsetTopbar,
@@ -36,10 +37,10 @@ const STATES: readonly { id: State; label: string }[] = [
 const hoursAgo = (hours: number): string => new Date(Date.now() - hours * 3_600_000).toISOString();
 /** The built card for each state it shows, with this project's data. */
 const BUILT: readonly BlockedProjectAccess[] = [
-  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP },
-  { state: 'requested', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, request: { id: 'request', organization: ORG, project: { id: 'portal', name: 'Landscaping Portal' }, repository: `${ORG}/${REPO}`, firstRequestedAt: hoursAgo(17), lastRequestedAt: hoursAgo(8), times: 2 } },
-  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/brandbyx-site`, `${ORG}/golconda-ppva`], permissions: {}, installedAt: hoursAgo(3), projects: [] } },
-  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: null },
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, bridge: null },
+  { state: 'requested', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, request: { id: 'request', organization: ORG, project: { id: 'portal', name: 'Harbor Portal' }, repository: `${ORG}/${REPO}`, firstRequestedAt: hoursAgo(17), lastRequestedAt: hoursAgo(8), times: 2 }, bridge: null },
+  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/brandbyx-site`, `${ORG}/field-notes`], permissions: {}, installedAt: hoursAgo(3), projects: [] }, bridge: null },
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: null, bridge: null },
 ];
 
 const icon = (Icon: typeof Lock01, size = 16): ReactNode => <Icon width={size} height={size} strokeWidth={1.5} />;
@@ -72,7 +73,7 @@ function OwnerSteps(): ReactElement {
   </div>;
 }
 
-/** The project page's access card: why the agent cannot start, and the one way in. */
+/** The project page's access card: why the agent cannot start, and both ways in. */
 function AccessCard({ state }: { state: Exclude<State, 'today'> }): ReactElement {
   const shape = useShape();
   const [copied, setCopied] = useState(false);
@@ -88,7 +89,7 @@ function AccessCard({ state }: { state: Exclude<State, 'today'> }): ReactElement
     {state === 'needs-app' ? <>
       <div className="flex flex-col gap-1.5">
         <h2 className="text-subtitle font-semibold text-foreground">Install your GitHub App on {ORG}</h2>
-        <p className="text-body text-muted-foreground">This repository is private. GitSpace reads it only through your GitHub App, <span className="text-foreground">{APP}</span>, and that App isn't installed on {ORG}. There is no other way in: until it is, this project's agent and workspaces can't start.</p>
+        <p className="text-body text-muted-foreground">This repository is private, and your GitHub App, <span className="text-foreground">{APP}</span>, isn't installed on {ORG}. This project's agent and workspaces start once GitSpace can read it, through the App or through one of your machines.</p>
       </div>
       <p className="text-caption text-muted-foreground">If you're not an owner of {ORG}, GitHub sends your install to its owners as a request, and this page tracks it.</p>
       <div className="flex flex-wrap gap-2">
@@ -116,7 +117,7 @@ function AccessCard({ state }: { state: Exclude<State, 'today'> }): ReactElement
         <p className="text-body text-muted-foreground"><span className="text-foreground">{APP}</span> is installed on {ORG}, but only for selected repositories, and <span className="font-mono text-foreground">{REPO}</span> isn't one of them. An owner adds it in the App's repository access.</p>
       </div>
       <ol className="flex flex-col gap-3">
-        <Step state="done" title={`Installed on ${ORG}`} detail="Selected repositories: brandbyx-site, golconda-ppva" />
+        <Step state="done" title={`Installed on ${ORG}`} detail="Selected repositories: brandbyx-site, field-notes" />
         <Step state="current" title={`${REPO} added to the App's repositories`} detail="GitHub → Settings → GitHub Apps → GitSpace bradleat → Configure → Repository access" />
         <Step state="next" title={`GitSpace imports ${REPO}`} />
       </ol>
@@ -143,7 +144,7 @@ function ProjectPage({ state }: { state: State }): ReactElement {
   return <>
     <SidebarInsetTopbar>
       <span className="inline-flex min-w-0 flex-1 items-center gap-2 truncate text-body">
-        <span className="font-medium">Landscaping Portal</span>
+        <span className="font-medium">Harbor Portal</span>
         <span className="inline-flex items-center gap-1 font-mono text-caption text-muted-foreground">{icon(GitBranch01, 12)}main</span>
       </span>
       <span className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color={state === 'importing' ? 'blue' : 'orange'} />{state === 'importing' ? 'Importing' : 'Needs access'}</span>
@@ -152,7 +153,7 @@ function ProjectPage({ state }: { state: State }): ReactElement {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-4 px-6 pb-48 pt-10">
           {state === 'built'
-            ? BUILT.map((access, index) => <RepositoryAccessCard key={index} access={access} onInstall={async () => '#'} onOpenSettings={() => undefined} />)
+            ? BUILT.map((access, index) => <RepositoryAccessCard key={index} access={access} onInstall={async () => '#'} onOpenSettings={() => undefined} onAttachMachine={() => undefined} />)
             : state === 'today'
               ? <p role="alert" className="w-full whitespace-pre-wrap break-words text-caption text-destructive">Cloud session control: This is a private repository, so GitSpace Cloud can't import it. Create a workspace in this project with a machine connected; the machine does the initial import.</p>
               : <AccessCard state={state} />}
@@ -192,7 +193,7 @@ function SettingsPage({ state }: { state: State }): ReactElement {
             <CardMedia icon={BRANDBYX} />
             <CardHeader>
               <span className="text-body font-medium text-foreground">{ORG}</span>
-              <CardDescription>{state === 'not-selected' ? 'Installed for brandbyx-site, golconda-ppva · not payne-portals' : state === 'importing' ? 'Installed · payne-portals importing' : `Requested for ${REPO} · project Landscaping Portal`}</CardDescription>
+              <CardDescription>{state === 'not-selected' ? 'Installed for brandbyx-site, field-notes · not payne-portals' : state === 'importing' ? 'Installed · payne-portals importing' : `Requested for ${REPO} · project Harbor Portal`}</CardDescription>
             </CardHeader>
             <CardFooter>
               {state === 'not-selected' ? <Badge variant="dot" size="compact" color="amber">Repository not allowed</Badge>
@@ -231,8 +232,8 @@ function MockSidebar({ view }: { view: View }): ReactElement {
       </SidebarGroup>
       <SidebarGroup collapsible><SidebarGroupLabel>Projects</SidebarGroupLabel>
         <SidebarMenu>
-          {['GitSpace', 'Golconda IDF Data Vault', 'Golconda PPVA Enrollment', 'Landscaping Portal', 'inkibra core'].map(name => <SidebarMenuItem key={name}>
-            <SidebarMenuButton icon={dot(name === 'Landscaping Portal' ? 'orange' : 'blue')} isActive={view === 'project' && name === 'Landscaping Portal'}>{name}</SidebarMenuButton>
+          {['GitSpace', 'Ledger', 'Crumb', 'Harbor Portal', 'Field notes'].map(name => <SidebarMenuItem key={name}>
+            <SidebarMenuButton icon={dot(name === 'Harbor Portal' ? 'orange' : 'blue')} isActive={view === 'project' && name === 'Harbor Portal'}>{name}</SidebarMenuButton>
           </SidebarMenuItem>)}
         </SidebarMenu>
       </SidebarGroup>

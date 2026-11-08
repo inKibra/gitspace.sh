@@ -137,17 +137,24 @@ export type GitHubState = z.infer<typeof GitHubStateSchema>;
 /** How many removed installations GitSpace keeps listed. */
 export const GITHUB_REMOVED_KEPT = 50;
 
-/** Whether a project's agent can read its repository, and if not, how it gets access. GitSpace reads a private GitHub
- * repository only through the account's App, named by `appName` (null before the account creates one). */
+/** The machine attached to a project's base workspace. Without the App it is the project's bridge to GitHub: it reads
+ * and fetches the origin with its own git credentials (the account SSH key). `online`: it holds a live relay connection. */
+export const GitHubProjectBridgeSchema = z.object({ machineId: z.string().min(1), label: z.string(), online: z.boolean() });
+export type GitHubProjectBridge = z.infer<typeof GitHubProjectBridgeSchema>;
+
+/** Whether the cloud reads a project's repository itself, and if not, what stands in the way of the App and which machine
+ * bridges it meanwhile. A private GitHub repository the App does not cover is read through the machine attached to the
+ * project's base workspace (`bridge`, null when none is); the App, named by `appName` (null before the account creates
+ * one), adds pull requests, checks, GitHub-event automations and syncing with no machine. */
 export const GitHubProjectAccessSchema = z.discriminatedUnion('state', [
   /** Not on GitHub, public, or covered by an installation. */
   z.object({ state: z.literal('ready') }),
   /** Private, and the App is not installed on its owner. */
-  z.object({ state: z.literal('needs-app'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string().nullable() }),
+  z.object({ state: z.literal('needs-app'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string().nullable(), bridge: GitHubProjectBridgeSchema.nullable() }),
   /** Private, and an install on its owner waits for an organization owner. */
-  z.object({ state: z.literal('requested'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), request: GitHubInstallRequestViewSchema }),
+  z.object({ state: z.literal('requested'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), request: GitHubInstallRequestViewSchema, bridge: GitHubProjectBridgeSchema.nullable() }),
   /** Private, and the App is installed on its owner for other repositories only. */
-  z.object({ state: z.literal('not-selected'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), installation: GitHubInstallationViewSchema }),
+  z.object({ state: z.literal('not-selected'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), installation: GitHubInstallationViewSchema, bridge: GitHubProjectBridgeSchema.nullable() }),
 ]);
 export type GitHubProjectAccess = z.infer<typeof GitHubProjectAccessSchema>;
 
@@ -156,6 +163,6 @@ export const GitHubAppManifestFormSchema = z.object({ action: z.string().url(), 
 export type GitHubAppManifestForm = z.infer<typeof GitHubAppManifestFormSchema>;
 
 export const GitHubStateCodec = wire.serializable((value): value is GitHubState => GitHubStateSchema.safeParse(value).success, { id: 'gitspace/github-state/v2', jsonSchema: GitHubStateSchema });
-export const GitHubProjectAccessCodec = wire.serializable((value): value is GitHubProjectAccess => GitHubProjectAccessSchema.safeParse(value).success, { id: 'gitspace/github-project-access/v1', jsonSchema: GitHubProjectAccessSchema });
+export const GitHubProjectAccessCodec = wire.serializable((value): value is GitHubProjectAccess => GitHubProjectAccessSchema.safeParse(value).success, { id: 'gitspace/github-project-access/v2', jsonSchema: GitHubProjectAccessSchema });
 export const GitHubAppOwnerCodec = wire.serializable((value): value is GitHubAppOwner => GitHubAppOwnerSchema.safeParse(value).success, { id: 'gitspace/github-app-owner/v1', jsonSchema: GitHubAppOwnerSchema });
 export const GitHubAppManifestFormCodec = wire.serializable((value): value is GitHubAppManifestForm => GitHubAppManifestFormSchema.safeParse(value).success, { id: 'gitspace/github-app-manifest-form/v1', jsonSchema: GitHubAppManifestFormSchema });

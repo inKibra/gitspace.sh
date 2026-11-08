@@ -3,7 +3,7 @@ import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import {
   GITHUB_REMOVED_KEPT, GitHubAppOwnerSchema, GitHubLoginSchema, GitHubRepositoryNameSchema, GitHubStateSchema, githubRepositoryOf,
   type GitHubAppManifestForm, type GitHubAppOwner, type GitHubInstallationView, type GitHubInstallRequestView, type GitHubProjectAccess,
-  type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
+  type GitHubProjectBridge, type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
 } from '@gitspace/protocol/github';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
@@ -364,9 +364,10 @@ export class GitHubAppDO extends BudgetedDurableObject {
   }
 
   /**
-   * Whether a project's agent can read its repository. A repository not on GitHub, public, or covered by an installation
-   * is ready; a private one is reached only through the App, so the answer says what stands in the way: no install on its
-   * owner, a request an owner there has not answered, or an install that leaves this repository out.
+   * Whether the cloud reads a project's repository itself. A repository not on GitHub, public, or covered by an
+   * installation is ready. A private one the App does not cover is read through the machine attached to the project's
+   * base workspace, its `bridge`; the answer also says what stands in the way of the App: no install on its owner, a
+   * request an owner there has not answered, or an install that leaves this repository out.
    */
   async projectAccess(projectId: string): Promise<GitHubProjectAccess> {
     const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
@@ -374,14 +375,26 @@ export class GitHubAppDO extends BudgetedDurableObject {
     const repository = project.repositoryReference === null ? null : githubRepositoryOf(project.repositoryReference);
     if (repository === null || this.coverage(repository) !== null || await this.publicOnGitHub(repository)) return { state: 'ready' };
     const organization = repository.slice(0, repository.indexOf('/'));
+    const bridge = await this.projectBridge(projectId);
     const appName = this.app()?.name ?? null;
-    if (appName === null) return { state: 'needs-app', repository, organization, appName };
+    if (appName === null) return { state: 'needs-app', repository, organization, appName, bridge };
     const projects = await this.repositoryProjects();
     const request = this.requestViews(projects).find((candidate) => candidate.organization?.toLowerCase() === organization.toLowerCase());
-    if (request) return { state: 'requested', repository, organization, appName, request };
+    if (request) return { state: 'requested', repository, organization, appName, request, bridge };
     const installation = this.installationViews(projects).find((candidate) => candidate.account.login.toLowerCase() === organization.toLowerCase());
-    if (installation) return { state: 'not-selected', repository, organization, appName, installation };
-    return { state: 'needs-app', repository, organization, appName };
+    if (installation) return { state: 'not-selected', repository, organization, appName, installation, bridge };
+    return { state: 'needs-app', repository, organization, appName, bridge };
+  }
+
+  /** The machine a ref import or a checkout's origin fetch goes through: one attached (not detached) to the project's
+   * base workspace, an online one first. Its attachments are read without starting the workspace's runtime. */
+  private async projectBridge(projectId: string): Promise<GitHubProjectBridge | null> {
+    const attachments = (await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).runtimeAttachmentRecords({ projectId, workspaceId: projectId }))
+      .filter((attachment) => attachment.state !== 'detached');
+    const attachment = attachments.find((candidate) => candidate.online) ?? attachments[0];
+    if (!attachment) return null;
+    const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(attachment.machineId);
+    return { machineId: attachment.machineId, label: machine?.label ?? attachment.machineId, online: attachment.online };
   }
 
   /** The manifest form that creates the App on GitHub; its state is good for one creation callback. */
@@ -597,7 +610,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** A token for one covered repository, narrowed to it and to reading or writing its contents (and workflow files). */
   async repositoryToken(repository: string, access: GitHubRepositoryAccess): Promise<GitHubRepositoryToken> {
-    return this.installationToken(repository, access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' });
+    return this.installationToken(repository, access === 'write' ? { contents: 'write', workflows: 'write', metadata: 'read' } : { contents: 'read', metadata: 'read' }, `Reaching ${repository} from the cloud`);
   }
 
   /** Whether anyone may read `repository`. A private repository must be covered by an installation: a reader's user
@@ -648,7 +661,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** Whether `login` may write to `repository` (admin, maintain or write), read through the installation covering it. */
   async canWrite(repository: string, login: string): Promise<boolean> {
-    const token = await this.installationToken(repository, { metadata: 'read' });
+    const token = await this.installationToken(repository, { metadata: 'read' }, `Checking who may write to ${repository}`);
     try {
       const access = await githubRequest(`/repos/${repository}/collaborators/${encodeURIComponent(login)}/permission`, { token: token.token, schema: z.object({ permission: z.string() }) });
       return access.permission === 'admin' || access.permission === 'write';
@@ -661,7 +674,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** The paths a pull request changes, read through the installation covering its repository. */
   async pullRequestFiles(repository: string, number: number): Promise<string[]> {
-    const token = await this.installationToken(repository, { pull_requests: 'read', metadata: 'read' });
+    const token = await this.installationToken(repository, { pull_requests: 'read', metadata: 'read' }, `Reading the files of ${repository} pull request #${number}`);
     const paths: string[] = [];
     for (let page = 1; page <= PULL_REQUEST_FILE_PAGES; page++) {
       const files = await githubRequest(`/repos/${repository}/pulls/${number}/files?per_page=${REPOSITORY_PAGE_SIZE}&page=${page}`, { token: token.token, schema: z.array(z.object({ filename: z.string(), previous_filename: z.string().optional() })) });
@@ -712,7 +725,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
   /** A token that reads `repository`: the covering installation's, else any installation's (any public repository),
    * else none (anonymous, under GitHub's limit per address). */
   private async readToken(repository: string): Promise<string | undefined> {
-    if (this.coverage(repository) !== null) return (await this.installationToken(repository, { metadata: 'read', contents: 'read' })).token;
+    if (this.coverage(repository) !== null) return (await this.installationToken(repository, { metadata: 'read', contents: 'read' }, `Reading ${repository}`)).token;
     const installationId = this.ctx.storage.sql.exec<{ id: number }>('SELECT id FROM installations ORDER BY installed_at, id LIMIT 1').toArray()[0]?.id;
     if (installationId === undefined || !this.app()) return undefined;
     const key = `${installationId}:*`;
@@ -754,10 +767,10 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /** An installation token narrowed to one covered repository and `permissions`. A token lasts an hour: machines
    * authenticate git to GitHub on every fetch and push, and minted one each time (about 5,400 a day). Reused until
-   * shortly before it expires; held in memory only. */
-  private async installationToken(repository: string, permissions: Readonly<Record<string, 'read' | 'write'>>): Promise<GitHubRepositoryToken> {
+   * shortly before it expires; held in memory only. `feature` names what needs it in the error an uncovered repository gets. */
+  private async installationToken(repository: string, permissions: Readonly<Record<string, 'read' | 'write'>>, feature: string): Promise<GitHubRepositoryToken> {
     const installationId = this.coverage(repository);
-    if (installationId === null) throw new Error(`No GitHub App installation covers ${repository}`);
+    if (installationId === null) throw new Error(`${feature} needs the GitSpace App on ${repository.slice(0, repository.indexOf('/'))}: install it from the project's page.`);
     const key = `${installationId}:${repository.toLowerCase()}:${JSON.stringify(permissions)}`;
     const held = this.issued.get(key);
     if (held && Date.parse(held.expiresAt) - Date.now() > TOKEN_REUSE_MARGIN_MS) return held;

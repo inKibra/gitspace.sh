@@ -190,7 +190,10 @@ describe('signed checkout origin access', () => {
     const f = await originFixture('https://github.com/someone/else.git');
     expect(await (await f.origin()).json()).toEqual({ status: 'ok', value: { kind: 'ssh' } });
     const refused = await f.token('read');
-    expect({ status: refused.status, body: await refused.json() }).toMatchObject({ status: 400, body: { status: 'error' } });
+    const body = await refused.json();
+    expect({ status: refused.status, body }).toMatchObject({ status: 400, body: { status: 'error' } });
+    // The refusal names what is missing and where to fix it.
+    expect(JSON.stringify(body)).toContain("A GitHub App token for someone/else needs the GitSpace App on someone: install it from the project's page.");
     expect(f.tokens).not.toHaveBeenCalled();
   });
 

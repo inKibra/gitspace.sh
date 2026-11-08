@@ -203,9 +203,12 @@ export interface GitSpaceShellProps {
   deployment?: SidebarDeploymentProps | null;
   /** Strip pinned to the top of the agent canvas (the post-launch `Now running …` notice). */
   launchBanner?: ReactNode;
-  /** Shown in place of the transcript while the project's agent cannot read its repository; the composer waits under
-   * `access.notice`. */
-  access?: { card: ReactNode; notice: string };
+  /** Shown in place of the transcript while the project's agent cannot read its repository and no machine bridges it;
+   * the composer waits under `access.notice`. `card` gets the action that opens the Inspector's Environment, where a
+   * machine is attached. */
+  access?: { card(onAttachMachine: () => void): ReactNode; notice: string };
+  /** Strip above the transcript while a machine bridges the project's repository to GitHub in place of the App. */
+  accessBanner?: ReactNode;
 }
 
 export const STATUS_COLOR: Record<WorkspaceStatusColor, string> = { dim: 'var(--muted-foreground)', green: '#22c55e', blue: '#3b82f6', orange: '#f97316', red: '#ef4444' };
@@ -338,7 +341,7 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, banner, access }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, banner, access, accessBanner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -358,7 +361,8 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
   banner?: ReactNode;
-  access?: GitSpaceShellProps['access'];
+  access?: { card: ReactNode; notice: string };
+  accessBanner?: ReactNode;
 }) {
   const shape = useShape();
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
@@ -452,6 +456,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
     {history ? <TranscriptHistoryNotice {...history} /> : null}
     {mainAgent?.errorMessage || mainAgent?.failed ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}</p> : null}
     {controlsError && !onRetryControls && !access ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
+    {accessBanner ? <div className="flex shrink-0 justify-center px-6 pt-3">{accessBanner}</div> : null}
     <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">
       {access
         ? <div className="mx-auto flex w-full max-w-3xl flex-col items-center px-6 pb-[calc(var(--composer-overlay-height)+2rem)] pt-10">{access.card}</div>
@@ -611,7 +616,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner, access }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner, access, accessBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
@@ -621,6 +626,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   /** The Inspector in the conversation's place, its tab strip on top; Escape or "Back to conversation" returns. */
   const [inspectorFull, setInspectorFull] = useState(false);
   const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | undefined>(capturing ? 'browser' : undefined);
+  const openEnvironment = (): void => { setInspectorSection('environment'); setInspectorOpen(true); };
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
   const [guideSection, setGuideSection] = useState<{ spaceId: string; id: string; serial: number } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
@@ -713,7 +719,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
           {workspace.kind === 'workspace' && projectGraph ? pullRequest ? <PrChip pr={pullRequest} full /> : <span className="shrink-0 text-caption text-muted-foreground max-lg:hidden">no PR</span> : null}
         </nav>
         <div className="flex items-center gap-1">
-            {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); }, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
+            {renderEnvironmentStatus?.(openEnvironment, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
             {profileChange ? <span className="px-2 text-caption text-muted-foreground max-md:hidden">{profileChange}</span> : null}
             {workspace.kind === 'project' ? projectOperation : null}
             {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
@@ -734,13 +740,13 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} access={access} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} accessBanner={accessBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { id: guideSection.id, serial: guideSection.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
             </div>
-            {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? () => { setInspectorSection('environment'); setInspectorOpen(true); } : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
+            {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? openEnvironment : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
     </div>
     {onCreateProject ? <CreateProjectDialog open={newProject} onOpenChange={(open) => { setNewProject(open); if (!open) setCreateError(null); }} pending={createPending} error={newProject ? createError : null} onSubmit={async (input) => {

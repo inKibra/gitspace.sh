@@ -269,7 +269,7 @@ function GitHubSettingsMock(): ReactElement {
       <SidebarInset className="min-w-0">
         <SidebarInsetTopbar><span className="text-body font-medium">Account settings</span></SidebarInsetTopbar>
         <PageCanvas>
-          <PageHeader kicker="Settings" title="GitHub" description="Your GitHub App reads your private repositories and sends their events here. GitSpace reaches a private repository only through an organization the App is installed on." />
+          <PageHeader kicker="Settings" title="GitHub" description="Your GitHub App reads your private repositories and sends their events here. Without it, GitSpace reads a private repository through one of your machines, using your own access." />
           {scenario === 'today'
             ? <div className="flex flex-col gap-8"><GitHubSettings github={TODAY} onStartGitHubApp={async () => { throw new Error('mock'); }} onStartGitHubInstall={async () => '#'} onRotateGitHubKey={async () => { throw new Error('mock'); }} onGitHubAction={async () => undefined} /></div>
             : <ProposedPage scenario={scenario} />}

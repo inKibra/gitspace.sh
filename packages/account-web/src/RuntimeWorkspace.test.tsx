@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { InspectorView } from '@gitspace/protocol';
@@ -9,14 +9,14 @@ import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gits
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
 
-const mocks = vi.hoisted((): { setRelations: ReturnType<typeof vi.fn>; refresh: ReturnType<typeof vi.fn>; shell: GitSpaceShellProps | null; saved: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, failed: false, pending: false }));
+const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; shell: GitSpaceShellProps | null; saved: unknown; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, access: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal } } }));
-vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : undefined, refetch: mocks.refresh }) }));
+vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
 vi.mock('./useTranscriptHistory.js', () => ({ useTranscriptHistory: () => ({ refresh: vi.fn() }) }));
-vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
+vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}{props.accessBanner}{props.access?.card(inspectEnvironment)}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
 const stamp = '2026-10-03T00:00:00.000Z';
 const inspectEnvironment = vi.fn();
 const project = cloudProjectSummarySchema.parse({ id: 'project', name: 'Project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: stamp });
@@ -40,7 +40,7 @@ let container: HTMLDivElement;
 const render = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={workspace.id} snapshot={snapshot} inspection={inspection} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-  mocks.setRelations.mockReset(); mocks.refresh.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false;
+  mocks.setRelations.mockReset(); mocks.refresh.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined;
   snapshot.documents = {};
   snapshot.conversations = [];
   snapshot.attachments = [];
@@ -139,5 +139,27 @@ it('renders a brand-new workspace whose code document is still null', async () =
   await act(async () => { render(); });
   expect(mocks.shell).not.toBeNull();
   expect(container.querySelector('button[aria-label^="Environment"]')).not.toBeNull();
+});
+
+const baseInspection: InspectorView = { ...inspection, project: { ...project, repositoryReference: 'git@github.com:octo-labs/portal.git' }, workspace: { ...workspace, id: project.id, kind: 'base', phase: null } };
+const renderProject = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={baseInspection} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
+const needsApp = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX' };
+
+it('syncs a project through its bridging machine under a banner instead of walling it off', async () => {
+  mocks.access = { ...needsApp, bridge: { machineId: 'machine-1', label: 'studio-mac', online: true } };
+  await act(async () => { renderProject(); });
+  expect(mocks.shell?.access).toBeUndefined();
+  expect(container.querySelector('[aria-label="GitHub sync"]')?.textContent).toContain('Syncs with GitHub through studio-mac, using your own access. Install GitSpace BrandByX on octo-labs');
+  expect(container.querySelector('[aria-label="Repository access"]')).toBeNull();
+});
+
+it('walls off a project no machine bridges with a card whose machine button opens the Environment', async () => {
+  mocks.access = { ...needsApp, bridge: null };
+  await act(async () => { renderProject(); });
+  expect(mocks.shell?.accessBanner).toBeUndefined();
+  expect(mocks.shell?.access?.notice).toBe('The project agent starts once GitSpace can read octo-labs/portal.');
+  const attach = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].find(button => button.textContent === 'Attach a machine');
+  await act(() => attach?.click());
+  expect(inspectEnvironment).toHaveBeenCalledTimes(1);
 });
 
