@@ -12,8 +12,11 @@ export const BOARD_CHANGES_CHARACTERS = 2_000;
 export const PROJECT_BOARD_INSTRUCTION = 'Workspace board: your turns carry this project\'s workspaces, one line each (phase; working, waiting on a person and on what, idle or failed; pull request; since when). A full board comes on your first turn, after a compaction and now and then; later turns carry only the lines that changed since your previous turn. The latest full board plus the changes after it is the current state; workspace statuses earlier in this conversation are history. space_workspace board reads the full board now. When the board or a space_workspace read fails, tell the person you could not read the current state and why; never answer from memory instead.';
 
 /** What a conversation was last told: the rows of its last board read and when it was read, the first line of its last
- * full board (null: the next turn gets a full one), the characters of changes since that board, and the run that read it. */
-export const ProjectBoardDoc = defineDoc<{ rows: WorkspaceBoardRow[]; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ rows: [], at: 0, full: null, changes: 0, turn: null }) });
+ * full board (null: the next turn gets a full one), the characters of changes since that board, and the run that read it.
+ * Version 1 rows have no `lastReply` or `journal`; they were only the baseline of the next changes, so a version 1 state
+ * becomes the initial one and the next turn gets a full board. */
+const initialBoard = () => ({ rows: [], at: 0, full: null, changes: 0, turn: null });
+export const ProjectBoardDoc = defineDoc<{ rows: WorkspaceBoardRow[]; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 2, scope: 'conversation', history: 'latest', fork: 'current', initial: initialBoard, migrate: initialBoard });
 
 /**
  * The board message a turn of the project agent starts with, read once per turn (`turn`, its run) and appended to the

@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { AssistantEntry, MemoryStorage, ToolResultEntry, UserEntry } from '@earendil-works/pi-durable';
+import { AssistantEntry, defineDoc, MemoryStorage, ToolResultEntry, UserEntry } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { createAssistantMessageEventStream, createModels, type Api, type AssistantMessage, type Context, type Message, type Model } from '@earendil-works/pi-ai';
 import { RuntimeIdentitySchema, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
@@ -83,6 +83,24 @@ test('the first turn carries the full board, a later one only what changed, and 
     const [third] = await f.turn('Anything else?');
     expect(text(third!.messages.at(-1))).toBe('Anything else?');
     expect(instructions(third)).toBe(instructions(first));
+  } finally { await f.harness.close(context); }
+}, 20_000);
+
+test('a board stored before rows carried a last message and journal gives the next turn a full board, not a failed read', async () => {
+  const f = await fixture();
+  try {
+    // The state the release before left: version 1 rows, and a full board the conversation shows.
+    const full = 'Workspace board, 2026-11-08 17:00:00 UTC (1 workspace):';
+    const BoardVersion1 = defineDoc<{ rows: Array<Omit<WorkspaceBoardRow, 'lastReply' | 'journal'>>; at: number; full: string | null; changes: number; turn: string | null }>({
+      kind: 'gitspace.project-board', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ rows: [], at: 0, full: null, changes: 0, turn: null }),
+    });
+    await f.root.commit(async tx => {
+      await tx.appendEntry(UserEntry, f.root.id, { model: [{ role: 'user', content: `${full}\n- Billing export (billing) · code · idle · since 17:00`, timestamp: 1 }] });
+      const { lastReply: _reply, journal: _journal, ...earlier } = row('billing', 'Billing export');
+      Object.assign(await tx.doc(BoardVersion1, f.root.id), { rows: [earlier], at: Date.parse('2026-11-08T17:00:00Z'), full, changes: 0, turn: null });
+    }, context);
+    const [first] = await f.turn('Which workspaces need me?');
+    expect(text(first!.messages.at(-1))).toMatch(/^Workspace board, \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC \(2 workspaces\):\n- Billing export \(billing\)/u);
   } finally { await f.harness.close(context); }
 }, 20_000);
 

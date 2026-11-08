@@ -30,6 +30,7 @@ import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, ty
 import { createRequestLoad, estimateMemory } from './memory-estimate.js';
 import { createStorageReads, type StorageReads } from './storage-reads.js';
 import { measureEntries, measureTables, openWakeRecord, type WakeRecord } from './wake-record.js';
+import { stubCodemodeChildren } from './entry-migrations.js';
 import { isolateRuntimes, openIsolateRuntime, type IsolateRuntime } from './isolate-runtimes.js';
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
@@ -202,6 +203,11 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   const wake = openWakeRecord(options.storage.sql, options.version ?? null, marks.leftover.map(mark => mark.step));
   // Counted open from here until its session closes, so the lines of this open include it.
   const resident = openIsolateRuntime(options.identity.workspaceId);
+  // Before pi opens, so its first read of a conversation's range finds the migrated entries.
+  try {
+    const migrated = stubCodemodeChildren(options.storage.sql);
+    if (migrated) console.info(JSON.stringify({ event: 'codemode_children_stubbed', workspaceId: options.identity.workspaceId, ...migrated }));
+  } catch (error) { console.error(JSON.stringify({ event: 'codemode_children_stub_failed', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); }
   // Before the open, so an open that exhausts the object's memory still leaves the line.
   if (wake.tablesDue()) {
     try { console.info(JSON.stringify({ event: 'workspace_database_tables', workspaceId: options.identity.workspaceId, projectId: options.identity.projectId, databaseBytes: options.storage.sql.databaseSize, ...measureTables(options.storage.sql, TABLES_BUDGET_MS), ...isolateRuntimes() })); }
