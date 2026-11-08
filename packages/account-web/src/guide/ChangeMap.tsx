@@ -52,8 +52,9 @@ interface LabelPlace { x: number; y: number; anchor: 'start' | 'middle' | 'end' 
 
 /** The flow view: packages as columns of areas, the paths between them beneath, their labels above. `lit` paths and
  * areas stand out and, while a step plays, the rest fade; `faded` areas fade on their own. With `focus`, the view
- * scrolls that area into sight. With `natural`, it is drawn at its natural size for the lightbox. */
-function FlowMap({ map, changes, litPaths, litAreas, faded, label, focus = null, natural = false }: {
+ * scrolls that area into sight. With `natural`, it is drawn at its natural size for the lightbox. Without `measured`
+ * (a map outside a guide), no area is marked changed or unchanged. */
+function FlowMap({ map, changes, litPaths, litAreas, faded, label, focus = null, natural = false, measured = true }: {
   map: ChangeMap;
   changes: ReadonlyMap<string, FileChange> | null;
   litPaths: ReadonlySet<string>;
@@ -62,6 +63,7 @@ function FlowMap({ map, changes, litPaths, litAreas, faded, label, focus = null,
   label: string;
   focus?: string | null;
   natural?: boolean;
+  measured?: boolean;
 }) {
   const shape = useShape();
   const marker = useId().replace(/[^A-Za-z0-9_-]/gu, '');
@@ -131,17 +133,17 @@ function FlowMap({ map, changes, litPaths, litAreas, faded, label, focus = null,
       const change = lines.get(area.id);
       const changed = area.files.length > 0;
       return <div key={area.id} data-area={area.id} data-lit={lit} title={area.whatItDoes || undefined}
-        className={`absolute flex flex-col gap-0.5 border px-3 py-2 text-left transition-opacity ${shape.container} ${changed ? 'bg-surface-3' : 'border-dashed bg-surface-1'}`}
+        className={`absolute flex flex-col gap-0.5 border px-3 py-2 text-left transition-opacity ${shape.container} ${changed || !measured ? 'bg-surface-3' : 'border-dashed bg-surface-1'}`}
         style={{
           left: x + FLOW_PAD, top: y + FLOW_PAD, width: AREA_WIDTH, height: AREA_HEIGHT, opacity: faded.has(area.id) || (playing && !lit) ? 0.35 : 1,
           borderColor: lit ? 'transparent' : changed ? `color-mix(in oklab, ${badgeColors.green} 50%, var(--border))` : 'var(--border)', boxShadow: lit ? `0 0 0 2px ${badgeColors.blue}` : undefined,
         }}>
         <span className="truncate font-medium leading-tight text-foreground" style={{ fontSize: FLOW_TEXT.name }}>{area.name}</span>
-        <span className="truncate leading-tight text-muted-foreground" style={{ fontSize: FLOW_TEXT.detail }}>{area.whatItDoes || area.role || area.note}</span>
-        <span className="mt-auto truncate font-mono leading-tight tabular-nums text-muted-foreground" style={{ fontSize: FLOW_TEXT.detail }}>
+        <span className={`${measured ? 'truncate' : 'line-clamp-2'} leading-tight text-muted-foreground`} style={{ fontSize: FLOW_TEXT.detail }}>{area.whatItDoes || area.role || area.note}</span>
+        {measured ? <span className="mt-auto truncate font-mono leading-tight tabular-nums text-muted-foreground" style={{ fontSize: FLOW_TEXT.detail }}>
           {change ? <><span style={{ color: badgeColors.green }}>+{change.additions}</span> <span style={{ color: badgeColors.red }}>−{change.deletions}</span> · </> : null}
           {changed ? `${area.files.length} file${area.files.length === 1 ? '' : 's'}` : area.note ? 'no changed files' : 'context'}
-        </span>
+        </span> : null}
       </div>;
     })}
     <svg width={width} height={height} viewBox={`${-FLOW_PAD} ${-FLOW_PAD} ${width} ${height}`} className="pointer-events-none absolute left-0 top-0" aria-hidden>
@@ -156,22 +158,22 @@ function FlowMap({ map, changes, litPaths, litAreas, faded, label, focus = null,
   </div>;
 }
 
-/** The colour key, and who made the map. */
-function MapLegend({ map }: { map: ChangeMap }) {
+/** The colour key, and who made the map. `measured`: GitSpace sizes the areas by the lines the guide's diffs change. */
+function MapLegend({ map, measured }: { map: ChangeMap; measured: boolean }) {
   const packages = new Set(map.areas.map((area) => area.package)).size;
   return <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-caption text-muted-foreground">
     {PATH_STATES.map((state) => <span key={state} className="inline-flex items-center gap-1.5">
       <svg width="18" height="6" aria-hidden><line x1="0" y1="3" x2="18" y2="3" style={{ stroke: PATH_COLOR[state], strokeWidth: 2, strokeDasharray: state === 'removed' ? '4 3' : undefined }} /></svg>
       {state === 'added' ? 'new path' : state === 'removed' ? 'removed' : 'unchanged'}
     </span>)}
-    <span className="inline-flex items-center gap-1 tabular-nums">{map.areas.length} area{map.areas.length === 1 ? '' : 's'} in {packages} package{packages === 1 ? '' : 's'}<Source by="agent" what="the areas, their packages and roles, and the paths between them" /><Source by="gitspace" what="where each area and path is drawn, and how tall each area stands: the lines its files change in the guide's diffs" /></span>
+    <span className="inline-flex items-center gap-1 tabular-nums">{map.areas.length} area{map.areas.length === 1 ? '' : 's'} in {packages} package{packages === 1 ? '' : 's'}<Source by="agent" what="the areas, their packages and roles, and the paths between them" /><Source by="gitspace" what={measured ? 'where each area and path is drawn, and how tall each area stands: the lines its files change in the guide\'s diffs' : 'where each area and path is drawn'} /></span>
   </p>;
 }
 
 /** The whole map with its steps: play them, or step through; each step lights its areas and paths in the view shown
  * and names its section. The overview opens first unless the map is crowded; pressing an area there opens the flow
  * view on it. */
-export function ChangeMapView({ map, sections, changes = null, onOpenSection, onStep }: {
+export function ChangeMapView({ map, sections, changes = null, onOpenSection, onStep, measured = true }: {
   map: ChangeMap;
   /** The guide's sections in reading order, for numbering the section each step belongs to. */
   sections: readonly { id: string; title: string }[];
@@ -180,8 +182,10 @@ export function ChangeMapView({ map, sections, changes = null, onOpenSection, on
   onOpenSection?(sectionId: string): void;
   /** The section of the step shown, or null when no step is. */
   onStep?(sectionId: string | null): void;
+  /** False for a map outside a guide (a FlowMap block): no diffs size its areas. */
+  measured?: boolean;
 }) {
-  const [view, setView] = useState<'overview' | 'flow'>(() => map.areas.length > CROWDED_AREAS || new Set(map.areas.map((area) => area.package)).size > CROWDED_PACKAGES ? 'flow' : 'overview');
+  const [view, setView] = useState<'overview' | 'flow'>(() => !measured || map.areas.length > CROWDED_AREAS || new Set(map.areas.map((area) => area.package)).size > CROWDED_PACKAGES ? 'flow' : 'overview');
   const [focus, setFocus] = useState<string | null>(null);
   const [step, setStep] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -215,17 +219,17 @@ export function ChangeMapView({ map, sections, changes = null, onOpenSection, on
   const flowLabel = 'The change map: the areas the change touches and the paths between them';
   return <div className="flex flex-col gap-2" data-map-view={view}>
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <TabsSubtle size="compact" selectedIndex={view === 'overview' ? 0 : 1} onSelect={(index) => { setFocus(null); setView(index === 0 ? 'overview' : 'flow'); }} idPrefix="change-map-view" aria-label="Map view">
+      {measured ? <TabsSubtle size="compact" selectedIndex={view === 'overview' ? 0 : 1} onSelect={(index) => { setFocus(null); setView(index === 0 ? 'overview' : 'flow'); }} idPrefix="change-map-view" aria-label="Map view">
         <TabsSubtleItem index={0} label="Overview" /><TabsSubtleItem index={1} label="Flow" />
-      </TabsSubtle>
-      <MapLegend map={map} />
+      </TabsSubtle> : null}
+      <MapLegend map={map} measured={measured} />
     </div>
     {view === 'overview'
       ? <Lightbox label="The change map, overview" mode="zoom" expanded={<IsoMap map={map} changes={changes} litPaths={litPaths} litAreas={litAreas} onOpenArea={openArea} natural />}>
         <IsoMap map={map} changes={changes} litPaths={litPaths} litAreas={litAreas} onOpenArea={openArea} />
       </Lightbox>
-      : <Lightbox label="The change map, flow view" mode="zoom" expanded={<FlowMap map={map} changes={changes} litPaths={litPaths} litAreas={current ? litAreas : focused} faded={none} label={flowLabel} natural />}>
-        <FlowMap map={map} changes={changes} litPaths={litPaths} litAreas={current ? litAreas : focused} faded={none} focus={focus} label={flowLabel} />
+      : <Lightbox label="The change map, flow view" mode="zoom" expanded={<FlowMap map={map} changes={changes} litPaths={litPaths} litAreas={current ? litAreas : focused} faded={none} label={flowLabel} measured={measured} natural />}>
+        <FlowMap map={map} changes={changes} litPaths={litPaths} litAreas={current ? litAreas : focused} faded={none} focus={focus} label={flowLabel} measured={measured} />
       </Lightbox>}
     {steps.length ? <div className="flex flex-wrap items-center gap-2">
       <Button variant="secondary" size="compact" type="button" onClick={play}>{playing ? <PauseCircle width={14} height={14} /> : <Play width={14} height={14} />}{playing ? 'Pause' : 'Play the steps'}</Button>
@@ -236,7 +240,7 @@ export function ChangeMapView({ map, sections, changes = null, onOpenSection, on
       <p className="basis-full text-caption text-muted-foreground" aria-live="polite">{current ? <>
         <span className="font-medium tabular-nums text-foreground">{(step ?? 0) + 1} / {steps.length} · </span>{current.caption}{' '}
         {sectionIndex >= 0 && onOpenSection ? <button type="button" className="font-medium text-foreground underline-offset-2 hover:underline" onClick={() => { setPlaying(false); onOpenSection(current.sectionId); }}>Read §{sectionIndex + 1} {sections[sectionIndex]!.title}</button> : sectionIndex >= 0 ? <span className="font-medium text-foreground">§{sectionIndex + 1} explains it.</span> : null}
-      </> : `Play the ${steps.length} step${steps.length === 1 ? '' : 's'} the change takes through the map; each names the section that explains it.`}</p>
+      </> : sections.length ? `Play the ${steps.length} step${steps.length === 1 ? '' : 's'} the change takes through the map; each names the section that explains it.` : `Play the ${steps.length} step${steps.length === 1 ? '' : 's'} through the map.`}</p>
     </div> : null}
   </div>;
 }

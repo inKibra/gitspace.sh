@@ -1,4 +1,4 @@
-import { uiBlockPrompt } from './gitspace-ui.js';
+import { UI_SKILL_DESCRIPTION, uiBlockPrompt } from './gitspace-ui.js';
 
 const REVIEW_GUIDE_NARRATOR = `---
 name: review-guide-narrator
@@ -169,7 +169,7 @@ Use \`codemode({ args: { code: '...' } })\`. A fresh cloud Worker isolate expose
 - \`mcp.call({ name, args })\`
 
 Search before guessing names. Describe unfamiliar tools before calling them. Compose loops, filtering, joins, pagination, and bounded aggregation in one codemode execution so intermediate results stay out of model context. An empty grant set produces an empty catalog. Provider and MCP credentials are never exposed. There is no \`space\` object: older conversations used \`space.create(...)\` and similar in a removed eval tool; call \`tools.space_workspace\`, \`tools.space_goal\` and the other space_* tools instead.`);
-const GITSPACE_UI = gitSpaceSkill('gitspace-ui', 'Write gitspace-ui, svg and mermaid blocks in chat replies and Markdown fields. Use before writing a block.', uiBlockPrompt());
+const GITSPACE_UI = gitSpaceSkill('gitspace-ui', UI_SKILL_DESCRIPTION, uiBlockPrompt());
 
 export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'space-goal': SPACE_GOAL,

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { BlockActionsProvider, type BlockActions, type BlockState } from './BlockActions.js';
 import { BLOCK_FIXTURES, SVG_DRAWING, type BlockFixture } from './fixtures.js';
+import { UI_BLOCK_EXAMPLES } from '@gitspace/protocol/gitspace-ui';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -74,6 +75,28 @@ describe('gitspace-ui blocks in Markdown', () => {
     for (const expected of EXPECTED[entry.id] ?? []) expect(text).toContain(expected);
     expect(text).toContain('Before the block.');
     expect(text).toContain('After the block.');
+  });
+
+  // What each example the gitspace-ui skill teaches shows once drawn: its chart values formatted by unit, the
+  // FlowMap's areas and step player, the staged choice and the checklist's progress.
+  const SKILL_EXAMPLES: Record<string, readonly string[]> = {
+    'Results of a run': ['Cold start after the cache change', '1.8 s', 'Before', 'After', '4f2c9a1'],
+    'Values over time': ['Memory per turn', 'Read per turn', '128.0 MB', '11.1 MB'],
+    'Options compared': ['Where replies are cached', 'Durable Object', '$12'],
+    'How it flows': ['tool-result store', 'conversation entries', 'Play the steps', 'unchanged'],
+    'A choice for the person': ['Which cache keeps the replies?', 'Workers KV', 'Add to message'],
+    'A plan to tick off': ['Before the release', '1 of 3 checks done', 'Smoke run on the release'],
+    'Before and after': ['The board in the transcript', 'A notice'],
+    'A layout or anything the components cannot express': ['Workspace board', 'Composer'],
+  };
+  it.each(UI_BLOCK_EXAMPLES.filter((example) => example.fence !== 'mermaid'))('draws the skill example "$title" as an agent writes it', async (example) => {
+    await render(<GitSpaceMarkdown>{fence(example.fence, example.body)}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector(`[data-gitspace-block="${example.fence}"]`) !== null);
+    const text = container.textContent ?? '';
+    expect(text).not.toContain('could not be drawn');
+    for (const expected of SKILL_EXAMPLES[example.title] ?? ['missing expectations']) expect(text).toContain(expected);
+    // A line chart draws one line per series, not columns.
+    if (example.title === 'Values over time') expect(container.querySelectorAll('figure svg polyline')).toHaveLength(2);
   });
 
   it('redraws from state when a bound control changes', async () => {

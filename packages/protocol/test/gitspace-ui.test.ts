@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { extractBlocks, parseSvg, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
+import { extractBlocks, parseSvg, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
 
 const fence = '```';
 
@@ -30,8 +30,21 @@ describe('gitspace-ui specs', () => {
     expect(validateUiSpec(reviewSpec())).toEqual([]);
   });
 
-  it('accepts the example in the agent instructions', () => {
-    expect(validateMarkdownBlocks(uiBlockPrompt())).toEqual([]);
+  it('accepts every example the skill teaches, each drawn as its own block', () => {
+    const prompt = uiBlockPrompt();
+    expect(validateMarkdownBlocks(prompt)).toEqual([]);
+    expect(extractBlocks(prompt).map((block) => block.kind)).toEqual(UI_BLOCK_EXAMPLES.map((example) => example.fence));
+  });
+
+  it('rejects a FlowMap whose paths or steps name areas or paths it does not have', () => {
+    const map = (props: Record<string, unknown>) => validateUiSpec({ root: 'map', elements: { map: { type: 'FlowMap', props, children: [] } }, state: {} });
+    const areas = [{ id: 'web', name: 'Web app', group: 'account-web' }, { id: 'worker', name: 'Worker', group: 'account-worker' }];
+    expect(map({ areas, paths: [{ id: 'send', from: 'web', to: 'worker', label: 'message', state: 'added' }], steps: [{ paths: ['send'], from: 'web', to: 'worker', caption: 'Sent.' }] })).toEqual([]);
+    expect(paths(map({
+      areas: [...areas, { id: 'web', name: 'Again', group: 'account-web' }],
+      paths: [{ id: 'send', from: 'web', to: 'db', label: 'write', state: 'added' }, { id: 'send', from: 'worker', to: 'web', label: 'reply', state: 'same' }],
+      steps: [{ paths: ['send', 'gone'], from: 'nowhere', to: 'worker', caption: 'Sent.' }],
+    }))).toEqual(['/elements/map/props/areas/2/id', '/elements/map/props/paths/0/to', '/elements/map/props/paths/1/id', '/elements/map/props/steps/0/from', '/elements/map/props/steps/0/paths/1']);
   });
 
   it('rejects a missing root, a root that names no element, missing elements and missing children', () => {

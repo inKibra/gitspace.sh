@@ -115,12 +115,13 @@ const components = {
   Chart: {
     props: z.strictObject({
       title: z.string().nullish(),
-      unit: z.enum(['ms', 'seconds', 'count', 'percent']),
+      kind: z.enum(['bars', 'columns', 'line', 'stacked']).nullish().describe('bars (default): one group of horizontal bars per row; columns: the same as vertical bars; line: one line per series across the rows in order, for values over time or over a sequence; stacked: one horizontal bar per row, its series stacked, for parts of a total'),
+      unit: z.enum(['ms', 'seconds', 'count', 'percent', 'bytes', 'usd', 'tokens']),
       series: z.array(z.strictObject({ key: z.string(), label: z.string(), color })),
       rows: z.array(z.strictObject({ label: z.string(), values: z.record(z.string(), z.number()).describe('series key → value') })),
       max: z.number().nullish(),
     }),
-    description: `Horizontal bars, one group per row and one bar per series. Values are in \`unit\`; ms values are shown in seconds. A series color is a name, one of ${color.options.join(', ')}; never a hex value.`,
+    description: `Numbers drawn to scale. Values are in \`unit\`: ms show as seconds, bytes as KB, MB or GB, usd as dollars. A series color is a name, one of ${color.options.join(', ')}; never a hex value.`,
   },
   Checklist: {
     props: z.strictObject({ title: z.string().nullish() }),
@@ -192,6 +193,31 @@ const components = {
   Mermaid: {
     props: z.strictObject({ source: z.string().describe('Mermaid source, at most 16 KiB') }),
     description: 'A Mermaid diagram: flowchart, sequence, state, class or gantt.',
+  },
+  FlowMap: {
+    props: z.strictObject({
+      areas: z.array(z.strictObject({
+        id: z.string().min(1).max(64),
+        name: z.string().min(1).max(80),
+        group: z.string().min(1).max(80).describe('The package, service or layer the area belongs to; areas of one group are drawn together'),
+        role: z.string().max(200).nullish().describe('One line: what the area is'),
+        note: z.string().max(400).nullish().describe('What it does in this flow, shown when the area is opened'),
+      })).min(1).max(32),
+      paths: z.array(z.strictObject({
+        id: z.string().min(1).max(64),
+        from: z.string().describe('An area id'),
+        to: z.string().describe('An area id'),
+        label: z.string().max(160).describe('What travels along it: a call, an event, a write'),
+        state: z.enum(['added', 'removed', 'same']).describe('added: a path this change makes; removed: one it takes away; same: one it keeps'),
+      })).max(64),
+      steps: z.array(z.strictObject({
+        paths: z.array(z.string()).min(1).describe('Path ids lit in this step'),
+        from: z.string().describe('An area id'),
+        to: z.string().describe('An area id'),
+        caption: z.string().max(400),
+      })).max(16).nullish().describe('A walk through the flow, played one step at a time'),
+    }),
+    description: 'How code or data flows between parts of a system, drawn as the Change Guide draws a change: areas grouped by package, paths between them marked added, removed or unchanged, and optional steps that light the paths in order. Use it for how a request travels, what a change rewires, or an architecture.',
   },
 } satisfies Record<string, UiComponent>;
 
@@ -400,6 +426,9 @@ function validateElement(elements: Record<string, unknown>, key: string, check: 
       check.issues.push({ path: pointer(propsPath, 'svg'), message: 'svg is one literal <svg> string, never an expression' });
     } else if (type === 'Mermaid' && typeof element.props.source === 'string') {
       for (const found of validateMermaid(element.props.source)) check.issues.push({ path: pointer(propsPath, 'source'), message: found.message });
+    } else if (type === 'FlowMap' && !hasExpression(element.props)) {
+      const map = components.FlowMap.props.safeParse(element.props);
+      if (map.success) checkFlowMapReferences(map.data, propsPath, check.issues);
     }
   }
   checkElementChildren(elements, element, path, component, check.issues);
@@ -407,6 +436,29 @@ function validateElement(elements: Record<string, unknown>, key: string, check: 
   if (element.repeat !== undefined) checkRepeat(element.repeat, pointer(path, 'repeat'), check);
   if (element.on !== undefined) checkBindings(element.on, pointer(path, 'on'), check);
   if (element.watch !== undefined) checkBindings(element.watch, pointer(path, 'watch'), check);
+}
+
+/** A FlowMap's ids are unique, its paths join areas it has, and its steps light paths and areas it has. */
+function checkFlowMapReferences(map: z.infer<typeof components.FlowMap.props>, path: string, issues: UiBlockIssue[]): void {
+  const at = (...keys: (string | number)[]): string => keys.reduce<string>(pointer, path);
+  const areas = new Set<string>();
+  map.areas.forEach((area, index) => {
+    if (areas.has(area.id)) issues.push({ path: at('areas', index, 'id'), message: `area id "${area.id}" is used twice` });
+    areas.add(area.id);
+  });
+  const known = (id: string, where: string): void => { if (!areas.has(id)) issues.push({ path: where, message: `no area "${id}"; the areas are ${[...areas].join(', ')}` }); };
+  const paths = new Set<string>();
+  map.paths.forEach((flow, index) => {
+    if (paths.has(flow.id)) issues.push({ path: at('paths', index, 'id'), message: `path id "${flow.id}" is used twice` });
+    paths.add(flow.id);
+    known(flow.from, at('paths', index, 'from'));
+    known(flow.to, at('paths', index, 'to'));
+  });
+  map.steps?.forEach((step, index) => {
+    known(step.from, at('steps', index, 'from'));
+    known(step.to, at('steps', index, 'to'));
+    step.paths.forEach((id, position) => { if (!paths.has(id)) issues.push({ path: at('steps', index, 'paths', position), message: `no path "${id}"` }); });
+  });
 }
 
 function checkElementChildren(elements: Record<string, unknown>, element: Record<string, unknown>, path: string, component: UiComponent | undefined, issues: UiBlockIssue[]): void {
@@ -869,18 +921,159 @@ function renderBareSchema(schema: z.core.JSONSchema.JSONSchema): string {
   }).join(' | ');
 }
 
-const EXAMPLE_SPEC = {
-  root: 'card',
-  elements: {
-    card: { type: 'Card', props: { title: 'Which cache keeps the replies?' }, children: ['options'], slots: { footer: ['pick'] } },
-    options: { type: 'RadioGroup', props: { label: null, value: { $bindState: '/choice' }, options: { $state: '/options' } }, children: [] },
-    pick: { type: 'Button', props: { label: 'Add to message', variant: 'primary', disabled: { $cond: { $state: '/choice', eq: '' }, $then: true, $else: false } }, on: { press: { action: 'stage', params: { kind: 'decision', label: { $computed: 'lookup', args: { items: { $state: '/options' }, key: 'value', value: { $state: '/choice' }, field: 'label' } }, payload: { choice: { $state: '/choice' } } } } }, children: [] },
-  },
-  state: { choice: '', options: [{ value: 'kv', label: 'Workers KV', description: 'Eventually consistent, cheap reads' }, { value: 'do', label: 'Durable Object', description: 'Strongly consistent, one region' }] },
-};
+/** A worked example in the `gitspace-ui` skill: when to draw it and the block itself. Every example passes
+ * `validateMarkdownBlocks` (tested), so the skill never teaches a block GitSpace would reject. */
+export interface UiBlockExample { title: string; when: string; fence: UiBlockKind; body: string }
 
-/** What a subagent is told about blocks; the full format is the `gitspace-ui` skill. */
-export const UI_BLOCK_SUMMARY = 'GitSpace draws three fenced blocks in Markdown: ```gitspace-ui is ONE JSON object { "root", "elements", "state" }, where "root" names a Card (or an AskCard for one question) in "elements", each element is { "type", "props", "children": [keys] } using only the catalog\'s components and props, and the data it shows sits in "state", read with {"$state": "/path"}; ```svg is one <svg> drawing coloured with currentColor or theme variables; ```mermaid is a Mermaid diagram. GitSpace rejects an invalid block with the path that failed. Read skill://gitspace-ui for the full format before you write a block.';
+const spec = (value: Record<string, unknown>): string => JSON.stringify(value);
+
+export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
+  {
+    title: 'Results of a run',
+    when: 'You measured something: the headline numbers as Stats, the comparison as a Chart, and where the numbers came from as a RunTag.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'Cold start after the cache change', description: 'Median of 20 runs per build' }, children: ['tiles', 'chart', 'run'] },
+        tiles: { type: 'Stats', props: { tiles: { $state: '/tiles' } }, children: [] },
+        chart: { type: 'Chart', props: { kind: 'columns', unit: 'ms', series: { $state: '/series' }, rows: { $state: '/rows' } }, children: [] },
+        run: { type: 'RunTag', props: { commit: '4f2c9a1', machine: 'darktop', sample: 'n=20', label: 'scripts/bench-cold.ts' }, children: [] },
+      },
+      state: {
+        tiles: [{ label: 'p50', value: '1.8 s', detail: 'was 3.1 s', tone: 'good' }, { label: 'p95', value: '2.6 s', detail: 'was 4.4 s', tone: 'good' }, { label: 'Memory', value: '92 MB', detail: 'was 88 MB', tone: 'neutral' }],
+        series: [{ key: 'before', label: 'Before', color: 'gray' }, { key: 'after', label: 'After', color: 'green' }],
+        rows: [{ label: 'p50', values: { before: 3100, after: 1800 } }, { label: 'p95', values: { before: 4400, after: 2600 } }],
+      },
+    }),
+  },
+  {
+    title: 'Values over time',
+    when: 'A measure that changes over time or over a sequence (memory per turn, latency per release): a line Chart, one line per series.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'Memory per turn', description: 'The workspace object resets at 128 MB' }, children: ['chart'] },
+        chart: { type: 'Chart', props: { kind: 'line', unit: 'bytes', series: { $state: '/series' }, rows: { $state: '/rows' }, max: 134217728 }, children: [] },
+      },
+      state: {
+        series: [{ key: 'read', label: 'Read per turn', color: 'blue' }, { key: 'held', label: 'Held after the turn', color: 'violet' }],
+        rows: [{ label: 'turn 1', values: { read: 31457280, held: 8388608 } }, { label: 'turn 2', values: { read: 32505856, held: 9437184 } }, { label: 'migrated', values: { read: 11534336, held: 4194304 } }, { label: 'turn 4', values: { read: 11665408, held: 4194304 } }],
+      },
+    }),
+  },
+  {
+    title: 'Options compared',
+    when: 'Several options against the same properties: a Table, the recommended one named in the text before it.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'Where replies are cached' }, children: ['table'] },
+        table: { type: 'Table', props: { columns: { $state: '/columns' }, rows: { $state: '/rows' }, caption: 'Reads measured from the worker in the same region' }, children: [] },
+      },
+      state: {
+        columns: [{ key: 'store', label: 'Store' }, { key: 'read', label: 'Read', align: 'right', mono: true }, { key: 'consistency', label: 'Consistency' }, { key: 'cost', label: 'Cost / month', align: 'right', mono: true }],
+        rows: [{ store: 'Workers KV', read: '4 ms', consistency: 'eventual, up to 60 s', cost: '$5' }, { store: 'Durable Object', read: '11 ms', consistency: 'strong', cost: '$12' }, { store: 'D1', read: '19 ms', consistency: 'strong', cost: '$5' }],
+      },
+    }),
+  },
+  {
+    title: 'How it flows',
+    when: 'How a request travels, what a change rewires, an architecture: a FlowMap, as the Change Guide draws a change. Areas grouped by package; paths added, removed or kept; steps that walk the flow.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'Where a codemode child\'s output goes now' }, children: ['map'] },
+        map: {
+          type: 'FlowMap', children: [], props: {
+            areas: [
+              { id: 'script', name: 'codemode script', group: 'runtime-core', role: 'Runs the agent\'s script and its child calls' },
+              { id: 'tool', name: 'tool execute', group: 'runtime-core', role: 'Runs one tool call and keeps its output' },
+              { id: 'store', name: 'tool-result store', group: 'runtime-workspace-do', role: 'Whole outputs, read on demand' },
+              { id: 'entries', name: 'conversation entries', group: 'pi-durable', role: 'What every turn reads back' },
+            ],
+            paths: [
+              { id: 'call', from: 'script', to: 'tool', label: 'child call', state: 'same' },
+              { id: 'full', from: 'tool', to: 'entries', label: 'whole output (up to 50 KB)', state: 'removed' },
+              { id: 'stub', from: 'tool', to: 'entries', label: '1 KB stub and reference', state: 'added' },
+              { id: 'keep', from: 'tool', to: 'store', label: 'whole output', state: 'added' },
+              { id: 'back', from: 'store', to: 'script', label: 'output for the script', state: 'added' },
+            ],
+            steps: [
+              { paths: ['call'], from: 'script', to: 'tool', caption: 'The script calls a tool.' },
+              { paths: ['keep', 'stub'], from: 'tool', to: 'store', caption: 'The whole output goes to the store; the entry keeps a stub.' },
+              { paths: ['back'], from: 'store', to: 'script', caption: 'The script reads the whole output from the store.' },
+            ],
+          },
+        },
+      },
+      state: {},
+    }),
+  },
+  {
+    title: 'A choice for the person',
+    when: 'The person picks for you: stage the choice in their message bar, so they can add context before it is sent.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'Which cache keeps the replies?' }, children: ['options'], slots: { footer: ['pick'] } },
+        options: { type: 'RadioGroup', props: { label: null, value: { $bindState: '/choice' }, options: { $state: '/options' } }, children: [] },
+        pick: { type: 'Button', props: { label: 'Add to message', variant: 'primary', disabled: { $cond: { $state: '/choice', eq: '' }, $then: true, $else: false } }, on: { press: { action: 'stage', params: { kind: 'decision', label: { $computed: 'lookup', args: { items: { $state: '/options' }, key: 'value', value: { $state: '/choice' }, field: 'label' } }, payload: { choice: { $state: '/choice' } } } } }, children: [] },
+      },
+      state: { choice: '', options: [{ value: 'kv', label: 'Workers KV', description: 'Eventually consistent, cheap reads' }, { value: 'do', label: 'Durable Object', description: 'Strongly consistent, one region' }] },
+    }),
+  },
+  {
+    title: 'A plan to tick off',
+    when: 'Steps or checks the person goes through: a Checklist repeated over state, its progress in the card, and the ticked items staged for you.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'Before the release', description: { $computed: 'progress', args: { items: { $state: '/checks' }, field: 'done', noun: 'checks done' } } }, children: ['list'], slots: { footer: ['send'] } },
+        list: { type: 'Checklist', props: { title: null }, repeat: { statePath: '/checks', key: 'id' }, children: ['item'] },
+        item: { type: 'ChecklistItem', props: { index: { $index: true }, label: { $item: 'label' }, checked: { $bindItem: 'done' }, note: { $item: 'note' } }, children: [] },
+        send: { type: 'Button', props: { label: 'Add to message', variant: 'primary' }, on: { press: { action: 'stage', params: { kind: 'review', label: { $computed: 'progress', args: { items: { $state: '/checks' }, field: 'done', noun: 'checks done' } }, payload: { done: { $computed: 'where', args: { items: { $state: '/checks' }, field: 'done' } } } } } }, children: [] },
+      },
+      state: { checks: [{ id: 'tests', label: 'Suites pass', done: true, note: '826 tests' }, { id: 'smoke', label: 'Smoke run on the release', done: false, note: '' }, { id: 'live', label: 'Checked live in the workspace', done: false, note: '' }] },
+    }),
+  },
+  {
+    title: 'Before and after',
+    when: 'What changes for someone: two panes of Markdown, with a slider when they overlay.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'card',
+      elements: {
+        card: { type: 'Card', props: { title: 'The board in the transcript' }, children: ['compare'] },
+        compare: { type: 'BeforeAfter', props: { before: { label: 'Before', title: 'A message from you', body: 'The board arrived as **your** chat bubble.' }, after: { label: 'After', title: 'A notice', body: 'A quiet *Workspace board* row; **Show all** opens the full board.' }, slider: false }, children: [] },
+      },
+      state: {},
+    }),
+  },
+  {
+    title: 'A layout or anything the components cannot express',
+    when: 'Layout, geometry, a UI mockup, a custom diagram: an svg block. Size it with viewBox; colour it only with currentColor and theme variables.',
+    fence: 'svg',
+    body: '<svg viewBox="0 0 360 150" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="358" height="148" rx="8" fill="none" stroke="var(--border)"/><rect x="1" y="1" width="96" height="148" rx="8" fill="var(--surface-2)"/><text x="14" y="26" font-size="12" fill="var(--muted-foreground)">Projects</text><text x="14" y="48" font-size="12" fill="currentColor">core</text><rect x="114" y="16" width="230" height="56" rx="6" fill="none" stroke="var(--accent)"/><text x="126" y="40" font-size="12" fill="currentColor">Workspace board</text><text x="126" y="58" font-size="11" fill="var(--muted-foreground)">one line per workspace</text><rect x="114" y="84" width="230" height="50" rx="6" fill="none" stroke="var(--border)"/><text x="126" y="113" font-size="12" fill="var(--muted-foreground)">Composer</text></svg>',
+  },
+  {
+    title: 'Mermaid, only for the most basic flow',
+    when: 'A handful of boxes in a line, or when the work is already about Mermaid (a Mermaid file, a diagram someone wrote in Mermaid). Anything more is a FlowMap or SVG.',
+    fence: 'mermaid',
+    body: 'flowchart LR\n  push[Push to develop] --> launch[Launch] --> live[Live]',
+  },
+];
+
+/** Every agent's instruction about blocks, main agents and subagents alike; the `gitspace-ui` skill has the format. */
+export const UI_BLOCK_BRIEF = 'Drawing: GitSpace renders blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide). Draw when a picture says it better than prose: results and measurements (Stats tiles, a Chart, a RunTag naming the run), options compared (a Table), values over time (a line Chart), how code or data flows or what a change rewires (a FlowMap, drawn as the Change Guide draws a change), a plan to tick off (a Checklist), a choice for the person (a card that stages it in their message bar), before and after (BeforeAfter). Use ```svg for layout, geometry, mockups or anything the components cannot express, and ```mermaid only for the most basic flows or when the work is already about Mermaid. Before you write a block, read skill://gitspace-ui: it has the format, every component and worked examples. GitSpace rejects an invalid block with the path that failed; fix it and write again.';
+
+/** The skill's description: what an agent sees in a skill list, so it names the moments to read the skill. */
+export const UI_SKILL_DESCRIPTION = 'Draw what you show as blocks GitSpace renders: cards, charts, tables, FlowMaps, checklists, SVG. Read before you report numbers or a measurement, compare options, explain how code or data flows, lay out a plan, show a before and after, or ask the person to choose.';
 
 /** The agent's instructions for writing blocks; the body of the `gitspace-ui` skill. */
 export function uiBlockPrompt(): string {
@@ -892,19 +1085,34 @@ export function uiBlockPrompt(): string {
   });
   const actionLines = [...actionByName].map(([name, action]) => `- ${name} ${renderSchema(z.toJSONSchema(action.params, { io: 'input' }))} — ${action.description}${Object.hasOwn(builtInActions, name) ? ' (built in)' : ''}`);
   const functionLines = Object.entries(functions).map(([name, fn]) => `- ${name}: ${fn.description}`);
-  return `GitSpace draws blocks you write in Markdown. Use one where a picture says it better than prose: numbers side by side, a plan, a before/after, a question with options. Write a sentence or two first, then the block. A chat message may hold several blocks, each placed where it belongs; so may any Markdown you write through a tool (goal, requirement, Change Guide, journal, plan step detail).
+  const examples = UI_BLOCK_EXAMPLES.map((example) => `### ${example.title}\n${example.when}\n${fence}${example.fence}\n${example.body}\n${fence}`).join('\n\n');
+  return `GitSpace draws blocks you write in Markdown: in chat replies and in any Markdown you write through a tool (goal, requirement, Change Guide, journal, plan step detail). Write a sentence or two first, then the block; one idea per block, and never draw the same content twice.
 
-Fences (the info string is exactly the fence name):
+## Which block
+- Results of a run or a measurement: Stats for the headline numbers, a Chart for the comparison, a RunTag for where they came from.
+- Options compared on the same properties: a Table.
+- Values over time or over a sequence: a Chart with kind "line". Parts of a total: kind "stacked".
+- How code or data flows, what a change rewires, an architecture: a FlowMap.
+- A plan or checks the person goes through: a Checklist.
+- A choice the person makes for you: a card whose button stages the choice; an AskCard for one question.
+- Before and after: BeforeAfter.
+- Layout, geometry, a UI mockup, or a drawing the components cannot express: ${fence}svg.
+- ${fence}mermaid only for the most basic flow (a handful of boxes in a line), or when the work is already about Mermaid. Anything more is a FlowMap or SVG.
+
+## Fences
+The info string is exactly the fence name.
 - ${fence}gitspace-ui: ONE JSON object { "root", "elements", "state" }.
 - ${fence}svg: one <svg> drawing (SVG rules below).
 - ${fence}mermaid: a Mermaid diagram, at most 16 KiB.
 
 GitSpace checks every block when it is stored. A tool write holding a bad block is rejected with each problem's path, such as \`block 2/elements/table/props/columns/0/align\` (blocks counted in order among these three fences, then a JSON pointer into the spec); fix each one and write again.
 
+## Examples
+Each passes GitSpace's checks; copy their shape.
+
+${examples}
+
 ## Spec
-${fence}gitspace-ui
-${JSON.stringify(EXAMPLE_SPEC)}
-${fence}
 - "root": the key of the root element: a Card, or an AskCard when the block is one question for the person.
 - "elements": element key → { "type", "props", "children": [keys], "slots"?: { "<slot>": [keys] }, "visible"?, "repeat"?, "on"? }. Every element has "children" ([] for a leaf). "visible", "repeat" and "on" sit beside "props", never inside it. Put default-slot children in "children", never in slots.default.
 - "state": the data the block reads. Seed every path a $state or repeat reads. At most ${MAX_ELEMENTS} elements and ${MAX_SPEC_BYTES / 1024} KiB.

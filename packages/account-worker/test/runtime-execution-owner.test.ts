@@ -11,7 +11,7 @@ import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
 import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
-import { UI_BLOCK_SUMMARY, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
+import { UI_BLOCK_BRIEF, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
@@ -167,7 +167,7 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
   });
 });
 
-test('workspace and project agents carry the gitspace-ui skill in full, a subagent its summary and pointer, and neither once the account turns the skill off', async () => {
+test('every agent carries the gitspace-ui brief and its pointer, never the whole skill, and none once the account turns the skill off', async () => {
   const projectId = `ui-${crypto.randomUUID()}`, workspaceId = `ui-space-${crypto.randomUUID()}`;
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
   await authority.bootstrap({ id: projectId, name: 'Bakery', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
@@ -180,12 +180,12 @@ test('workspace and project agents carry the gitspace-ui skill in full, a subage
       const skills = env.USER_SKILLS.getByName(env.ACCOUNT_ID);
       const child = String(await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT));
       try {
-        const main = await instructions(String(root.id), BACKGROUND_CONTEXT);
-        expect(main).toContain(prompt);
-        const subagent = await instructions(child, BACKGROUND_CONTEXT);
-        expect(subagent).toContain(UI_BLOCK_SUMMARY);
-        expect(subagent).toContain('Read skill://gitspace-ui for the full format');
-        expect(subagent).not.toContain(prompt);
+        for (const conversation of [String(root.id), child]) {
+          const carried = await instructions(conversation, BACKGROUND_CONTEXT);
+          expect(carried).toContain(UI_BLOCK_BRIEF);
+          expect(carried).toContain('read skill://gitspace-ui');
+          expect(carried).not.toContain(prompt);
+        }
         const before = (await skills.list()).find(skill => skill.id === 'gitspace-ui');
         if (!before) throw new Error('gitspace-ui is not an account skill');
         const off = await skills.update({ id: 'gitspace-ui', expectedRevision: before.revision, enabled: false, scope: before.scope, exceptions: before.exceptions, assignments: before.assignments });
@@ -193,7 +193,7 @@ test('workspace and project agents carry the gitspace-ui skill in full, a subage
           for (const conversation of [String(root.id), child]) {
             const disabled = await instructions(conversation, BACKGROUND_CONTEXT);
             expect(disabled).not.toContain(prompt);
-            expect(disabled).not.toContain(UI_BLOCK_SUMMARY);
+            expect(disabled).not.toContain(UI_BLOCK_BRIEF);
             expect(disabled).not.toContain('skill://gitspace-ui');
           }
         } finally { await skills.update({ id: 'gitspace-ui', expectedRevision: off.revision, enabled: true, scope: before.scope, exceptions: before.exceptions, assignments: before.assignments }); }

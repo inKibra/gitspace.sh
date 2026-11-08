@@ -1,5 +1,6 @@
 import { wire } from './json-wire.js'
 import { z } from 'zod';
+import { UI_SKILL_DESCRIPTION } from './gitspace-ui.js';
 
 const skillIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9-]*$/u);
 export const skillScopeSchema = z.enum(['project', 'workspaces', 'all']);
@@ -44,5 +45,5 @@ export const DEFAULT_GITSPACE_SKILLS: readonly Omit<SkillView, 'revision'>[] = [
   { id: 'workspace-services', name: 'workspace-services', description: 'Declare and run stable-port workspace services through OMP Hub.', source: 'gitspace', scope: 'workspaces', enabled: true, exceptions: [], assignments: [] },
   { id: 'workspace-lifecycle', name: 'workspace-lifecycle', description: 'Inspect repositories and configure approved, portable workspace lifecycle scripts.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
   { id: 'integration-code-mode', name: 'integration-code-mode', description: 'Discover and compose granted MCP tools through bounded JavaScript.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
-  { id: 'gitspace-ui', name: 'gitspace-ui', description: 'Write blocks GitSpace draws: gitspace-ui specs, SVG and Mermaid.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
+  { id: 'gitspace-ui', name: 'gitspace-ui', description: UI_SKILL_DESCRIPTION, source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
 ];

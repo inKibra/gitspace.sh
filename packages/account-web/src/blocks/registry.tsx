@@ -16,6 +16,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { useBlockActions } from './BlockActions.js';
 import { SvgBlock } from './SvgBlock.js';
+import { ChartView } from './ChartView.js';
+import { ChangeMapView } from '../guide/ChangeMap.js';
 
 /** The protocol catalog as a json-render catalog: its components' zod props type the renderers, its actions the handlers. */
 export const blockCatalog = defineCatalog(schema, gitspaceUiCatalog);
@@ -35,13 +37,6 @@ function InlineText({ text }: { text: string }): ReactNode {
   return text.split(/(`[^`]+`)/u).map((part, index) => part.startsWith('`') && part.endsWith('`') && part.length > 1
     ? <code key={index} className="rounded bg-surface-3 px-1 font-mono text-[0.92em]">{part.slice(1, -1)}</code>
     : part);
-}
-
-function formatValue(value: number, unit: 'ms' | 'seconds' | 'count' | 'percent'): string {
-  if (unit === 'ms') return `${(value / 1000).toFixed(1)} s`;
-  if (unit === 'seconds') return `${value.toFixed(1)} s`;
-  if (unit === 'percent') return `${value}%`;
-  return value.toLocaleString('en-US');
 }
 
 /** Reports a Checklist row's ticked state by row index, for CheckboxGroup's merged highlight. */
@@ -219,39 +214,7 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
   Stats: ({ props }) => <div className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-2">
     {props.tiles.map((tile, index) => <StatTile key={`${index}:${tile.label}`} label={tile.label} value={tile.value} detail={tile.detail ?? undefined} tone={tile.tone ?? 'neutral'} />)}
   </div>,
-  Chart: ({ props }) => {
-    const values = props.rows.flatMap((row) => props.series.map((series) => row.values[series.key] ?? 0));
-    const max = props.max ?? Math.max(1, ...values) * 1.15;
-    const barHeight = 12;
-    const groupHeight = props.series.length * (barHeight + 3) + 10;
-    const width = 640;
-    const labelWidth = 230;
-    const track = width - labelWidth - 70;
-    return <figure className="flex flex-col gap-2">
-      {props.title ? <figcaption className="text-caption font-medium text-muted-foreground">{props.title}</figcaption> : null}
-      <svg viewBox={`0 0 ${width} ${props.rows.length * groupHeight}`} className="w-full" role="img" aria-label={props.title ?? 'Bar chart'}>
-        {props.rows.map((row, rowIndex) => {
-          const top = rowIndex * groupHeight;
-          return <g key={`${rowIndex}:${row.label}`}>
-            <text x={0} y={top + groupHeight / 2} dominantBaseline="middle" style={{ font: '12px var(--font-sans, system-ui)', fill: 'var(--foreground)' }}>{row.label}</text>
-            <rect x={labelWidth} y={top + 2} width={track} height={groupHeight - 8} rx={4} style={{ fill: 'var(--surface-2)' }} />
-            {props.series.map((series, seriesIndex) => {
-              const value = row.values[series.key] ?? 0;
-              const length = Math.max(2, (value / max) * track);
-              const y = top + 5 + seriesIndex * (barHeight + 3);
-              return <g key={series.key}>
-                <rect x={labelWidth} y={y} height={barHeight} rx={3} style={{ width: length, fill: badgeColors[series.color], transition: 'width 350ms cubic-bezier(.2,.8,.2,1)' }} />
-                <text x={labelWidth + length + 6} y={y + barHeight / 2} dominantBaseline="middle" style={{ font: '11px ui-monospace, monospace', fill: 'var(--muted-foreground)', transition: 'x 350ms' }}>{formatValue(value, props.unit)}</text>
-              </g>;
-            })}
-          </g>;
-        })}
-      </svg>
-      <div className="flex flex-wrap gap-3 text-caption text-muted-foreground">
-        {props.series.map((series) => <span key={series.key} className="flex items-center gap-1.5"><span className="h-2 w-4 rounded-sm" style={{ background: badgeColors[series.color] }} />{series.label}</span>)}
-      </div>
-    </figure>;
-  },
+  Chart: ({ props }) => <ChartView props={props} />,
   Checklist: ({ props, children }) => <ChecklistGroup title={props.title ?? null}>{children}</ChecklistGroup>,
   ChecklistItem: ({ props, bindings, emit }) => <ChecklistRow index={props.index} label={props.label} note={props.note ?? null} checked={props.checked} bindingPath={bindings?.checked} onChanged={() => emit('change')} />,
   Steps: ({ props, bindings }) => {
@@ -302,6 +265,12 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
     const fence = '`'.repeat(Math.max(3, ...[...props.source.matchAll(/`+/gu)].map((run) => run[0].length + 1)));
     return <GitSpaceMarkdown>{`${fence}mermaid\n${props.source}\n${fence}`}</GitSpaceMarkdown>;
   },
+  // The Change Guide's map, without a guide: no sections to open, no diffs to size the areas.
+  FlowMap: ({ props }) => <ChangeMapView measured={false} sections={[]} map={{
+    areas: props.areas.map((area) => ({ id: area.id, name: area.name, package: area.group, role: area.role ?? '', whatItDoes: area.note ?? '', files: [] })),
+    paths: props.paths,
+    steps: (props.steps ?? []).map((step) => ({ ...step, sectionId: '' })),
+  }} />,
 };
 
 /** The items of `args.items` whose `args.field` is true. */
