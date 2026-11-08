@@ -12,7 +12,7 @@ const unused = async (): Promise<never> => { throw new Error('Unexpected service
 const colored = (primaryColor: NonNullable<WorkspaceBoardRow['status']>['primaryColor']): WorkspaceBoardRow['status'] => ({ primaryColor, agents: { green: 0, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } });
 const reply = (content: AssistantMessage['content'], stopReason: AssistantMessage['stopReason']): AssistantMessage => ({ role: 'assistant', content, api: model.api, provider: model.provider, model: model.id, stopReason, timestamp: Date.now(), usage });
 const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardRow> = {}): WorkspaceBoardRow => ({
-  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequest: null, since: '2026-11-08T17:00:00Z', ...changes,
+  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequest: null, since: '2026-11-08T17:00:00Z', lastReply: null, journal: [], ...changes,
 });
 const text = (message: Message | undefined) => typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content);
 /** The instructions a request carries: pi sends them as system messages in the conversation. */

@@ -598,8 +598,13 @@ test('space_workspace list and board give every workspace\'s status in one read 
   await authority.putWorkspace({ ...workspace, id: 'billing', name: 'Billing export', branch: 'billing', phase: 'code' });
   await authority.putWorkspace({ ...workspace, id: 'search', name: 'Search index', branch: 'search', phase: 'plan' });
   const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' } });
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null });
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, lastReply: 'Exports are ready;\nwhich bucket?' });
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null, lastReply: null });
+  // A journal entry reaches the account index from the journal's own object, after its write.
+  await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, 'billing'])).appendJournalEntry({
+    projectId, spaceId: 'billing', id: 'bucket', kind: 'decision', phase: 'code', title: 'Exports go to the archive bucket', body: '', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a',
+  });
+  await vi.waitFor(async () => expect((await index.projectWorkspaceJournals(projectId)).billing).toMatchObject([{ kind: 'decision', title: 'Exports go to the archive bucket' }]));
   await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).link({ projectId, subject: { kind: 'pullRequest', number: 42 }, workspaceId: 'billing', source: 'person', detail: 'Ada' });
   // The account's one-time seed of status rows reads every workspace once; later reads read rows only.
   await index.projectWorkspaceStatuses(projectId);
@@ -609,11 +614,14 @@ test('space_workspace list and board give every workspace\'s status in one read 
     const workspaceRead = vi.spyOn(env.SPACE_AUTHORITY, 'getByName');
     try {
       const listed = z.array(z.object({ id: z.string(), name: z.string(), status: z.unknown() })).parse(JSON.parse(text(await invoke('space_workspace', { method: 'list' }))));
-      expect(listed.find(item => item.id === 'billing')?.status).toEqual({ activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequest: 42, since: expect.any(String) });
+      expect(listed.find(item => item.id === 'billing')?.status).toEqual({
+        activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequest: 42, since: expect.any(String),
+        lastReply: 'Exports are ready;\nwhich bucket?', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
+      });
       expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequest: null });
       const board = text(await invoke('space_workspace', { method: 'board' }));
       expect(board).toMatch(/^Workspace board, .+ UTC \(2 workspaces\):\n/u);
-      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n/u);
+      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n {2}last message: "Exports are ready; which bucket\?"\n {2}journal: decision "Exports go to the archive bucket" \(\d\d:\d\d\)\n/u);
       expect(board).toMatch(/\n- Search index \(search\) · plan · working · since \d\d:\d\d$/u);
       // The project agent's turns read the same rows.
       expect((await services.tools.projectBoard?.())?.map(row => row.name)).toEqual(['Billing export', 'Search index']);

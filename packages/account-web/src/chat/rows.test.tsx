@@ -116,4 +116,13 @@ describe('turns that are not the person\'s or the agent\'s', () => {
     expect(reply).toContain('Delivered to the agent');
     expect(html({ id: 'e2', type: 'interruption', reason: 'event', kind: 'machine-ready', title: 'Machine', detail: 'The build machine is ready.' })).toContain('data-notice="Machine"');
   });
+
+  it('shows the workspace board as one quiet line with the whole board folded underneath', () => {
+    const board = 'Workspace board, 2026-11-08 21:57:04 UTC (2 workspaces):\n- Billing export (billing) · code · working\n- Search index (search) · plan · idle';
+    const item: TranscriptItem = { id: 'b1', type: 'interruption', reason: 'machine', title: 'Workspace board', detail: 'Workspace board, 2026-11-08 21:57:04 UTC (2 workspaces)', body: board };
+    const page = new DOMParser().parseFromString(html(item), 'text/html');
+    expect(page.querySelector('[data-notice="Workspace board"]')).not.toBeNull();
+    expect(page.querySelector('details pre')?.textContent).toBe(board);
+    expect(page.body.textContent?.startsWith('Workspace board · Workspace board, 2026-11-08 21:57:04 UTC (2 workspaces)')).toBe(true);
+  });
 });

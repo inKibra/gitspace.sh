@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { WorkspacePhase, WorkspaceReport, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** One workspace as the project agent's board shows it, from stored rows only: the project's definition, the account's
@@ -15,10 +16,21 @@ export type WorkspaceBoardRow = {
   pullRequest: number | null;
   /** When its activity (working, waiting on a person, idle, failed) or what it waits on last changed. */
   since: string | null;
+  /** Its main agent's latest message, as the workspace last reported it. */
+  lastReply: string | null;
+  /** Its journal's newest entries, newest first, as the workspace last reported them. */
+  journal: WorkspaceJournalLine[];
 };
+/** Journal entries an index row keeps, and a board line names. */
+export const BOARD_JOURNAL_ENTRIES = 3;
+/** A workspace's newest journal entries as its index row keeps them, newest first: each entry's kind, title and time. */
+export const WorkspaceJournalLinesSchema = z.array(z.object({ kind: z.string().max(64), title: z.string().max(200), at: z.iso.datetime() }).strict()).max(BOARD_JOURNAL_ENTRIES);
+export type WorkspaceJournalLine = z.infer<typeof WorkspaceJournalLinesSchema>[number];
 
 /** Characters of a waited-on prompt a board line carries. */
 const PROMPT_CHARACTERS = 120;
+/** Characters of the latest message a board line carries. */
+const REPLY_CHARACTERS = 200;
 
 /** What the workspace's agents are doing: working, waiting on a person (and on what), idle or failed. */
 export function workspaceActivity(row: Pick<WorkspaceBoardRow, 'status' | 'waitingOn'>): string {
@@ -53,12 +65,18 @@ function onBoard(row: WorkspaceBoardRow): boolean {
   return row.lifecycle !== 'archived' && row.lifecycle !== 'deleting';
 }
 
-/** `Name (id) · phase · activity · PR #n · since HH:MM`; the lifecycle only when the workspace is not active. */
+/** `Name (id) · phase · activity · PR #n · since HH:MM`, the lifecycle only when the workspace is not active; then its
+ * latest message and its newest journal entries, each on its own indented line when it has them. */
 export function workspaceBoardLine(row: WorkspaceBoardRow, at: Date): string {
-  return [
+  const head = [
     `${row.name} (${row.workspaceId})`, row.phase ?? 'no phase', ...(row.lifecycle === 'active' ? [] : [row.lifecycle]), workspaceActivity(row),
     ...(row.pullRequest === null ? [] : [`PR #${row.pullRequest}`]), ...(row.since === null ? [] : [`since ${clock(new Date(row.since), at)}`]),
   ].join(' · ');
+  const reply = row.lastReply?.replace(/\s+/gu, ' ').trim();
+  const lines = [head];
+  if (reply) lines.push(`  last message: "${reply.length > REPLY_CHARACTERS ? `${reply.slice(0, REPLY_CHARACTERS)}…` : reply}"`);
+  if (row.journal.length) lines.push(`  journal: ${row.journal.map(entry => `${entry.kind} "${entry.title}" (${clock(new Date(entry.at), at)})`).join(' · ')}`);
+  return lines.join('\n');
 }
 
 /** Every workspace on the board, one line each, stamped with the time it was read. */

@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
 import { emptyWorkspaceStatus, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
-import { workspaceBoard, workspaceBoardChanges, type WorkspaceBoardRow } from './workspace-board.js';
+import { workspaceBoard, workspaceBoardChanges, workspaceBoardLine, type WorkspaceBoardRow } from './workspace-board.js';
 
 const colored = (primaryColor: WorkspaceStatusSummary['primaryColor'], conflicts = 0): WorkspaceStatusSummary => ({ ...emptyWorkspaceStatus, primaryColor, sync: { conflicts, problems: 0 } });
 const at = new Date('2026-11-08T18:46:05Z');
 const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardRow>): WorkspaceBoardRow => ({
-  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequest: null, since: '2026-11-08T17:02:00Z', ...changes,
+  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequest: null, since: '2026-11-08T17:02:00Z', lastReply: null, journal: [], ...changes,
 });
 const rows = [
   row('billing', 'Billing export', { status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket should\nexports go to?' }, pullRequest: 42, since: '2026-11-08T18:31:00Z' }),
@@ -29,6 +29,20 @@ test('a board line shows each workspace\'s phase, what it is doing and on what i
   expect(approval).toContain(`Planner (plan) · code · waiting on a person to approve "${'x'.repeat(120)}…"`);
   expect(approval).toContain('Broken (broken) · code · failed');
   expect(workspaceBoard([rows[5]!], at)).toBe('Workspace board, 2026-11-08 18:46:05 UTC: no workspaces.');
+});
+
+test('a board line carries the workspace\'s latest message, cut and on one line, and its newest journal entries', () => {
+  const reported = row('billing', 'Billing export', {
+    lastReply: `Exports now land in\n\nthe archive bucket. ${'y'.repeat(250)}`,
+    journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: '2026-11-08T18:40:00Z' }, { kind: 'finding', title: 'Old bucket is read-only', at: '2026-11-07T09:15:00Z' }],
+  });
+  const reply = `Exports now land in the archive bucket. ${'y'.repeat(250)}`.slice(0, 200);
+  expect(workspaceBoardLine(reported, at)).toBe([
+    'Billing export (billing) · code · idle · since 17:02',
+    `  last message: "${reply}…"`,
+    '  journal: decision "Exports go to the archive bucket" (18:40) · finding "Old bucket is read-only" (11-07 09:15)',
+  ].join('\n'));
+  expect(workspaceBoardChanges([rows[0]!], [{ ...rows[0]!, lastReply: 'Done.' }], at, at)).toContain('  last message: "Done."');
 });
 
 test('the changes between two reads name only the workspaces whose line changed, new ones and those that left', () => {

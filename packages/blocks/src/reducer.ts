@@ -475,6 +475,13 @@ export class TranscriptProjector {
         this.#write({ id: `${turn.id}:machine:${event.ordinal}`, type: 'interruption', reason: 'machine', title: typeof message.title === 'string' ? message.title : 'Machine', detail: contentText(message.content), ...createdAt(event) });
         return;
       }
+      // The project agent's workspace board: its first line shows, the whole board folds underneath.
+      if (message.role === 'custom' && message.customType === 'gitspace.workspace-board' && message.display === true) {
+        const board = contentText(message.content);
+        const [head = ''] = board.split('\n', 1);
+        this.#write({ id: `${turn.id}:board:${event.ordinal}`, type: 'interruption', reason: 'machine', title: 'Workspace board', detail: head.replace(/:$/u, ''), ...(head.length < board.length ? { body: board } : {}), ...createdAt(event) });
+        return;
+      }
       if (message.role === 'custom' && message.customType === WORKSPACE_REPORT_ENTRY && message.display === true) {
         const report = workspaceTurnReportSchema.safeParse(message.details);
         if (report.success) this.#write({ id: `${turn.id}:workspace:${event.ordinal}`, type: 'workspace-report', ...report.data, ...createdAt(event) });

@@ -26,6 +26,8 @@ export type WakeRecord = {
   reopen: Reopen;
   /** Whether the database's tables were measured within `TABLES_INTERVAL_MS`; marks them measured now if not. */
   tablesDue(): boolean;
+  /** Whether pi's entries were measured within `TABLES_INTERVAL_MS`; marks them measured now if not. */
+  entriesDue(): boolean;
   turnEnded(): void;
 };
 
@@ -39,6 +41,8 @@ const quoted = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
 export function openWakeRecord(sql: SqlStorage, version: string | null, interrupted: string[], now = Date.now()): WakeRecord {
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_wakes(id INTEGER PRIMARY KEY CHECK (id = 1), opened_at INTEGER NOT NULL, version TEXT, turn_ended_at INTEGER, tables_at INTEGER)');
+  try { sql.exec('ALTER TABLE runtime_wakes ADD COLUMN entries_at INTEGER'); }
+  catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
   const previous = sql.exec<{ opened_at: number; version: string | null; turn_ended_at: number | null }>('SELECT opened_at, version, turn_ended_at FROM runtime_wakes WHERE id = 1').toArray()[0];
   const tasksTable = sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").toArray().length > 0;
   const liveTasks = tasksTable ? sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM tasks WHERE status != 'terminal' AND background = 0").one().count : 0;
@@ -54,6 +58,12 @@ export function openWakeRecord(sql: SqlStorage, version: string | null, interrup
       const at = sql.exec<{ tables_at: number | null }>('SELECT tables_at FROM runtime_wakes WHERE id = 1').one().tables_at;
       if (at !== null && Date.now() - at < TABLES_INTERVAL_MS) return false;
       sql.exec('UPDATE runtime_wakes SET tables_at = ? WHERE id = 1', Date.now());
+      return true;
+    },
+    entriesDue() {
+      const at = sql.exec<{ entries_at: number | null }>('SELECT entries_at FROM runtime_wakes WHERE id = 1').one().entries_at;
+      if (at !== null && Date.now() - at < TABLES_INTERVAL_MS) return false;
+      sql.exec('UPDATE runtime_wakes SET entries_at = ? WHERE id = 1', Date.now());
       return true;
     },
     turnEnded() { sql.exec('UPDATE runtime_wakes SET turn_ended_at = ? WHERE id = 1', Date.now()); },
@@ -84,4 +94,38 @@ export function measureTables(sql: SqlStorage, budgetMs: number): DatabaseTables
   }
   tables.sort((left, right) => right.bytes - left.bytes);
   return { tables, measuredBytes: tables.reduce((sum, table) => sum + table.bytes, 0), unmeasured, ms: Math.round(performance.now() - started) };
+}
+
+/** pi's stored entries as a turn reads them: the largest single entries, and per conversation its entries and bytes in
+ * all and in the range pi reads to build a turn's context (from its newest compaction marker's `head`, or the start).
+ * `kind` and `role` come from each entry's record; `bytes` is the record's stored length. */
+export type EntrySizes = {
+  largest: Array<{ id: number; conversationId: number; kind: string | null; role: string | null; at: number | null; bytes: number }>;
+  conversations: Array<{ conversationId: number; entries: number; bytes: number; rangeFrom: number | null; rangeEntries: number; rangeBytes: number }>;
+  /** The range's entries of every conversation together, by kind. */
+  rangeKinds: Array<{ kind: string | null; entries: number; bytes: number }>;
+  ms: number;
+};
+
+/** Measures pi's `entries` table (see `EntrySizes`): four reads of every entry, so at most once a day per object. Null
+ * when the database has no such table. */
+export function measureEntries(sql: SqlStorage): EntrySizes | null {
+  if (!sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'").toArray().length) return null;
+  const started = performance.now();
+  const largest = sql.exec<{ id: number; conversation_id: number; kind: string | null; role: string | null; at: number | null; bytes: number }>(
+    "SELECT id, conversation_id, json_extract(record, '$.kind') AS kind, json_extract(record, '$.model[0].role') AS role, json_extract(record, '$.model[0].timestamp') AS at, LENGTH(CAST(record AS BLOB)) AS bytes FROM entries ORDER BY bytes DESC LIMIT 20",
+  ).toArray().map(row => ({ id: row.id, conversationId: row.conversation_id, kind: row.kind, role: row.role, at: row.at, bytes: row.bytes }));
+  // A conversation's range starts at its newest compaction marker's `head`; without one, at its first entry.
+  const ranges = 'SELECT conversation_id, head FROM entries WHERE id IN (SELECT MAX(id) FROM entries WHERE head IS NOT NULL GROUP BY conversation_id)';
+  const conversations = sql.exec<{ conversation_id: number; entries: number; bytes: number; range_from: number | null; range_entries: number; range_bytes: number }>(
+    `SELECT e.conversation_id, COUNT(*) AS entries, SUM(LENGTH(CAST(e.record AS BLOB))) AS bytes, r.head AS range_from,
+      SUM(CASE WHEN r.head IS NULL OR e.id >= r.head THEN 1 ELSE 0 END) AS range_entries,
+      SUM(CASE WHEN r.head IS NULL OR e.id >= r.head THEN LENGTH(CAST(e.record AS BLOB)) ELSE 0 END) AS range_bytes
+     FROM entries e LEFT JOIN (${ranges}) r ON r.conversation_id = e.conversation_id GROUP BY e.conversation_id ORDER BY range_bytes DESC`,
+  ).toArray().map(row => ({ conversationId: row.conversation_id, entries: row.entries, bytes: row.bytes, rangeFrom: row.range_from, rangeEntries: row.range_entries, rangeBytes: row.range_bytes }));
+  const rangeKinds = sql.exec<{ kind: string | null; entries: number; bytes: number }>(
+    `SELECT json_extract(e.record, '$.kind') AS kind, COUNT(*) AS entries, SUM(LENGTH(CAST(e.record AS BLOB))) AS bytes
+     FROM entries e LEFT JOIN (${ranges}) r ON r.conversation_id = e.conversation_id WHERE r.head IS NULL OR e.id >= r.head GROUP BY kind ORDER BY bytes DESC LIMIT 15`,
+  ).toArray();
+  return { largest, conversations, rangeKinds, ms: Math.round(performance.now() - started) };
 }

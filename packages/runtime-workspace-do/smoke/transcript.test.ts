@@ -105,6 +105,21 @@ test('withdrawn notices leave the transcript while the other notices stay', asyn
   });
 });
 
+test('the project agent\'s workspace board shows as a notice inside the person\'s turn, never as their message', async () => {
+  await fixture(async (_harness, storage, root) => {
+    const board = 'Workspace board, 2026-11-08 21:57:04 UTC (1 workspace):\n- Billing export (billing) · code · working · since 21:50';
+    await root.commit(async tx => {
+      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'What is waiting on me?', timestamp: 1 }] });
+      await tx.appendEntry(root.id, { kind: 'gitspace.workspace-board', data: {}, model: [{ role: 'user', content: board, timestamp: 2 }] });
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Billing export is working.' }], 3)] });
+    }, context);
+    const { rows } = await createTranscriptReader(storage, none).page(root.id, { generation: null, before: null, after: null, around: null });
+    expect(rows.map(row => row.item.type === 'message' ? `${row.item.role}: ${row.item.text}` : row.item.type === 'interruption' ? `${row.item.title}: ${row.item.detail}` : row.item.type))
+      .toEqual(['user: What is waiting on me?', 'Workspace board: Workspace board, 2026-11-08 21:57:04 UTC (1 workspace)', 'assistant: Billing export is working.']);
+    expect(new Set(rows.map(row => row.turnId)).size).toBe(1);
+  });
+});
+
 test('workspace turn reports show as compact rows, never as the user\'s messages or as event notices', async () => {
   await fixture(async (_harness, storage, root) => {
     await turn(root, 0, 0);

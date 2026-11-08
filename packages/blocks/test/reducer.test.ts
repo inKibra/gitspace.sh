@@ -309,6 +309,23 @@ describe('messages delivered on others\' behalf', () => {
     expect(turns[1]?.items[1]).not.toHaveProperty('body');
     expect(turns[1]?.items.slice(2).map((item) => item.type === 'interruption' ? `${item.reason}:${item.title}` : item.type)).toEqual(['message', 'compacted:Context compacted', 'machine:Project']);
   });
+
+  it('shows the project agent\'s workspace board as a quiet notice with the board folded, never as the user', () => {
+    const board = 'Workspace board, 2026-11-08 21:57:04 UTC (2 workspaces):\n- Billing export (billing) · code · working · since 21:50\n- Search index (search) · plan · idle';
+    const failed = 'The workspace board could not be read at 2026-11-08T21:57:04.903Z: Network connection lost.\nTell the person you could not read the current state of this project\'s workspaces; do not answer from memory.';
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'What is waiting on me?' }] } } },
+      { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.workspace-board', display: true, title: 'Workspace board', content: board } } },
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.workspace-board', display: true, title: 'Workspace board', content: failed } } },
+      { sessionId: 's1', ordinal: 4, kind: 'message_end', payload: { message: { role: 'assistant', content: [{ type: 'text', text: 'Billing export is working.' }] } } },
+    ]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.user).toMatchObject({ text: 'What is waiting on me?' });
+    expect(turns[0]?.items.slice(0, 2)).toEqual([
+      expect.objectContaining({ type: 'interruption', reason: 'machine', title: 'Workspace board', detail: 'Workspace board, 2026-11-08 21:57:04 UTC (2 workspaces)', body: board }),
+      expect.objectContaining({ type: 'interruption', reason: 'machine', title: 'Workspace board', detail: 'The workspace board could not be read at 2026-11-08T21:57:04.903Z: Network connection lost.', body: failed }),
+    ]);
+  });
 });
 
 describe('todo lists and proposed plans', () => {

@@ -167,15 +167,17 @@ export function EventCard({ item }: { item: InterruptionBlock }) {
 
 const NOTICE_SOURCE_COLOR: Record<string, string> = { Stack: badgeColors.gray, Blocks: badgeColors.amber };
 
-/** One of GitSpace's own notices to the agent (a machine, the stack, an invalid block), a quiet line; the agent reads it on its next turn. */
+/** One of GitSpace's own notices to the agent (a machine, the stack, an invalid block, the workspace board), a quiet
+ * line; the agent reads it on its next turn. A notice longer than its line folds the rest underneath. */
 export function NoticeRow({ item }: { item: InterruptionBlock }) {
   const text = item.detail ?? '';
   const color = NOTICE_SOURCE_COLOR[item.title]
     ?? (/\b(fail(ed|s)?|error|conflict|could not|not published|offline)\b/iu.test(text) ? badgeColors.red
       : /\b(ready|attached|online|published|restored|connected)\b/iu.test(text) ? badgeColors.green : badgeColors.gray);
-  return <p data-notice={item.title} className="flex min-w-0 items-start gap-2 px-1 text-caption text-muted-foreground">
+  return <div data-notice={item.title} className="flex min-w-0 items-start gap-2 px-1 text-caption text-muted-foreground">
     <span className="status-dot mt-1 shrink-0" style={{ color }} />
-    <span className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]"><span className="font-medium text-foreground/80">{item.title}</span> · {text}</span>
+    <span className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]"><span className="font-medium text-foreground/80">{item.title}</span> · {text}
+      {item.body ? <details className="mt-1"><summary className="cursor-pointer">Show all</summary><pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{item.body}</pre></details> : null}</span>
     <ItemTime at={item.at} className="mt-px" />
-  </p>;
+  </div>;
 }

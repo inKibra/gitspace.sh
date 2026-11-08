@@ -68,6 +68,7 @@ import {
   type WorkflowView,
 } from '@gitspace/protocol/inspector-contract';
 import { extractBlocks, validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
+import { BOARD_JOURNAL_ENTRIES } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
@@ -1023,7 +1024,18 @@ export class SpaceContextDO extends BudgetedDurableObject {
       input.reverted === null ? null : JSON.stringify(input.reverted), new Date().toISOString(), input.createdBy,
       input.citations === undefined ? null : JSON.stringify(input.citations), input.sectionId ?? null, input.supersedes ?? null,
     ).one();
+    // Runs once the write's transaction has ended, and reads what it kept.
+    this.ctx.waitUntil(Promise.resolve().then(() => this.reportJournal(identity)));
     return this.journalRecord(identity, row);
+  }
+
+  /** Sends the journal's newest entries to the account's index, where the project agent's board reads them, so the board
+   * never wakes this object. A failed send is only logged: the next entry sends them again. */
+  private async reportJournal(identity: InspectorIdentity): Promise<void> {
+    const journal = this.ctx.storage.sql.exec<{ kind: string; title: string; created_at: string }>('SELECT kind, title, created_at FROM inspector_journal_entries ORDER BY sequence DESC LIMIT ?', BOARD_JOURNAL_ENTRIES).toArray()
+      .map(row => ({ kind: row.kind, title: row.title.slice(0, 200), at: row.created_at }));
+    try { await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).setWorkspaceJournal({ projectId: identity.projectId, workspaceId: identity.spaceId, journal }); }
+    catch (error) { console.error(JSON.stringify({ event: 'workspace_journal_report_failed', workspaceId: identity.spaceId, error: error instanceof Error ? error.message : String(error) })); }
   }
 
   private journalRecord(identity: InspectorIdentity, row: JournalRow): JournalEntryView {

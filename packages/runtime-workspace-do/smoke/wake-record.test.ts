@@ -1,6 +1,6 @@
 import { afterEach, expect, setSystemTime, test } from 'bun:test';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
-import { FULL_SCAN_ROWS, measureTables, openWakeRecord, SAMPLE_ROWS, TABLES_INTERVAL_MS } from '../src/wake-record.js';
+import { FULL_SCAN_ROWS, measureEntries, measureTables, openWakeRecord, SAMPLE_ROWS, TABLES_INTERVAL_MS } from '../src/wake-record.js';
 
 /** The part of a Durable Object's SqlStorage the wake record uses, over one SQLite database each "instance" reopens. */
 function storage(database: Database): SqlStorage {
@@ -45,6 +45,55 @@ test('tables are measured at most once a day, across instances', () => {
   const later = openWakeRecord(storage(database), null, []);
   expect(later.tablesDue()).toBe(true);
   expect(later.tablesDue()).toBe(false);
+});
+
+test('entries have their own daily measurement, due on a database whose tables were measured before it existed', () => {
+  const database = new Database(':memory:');
+  database.run('CREATE TABLE runtime_wakes(id INTEGER PRIMARY KEY CHECK (id = 1), opened_at INTEGER NOT NULL, version TEXT, turn_ended_at INTEGER, tables_at INTEGER)');
+  setSystemTime(new Date('2026-11-01T10:00:00Z'));
+  database.run('INSERT INTO runtime_wakes(id, opened_at, tables_at) VALUES(1, ?, ?)', [Date.now(), Date.now()]);
+  const opened = openWakeRecord(storage(database), null, []);
+  expect(opened.tablesDue()).toBe(false);
+  expect(opened.entriesDue()).toBe(true);
+  setSystemTime(new Date('2026-11-02T09:59:59Z'));
+  expect(openWakeRecord(storage(database), null, []).entriesDue()).toBe(false);
+  setSystemTime(new Date(Date.parse('2026-11-01T10:00:00Z') + TABLES_INTERVAL_MS));
+  expect(openWakeRecord(storage(database), null, []).entriesDue()).toBe(true);
+});
+
+test('entries are measured as a turn reads them: from each conversation\'s newest compaction marker\'s head, by kind, largest first', () => {
+  const database = new Database(':memory:');
+  database.run('CREATE TABLE entries(id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, head INTEGER, commit_seq INTEGER NOT NULL, record TEXT NOT NULL)');
+  const entry = (id: number, conversation: number, kind: string, text: string, head: number | null = null) =>
+    database.run('INSERT INTO entries(id, conversation_id, head, commit_seq, record) VALUES(?, ?, ?, ?, ?)', [id, conversation, head, id, JSON.stringify({ id, kind, model: [{ role: 'user', timestamp: id, content: text }] })]);
+  // Conversation 1: two compactions; the newer keeps entries from 5 on, so 5, 6 (the marker) and 7 are its range.
+  entry(1, 1, 'pi.input', 'a'.repeat(5000));
+  entry(2, 1, 'pi.compaction', 'summary', 1);
+  entry(3, 1, 'pi.input', 'b'.repeat(100));
+  entry(4, 1, 'pi.input', 'c'.repeat(100));
+  entry(5, 1, 'pi.tool', 'd'.repeat(2000));
+  entry(6, 1, 'pi.compaction', 'summary', 5);
+  entry(7, 1, 'pi.input', 'e'.repeat(300));
+  // Conversation 2 never compacted: all of it is its range.
+  entry(8, 2, 'pi.input', 'f'.repeat(700));
+  const sizes = database.query<{ bytes: number }, [number]>('SELECT LENGTH(CAST(record AS BLOB)) AS bytes FROM entries WHERE id = ?');
+  const size = (id: number) => sizes.get(id)?.bytes ?? 0;
+  const measured = measureEntries(storage(database));
+  expect(measured?.largest.slice(0, 3)).toEqual([
+    { id: 1, conversationId: 1, kind: 'pi.input', role: 'user', at: 1, bytes: size(1) },
+    { id: 5, conversationId: 1, kind: 'pi.tool', role: 'user', at: 5, bytes: size(5) },
+    { id: 8, conversationId: 2, kind: 'pi.input', role: 'user', at: 8, bytes: size(8) },
+  ]);
+  expect(measured?.conversations).toEqual([
+    { conversationId: 1, entries: 7, bytes: [1, 2, 3, 4, 5, 6, 7].reduce((sum, id) => sum + size(id), 0), rangeFrom: 5, rangeEntries: 3, rangeBytes: size(5) + size(6) + size(7) },
+    { conversationId: 2, entries: 1, bytes: size(8), rangeFrom: null, rangeEntries: 1, rangeBytes: size(8) },
+  ]);
+  expect(measured?.rangeKinds).toEqual([
+    { kind: 'pi.tool', entries: 1, bytes: size(5) },
+    { kind: 'pi.input', entries: 2, bytes: size(7) + size(8) },
+    { kind: 'pi.compaction', entries: 1, bytes: size(6) },
+  ]);
+  expect(measureEntries(storage(new Database(':memory:')))).toBeNull();
 });
 
 test('a database fixture is measured table by table, largest first, without SQLite or Durable Object internals', () => {

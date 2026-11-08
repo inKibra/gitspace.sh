@@ -29,7 +29,7 @@ import { transcriptResponse, type RuntimeTranscriptFormat, type TranscriptImageU
 import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
 import { createRequestLoad, estimateMemory } from './memory-estimate.js';
 import { createStorageReads, type StorageReads } from './storage-reads.js';
-import { measureTables, openWakeRecord, type WakeRecord } from './wake-record.js';
+import { measureEntries, measureTables, openWakeRecord, type WakeRecord } from './wake-record.js';
 import { isolateRuntimes, openIsolateRuntime, type IsolateRuntime } from './isolate-runtimes.js';
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
@@ -206,6 +206,10 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   if (wake.tablesDue()) {
     try { console.info(JSON.stringify({ event: 'workspace_database_tables', workspaceId: options.identity.workspaceId, projectId: options.identity.projectId, databaseBytes: options.storage.sql.databaseSize, ...measureTables(options.storage.sql, TABLES_BUDGET_MS), ...isolateRuntimes() })); }
     catch (error) { console.error(JSON.stringify({ event: 'workspace_database_tables_failed', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); }
+  }
+  if (wake.entriesDue()) {
+    try { console.info(JSON.stringify({ event: 'workspace_entry_sizes', workspaceId: options.identity.workspaceId, projectId: options.identity.projectId, ...measureEntries(options.storage.sql) })); }
+    catch (error) { console.error(JSON.stringify({ event: 'workspace_entry_sizes_failed', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); }
   }
   // Opening reads every conversation's newest entries, screenshots included: its mark names the stage it reached.
   const opening = marks.stage('runtime open', `opening storage; database ${megabytes(options.storage.sql.databaseSize)}`);

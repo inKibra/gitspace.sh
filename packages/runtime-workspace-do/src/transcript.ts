@@ -37,8 +37,10 @@ export interface WithdrawnNotices {
 const MACHINE_NOTICE = 'gitspace.machine-notice';
 /** A compaction summary is context the model reads as a user message; it shows as the compaction, not as the user's. */
 const COMPACTION = CompactionEntry.kind;
+/** The project agent's workspace board reaches it as context but shows as one quiet row, the board under a fold. */
+const WORKSPACE_BOARD = 'gitspace.workspace-board';
 /** A workspace's turn report reaches the project agent as context (quiet) but shows as one compact row. */
-const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== COMPACTION && entry.kind !== WORKSPACE_REPORT_ENTRY && entry.model?.[0]?.role === 'user';
+const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== WORKSPACE_BOARD && entry.kind !== COMPACTION && entry.kind !== WORKSPACE_REPORT_ENTRY && entry.model?.[0]?.role === 'user';
 
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
 export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices): TranscriptEvent[] {
@@ -49,6 +51,7 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
       const title = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) && typeof entry.data.source === 'string' ? entry.data.source : 'Machine';
       return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     }
+    if (entry.kind === WORKSPACE_BOARD) return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: WORKSPACE_BOARD, display: true, title: 'Workspace board', content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === WORKSPACE_REPORT_ENTRY) return { ordinal: base + index, kind: 'message_end', payload: { message: workspaceReportMessage(entry), entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: { entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     let message = source;
