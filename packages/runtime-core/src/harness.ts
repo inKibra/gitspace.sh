@@ -47,6 +47,8 @@ export type RuntimeHarnessOptions = {
   refuseRequest(signal: AbortSignal, reason: string): void;
   /** After binding: images rewritten as Vision fallback descriptions when the bound model cannot read them. */
   describeImages?(signal: AbortSignal, messages: readonly Message[]): Promise<Message[] | undefined>;
+  /** The messages a conversation's model request is built from, as pi read them, before any hook rewrites them. */
+  contextRead?(conversationId: string, messages: readonly Message[]): void;
   /**
    * Requests a reset can cut off: `begin` records one more attempt under `key` and answers how many earlier attempts
    * under it never finished (the workspace object was reset during them); `end` clears the count. Durable, so it
@@ -165,6 +167,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     // Before binding, so a refused request is not bound afterwards.
     const form = resetAttempt(options, `turn:${String(runtime.conversationId)}`, signal, 'This turn\'s model request');
     if (form === 'refused') return undefined;
+    options.contextRead?.(String(runtime.conversationId), input.messages);
     const live = await runtime.snapshot(LiveDoc, runtime.conversationId, context);
     const ids = live?.run?.inputs ?? [];
     const requests = new Map<string, string>();

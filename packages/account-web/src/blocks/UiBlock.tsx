@@ -1,11 +1,13 @@
 // A gitspace-ui block: a json-render spec checked with GitSpace's validator, then drawn with the block registry. Each
-// block keeps its own json-render state, seeded from the spec's `state`; its actions run the surface's BlockActions.
+// block keeps its own json-render state, seeded from the spec's `state`; its actions run the surface's BlockActions. It
+// opens in the lightbox, drawn again at the dialog's width from the same state.
 import { gitspaceUiCatalog, validateUiSpec, type UiBlockIssue } from '@gitspace/protocol/gitspace-ui';
 import { createStateStore, type Spec, type StateStore } from '@json-render/core';
 import { JSONUIProvider, Renderer, defineRegistry, useStateValue, type Actions } from '@json-render/react';
 import { InfoCircle } from '@untitledui/icons';
 import { useEffect, useMemo, useRef } from 'react';
 import type { z } from 'zod';
+import { Lightbox } from '../Lightbox.js';
 import { useBlockActions, type BlockActionName, type BlockActions, type BlockState } from './BlockActions.js';
 import { BlockErrorCard } from './BlockFrames.js';
 import { BLOCK_COMPONENTS, blockCatalog, blockFunctions } from './registry.js';
@@ -51,11 +53,15 @@ function DrawnBlock({ spec }: { spec: Spec }) {
     const defined = defineRegistry(blockCatalog, { components: BLOCK_COMPONENTS, actions: blockActions(store, () => actionsRef.current) });
     return { registry: defined.registry, handlers: defined.handlers(() => undefined, store.getSnapshot) };
   }, [store]);
+  const title = spec.elements[spec.root]?.props.title;
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
-    <div data-gitspace-block="gitspace-ui" className="my-2 flex min-w-0 flex-col gap-1.5">
-      <Renderer spec={spec} registry={registry} />
-      <Notices />
-    </div>
+    <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2"
+      expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><Renderer spec={spec} registry={registry} /><Notices /></div>}>
+      <div data-gitspace-block="gitspace-ui" className="flex min-w-0 flex-col gap-1.5">
+        <Renderer spec={spec} registry={registry} />
+        <Notices />
+      </div>
+    </Lightbox>
   </JSONUIProvider>;
 }
 

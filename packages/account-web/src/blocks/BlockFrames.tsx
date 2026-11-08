@@ -7,7 +7,7 @@ import { useState } from 'react';
 
 const SHOWN_ISSUES = 8;
 
-export function BlockErrorCard({ issues, source, sourceLabel }: { issues: readonly UiBlockIssue[]; source: string; sourceLabel: 'JSON' | 'SVG' }) {
+export function BlockErrorCard({ issues, source, sourceLabel }: { issues: readonly UiBlockIssue[]; source: string; sourceLabel: 'JSON' | 'SVG' | 'Mermaid' }) {
   const shape = useShape();
   const [showSource, setShowSource] = useState(false);
   return <div role="group" aria-label="Block that could not be drawn" className={`my-2 flex flex-col gap-1.5 border border-border bg-surface-2 px-3 py-2 ${shape.container}`}>

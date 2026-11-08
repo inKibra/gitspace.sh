@@ -321,8 +321,14 @@ export class TranscriptProjector {
       if (this.store.read(id)) return;
       const items = todoItems(args.items);
       this.#write({ id, type: 'todo', source: args.from === 'plan' || items.some((item) => item.planStep !== undefined) ? 'plan' : 'own', items });
-    } else if (!this.#findTool(toolCallId)) {
+    } else {
       const id = this.#toolId(toolCallId, 'tool');
+      const previous = this.#findTool(toolCallId);
+      // The assistant message that issued a call records it before the call starts executing.
+      if (previous) {
+        if (startedAt && !previous.startedAt) this.#write({ ...previous, startedAt }, previous);
+        return;
+      }
       this.#write({
         id,
         type: 'tool-call',
@@ -500,10 +506,14 @@ export class TranscriptProjector {
         if (this.#finishTodo(message.toolCallId, message.isError === true, contentText(message.content), message.details)) return;
         const tool = this.#findTool(message.toolCallId);
         if (!tool) return;
+        const endedAt = timestamp(event.createdAt);
+        // A stored result carries how long the call executed; its start is that long before the result.
+        const started = endedAt && typeof message.durationMs === 'number' ? Date.parse(endedAt) - message.durationMs : Number.NaN;
         const completed: ToolCallBlock = {
           ...tool,
+          ...(!tool.startedAt && Number.isFinite(started) ? { startedAt: new Date(started).toISOString() } : {}),
           status: message.isError === true ? 'error' : 'done',
-          endedAt: timestamp(event.createdAt),
+          endedAt,
           details: message.details ?? tool.details,
           result: [
             ...richText(`${tool.id}:result`, contentText(message.content)),

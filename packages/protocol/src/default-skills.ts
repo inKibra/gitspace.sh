@@ -18,7 +18,7 @@ Turn the diff into the PR as a build-order story a reviewer reads top to bottom,
 ## Write
 
 - \`intro\`: what changed and why, in a few plain sentences a reader understands before any code.
-- \`captures\`: artifact references to screenshots or recordings of the change, when it is visible.
+- \`captures\`: artifact references to what a reader sees of the change, when it is visible: images, videos, or browser captures (the \`drive://workspace/browser/captures/<id>/\` folder or its \`capture.json\`). \`put\` rejects anything else; attach JSON, logs, transcripts and other files as \`evidence\` on the section they prove.
 - \`map\`: \`areas\` (each part of the system the change touches: name, package, role, what it does, its changed files), \`paths\` between areas (\`added\`, \`removed\` or \`same\`), and \`steps\` walking the main path, each naming the section that explains it. GitSpace lays the map out; never send coordinates.
 - \`sections\` in reader order, each readable in under a minute:
   - \`title\`, \`kind\` (decision, behavior, risk, mechanical), \`summary\` (one sentence), \`explanation\`;

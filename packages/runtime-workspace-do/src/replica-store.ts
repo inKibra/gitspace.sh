@@ -61,6 +61,10 @@ export function createReplicaStore(storage: DurableObjectStorage) {
       if (newer.reduce((bytes, delta) => bytes + delta.event.length, 0) > REPLAY_BYTES) return null;
       return newer.map(({ event }) => ({ event }));
     },
+    /** The deltas kept in memory, oldest first. */
+    retained(): readonly { cursor: number; event: string }[] {
+      return deltas;
+    },
   };
 }
 

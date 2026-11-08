@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
-import { Harness, MemoryStorage, createRegistry, type Conversation } from '@earendil-works/pi-durable';
+import { Harness, MemoryStorage, ToolTask, createRegistry, defineExtension, defineTool, type Conversation } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { createModels, type AssistantMessage } from '@earendil-works/pi-ai';
+import { Type, createModels, type AssistantMessage } from '@earendil-works/pi-ai';
 import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
 import { formatConversationEvents, type TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
@@ -148,4 +148,47 @@ test('stored images show by the URL the workspace resolves, in rows and in full 
     const content = await reader.content(root.id, { generation: page.generation, rowId: tool.id, offset: 0 });
     expect(content.text).toContain(`"url":"/images/${encodeURIComponent(`${stored};image/webp`)}"`);
   });
+});
+
+test('a call shows when it started executing while it runs, and once finished spans from that start to its result', async () => {
+  const storage = new MemoryStorage();
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const wait = defineTool({ name: 'wait', description: 'Wait until released', parameters: Type.Object({}), async execute() {
+    started.resolve();
+    await release.promise;
+    return { output: [{ type: 'text', text: 'released' }] };
+  } });
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: 'waiting', tools: [wait] }));
+  const harness = await Harness.open(storage, { registry, models: createModels() }, context);
+  try {
+    const root = await harness.root(context, { agent: { model: { provider: 'openai', modelId: 'fixture' }, tools: [wait] } });
+    const before = Date.now();
+    await root.commit(async tx => {
+      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'wait for it', timestamp: before }] });
+      const call = await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'toolCall', id: 'slow', name: 'wait', arguments: {} }], before)] });
+      await tx.createTask(ToolTask, { kind: 'model', assistant: call.id, callId: 'slow' }, { conversationId: root.id, ownership: { kind: 'conversation' } });
+    }, context);
+    harness.resume();
+    await started.promise;
+    const reader = createTranscriptReader(storage, none);
+    const call = async () => (await reader.page(root.id, { generation: null, before: null, after: null, around: null })).rows.find(row => row.item.type === 'tool-call')?.item;
+    const running = await call();
+    if (running?.type !== 'tool-call' || !running.startedAt) throw new Error('The running call has no start');
+    expect(running.status).toBe('running');
+    expect(Date.parse(running.startedAt)).toBeGreaterThanOrEqual(before);
+    // Pi measures how long a call executed with `performance.now()`, which a fake clock does not move.
+    await Bun.sleep(60);
+    release.resolve();
+    await root.waitForIdle(context);
+    const finished = await call();
+    if (finished?.type !== 'tool-call' || !finished.startedAt || !finished.endedAt) throw new Error('The finished call is not timed');
+    expect(finished.status).toBe('done');
+    expect(Date.parse(finished.startedAt)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(finished.endedAt) - Date.parse(finished.startedAt)).toBeGreaterThanOrEqual(50);
+  } finally {
+    release.resolve();
+    await harness.close(context);
+  }
 });

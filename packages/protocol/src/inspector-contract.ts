@@ -426,6 +426,31 @@ const changeGuideNarrativeFields = {
   map: changeMapSchema.optional(),
 };
 
+/** What an intro capture shows. */
+export type GuideCaptureKind = 'image' | 'video' | 'browser-capture';
+const VISUAL_EXTENSIONS: Readonly<Record<string, GuideCaptureKind>> = {
+  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image', avif: 'image',
+  mp4: 'video', webm: 'video', mov: 'video',
+};
+const BROWSER_CAPTURE_URL = /^(drive:\/\/[^/]+\/browser\/captures\/[^/]+)(?:\/(?:capture\.json)?)?$/u;
+
+/** The drive folder (`drive://<mount>/browser/captures/<id>`) a browser capture reference names, by its folder or its
+ * `capture.json`; null for any other address. */
+export function browserCaptureFolder(url: string): string | null {
+  return BROWSER_CAPTURE_URL.exec(url)?.[1] ?? null;
+}
+
+/** What an intro capture shows: an image or a video by its media type (else its extension), or a browser capture; null
+ * for anything else, which belongs in a section's evidence instead. */
+export function guideCaptureKind(reference: EvidenceReference): GuideCaptureKind | null {
+  if (reference.kind !== 'artifact') return null;
+  if (browserCaptureFolder(reference.url)) return 'browser-capture';
+  if (reference.mediaType?.startsWith('image/')) return 'image';
+  if (reference.mediaType?.startsWith('video/')) return 'video';
+  if (reference.mediaType) return null;
+  return VISUAL_EXTENSIONS[reference.url.split('/').at(-1)?.split('.').at(-1)?.toLowerCase() ?? ''] ?? null;
+}
+
 /** A map step belongs to a section of the same guide. */
 function refineGuideMapSections(guide: { sections: ChangeGuideSection[]; map?: ChangeMap }, context: z.RefinementCtx): void {
   if (guide.map === undefined) return;

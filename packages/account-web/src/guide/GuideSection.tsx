@@ -16,7 +16,8 @@ import { ExhibitDiff, type GuideReview } from './ExhibitDiff.js';
 import { areasTouching } from './map-layout.js';
 import { SectionChangeBadge, type GuideComparison } from './GuideRevisions.js';
 
-const KIND: Record<ChangeGuideSection['kind'], { label: string; color: string }> = {
+/** Each section kind's name and colour; the walkthrough and the treemap of where the change is colour by it. */
+export const SECTION_KIND: Record<ChangeGuideSection['kind'], { label: string; color: string }> = {
   decision: { label: 'Decision', color: badgeColors.violet },
   behavior: { label: 'Behavior', color: badgeColors.blue },
   risk: { label: 'Risk', color: badgeColors.amber },
@@ -171,7 +172,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
   const ranges = section.exhibits.reduce((sum, exhibit) => sum + (exhibit.ranges?.length ?? 0), 0);
   const paths = new Set(section.exhibits.map((exhibit) => exhibit.path));
   const threads = workspace?.review.threads.filter((thread) => thread.anchor.kind === 'line' && paths.has(thread.anchor.path)).length ?? 0;
-  const kind = KIND[section.kind];
+  const kind = SECTION_KIND[section.kind];
   const change = comparison?.changes.get(section.id) ?? null;
   const since = comparison?.onLoadSinceDiff && change === 'changed' ? { revision: comparison.since, onLoad: comparison.onLoadSinceDiff } : null;
   return <section id={`guide-section-${section.id}`} data-section={section.id} data-map-now={onMapNow || undefined} className="scroll-mt-2 pt-4">

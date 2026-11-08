@@ -1,4 +1,5 @@
 import { env, runInDurableObject } from 'cloudflare:test';
+import type { EvidenceReference } from '@gitspace/protocol';
 import { describe, expect, it } from 'vitest';
 import { SpaceContextDO } from '../src/space-context.js';
 
@@ -15,6 +16,14 @@ const evidence = (run: number) => ({
   artifactHash: `sha256:${run.toString(16).padStart(64, '0')}`,
   generation: 7,
   label: `Run ${run}`,
+});
+const capture = (name: string, mediaType: string | null): EvidenceReference => ({
+  kind: 'artifact',
+  url: `drive://workspace/${name}`,
+  hash: `sha256:${'1'.repeat(64)}`,
+  generation: 7,
+  label: name,
+  mediaType,
 });
 
 async function inside<T>(name: string, operation: (context: SpaceContextDO) => T): Promise<T> {
@@ -208,9 +217,10 @@ describe('SpaceContextDO', () => {
       paths: [{ id: 'save', from: 'ui', to: 'worker', label: 'save', state: 'added' as const }],
       steps: [{ paths: ['save'], from: 'ui', to: 'worker', caption: 'The UI saves the record.', sectionId: 'store' }],
     };
-    const guide = { headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Store it', createdBy: 'narrator-a', sections: [section], intro: 'Why this change.', captures: [evidence(1)], map };
+    const captures = [capture('shots/after.png', 'image/png'), capture('browser/captures/c1/capture.json', 'application/json'), capture('shots/walkthrough.webm', null)];
+    const guide = { headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Store it', createdBy: 'narrator-a', sections: [section], intro: 'Why this change.', captures, map };
     await inside('inspector-narrative', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide }));
-    expect(await inside('inspector-narrative', (context) => context.getChangeGuide(identity))).toMatchObject({ revision: 1, intro: 'Why this change.', captures: [evidence(1)], map, sections: [section] });
+    expect(await inside('inspector-narrative', (context) => context.getChangeGuide(identity))).toMatchObject({ revision: 1, intro: 'Why this change.', captures, map, sections: [section] });
     await expect(inside('inspector-narrative', (context) => context.putChangeGuide({
       ...identity, expectedRevision: 1, guide: { ...guide, map: { ...map, steps: [{ ...map.steps[0]!, sectionId: 'elsewhere' }] } },
     }))).rejects.toThrow('missing section');
@@ -259,7 +269,7 @@ describe('SpaceContextDO', () => {
     expect((await inside('inspector-acceptance', (context) => context.listJournal(identity))).map((item) => item.title)).toEqual(['Accepted Evidenced', 'Reopened Evidenced', 'Accepted Bare', 'Reopened Bare']);
   });
 
-  it('rejects a write whose Markdown holds a bad block, naming the field and the block issue', async () => {
+  it('rejects a write whose Markdown holds a bad block or whose guide captures something not visual, naming the field and the issue', async () => {
     const badSpec = '```gitspace-ui\n{ "root": "a", "elements": {} }\n```';
     await expect(inside('inspector-blocks', (context) => context.putGoal({
       ...identity, expectedRevision: 0,
@@ -275,6 +285,8 @@ describe('SpaceContextDO', () => {
       .rejects.toThrow('guide.sections[0].why: block 1: the ```mermaid fence is not closed');
     await expect(inside('inspector-blocks', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide: { ...guide, sections: [{ ...section, diagram: 'Just prose.' }] } })))
       .rejects.toThrow('guide.sections[0].diagram: holds 0 blocks');
+    await expect(inside('inspector-blocks', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide: { ...guide, captures: [capture('shots/after.png', 'image/png'), capture('evidence/transcript.json', 'application/json'), evidence(3)] } })))
+      .rejects.toThrow(/guide\.captures\[1\]: evidence\/transcript\.json \(application\/json\) is not an image, video or browser capture; attach non-visual files as evidence links.*\nguide\.captures\[2\]: Run 3 \(command\)/u);
     await expect(inside('inspector-blocks', (context) => context.appendJournalEntry({
       ...identity, id: 'note', kind: 'narrative', phase: 'code', title: 'Note', body: '```svg\n<svg><script/></svg>\n```', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a',
     }))).rejects.toThrow('body: block 1');

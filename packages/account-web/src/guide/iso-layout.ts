@@ -30,10 +30,17 @@ const MARGIN = 14;
 const NAME_RISE = 7;
 const PLATE_LABEL_DROP = 16;
 const PATH_LABEL_RISE = 7;
-/** About how wide a character of each label is, in pixels, for keeping labels inside the drawing. */
-const NAME_CHAR = 6;
-const PLATE_CHAR = 6.4;
-const PATH_CHAR = 6.6;
+/** Each kind of label: its size on screen and about how wide one of its characters is, in pixels, and where else it
+ * may go when its place is taken, in lines up (negative) or down, in the order tried. */
+export const ISO_LABEL: Record<IsoLabel['kind'], { size: number; char: number; shifts: readonly number[] }> = {
+  name: { size: 12, char: 6, shifts: [0, -1, -2, 1] },
+  count: { size: 11, char: 6.4, shifts: [0] },
+  plate: { size: 11, char: 6.4, shifts: [0, 1, -1] },
+  path: { size: 11, char: 6.6, shifts: [0, -1, 1, -2, 2] },
+};
+/** A label's line height, and the room kept between two labels, as shares of its size. */
+const LABEL_LINE = 1.2;
+const LABEL_GAP = 0.2;
 
 export interface IsoPoint { x: number; y: number }
 /** A rectangle on the plane: its corner nearest the back, and its sides along the two axes. */
@@ -135,13 +142,56 @@ export function projectIsoMap(layout: ChangeMapLayout, changes: ReadonlyMap<stri
     return [{ path, d, label: { x: bow.x, y: bow.y - PATH_LABEL_RISE } }];
   });
   const spans = [
-    ...plates.flatMap((plate) => [...plate.corners.map((point) => ({ point, half: 0 })), { point: plate.label, half: (plate.name.length * PLATE_CHAR) / 2 }]),
-    ...boxes.flatMap((box) => [...box.left, ...box.right].map((point) => ({ point, half: 0 })).concat({ point: { x: box.name.x, y: box.name.y - 10 }, half: (box.area.name.length * NAME_CHAR) / 2 })),
-    ...paths.map((drawn) => ({ point: drawn.label, half: (drawn.path.label.length * PATH_CHAR) / 2 })),
+    ...plates.flatMap((plate) => [...plate.corners.map((point) => ({ point, half: 0 })), { point: plate.label, half: (plate.name.length * ISO_LABEL.plate.char) / 2 }]),
+    ...boxes.flatMap((box) => [...box.left, ...box.right].map((point) => ({ point, half: 0 })).concat({ point: { x: box.name.x, y: box.name.y - 10 }, half: (box.area.name.length * ISO_LABEL.name.char) / 2 })),
+    ...paths.map((drawn) => ({ point: drawn.label, half: (drawn.path.label.length * ISO_LABEL.path.char) / 2 })),
   ];
   const x = Math.min(...spans.map(({ point, half }) => point.x - half)) - MARGIN;
   const y = Math.min(...spans.map(({ point }) => point.y)) - MARGIN;
   const right = Math.max(...spans.map(({ point, half }) => point.x + half)) + MARGIN;
   const bottom = Math.max(...spans.map(({ point }) => point.y)) + MARGIN;
   return { plates, boxes, paths, x, y, width: right - x, height: bottom - y };
+}
+
+/** A label of the overview: an area's name, the lines or "context" on its box's top, a package's name or a path's label
+ * (`of` names the area, package or path), where it is drawn and how large, in drawing units, and whether it is drawn. */
+export interface IsoLabel { kind: 'name' | 'count' | 'plate' | 'path'; of: string; text: string; x: number; y: number; size: number; shown: boolean }
+
+type IsoLabelPlace = Omit<IsoLabel, 'size' | 'shown'>;
+
+/** The overview's labels for a drawing shown at `scale` screen pixels per drawing unit, each at its size on screen. A
+ * box's count is drawn only where it fits on the box's top. Any other label is kept inside the drawing and moved a line
+ * or two where it would cover a label placed before it (counts first, then area names, packages and paths); one with
+ * nowhere left to go is hidden. */
+export function placeIsoLabels(layout: IsoMapLayout, scale: number): IsoLabel[] {
+  const counts = layout.boxes.flatMap((box): IsoLabelPlace[] => {
+    const text = !box.area.files.length ? 'context' : box.lines === null ? '' : String(box.lines);
+    const top = Math.max(...box.top.map((point) => point.x)) - Math.min(...box.top.map((point) => point.x));
+    const fits = text && (text.length * ISO_LABEL.count.char) / scale < top * 0.8;
+    return fits ? [{ kind: 'count', of: box.area.id, text, x: box.middle.x, y: box.middle.y + (ISO_LABEL.count.size / scale) * 0.35 }] : [];
+  });
+  const wanted = [
+    ...counts,
+    ...layout.boxes.map((box): IsoLabelPlace => ({ kind: 'name', of: box.area.id, text: box.area.name, x: box.name.x, y: box.name.y })),
+    ...layout.plates.map((plate): IsoLabelPlace => ({ kind: 'plate', of: plate.name, text: plate.name, x: plate.label.x, y: plate.label.y })),
+    ...layout.paths.filter((drawn) => drawn.path.label).map((drawn): IsoLabelPlace => ({ kind: 'path', of: drawn.path.id, text: drawn.path.label, x: drawn.label.x, y: drawn.label.y })),
+  ];
+  const taken: { left: number; top: number; right: number; bottom: number }[] = [];
+  return wanted.map((label): IsoLabel => {
+    const { size: pixels, char, shifts } = ISO_LABEL[label.kind];
+    const size = pixels / scale;
+    const half = (label.text.length * char) / scale / 2;
+    const gap = size * LABEL_GAP;
+    const x = half * 2 >= layout.width ? layout.x + layout.width / 2 : Math.min(layout.x + layout.width - half, Math.max(layout.x + half, label.x));
+    for (const shift of shifts) {
+      const y = Math.min(layout.y + layout.height - size * (LABEL_LINE - 1), Math.max(layout.y + size, label.y + shift * size * LABEL_LINE));
+      const box = { left: x - half, top: y - size, right: x + half, bottom: y + size * (LABEL_LINE - 1) };
+      const clear = taken.every((other) => box.right + gap <= other.left || other.right + gap <= box.left || box.bottom + gap <= other.top || other.bottom + gap <= box.top);
+      if (clear) {
+        taken.push(box);
+        return { ...label, x, y, size, shown: true };
+      }
+    }
+    return { ...label, size, shown: false };
+  });
 }

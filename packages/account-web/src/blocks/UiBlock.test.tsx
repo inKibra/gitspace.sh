@@ -207,3 +207,33 @@ describe('block actions', () => {
     await waitFor(() => container.textContent?.includes('Adding to your message failed: the composer is closed') ?? false);
   });
 });
+
+describe('blocks in the lightbox', () => {
+  const dialog = () => document.body.querySelector<HTMLElement>('[role="dialog"]');
+
+  it('opens a block full-screen, drawn again from the same state, and closes with Escape', async () => {
+    await render(<GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('benchmark').spec))}</GitSpaceMarkdown>);
+    await waitFor(() => container.textContent?.includes('1.1 s') ?? false);
+    await act(async () => container.querySelector<HTMLElement>('button[aria-label="Expand Menu ready, per page"]')?.click());
+    await waitFor(() => dialog()?.textContent?.includes('1.1 s') ?? false);
+    const title = document.getElementById(dialog()?.getAttribute('aria-labelledby') ?? '');
+    expect(title?.textContent).toBe('Menu ready, per page');
+    for (const expected of EXPECTED.benchmark ?? []) expect(dialog()?.textContent).toContain(expected);
+    // A control in the dialog changes the block in place too: both draw from one state.
+    const toggle = [...dialog()!.querySelectorAll<HTMLElement>('button, span, div, p')].filter((element) => element.textContent?.trim() === 'Menu cache (abc1234)').at(-1);
+    await act(async () => toggle?.click());
+    await waitFor(() => (dialog()?.textContent?.includes('0.4 s') ?? false) && (container.textContent?.includes('0.4 s') ?? false));
+    await act(async () => { document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    await waitFor(() => dialog() === null);
+    expect(container.textContent).toContain('0.4 s');
+  });
+
+  it('opens when the block is pressed, but not when one of its own controls is', async () => {
+    await render(<BlockActionsProvider actions={{ stage: () => undefined }}><GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('options').spec))}</GitSpaceMarkdown></BlockActionsProvider>);
+    await waitFor(() => container.textContent?.includes('Use Redis') ?? false);
+    await click('Use Redis');
+    expect(dialog()).toBeNull();
+    await click('Pick one; it waits in your message so you can say why.');
+    await waitFor(() => dialog()?.textContent?.includes('Survives a deploy') ?? false);
+  });
+});

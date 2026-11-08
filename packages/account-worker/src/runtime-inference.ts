@@ -143,6 +143,11 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   return {
     models: router.models,
     editTool(model: { provider: string; modelId: string }) { const selected = router.models.getModel(model.provider, model.modelId); return modelEditTool(selected ?? { provider: model.provider, id: model.modelId }); },
+    /** The model lists of the catalogs this object holds, one per profile revision, for the memory estimate line. */
+    async memoryHolders(): Promise<Record<string, unknown>> {
+      const settled = await Promise.allSettled(catalogs.values());
+      return { inferenceCatalogs: settled.flatMap(result => result.status === 'fulfilled' ? [result.value.getAllModels()] : []) };
+    },
     async admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }) {
       const admissionKey = key('admission', input.conversationId, input.requestId);
       const existing = await ctx.storage.get<unknown>(admissionKey);

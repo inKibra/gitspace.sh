@@ -11,6 +11,7 @@ import { createReplicaStore } from '../src/replica-store.js';
 import { QuestionsDoc } from '../../runtime-core/src/documents.js';
 import { AgentDefinitionContextDoc } from '../../runtime-core/src/subagent-state.js';
 import { BackgroundAgentsDoc, createBackgroundAgentTask } from '../../runtime-core/src/background-agents.js';
+import { z } from 'zod';
 
 const identity = RuntimeIdentitySchema.parse({ projectId: 'smoke-project', workspaceId: 'smoke-workspace' });
 const modelRef = { provider: 'fixture', modelId: 'fixture' };
@@ -290,8 +291,60 @@ export class ResetMarksSmoke extends DurableObject {
     return Response.json(createRunningMarks(this.ctx.storage.sql).leftover.map(({ step, detail }) => ({ step, detail })));
   }
 }
-export default { fetch(request: Request, env: { SMOKE: DurableObjectNamespace<RuntimeSmoke>; REPLICA: DurableObjectNamespace<ReplicaSmoke>; RESET: DurableObjectNamespace<ResetMarksSmoke> }) {
+/** The memory estimate lines this isolate logged, parsed, as the runtime writes them to the console. */
+const memoryLines: Array<Record<string, unknown>> = [];
+const consoleInfo = console.info.bind(console);
+console.info = (...args: unknown[]) => {
+  const [line] = args;
+  if (typeof line === 'string' && line.startsWith('{"event":"workspace_memory_estimate"')) memoryLines.push(z.record(z.string(), z.unknown()).parse(JSON.parse(line)));
+  consoleInfo(...args);
+};
+/** A workspace with a large main conversation and a turn, then 140 finished tasks with large results and a turn right
+ * after, then the runtime opened again: the lines its runtimes logged. The model's window is large enough that nothing
+ * compacts. */
+export class MemorySmoke extends DurableObject {
+  /** The runtime schedules its heartbeat; this object runs nothing on it. */
+  async alarm() {}
+  async fetch(): Promise<Response> {
+    memoryLines.length = 0;
+    const operations: OperationalServices = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => this.ctx.storage.setAlarm(timestamp) };
+    const models = createModels();
+    models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [{ ...model, contextWindow: 10_000_000 }], stream, streamSimple: stream });
+    const runtime = await openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models });
+    /** Runs `step`, then waits for one more `phase` line. */
+    const logged = async (phase: string, step: () => Promise<unknown>) => {
+      const before = memoryLines.filter(line => line.phase === phase).length;
+      await step();
+      const deadline = Date.now() + 30_000;
+      while (memoryLines.filter(line => line.phase === phase).length === before) {
+        check(Date.now() < deadline, `No ${phase} memory estimate line`);
+        const waited = Promise.withResolvers<void>();
+        setTimeout(waited.resolve, 20);
+        await waited.promise;
+      }
+    };
+    const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+    await root.commit(async tx => {
+      for (let i = 0; i < 300; i++) await tx.appendEntry(root.id, { kind: 'smoke.history', model: [{ role: 'user', content: `memory-${i} ${'m'.repeat(10_000)}`, timestamp: Date.now() }] });
+    }, BACKGROUND_CONTEXT);
+    await logged('turn-end', () => runtime.submit({ ...identity, requestId: 'conversation-turn', text: 'conversation-turn' }));
+    const operation = createOperationalTasks(operations).find(task => task.definition.name === 'gitspace.Checkpoint');
+    check(operation, 'Missing checkpoint task definition');
+    const ids = await root.commit(async tx => {
+      const ids = [];
+      for (let i = 0; i < 140; i++) ids.push(await tx.createTask(operation, { args: { i }, deadlineAt: new Date(Date.now() + 120_000).toISOString(), replay: 'safe' }, { ownership: { kind: 'conversation' }, conversationId: root.id, background: true }));
+      return ids;
+    }, BACKGROUND_CONTEXT);
+    runtime.harness.resume();
+    await Promise.all(ids.map(id => runtime.harness.waitForTask(id, BACKGROUND_CONTEXT)));
+    await logged('turn-end', () => runtime.submit({ ...identity, requestId: 'tasks-turn', text: 'tasks-turn' }));
+    await logged('wake', () => openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models }));
+    return Response.json(memoryLines);
+  }
+}
+export default { fetch(request: Request, env: { SMOKE: DurableObjectNamespace<RuntimeSmoke>; REPLICA: DurableObjectNamespace<ReplicaSmoke>; RESET: DurableObjectNamespace<ResetMarksSmoke>; MEMORY: DurableObjectNamespace<MemorySmoke> }) {
   const url = new URL(request.url);
   if (url.pathname === '/reset-marks') return env.RESET.getByName(url.searchParams.get('stage') ?? '').fetch(request);
+  if (url.pathname === '/memory-estimate') return env.MEMORY.getByName('memory').fetch(request);
   return url.pathname === '/replica-proof' ? env.REPLICA.getByName('replica').fetch(request) : env.SMOKE.getByName('runtime-regressions').fetch(request);
 } };

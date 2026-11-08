@@ -2,7 +2,7 @@
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { JournalEntryView } from '@gitspace/protocol';
+import type { ChangeGuideView, EvidenceReference, JournalEntryView } from '@gitspace/protocol';
 import { Inspector, type InspectorProps } from './Inspector.js';
 import { InspectorLayout } from './inspector-shared.js';
 import type { DriveFileView } from './DriveSurface.js';
@@ -195,5 +195,30 @@ describe('Inspector journal', () => {
 
     await click('§ Retry policy');
     expect(container.querySelector('[aria-label="Inspector views"] [role="tab"][aria-selected="true"]')?.textContent).toMatch(/^Change Guide/u);
+  });
+});
+
+describe('Inspector guide captures', () => {
+  it('requests a capture again when its read was cancelled before it settled', async () => {
+    const capture: EvidenceReference = { kind: 'artifact', url: 'drive://workspace/shots/after.png', hash: `sha256:${'1'.repeat(64)}`, generation: 1, label: 'After', mediaType: 'image/png' };
+    const guide: ChangeGuideView = { projectId: 'project', spaceId: 'space', revision: 1, headCommit: 'b'.repeat(40), baseRef: 'main', baseCommit: 'c'.repeat(40), title: 'Guide', createdAt: date, createdBy: 'author', reviewerStates: [], captures: [capture],
+      sections: [{ id: 'section', title: 'Retry policy', kind: 'behavior', explanation: 'Retries once', why: '', requirementIds: [], exhibits: [] }] };
+    const signals: AbortSignal[] = [];
+    props.onRequestArtifact = (_reference, signal) => {
+      if (signal) signals.push(signal);
+      const { promise, reject } = Promise.withResolvers<never>();
+      signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      return promise;
+    };
+    props.initialView = 'guide';
+    props.overview = { ...props.overview, changeGuide: guide };
+    await render();
+    expect(signals).toHaveLength(1);
+    // The Inspector moves to another space and cancels its reads; the same guide stays on screen, so its capture must be read again.
+    props.overview = { ...props.overview, spaceId: 'other' };
+    await render();
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals).toHaveLength(2);
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('Loading the capture…');
   });
 });

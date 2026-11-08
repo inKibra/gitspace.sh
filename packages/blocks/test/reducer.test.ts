@@ -73,6 +73,23 @@ describe('reduceTranscriptToTurns', () => {
     });
   });
 
+  it('times a call from when it started executing to its result, whether the start was streamed or only the result recorded how long it ran', () => {
+    const [turn] = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {}, createdAt: '2026-11-08T10:00:00.000Z' },
+      { sessionId: 's1', ordinal: 2, kind: 'message_end', createdAt: '2026-11-08T10:00:01.000Z', payload: { message: { role: 'assistant', content: [
+        { type: 'toolCall', id: 'streamed', name: 'bash', arguments: { command: 'make' } },
+        { type: 'toolCall', id: 'stored', name: 'read', arguments: { path: 'notes.md' } },
+      ] } } },
+      { sessionId: 's1', ordinal: 3, kind: 'tool_execution_start', createdAt: '2026-11-08T10:00:04.000Z', payload: { toolCallId: 'streamed', toolName: 'bash', args: { command: 'make' } } },
+      { sessionId: 's1', ordinal: 4, kind: 'message_end', createdAt: '2026-11-08T10:00:09.000Z', payload: { message: { role: 'toolResult', toolCallId: 'streamed', content: [{ type: 'text', text: 'built' }] } } },
+      { sessionId: 's1', ordinal: 5, kind: 'message_end', createdAt: '2026-11-08T10:00:12.000Z', payload: { message: { role: 'toolResult', toolCallId: 'stored', durationMs: 2500, content: [{ type: 'text', text: 'notes' }] } } },
+    ]);
+    expect(turn?.items.map((item) => item.type === 'tool-call' ? [item.toolCallId, item.startedAt, item.endedAt] : item.type)).toEqual([
+      ['streamed', '2026-11-08T10:00:04.000Z', '2026-11-08T10:00:09.000Z'],
+      ['stored', '2026-11-08T10:00:09.500Z', '2026-11-08T10:00:12.000Z'],
+    ]);
+  });
+
   it('splits a rehydrated transcript without turn markers at each user message', () => {
     const turns = reduceTranscriptToTurns([
       { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'first' }] } } },

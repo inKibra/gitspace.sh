@@ -1,9 +1,10 @@
-import { CompactionEntry, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
+import { CompactionEntry, ToolTask, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { TranscriptProjector, WORKSPACE_REPORT_ENTRY, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
+import { z } from 'zod';
 
 export type RuntimeTranscriptEvent = TranscriptEvent & { sessionId: string };
 export type RuntimeTranscriptFormat = 'json' | 'ndjson';
@@ -21,6 +22,9 @@ const FORWARD_IDS = 256;
 const FORWARD_STEPS = 16;
 const SEARCH_WINDOWS = 16;
 const LIVE_STATUSES = ['pending', 'running', 'waiting', 'completing'] as const;
+/** States of a tool task that has started executing and has no result yet. */
+const EXECUTING_STATUSES: readonly NonNullable<TaskQuery['status']>[] = ['running', 'waiting'];
+const modelToolTaskInput = z.object({ kind: z.literal('model'), assistant: z.number(), callId: z.string() });
 
 const entryOf = (ordinal: number) => Math.floor(ordinal / ENTRY_ORDINALS);
 /** Machine notices withdrawn from a conversation: its chat and history skip them, and a `gitspace.notices-withdrawn`
@@ -178,6 +182,30 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     return false;
   }
 
+  /** Model-issued tool calls of `entries` executing now, as the events that start them. Pi records a call's start only
+   * on its task; its result entry records how long it ran. */
+  async function executing(conversationId: ConversationId, sessionId: string, entries: readonly EntryRecord[]): Promise<TranscriptEventInput[]> {
+    const names = new Map<string, string>();
+    for (const entry of entries) for (const message of entry.model ?? []) {
+      if (message.role === 'assistant') for (const part of message.content) if (part.type === 'toolCall') names.set(`${Number(entry.id)}:${part.id}`, part.name);
+    }
+    const events: TranscriptEventInput[] = [];
+    for (const status of EXECUTING_STATUSES) {
+      let cursor: Cursor | undefined;
+      do {
+        const page = await storage.scanTasks({ conversationId, kind: ToolTask.definition.name, status }, 64, cursor, ctx);
+        for (const task of page.items) {
+          const input = modelToolTaskInput.safeParse(task.input);
+          const toolName = input.success ? names.get(`${input.data.assistant}:${input.data.callId}`) : undefined;
+          if (!input.success || toolName === undefined || task.startedAt === undefined) continue;
+          events.push({ sessionId, ordinal: input.data.assistant * ENTRY_ORDINALS, kind: 'tool_execution_start', payload: { toolCallId: input.data.callId, toolName }, createdAt: new Date(task.startedAt).toISOString() });
+        }
+        cursor = page.next;
+      } while (cursor);
+    }
+    return events;
+  }
+
   /** Entries at or below `maxEntry`, extended back to the turn that contains them and forward to that turn's end. */
   async function window(conversationId: ConversationId, maxEntry: number | null, highWater: number): Promise<Window> {
     const entries: EntryRecord[] = [];
@@ -236,6 +264,7 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       const notice = noticeEvent(entry);
       if (notice) projector.apply({ ...notice, sessionId });
     }
+    if (view.newest) for (const event of await executing(conversationId, sessionId, view.entries)) projector.apply(event);
     projector.flush();
     const lastTurn = [...projection.turns.keys()].at(-1);
     const running = view.newest && await live(conversationId);

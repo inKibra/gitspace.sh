@@ -6,10 +6,13 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChangeGuideSurface } from '../inspector/ChangeGuideSurface.js';
 import { SharedGuide } from '../SharedGuide.js';
-import { ChangeMapView } from './ChangeMap.js';
+import { ChangeMapView, READABLE_TEXT } from './ChangeMap.js';
+import { tileTint } from './ChangeTreemap.js';
 import { narrowExhibit } from './exhibit-segments.js';
-import { projectIsoMap, type FileChange } from './iso-layout.js';
+import { SECTION_KIND } from './GuideSection.js';
+import { ISO_LABEL, placeIsoLabels, projectIsoMap, type FileChange } from './iso-layout.js';
 import { AREA_HEIGHT, AREA_WIDTH, layoutChangeMap } from './map-layout.js';
+import { SMALLEST_TILE, guideFiles, layoutTreemap, type ChangedFile, type Rect } from './treemap-layout.js';
 
 const date = '2026-01-01T00:00:00.000Z';
 const base = 'a'.repeat(40);
@@ -86,7 +89,8 @@ function button(label: string): HTMLElement {
 }
 async function surface(overrides: Partial<Parameters<typeof ChangeGuideSurface>[0]> = {}) {
   await act(async () => root.render(<ChangeGuideSurface guide={guide} reviewerId="reviewer" goal={goal} workspaces={[]}
-    review={{ threads: [], onOpenFile() {}, onSelectThread() {}, onSelectRange() {} }} onOpenEvidence={() => undefined} captures={{ content: () => null, load() {} }}
+    review={{ threads: [], onOpenFile() {}, onSelectThread() {}, onSelectRange() {} }} onOpenEvidence={() => undefined}
+    captures={{ content: () => null, status: () => undefined, error: () => undefined, load() {}, size: () => null, browserCapture: () => ({ poster: null, recording: null }) }}
     onLoadDiff={async (path) => diffFor(path)} onMarkRead={unavailable} {...overrides} />));
 }
 
@@ -157,7 +161,7 @@ describe('change map layout', () => {
     expect(container.querySelector('svg [data-area="heater"]')).not.toBeNull();
     await act(async () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.textContent?.includes('Flow'))?.click());
     expect(view()).toBe('flow');
-    expect(container.querySelector('.react-flow [data-area="heater"]')).not.toBeNull();
+    expect(container.querySelector('[data-flow] [data-area="heater"]')).not.toBeNull();
     const extra = (count: number, pkg: (index: number) => string): ChangeMap => ({ ...map, areas: [...map.areas, ...Array.from({ length: count }, (_, index) => ({ id: `extra-${index}`, name: `Extra ${index}`, package: pkg(index), role: '', whatItDoes: '', files: [] }))] });
     await act(async () => root.render(<ChangeMapView key="many-areas" map={extra(8, () => 'kettle/core')} sections={sections} />));
     expect(view()).toBe('flow');
@@ -174,7 +178,7 @@ describe('change map layout', () => {
     const overview = { areas: lit('svg [data-area]'), paths: lit('svg [data-path]') };
     expect(overview).toEqual({ areas: ['panel', 'scheduler'], paths: ['press'] });
     await act(async () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.textContent?.includes('Flow'))?.click());
-    expect({ areas: lit('.react-flow [data-area]'), paths: lit('.react-flow [data-path]') }).toEqual(overview);
+    expect({ areas: lit('[data-flow] [data-area]'), paths: lit('[data-flow] [data-path]') }).toEqual(overview);
   });
 
   it('tells what an area is and what changed in it on hover, and opens the flow view on it when pressed', async () => {
@@ -186,8 +190,133 @@ describe('change map layout', () => {
     for (const text of ['Control panel', 'kettle/ui', 'what the person presses', 'Shows the brew button.', '5 lines changed', 'ui/panel.tsx', '+4', '−1']) expect(card).toContain(text);
     await act(async () => panel.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(container.querySelector('[data-map-view]')?.getAttribute('data-map-view')).toBe('flow');
-    expect(container.querySelector('.react-flow [data-area="panel"]')?.getAttribute('data-lit')).toBe('true');
-    expect(container.querySelector('.react-flow [data-area="heater"]')?.getAttribute('data-lit')).toBe('false');
+    expect(container.querySelector('[data-flow] [data-area="panel"]')?.getAttribute('data-lit')).toBe('true');
+    expect(container.querySelector('[data-flow] [data-area="heater"]')?.getAttribute('data-lit')).toBe('false');
+  });
+});
+
+describe('change map views at a narrow width', () => {
+  it('keeps the flow view\'s text readable in a narrow box, scrolling sideways instead of shrinking it further', async () => {
+    let width = 320;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private callback: (entries: { contentRect: { width: number; height: number } }[]) => void) {}
+      observe() { this.callback([{ contentRect: { width, height: 400 } }]); }
+      unobserve() {}
+      disconnect() {}
+    });
+    const drawn = async (key: string) => {
+      await act(async () => root.render(<ChangeMapView key={key} map={map} sections={sections} />));
+      await act(async () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.textContent?.includes('Flow'))?.click());
+      const flow = container.querySelector<HTMLElement>('[data-flow]')!;
+      const scale = Number(flow.querySelector('[data-flow-scale]')?.getAttribute('data-flow-scale'));
+      const sizes = [...flow.querySelectorAll('[style]')].flatMap((node) => {
+        const size = /font(?:-size)?:[^;]*?(\d+(?:\.\d+)?)px/u.exec(node.getAttribute('style') ?? '');
+        return size ? [Number(size[1])] : [];
+      });
+      return { scale, sizes, width: Number.parseFloat(flow.querySelector<HTMLElement>(':scope > div')?.style.width ?? '0') };
+    };
+    const narrow = await drawn('narrow');
+    expect(narrow.sizes.length).toBeGreaterThan(map.areas.length);
+    for (const size of narrow.sizes) expect(size * narrow.scale).toBeGreaterThanOrEqual(READABLE_TEXT);
+    // Wider than its box, it scrolls.
+    expect(narrow.width).toBeGreaterThan(320);
+    width = 4000;
+    // A wide box shows it at its natural size, not enlarged.
+    expect((await drawn('wide')).scale).toBe(1);
+  });
+
+  it('moves or hides overview labels that would cover each other in a narrow box, and keeps them their size on screen', () => {
+    const iso = projectIsoMap(layoutChangeMap(map), null);
+    expect(placeIsoLabels(iso, 1).every((label) => label.shown)).toBe(true);
+    const scale = 0.3;
+    const shown = placeIsoLabels(iso, scale).filter((label) => label.shown);
+    expect(shown.length).toBeGreaterThan(0);
+    const boxes = shown.map((label) => {
+      expect(label.size * scale).toBeCloseTo(ISO_LABEL[label.kind].size);
+      const half = (label.text.length * ISO_LABEL[label.kind].char) / scale / 2;
+      return { left: label.x - half, right: label.x + half, top: label.y - label.size, bottom: label.y + label.size * 0.2 };
+    });
+    for (const [index, box] of boxes.entries()) {
+      for (const other of boxes.slice(index + 1)) expect(box.right <= other.left || other.right <= box.left || box.bottom <= other.top || other.bottom <= box.top).toBe(true);
+    }
+  });
+});
+
+describe('where it changed', () => {
+  const changed = (path: string, pkg: string | null, lines: number): ChangedFile => ({ path, package: pkg, section: { id: 'schedule', index: 0, title: 'Pressing brew schedules it', kind: 'behavior' }, test: false, additions: lines, deletions: 0 });
+  const area = (rect: Rect) => rect.w * rect.h;
+
+  it('gives each package and each file room in proportion to the lines it changes', () => {
+    const files = [changed('ui/panel.tsx', 'kettle/ui', 300), changed('ui/dial.tsx', 'kettle/ui', 100), changed('core/queue.ts', 'kettle/core', 200), changed('core/clock.ts', 'kettle/core', 250), changed('firmware/relay.c', 'kettle/firmware', 150)];
+    const packages = layoutTreemap(files, 800, 400);
+    expect(packages.flatMap((pkg) => pkg.tiles.flatMap((tile) => tile.files.map((file) => file.path))).sort()).toEqual(files.map((file) => file.path).sort());
+    for (const pkg of packages) {
+      expect(area(pkg.rect) / (pkg.additions + pkg.deletions)).toBeCloseTo((800 * 400) / 1000, 3);
+      const [first, ...rest] = pkg.tiles.map((tile) => area(tile.rect) / (tile.additions + tile.deletions));
+      for (const perLine of rest) expect(perLine / first!).toBeCloseTo(1, 5);
+    }
+  });
+
+  it('gathers a package\'s files too small to read into one tile that says how many', () => {
+    const small = Array.from({ length: 6 }, (_, index) => changed(`core/step-${index}.ts`, 'kettle/core', 4));
+    const core = layoutTreemap([changed('core/scheduler.ts', 'kettle/core', 900), ...small, changed('ui/panel.tsx', 'kettle/ui', 300)], 600, 300).find((pkg) => pkg.name === 'kettle/core')!;
+    const shared = core.tiles.filter((tile) => tile.files.length > 1);
+    expect(shared.map((tile) => tile.files.map((file) => file.path).sort())).toEqual([small.map((file) => file.path)]);
+    for (const tile of core.tiles) expect(area(tile.rect)).toBeGreaterThanOrEqual(SMALLEST_TILE);
+  });
+
+  it('puts a file no map area lists in the package of a mapped file beside it, else in none', () => {
+    const shown = (paths: string[]): ChangeGuideSection => ({ ...sections[0]!, exhibits: paths.map((path) => ({ path, blobId: null, note: '', slowRead: false })) });
+    const nested: ChangeMap = { ...map, areas: [...map.areas, { id: 'api', name: 'Brew route', package: 'kettle/api', role: '', whatItDoes: '', files: ['services/api/src/brew.ts'] }] };
+    const files = guideFiles([shown(['ui/panel.tsx', 'ui/panel.test.tsx', 'services/api/test/brew.test.ts', 'services/web/src/page.ts', 'NOTES.md'])], nested);
+    expect(Object.fromEntries(files.map((file) => [file.path, file.package]))).toEqual({
+      'ui/panel.tsx': 'kettle/ui', 'ui/panel.test.tsx': 'kettle/ui', 'services/api/test/brew.test.ts': 'kettle/api', 'services/web/src/page.ts': null, 'NOTES.md': null,
+    });
+  });
+
+  it('colours each file by the kind of the section that shows it, a test paler, and a tile several files share neutral', () => {
+    const decision: ChangedFile['section'] = { id: 'heat', index: 1, title: 'The heater follows the schedule', kind: 'decision' };
+    const files = [changed('ui/panel.tsx', 'kettle/ui', 300), { ...changed('firmware/heater.c', 'kettle/firmware', 300), section: decision }, { ...changed('firmware/heater.test.ts', 'kettle/firmware', 200), section: decision, test: true },
+      changed('core/scheduler.ts', 'kettle/core', 900), ...Array.from({ length: 6 }, (_, index) => changed(`core/step-${index}.ts`, 'kettle/core', 4))];
+    const tiles = layoutTreemap(files, 600, 300).flatMap((pkg) => pkg.tiles);
+    const tint = (path: string) => tileTint(tiles.find((candidate) => candidate.files.some((file) => file.path === path))!);
+    const strength = (path: string) => Number(/ (\d+)%/u.exec(tint(path))?.[1]);
+    expect(tint('ui/panel.tsx')).toContain(SECTION_KIND.behavior.color);
+    expect(tint('firmware/heater.c')).toContain(SECTION_KIND.decision.color);
+    expect(tint('firmware/heater.test.ts')).toContain(SECTION_KIND.decision.color);
+    expect(strength('firmware/heater.test.ts')).toBeLessThan(strength('firmware/heater.c'));
+    for (const kind of Object.values(SECTION_KIND)) expect(tint('core/step-0.ts')).not.toContain(kind.color);
+  });
+
+  const tile = (path: string) => container.querySelector<HTMLElement>(`[data-tile="${path}"]`);
+
+  it('opens the section that shows a file when its tile is pressed', async () => {
+    // Another space, so the sections it opens stay out of the surface's cache for the guide the other tests read.
+    await surface({ guide: { ...guide, spaceId: 'treemap-space' } });
+    await vi.waitFor(() => expect(container.querySelector('[aria-busy="false"] [data-tile="firmware/heater.c"]')).not.toBeNull());
+    const heat = container.querySelector('[data-section="heat"] button[aria-expanded]');
+    expect(heat?.getAttribute('aria-expanded')).toBe('false');
+    await act(async () => tile('firmware/heater.c')?.click());
+    expect(heat?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('stands every file in place until the diffs are read, then sizes each by its lines', async () => {
+    const read = Promise.withResolvers<void>();
+    await surface({ onLoadDiff: async (path) => { await read.promise; return diffFor(path); } });
+    expect(container.querySelector('[aria-busy="true"] [data-tile="ui/panel.tsx"]')).not.toBeNull();
+    expect(container.textContent).toContain('Reading the diffs of 2 files');
+    await act(async () => read.resolve());
+    await vi.waitFor(() => expect(container.querySelector('[aria-busy="false"] [data-tile="ui/panel.tsx"]')).not.toBeNull());
+    expect(tile('ui/panel.tsx')?.getAttribute('aria-label')).toContain('+1 −1');
+  });
+
+  it('leaves tests out when the reader picks production code', async () => {
+    const [schedule, heat] = sections as [ChangeGuideSection, ChangeGuideSection];
+    await surface({ guide: { ...guide, sections: [schedule, { ...heat, exhibits: [...heat.exhibits, { path: 'firmware/heater.test.ts', blobId: null, note: '', slowRead: false }] }] } });
+    await vi.waitFor(() => expect(tile('firmware/heater.test.ts')).not.toBeNull());
+    await act(async () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.textContent?.includes('Production code'))?.click());
+    expect(tile('firmware/heater.test.ts')).toBeNull();
+    expect(tile('firmware/heater.c')).not.toBeNull();
   });
 });
 

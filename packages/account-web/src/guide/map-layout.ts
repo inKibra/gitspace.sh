@@ -6,10 +6,11 @@ import type { ChangeMap } from '@gitspace/protocol';
 
 export const AREA_WIDTH = 208;
 export const AREA_HEIGHT = 72;
-const AREA_GAP = 24;
+/** The gaps between areas in a column and between columns leave room for a path's label at full size. */
+const AREA_GAP = 32;
 const PACKAGE_PAD = 16;
 const PACKAGE_HEAD = 30;
-const PACKAGE_GAP = 80;
+const PACKAGE_GAP = 112;
 /** Up to this many packages, every column order is tried; past it, columns keep the order of their first area. */
 const ORDERED_PACKAGES = 7;
 

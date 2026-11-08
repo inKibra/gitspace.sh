@@ -15,7 +15,8 @@ export type RunningMarks = {
   active(): boolean;
   /** One record per key (a conversation's turn, its compaction) counting attempts that have not finished. */
   unfinished: { begin(key: string): number; end(key: string): void };
-  models(models: Models): Models;
+  /** `onRequest` hears each request start with the characters its messages carry, and answers the call that ends it. */
+  models(models: Models, onRequest?: (characters: number) => () => void): Models;
 };
 
 /** How often a streaming model request's mark records how much reply has arrived. */
@@ -97,18 +98,24 @@ export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => 
      * `REPLY_NOTE_MS` how much reply has arrived, so a reset shows which stage of the request it hit and what had grown.
      * Turns stream (`streamSimple`); pi and the compaction hook summarize a conversation with `completeSimple`.
      */
-    models(models: Models): Models {
+    models(models: Models, onRequest?: (characters: number) => () => void): Models {
       const describe = (model: { provider: string; id: string }, context: Context) => {
         const { characters, images, imageCharacters } = messageCharacters(context.messages);
-        return `${model.provider}/${model.id}: ${context.messages.length} messages, ${megabytes(characters + imageCharacters)}${images ? ` (${images} images, ${megabytes(imageCharacters)})` : ''}, system ${kilobytes(context.systemPrompt?.length ?? 0)}, ${context.tools?.length ?? 0} tools ${kilobytes(textLength(context.tools))}`;
+        return { characters: characters + imageCharacters, text: `${model.provider}/${model.id}: ${context.messages.length} messages, ${megabytes(characters + imageCharacters)}${images ? ` (${images} images, ${megabytes(imageCharacters)})` : ''}, system ${kilobytes(context.systemPrompt?.length ?? 0)}, ${context.tools?.length ?? 0} tools ${kilobytes(textLength(context.tools))}` };
       };
       return new Proxy(models, {
         get: (target, key, receiver) => {
-          if (key === 'completeSimple') return (model: Parameters<Models['completeSimple']>[0], context: Context, options?: Parameters<Models['completeSimple']>[2]) => run('compaction request', describe(model, context), () => target.completeSimple(model, context, options));
+          if (key === 'completeSimple') return async (model: Parameters<Models['completeSimple']>[0], context: Context, options?: Parameters<Models['completeSimple']>[2]) => {
+            const request = describe(model, context);
+            const ended = onRequest?.(request.characters);
+            try { return await run('compaction request', request.text, () => target.completeSimple(model, context, options)); }
+            finally { ended?.(); }
+          };
           if (key !== 'streamSimple') return Reflect.get(target, key, receiver);
           return (model: Parameters<Models['streamSimple']>[0], context: Context, options?: Parameters<Models['streamSimple']>[2]) => {
-            const request = describe(model, context);
+            const { characters, text: request } = describe(model, context);
             const mark = start('model request', request, true);
+            const ended = onRequest?.(characters);
             const startedAt = Date.now();
             let answered = '';
             const inner = target.streamSimple(model, context, {
@@ -135,7 +142,7 @@ export function createRunningMarks(sql: SqlStorage, onStart: () => void = () => 
                   mark.update(`${request}${answered}; reply after ${Math.round((now - startedAt) / 1000)} s: ${events} events, thinking ${kilobytes(thinking)}, text ${kilobytes(text)}, tool-call arguments ${kilobytes(toolArguments)}`);
                 }
               }
-              finally { mark.end(); outer.end(); }
+              finally { mark.end(); ended?.(); outer.end(); }
             })();
             return outer;
           };

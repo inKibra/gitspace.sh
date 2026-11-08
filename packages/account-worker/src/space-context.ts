@@ -11,6 +11,7 @@ import {
   evidenceReferenceSchema,
   goalRecordViewSchema,
   goalRequirementSchema,
+  guideCaptureKind,
   inspectorIdentitySchema,
   inspectorOverviewSchema,
   journalEntryViewSchema,
@@ -645,7 +646,10 @@ export class SpaceContextDO extends BudgetedDurableObject {
         for (const [rangeIndex, range] of (exhibit.ranges ?? []).entries()) fields.push([`${at}.exhibits[${exhibitIndex}].ranges[${rangeIndex}].note`, range.note]);
       }
     }
-    assertMarkdownBlocks(fields, diagrams);
+    const captures = (parsed.guide.captures ?? []).flatMap((capture, index) => guideCaptureKind(capture) ? [] : [
+      `guide.captures[${index}]: ${capture.label} (${capture.kind === 'artifact' ? capture.mediaType ?? capture.url : capture.kind}) is not an image, video or browser capture; attach non-visual files as evidence links on the section they prove instead`,
+    ]);
+    assertMarkdownBlocks(fields, diagrams, captures);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
       const actual = this.latestGuideRow()?.revision ?? 0;
@@ -1173,9 +1177,9 @@ const REOPENED_ACCEPTANCE = JSON.stringify({ acceptedBy: null, acceptedAt: null 
 type MarkdownField = [string, string | null | undefined];
 
 /** Rejects a write when a Markdown field holds an invalid gitspace-ui, svg or mermaid block, or a diagram field is not
- * exactly one block; each problem reads `<field path>: <issue path>: <message>`. */
-function assertMarkdownBlocks(fields: MarkdownField[], diagrams: MarkdownField[] = []): void {
-  const problems: string[] = [];
+ * exactly one block; each problem reads `<field path>: <issue path>: <message>`, after the problems already `found`. */
+function assertMarkdownBlocks(fields: MarkdownField[], diagrams: MarkdownField[] = [], found: readonly string[] = []): void {
+  const problems = [...found];
   for (const [field, markdown] of diagrams) {
     if (markdown === null || markdown === undefined) continue;
     const blocks = extractBlocks(markdown).length;

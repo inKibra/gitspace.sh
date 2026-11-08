@@ -95,13 +95,16 @@ function active(block: ToolCallBlock): boolean {
   return block.status === 'running' || block.status === 'pending';
 }
 
+/** A call's start and end; `end` is null while it runs. A finished call missing a time is drawn at the one it has. */
 interface Timing { start: number | null; end: number | null }
 
 function timingOf(block: ToolCallBlock): Timing {
   const started = block.startedAt ? Date.parse(block.startedAt) : Number.NaN;
   const ended = block.endedAt ? Date.parse(block.endedAt) : Number.NaN;
-  const end = Number.isFinite(ended) && !active(block) ? ended : null;
-  return { start: Number.isFinite(started) ? started : end, end };
+  const start = Number.isFinite(started) ? started : null;
+  if (active(block)) return { start, end: null };
+  const end = Number.isFinite(ended) ? ended : start;
+  return { start: start ?? end, end };
 }
 
 /** The group's time window; `scale` is its width on the axis, at least a second. */
@@ -253,7 +256,7 @@ function MiniWaterfall({ calls, timings, span }: { calls: readonly GroupCall[]; 
       if (timing.start === null) return null;
       const x = ((timing.start - span.start) / span.scale) * 112;
       const width = Math.max(1.5, (((timing.end ?? span.now) - timing.start) / span.scale) * 112);
-      return <rect key={block.id} x={x} y={(index % lanes) * step + step * 0.15} width={width} height={Math.max(1, step * 0.7)} rx="0.75" fill={active(block) ? badgeColors.blue : barColor(block)} opacity={block.status === 'done' ? 0.55 : 1} />;
+      return <rect key={block.id} data-call-bar={block.id} x={x} y={(index % lanes) * step + step * 0.15} width={width} height={Math.max(1, step * 0.7)} rx="0.75" fill={active(block) ? badgeColors.blue : barColor(block)} opacity={block.status === 'done' ? 0.55 : 1} />;
     })}
   </svg>;
 }
@@ -370,7 +373,7 @@ function CallRow({ call, timing, edit, span, at, selected, onSelect }: { call: G
         {browser ? <span className="shrink-0 truncate text-caption text-muted-foreground">· {browser}</span> : null}
       </span>
       <span className="relative h-full">
-        {timing.start !== null && end !== null ? <span className="absolute top-1/2 h-2.5 -translate-y-1/2 rounded-[3px]" style={{ left: at(timing.start), width: `max(3px, calc(${at(end)} - ${at(timing.start)}))`, background: active(block) ? badgeColors.blue : barColor(block), opacity: block.status === 'done' ? 0.7 : 1 }}>
+        {timing.start !== null && end !== null && span ? <span data-call-bar={block.id} className="absolute top-1/2 h-2.5 min-w-[3px] -translate-y-1/2 rounded-[3px]" style={{ left: at(timing.start), width: `${((end - timing.start) / span.scale) * 100}%`, background: active(block) ? badgeColors.blue : barColor(block), opacity: block.status === 'done' ? 0.7 : 1 }}>
           {block.status === 'running' ? <span className="absolute inset-0 animate-pulse rounded-[3px] bg-[repeating-linear-gradient(135deg,transparent_0_4px,rgb(255_255_255/0.35)_4px_8px)]" /> : null}
         </span> : null}
         {block.status === 'running' && span ? <span className="absolute inset-y-0 w-px" style={{ left: at(span.now), background: badgeColors.blue }} aria-hidden /> : null}
@@ -434,7 +437,7 @@ function CallDetail({ call, timing, edit, end, browser }: { call: GroupCall; tim
       {path ? <span className="min-w-0 truncate font-mono">{path}</span> : null}
       {browser ? <span>{browser}</span> : null}
       {timing.start !== null ? <span className="tabular-nums">started {clock(timing.start)}</span> : null}
-      {timing.start !== null && end !== null ? <span className="tabular-nums">{active(block) ? `running ${duration(end - timing.start)}` : `took ${duration(end - timing.start)}`}</span> : null}
+      {timing.start !== null && end !== null ? <span className="tabular-nums">{active(block) ? `running ${duration(end - timing.start)}` : `ended ${clock(end)} · took ${duration(end - timing.start)}`}</span> : null}
       {block.status === 'error' ? <Badge size="compact" variant="dot" color="red">failed</Badge> : block.status === 'interrupted' ? <Badge size="compact" variant="dot" color="amber">stopped</Badge> : null}
       {call.complete ? <span className="ml-auto">
         <TabsSubtle size="compact" selectedIndex={Math.min(tab, labels.length - 1)} onSelect={setTab} idPrefix={`call-${block.id}`} aria-label="Call detail">

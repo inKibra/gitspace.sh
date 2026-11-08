@@ -1,20 +1,21 @@
 // A Change Guide as one calm document, the same in the Inspector and on a shared link: the title and who made what;
-// the introduction and its captures; the change map with its steps; then the walkthrough, one section at a time. In
-// the workspace it is also where a person reads, accepts requirements, comments on lines and routes follow-ups; a
-// shared guide shows the same parts read-only.
+// the introduction and its captures; where the change is; the change map with its steps; then the walkthrough, one
+// section at a time. In the workspace it is also where a person reads, accepts requirements, comments on lines and
+// routes follow-ups; a shared guide shows the same parts read-only.
 import type { ChangeGuideSection, ChangeMap, EvidenceReference, RepositoryDiffView } from '@gitspace/protocol';
-import { badgeColors, useShape } from '@gitspace/ui';
-import { Image01 } from '@untitledui/icons';
+import { badgeColors } from '@gitspace/ui';
 import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { artifactId, RuntimeAvailability, type ArtifactReference, type InspectorArtifactContent } from '../inspector/inspector-shared.js';
+import { artifactId, RuntimeAvailability, type ArtifactReference } from '../inspector/inspector-shared.js';
+import { GuideCapture, type GuideCaptures } from './GuideCapture.js';
 import { Source, SourceLegend } from './Authorship.js';
 import { ChangeMapView } from './ChangeMap.js';
+import { ChangeTreemap } from './ChangeTreemap.js';
 import type { FileChange } from './iso-layout.js';
 import { EvidenceLinks, GuideSection, MEASURE, type GuideWorkspace } from './GuideSection.js';
 import { ComparisonSummary, type GuideComparison } from './GuideRevisions.js';
 
-/** How many of the map's files are measured at once. */
+/** How many of the guide's files are measured at once. */
 const MEASURING = 4;
 
 /** The parts of a guide both the workspace and a shared link read. */
@@ -29,12 +30,6 @@ export interface GuideContent {
   map?: ChangeMap | undefined;
 }
 
-/** How the Inspector shows a capture it can load: its preview once loaded. */
-export interface GuideCaptures {
-  content(reference: ArtifactReference): InspectorArtifactContent | null;
-  load(reference: ArtifactReference): void;
-}
-
 function PartHeading({ id, title, source, detail }: { id: string; title: string; source: ReactNode; detail?: string }) {
   return <header id={id} className={`flex scroll-mt-2 flex-col gap-1 pb-3 pt-10 ${MEASURE}`}>
     <h2 className="flex items-center gap-1.5 text-title font-semibold text-foreground">{title}{source}</h2>
@@ -42,30 +37,15 @@ function PartHeading({ id, title, source, detail }: { id: string; title: string;
   </header>;
 }
 
-function Capture({ reference, captures }: { reference: ArtifactReference; captures: GuideCaptures | null }) {
-  const shape = useShape();
-  const content = captures?.content(reference) ?? null;
-  useEffect(() => { captures?.load(reference); }, [artifactId(reference)]);
-  const image = content && content.mediaType?.startsWith('image/') ? content.previewUrl : null;
-  return <figure className="flex min-w-0 flex-col gap-1.5">
-    {image ? <img src={image} alt={reference.label} className={`w-full border border-border bg-surface-1 object-contain ${shape.container}`} />
-      : <div className={`flex aspect-video w-full flex-col items-center justify-center gap-2 border border-dashed border-border bg-surface-1 p-4 text-center text-caption text-muted-foreground ${shape.container}`}>
-        <Image01 width={20} height={20} />{captures ? 'Loading the capture…' : 'Captures open in the workspace.'}
-      </div>}
-    <figcaption className="text-caption text-foreground">{reference.label}</figcaption>
-  </figure>;
-}
-
-/** The lines each of the map's files changes, read from the same diffs the walkthrough shows; null until all are read,
- * and while the workspace cannot serve diffs. Only files the guide shows can be read, so an area whose files it does
- * not show is not measured. */
-function useFileChanges(map: ChangeMap | undefined, sections: readonly ChangeGuideSection[], loadDiff: (path: string) => Promise<RepositoryDiffView>): ReadonlyMap<string, FileChange> | null {
+/** The lines each file the guide shows changes, read from the same diffs the walkthrough shows: null until all are
+ * read, and while the workspace cannot serve diffs (then `measuring` is false). Only files the guide shows can be read,
+ * so a mapped file no section shows is not measured. */
+function useFileChanges(sections: readonly ChangeGuideSection[], loadDiff: (path: string) => Promise<RepositoryDiffView>): { changes: ReadonlyMap<string, FileChange> | null; measuring: boolean } {
   const runtimeAvailable = useContext(RuntimeAvailability);
   const [changes, setChanges] = useState<ReadonlyMap<string, FileChange> | null>(null);
   useEffect(() => {
-    if (!map || !runtimeAvailable) return;
-    const shown = new Set(sections.flatMap((section) => section.exhibits.map((exhibit) => exhibit.path)));
-    const queue = [...new Set(map.areas.flatMap((area) => area.files))].filter((path) => shown.has(path));
+    if (!runtimeAvailable) return;
+    const queue = [...new Set(sections.flatMap((section) => section.exhibits.map((exhibit) => exhibit.path)))];
     const measured = new Map<string, FileChange>();
     let active = true;
     const measure = async (): Promise<void> => {
@@ -76,8 +56,8 @@ function useFileChanges(map: ChangeMap | undefined, sections: readonly ChangeGui
     };
     void Promise.all(Array.from({ length: Math.min(MEASURING, queue.length) }, measure)).then(() => { if (active) setChanges(measured); });
     return () => { active = false; };
-  }, [map, sections, runtimeAvailable]);
-  return changes;
+  }, [sections, runtimeAvailable]);
+  return { changes, measuring: runtimeAvailable && changes === null };
 }
 
 export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, workspace, captures, comparison, focusSection, initialOpen, onOpenChange }: {
@@ -112,7 +92,7 @@ export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, work
     void loading.catch(() => diffs.current.delete(path));
     return loading;
   };
-  const changes = useFileChanges(guide.map, guide.sections, loadDiff);
+  const { changes, measuring } = useFileChanges(guide.sections, loadDiff);
   const [mapSection, setMapSection] = useState<string | null>(null);
   const openSection = (id: string): void => {
     setOpen((current) => current.has(id) ? current : new Set(current).add(id));
@@ -150,8 +130,14 @@ export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, work
     {guide.intro || guide.captures?.length ? <>
       <PartHeading id="guide-intro" title="What changed" source={<Source by="agent" what="the introduction and which captures show the change" />} />
       {guide.intro ? <div className={`text-body leading-relaxed ${MEASURE}`}><GitSpaceMarkdown>{guide.intro}</GitSpaceMarkdown></div> : null}
-      {artifacts.length ? <div className={`mt-4 grid gap-4 ${artifacts.length > 1 ? 'grid-cols-2' : 'grid-cols-1'} ${MEASURE}`}>{artifacts.map((reference) => <Capture key={artifactId(reference)} reference={reference} captures={captures} />)}</div> : null}
+      {artifacts.length ? <div className={`mt-4 grid gap-4 ${artifacts.length > 1 ? 'grid-cols-2' : 'grid-cols-1'} ${MEASURE}`}>{artifacts.map((reference) => <GuideCapture key={artifactId(reference)} reference={reference} captures={captures} onOpen={workspace ? workspace.onOpenEvidence : null} />)}</div> : null}
       {otherCaptures.length ? <div className={`mt-3 ${MEASURE}`}><EvidenceLinks evidence={otherCaptures} onOpen={workspace ? workspace.onOpenEvidence : null} /></div> : null}
+    </> : null}
+
+    {files ? <>
+      <PartHeading id="guide-where" title="Where it changed" source={<Source by="gitspace" what="each file's size: the lines its diff changes" />}
+        detail="Each file is as large as the lines it changes, grouped by package and coloured by the kind of section that shows it. Press a file to read its section." />
+      <ChangeTreemap sections={guide.sections} map={guide.map} changes={changes} measuring={measuring} onOpenSection={openSection} />
     </> : null}
 
     {guide.map?.areas.length ? <>

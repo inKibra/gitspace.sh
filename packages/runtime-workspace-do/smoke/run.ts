@@ -20,7 +20,7 @@ try {
   if (!built.success) throw new AggregateError(built.logs, 'Runtime smoke fixture build failed');
   assert.equal(built.outputs.length, 1);
   const contents = await built.outputs[0]!.text();
-  const options = { modules: [{ type: 'ESModule' as const, path: join(directory, 'fixture.js'), contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { SMOKE: { className: 'RuntimeSmoke', useSQLite: true }, REPLICA: { className: 'ReplicaSmoke', useSQLite: true }, RESET: { className: 'ResetMarksSmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'state'), outboundService: () => { throw new Error('External network forbidden in runtime smoke'); } };
+  const options = { modules: [{ type: 'ESModule' as const, path: join(directory, 'fixture.js'), contents }, await searchWasmModule(directory)], modulesRoot: directory, compatibilityDate: '2026-03-02', compatibilityFlags: ['nodejs_compat'], durableObjects: { SMOKE: { className: 'RuntimeSmoke', useSQLite: true }, REPLICA: { className: 'ReplicaSmoke', useSQLite: true }, RESET: { className: 'ResetMarksSmoke', useSQLite: true }, MEMORY: { className: 'MemorySmoke', useSQLite: true } }, durableObjectsPersist: join(directory, 'state'), outboundService: () => { throw new Error('External network forbidden in runtime smoke'); } };
   worker = new Miniflare(options);
   async function request(path: string, body?: unknown, expectedFailure = false): Promise<unknown> {
     assert(worker);
@@ -45,6 +45,32 @@ try {
   }
   const assistantReplies = (snapshot: RuntimeSnapshot) => snapshot.conversations.flatMap(item => item.messages).filter(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text.startsWith('fixture reply:'))).length;
   console.log('PASS replica stores the cursor only: migration, in-memory replay, reset after reopen, large Unicode draft', await request('/replica-proof'));
+
+  // The memory estimate: a line as the runtime opens and one as each turn ends, each holder's bytes where its data is; a
+  // turn ending within 30 s of the last estimate logs only that it was skipped.
+  {
+    const lines = z.array(z.looseObject({ phase: z.string(), skipped: z.string().optional() })).parse(await request('/memory-estimate'));
+    assert.deepEqual(lines.map(line => [line.phase, line.skipped ?? null]), [['wake', null], ['turn-end', null], ['turn-end', 'busy'], ['wake', null]]);
+    const estimates = lines.map(line => line.skipped === undefined ? z.looseObject({ holders: z.record(z.string(), z.number()), totalBytes: z.number(), tasks: z.number(), truncated: z.boolean(), requests: z.object({ count: z.number(), largestBytes: z.number() }) }).parse(line) : null);
+    const [, conversation, , reopened] = estimates;
+    assert(conversation && reopened);
+    for (const line of [conversation, reopened]) {
+      assert.equal(line.totalBytes, Object.values(line.holders).reduce((sum, bytes) => sum + bytes, 0));
+      assert.equal(line.truncated, false);
+    }
+    // The main conversation's view keeps its newest 256 entries: 2.56 million characters of the 3 million seeded.
+    assert(conversation.holders.conversationViews! >= 2_560_000, `A large conversation's views counted ${conversation.holders.conversationViews} bytes`);
+    assert(conversation.holders.taskViews! < 100_000, `Task views counted ${conversation.holders.taskViews} bytes before any task held a result`);
+    // The snapshot is built from the views and shares their text, which counts once.
+    assert(conversation.holders.snapshot! < 500_000, `The snapshot counted ${conversation.holders.snapshot} bytes of the views' text again`);
+    assert(conversation.requests.count >= 1 && conversation.requests.largestBytes >= 3_000_000, `The turn's request counted ${conversation.requests.largestBytes} bytes`);
+    // Reopened: 128 finished tasks are kept, each with a 4,096-character preview of its large result; the conversation is
+    // unchanged but for the second turn.
+    assert(reopened.tasks >= 128);
+    assert(reopened.holders.taskViews! - conversation.holders.taskViews! >= 128 * 4096, `128 large task results added ${reopened.holders.taskViews! - conversation.holders.taskViews!} bytes to the task views`);
+    assert(Math.abs(reopened.holders.conversationViews! - conversation.holders.conversationViews!) < 100_000, 'Task results were counted in the conversation views');
+    console.log('PASS memory estimate lines on open and at a turn end attribute a large conversation and large task results to their holders; a burst skips', JSON.stringify(lines[1]));
+  }
 
   // A reset during the open's rebuild or the alarm's conversation recovery is reported on the next open: the stage it
   // reached and how much it held.

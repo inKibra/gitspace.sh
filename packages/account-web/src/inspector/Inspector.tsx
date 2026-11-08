@@ -1,7 +1,7 @@
 import type { ExecutionBlock } from '@gitspace/blocks';
 import type { RuntimeSideAgentBlock } from '../runtime-shell-adapter.js';
 import { Button, TabsSubtle, TabsSubtleItem, TabsSubtlePanel, Tooltip, ThinkingIndicator } from '@gitspace/ui';
-import type { EvidenceReference, InspectorOverview, JournalEntryView, RepositoryDiffView, RepositoryFileView, RepositoryMode, RepositoryTreeEntry, ReviewAnchor, ReviewThreadView, SessionUsageReport, ServiceView } from '@gitspace/protocol';
+import { browserCaptureFolder, type EvidenceReference, type InspectorOverview, type JournalEntryView, type RepositoryDiffView, type RepositoryFileView, type RepositoryMode, type RepositoryTreeEntry, type ReviewAnchor, type ReviewThreadView, type SessionUsageReport, type ServiceView } from '@gitspace/protocol';
 import type { GitLfsHeldBack } from '@gitspace/protocol-workspace';
 import { AlertCircle, Archive, ArrowLeft, Expand06, File02, FileCode02, Globe01, Minimize02, Tool02, XClose } from '@untitledui/icons';
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -189,16 +189,16 @@ export function Inspector(props: InspectorProps) {
   const artifactRequests = useRef(new Map<string, AbortController>());
   const tabStrip = useRef<HTMLDivElement>(null);
   const uploads = useArtifactUploads(props.artifactUpload);
-  useEffect(() => {
+  // Leaving a space cancels its reads and forgets what they loaded. This runs as the old space's cleanup, before the
+  // views of the next space start their reads in the same commit, so it never forgets a read they just started.
+  useEffect(() => () => {
+    for (const controller of artifactRequests.current.values()) controller.abort();
+    artifactRequests.current.clear();
+    for (const content of artifactCache.current.values()) content.dispose?.();
+    artifactCache.current.clear();
     setArtifactContent({});
     setArtifactLoad({});
     setArtifactErrors({});
-    return () => {
-      for (const controller of artifactRequests.current.values()) controller.abort();
-      artifactRequests.current.clear();
-      for (const content of artifactCache.current.values()) content.dispose?.();
-      artifactCache.current.clear();
-    };
   }, [props.overview.spaceId]);
   // Escape returns from full width, unless a dialog, menu or list that handles Escape itself has focus.
   useEffect(() => {
@@ -240,6 +240,17 @@ export function Inspector(props: InspectorProps) {
   // Read recorded usage when requested, not on every Inspector mount.
   useEffect(() => { if (runtimeAvailable && view === 'usage') props.usage.load(); }, [view, runtimeAvailable]);
   useEffect(() => { if (runtimeAvailable && view === 'agents') props.agentSetup.load(); }, [view, runtimeAvailable, props.agentSetup.sessionId]);
+  /** A read cancelled before it settled forgets its 'loading' state (unless a newer read of the same file runs), so
+   * the next view that shows the file requests it again. */
+  const forgetCancelled = (key: string, controller: AbortController): void => {
+    const running = artifactRequests.current.get(key);
+    if (running && running !== controller) return;
+    setArtifactLoad((current) => {
+      if (current[key] !== 'loading') return current;
+      const { [key]: cancelled, ...rest } = current;
+      return rest;
+    });
+  };
   const loadArtifact = async (reference: ArtifactReference): Promise<void> => {
     const key = artifactId(reference);
     if (artifactRequests.current.has(key) || artifactCache.current.has(key)) return;
@@ -248,13 +259,13 @@ export function Inspector(props: InspectorProps) {
     setArtifactLoad((current) => ({ ...current, [key]: 'loading' }));
     try {
       const content = await props.onRequestArtifact(reference, controller.signal);
-      if (controller.signal.aborted) { content.dispose?.(); return; }
+      if (controller.signal.aborted) { content.dispose?.(); forgetCancelled(key, controller); return; }
       artifactCache.current.get(key)?.dispose?.();
       artifactCache.current.set(key, content);
       setArtifactContent((current) => ({ ...current, [key]: content }));
       setArtifactLoad((current) => ({ ...current, [key]: 'loaded' }));
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) { forgetCancelled(key, controller); return; }
       setArtifactErrors((current) => ({ ...current, [key]: rpcErrorMessage(error, 'inspector.artifacts.read') }));
       setArtifactLoad((current) => ({ ...current, [key]: 'error' }));
     } finally {
@@ -451,7 +462,18 @@ export function Inspector(props: InspectorProps) {
         goal={props.overview.goal}
         onSetAcceptance={props.onSetRequirementAcceptance}
         onOpenEvidence={openEvidence}
-        captures={{ content: (reference) => artifactContent[artifactId(reference)] ?? null, load: (reference) => void loadArtifact(reference) }}
+        captures={{
+          content: (reference) => artifactContent[artifactId(reference)] ?? null,
+          status: (reference) => artifactLoad[artifactId(reference)],
+          error: (reference) => artifactErrors[artifactId(reference)],
+          load: (reference) => void loadArtifact(reference),
+          size: (reference) => driveFiles.find((file) => file.url === reference.url)?.size ?? null,
+          browserCapture: (reference) => {
+            const folder = browserCaptureFolder(reference.url);
+            const named = (name: string): ArtifactReference | null => artifacts.find((candidate) => candidate.url === `${folder}/${name}`) ?? null;
+            return { poster: named('thumbnail.jpg') ?? named('image.jpg'), recording: named('video.webm') ?? named('image.jpg') };
+          },
+        }}
         scope={props.scope}
         workspaces={props.workspaces}
         onSetRelations={props.onSetRelations}

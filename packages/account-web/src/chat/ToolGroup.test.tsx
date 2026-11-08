@@ -80,6 +80,34 @@ it('lists each call of an open group with its duration', async () => {
   expect(rows[0]!.textContent).toContain('ls notes');
 });
 
+it('draws each call from its start to its end on the group\'s axis, a running call reaching now and growing with it', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  try {
+    // Overlapping: `make` starts before `ls` ends; `tidy` is still running at 10:00:10.
+    const ls: ToolCallBlock = { ...read, startedAt: '2026-01-01T10:00:00.000Z', endedAt: '2026-01-01T10:00:02.000Z' };
+    const make: ToolCallBlock = { ...read, id: 'turn:tool:make', toolCallId: 'make', target: 'make', startedAt: '2026-01-01T10:00:01.000Z', endedAt: '2026-01-01T10:00:06.000Z' };
+    const tidy: ToolCallBlock = { ...read, id: 'turn:tool:tidy', toolCallId: 'tidy', target: 'tidy', status: 'running', startedAt: '2026-01-01T10:00:04.000Z', endedAt: undefined, result: [] };
+    vi.setSystemTime(new Date('2026-01-01T10:00:10.000Z'));
+    await render(turn([ls, make, tidy]));
+    const group = groups()[0]!;
+    await click(group.querySelector('button[aria-expanded]'));
+    // The closed-group waterfall is 112 wide; open rows place bars by percentages of the shared axis.
+    const bars = () => ({
+      mini: [...group.querySelectorAll('svg [data-call-bar]')].map((bar) => [Number(bar.getAttribute('x')), Number(bar.getAttribute('width'))].map((value) => Math.round(value * 10) / 10)),
+      rows: [...group.querySelectorAll<HTMLElement>('li [data-call-bar]')].map((bar) => [bar.style.left, bar.style.width].map((value) => Math.round(Number.parseFloat(value)))),
+    });
+    // 10 s of axis: 11.2 per second, 10% per second.
+    expect(bars()).toEqual({ mini: [[0, 22.4], [11.2, 56], [44.8, 67.2]], rows: [[0, 20], [10, 50], [40, 60]] });
+    expect([...group.querySelectorAll('[data-call-took]')].map((took) => took.textContent)).toEqual(['2.0 s', '5.0 s', '6.0 s…']);
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    // At 10:00:15 the axis is 15 s long and only the running call grew.
+    expect(bars()).toEqual({ mini: [[0, 14.9], [7.5, 37.3], [29.9, 82.1]], rows: [[0, 13], [7, 33], [27, 73]] });
+    expect([...group.querySelectorAll('[data-call-took]')].at(-1)?.textContent).toBe('11 s…');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('shows a selected call’s output as numbered log lines and its arguments as a JSON tree', async () => {
   await render(turn([read, edit]));
   await click(groups()[0]!.querySelector('button[aria-expanded]'));
