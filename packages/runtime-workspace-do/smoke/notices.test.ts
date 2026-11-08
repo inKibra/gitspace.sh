@@ -28,7 +28,7 @@ test('an invalid block in a message gets its agent one Blocks notice, also when 
     await noticeInvalidBlocks(harness, message);
     expect(await notices(root)).toEqual([{
       data: { source: 'Blocks' },
-      text: 'Block 1 in your last message is invalid: the Mermaid source is empty\nThe chat shows an error in place of that block; send a corrected block in a new message.',
+      text: 'Block 1 in your last message is invalid: the Mermaid source is empty\nThe chat shows an error in place of that block. Check the failing paths against skill://gitspace-ui and send a corrected block in a new message.',
     }]);
     // A second message with the same invalid block is its own message.
     await noticeInvalidBlocks(harness, await posted(root, 'pi.assistant', [reply(`Again:\n${fence}mermaid\n\n${fence}`)]));

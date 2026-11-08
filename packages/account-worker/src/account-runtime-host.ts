@@ -13,7 +13,7 @@ import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { importedProjectRepository, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
-import { readSourceCheckpoint, readWorkspaceMetadata, storeWorkspaceReport, storeWorkspaceStatus } from './workspace-metadata.js';
+import { readSourceCheckpoint, readWorkspaceMetadata, readWorkspaceReport, storeWorkspaceReport, storeWorkspaceStatus } from './workspace-metadata.js';
 import { projectWatchHooks, reconcileProjectWatch } from './project-watch.js';
 import { automationTurnHooks, reconcileAutomationTurns } from './automation-turns.js';
 import { notifyMachines } from './machine-notices.js';
@@ -25,6 +25,7 @@ import { remoteDefaultBranch } from './cloud-project.js';
 import { createRuntimeImages } from './runtime-images.js';
 import { inferenceWorkerRunner } from './inference-runner.js';
 import { journalMessageDecisions } from './message-decisions.js';
+import { WORKER_VERSION } from './tenant-releases.js';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the origin's history,
  * imported natively from a public origin or streamed with installation-token reads from a covered one. */
@@ -145,8 +146,9 @@ export async function createAccountWorkspaceRuntime(
     },
     published: (snapshot, report) => {
       const status = report.summary;
-      // The sidebar's row: sent to every tab only when the status changed.
-      if (storeWorkspaceStatus(ctx.storage, status)) waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+      // The account's row: the sidebar's status and the project agent's board, sent only when either changed.
+      const waitingChanged = JSON.stringify(readWorkspaceReport(ctx.storage)?.waitingOn ?? null) !== JSON.stringify(report.waitingOn);
+      if (storeWorkspaceStatus(ctx.storage, status) || waitingChanged) waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status, waitingOn: report.waitingOn }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       storeWorkspaceReport(ctx.storage, report);
       watch.published(report);
       automationTurns.published(report);
@@ -184,6 +186,7 @@ export async function createAccountWorkspaceRuntime(
     browser: services.browser,
     storage: ctx.storage,
     identity,
+    version: WORKER_VERSION,
     waitUntil: promise => waitUntil('runtime', promise),
     schedule,
     qa,

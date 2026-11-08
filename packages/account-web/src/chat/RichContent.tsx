@@ -1,4 +1,5 @@
 import type { MessageImage, RichContentBlock } from '@gitspace/blocks';
+import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@gitspace/ui';
 import { Link03 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
@@ -30,10 +31,11 @@ export function MessageAttachments({ images }: { images: MessageImage[] }) {
   />)}</>;
 }
 
-/** A user message as Markdown: an uploaded attachment becomes a link to its drive file, an inline text attachment a
- * titled block of its text. */
+/** A user message as Markdown: a staged choice shows as its line only (its data is for the agent), an uploaded
+ * attachment becomes a link to its drive file, an inline text attachment a titled block of its text. */
 export function userMessageMarkdown(text: string): string {
   return text
+    .replace(STAGED_CHOICE_DATA, '$1')
     .replace(/<attachment name="([^"]*)" url="([^"]*)"[^>]*\/>/gu, (_match, name: string, url: string) => `📎 [${name.replace(/[[\]]/gu, '\\$&')}](${url})`)
     .replace(/<attachment name="([^"]*)">\n([\s\S]*?)\n<\/attachment>/gu, (_match, name: string, content: string) => {
       const fence = '~'.repeat(Math.max(3, ...[...content.matchAll(/~{3,}/gu)].map(run => run[0].length + 1)));

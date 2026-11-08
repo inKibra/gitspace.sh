@@ -291,22 +291,24 @@ export class ResetMarksSmoke extends DurableObject {
     return Response.json(createRunningMarks(this.ctx.storage.sql).leftover.map(({ step, detail }) => ({ step, detail })));
   }
 }
-/** The memory estimate lines this isolate logged, parsed, as the runtime writes them to the console. */
+/** The memory estimate and database table lines this isolate logged, parsed, as the runtime writes them to the console. */
 const memoryLines: Array<Record<string, unknown>> = [];
 const consoleInfo = console.info.bind(console);
 console.info = (...args: unknown[]) => {
   const [line] = args;
-  if (typeof line === 'string' && line.startsWith('{"event":"workspace_memory_estimate"')) memoryLines.push(z.record(z.string(), z.unknown()).parse(JSON.parse(line)));
+  if (typeof line === 'string' && (line.startsWith('{"event":"workspace_memory_estimate"') || line.startsWith('{"event":"workspace_database_tables"'))) memoryLines.push(z.record(z.string(), z.unknown()).parse(JSON.parse(line)));
   consoleInfo(...args);
 };
-/** A workspace with a large main conversation and a turn, then 140 finished tasks with large results and a turn right
- * after, then the runtime opened again: the lines its runtimes logged. The model's window is large enough that nothing
- * compacts. */
+/** A workspace with a table of 50 notes of 2,000 characters, a large main conversation and a turn, then 140 finished
+ * tasks with large results and a turn right after, then the runtime opened again beside the first, then the first
+ * closed and a third opened: the lines its runtimes logged. The model's window is large enough that nothing compacts. */
 export class MemorySmoke extends DurableObject {
   /** The runtime schedules its heartbeat; this object runs nothing on it. */
   async alarm() {}
   async fetch(): Promise<Response> {
     memoryLines.length = 0;
+    this.ctx.storage.sql.exec('CREATE TABLE smoke_notes(id INTEGER PRIMARY KEY, body TEXT NOT NULL)');
+    for (let i = 0; i < 50; i++) this.ctx.storage.sql.exec('INSERT INTO smoke_notes(body) VALUES(?)', 'n'.repeat(2_000));
     const operations: OperationalServices = { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: receiptText }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: timestamp => this.ctx.storage.setAlarm(timestamp) };
     const models = createModels();
     models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [{ ...model, contextWindow: 10_000_000 }], stream, streamSimple: stream });
@@ -338,6 +340,9 @@ export class MemorySmoke extends DurableObject {
     runtime.harness.resume();
     await Promise.all(ids.map(id => runtime.harness.waitForTask(id, BACKGROUND_CONTEXT)));
     await logged('turn-end', () => runtime.submit({ ...identity, requestId: 'tasks-turn', text: 'tasks-turn' }));
+    await logged('wake', () => openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models }));
+    // The first runtime closes; a third opens beside the second.
+    await runtime.harness.close(BACKGROUND_CONTEXT);
     await logged('wake', () => openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models }));
     return Response.json(memoryLines);
   }

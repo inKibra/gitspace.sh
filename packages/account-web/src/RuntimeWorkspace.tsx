@@ -4,7 +4,7 @@ import type { ResourceFile } from './resource-files.js';
 import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
 import type { CloudProjectOperation, InspectorView, LaunchSourceView } from '@gitspace/protocol';
-import { RuntimeIdentitySchema, type RuntimeAnswerInput, type RuntimeApprovalAnswer, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeAnswerInput, type RuntimeApprovalAnswer, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
@@ -30,7 +30,7 @@ import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
 import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useLiveChanges } from './live-notices.js';
-import { useEventRefresh } from './SynchronizationProvider.js';
+import { useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
 import { RepositoryAccessCard, RepositoryBridgeBanner, rememberGitHubInstall } from './GitHubAccess.js';
 import { operationActive, OperationStatusLine } from './OperationProgress.js';
 
@@ -96,13 +96,17 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
   const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
   // A project whose private repository the GitHub App does not reach syncs through the machine attached to its base
-  // workspace under a banner; with no such machine it shows the ways in instead of a transcript.
+  // workspace under a banner; with no such machine, or while its repository waits for a machine to copy it in (the
+  // cloud's import was refused), it shows the ways in instead of a transcript.
   const projectView = inspection.workspace.kind === 'base' && inspection.project.repositoryReference !== null;
   const accessQuery = useResultQuery(rpcClient.github.projectAccess, { projectId: props.projectId }, { enabled: projectView });
   const accessValue = useRetainedQueryValue(accessQuery, props.projectId);
   useEventRefresh(useLiveChanges(accountLiveKey('github')), () => accessQuery.refetch(), projectView);
+  // A refused import (a project operation) leaves the repository waiting for a copy.
+  useEventRefresh(useProjectChanges(props.projectId), () => accessQuery.refetch(), projectView);
   const blocked = projectView && accessValue && accessValue.state !== 'ready' ? accessValue : null;
-  const walled = blocked && blocked.bridge === null ? blocked : null;
+  const bridged = blocked && blocked.state !== 'awaits-copy' && !blocked.awaitsCopy && blocked.bridge ? { access: blocked, bridge: blocked.bridge } : null;
+  const walled = blocked && !bridged ? blocked : null;
   // The agent's start, which imports the repository, was refused while there was no way in: it starts again once there is.
   const wasWalled = useRef(false);
   useEffect(() => {
@@ -116,6 +120,15 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     if (result.status === 'error') throw result.error;
     rememberGitHubInstall(props.projectId);
     return result.value.url;
+  };
+  // The chosen machine copies the base branch in, then is attached to the base workspace to keep it in sync.
+  const copyThroughMachine = async (machineId: string) => {
+    const copied = await rpcClient.project.seed({ projectId: props.projectId, machineId });
+    if (copied.status === 'error') throw copied.error;
+    const base = RuntimeIdentitySchema.parse({ projectId: props.projectId, workspaceId: props.projectId });
+    const attached = await rpcClient.runtime.attachment.cache.request({ ...base, machineId: RuntimeMachineIdSchema.parse(machineId) });
+    if (attached.status === 'error') throw attached.error;
+    await accessQuery.refetch();
   };
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalChoice, setTerminalChoice] = useState<{ spaceId: string; machineId: string } | null>(null);
@@ -274,10 +287,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       }), onBackToDefault: () => perform(launch.backToDefault) } : null}
       launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onBackToDefault={() => perform(launch.backToDefault)} onDismiss={launch.dismiss} /> : undefined}
       access={walled ? {
-        card: onAttachMachine => <RepositoryAccessCard access={walled} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} onAttachMachine={onAttachMachine} />,
-        notice: `The project agent starts once GitSpace can read ${walled.repository}.`,
+        card: onAttachMachine => <RepositoryAccessCard access={walled} copy={{ machines: inspection.machines.filter(machine => machine.state === 'online'), onCopy: copyThroughMachine }} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} onAttachMachine={onAttachMachine} />,
+        notice: `The project agent starts once GitSpace can read ${walled.state === 'awaits-copy' ? walled.origin : walled.repository}.`,
       } : undefined}
-      accessBanner={blocked?.bridge ? <RepositoryBridgeBanner access={blocked} bridge={blocked.bridge} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} /> : undefined}
+      accessBanner={bridged ? <RepositoryBridgeBanner access={bridged.access} bridge={bridged.bridge} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
       sessionCommand={sessionCommand}

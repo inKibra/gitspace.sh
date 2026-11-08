@@ -25,3 +25,4 @@ export * from './tool-results.js';
 export * from './apply-patch.js';
 export * from './subagent-policy.js';
 export * from './workspace-status.js';
+export * from './workspace-board.js';

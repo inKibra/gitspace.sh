@@ -6,9 +6,10 @@ import type { GitHubState } from '@gitspace/protocol/github';
 import { GitHubSettings } from './SettingsPage.js';
 
 const unused = async (): Promise<never> => { throw new Error('Not used by this scenario'); };
-const noApp: GitHubState = { app: null, installations: [], requests: [], unconfirmed: [], removed: [], uninstalled: [], deliveries: [] };
+const noApp: GitHubState = { app: null, person: { login: null, source: null }, installations: [], requests: [], unconfirmed: [], removed: [], uninstalled: [], deliveries: [] };
 const installed: GitHubState = {
   app: { id: 7, slug: 'gitspace-brad', name: 'GitSpace brad', htmlUrl: 'https://github.com/apps/gitspace-brad', owner: { kind: 'user', login: 'brad' }, createdAt: '2026-10-17T10:00:00.000Z', keyUpdatedAt: '2026-10-17T10:00:00.000Z' },
+  person: { login: null, source: null },
   installations: [{
     id: 42,
     account: { kind: 'organization', login: 'inKibra' },
@@ -151,4 +152,18 @@ it('reports a private key GitHub rejects and confirms one it accepts', async () 
   await click('Replace key');
   expect(rotate).toHaveBeenCalledTimes(2);
   expect(document.body.querySelector('[role="status"]')?.textContent).toContain('Private key replaced');
+});
+
+it('fills in the person\'s GitHub login, says when it came from the App\'s owner, and saves what they type, trimmed', async () => {
+  const action = vi.fn(async () => undefined);
+  await render({ github: { ...noApp, person: { login: 'dana', source: 'app-owner' } }, onGitHubAction: action });
+  const field = document.body.querySelector<HTMLInputElement>('[aria-label="Your GitHub login"] input')!;
+  expect(field.value).toBe('dana');
+  expect(document.body.textContent).toContain('automations never deliver what this login posts. This one is from your GitHub App\'s owner.');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, '  sam-ops  ');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await click('Save');
+  expect(action).toHaveBeenCalledExactlyOnceWith({ kind: 'set-login', login: 'sam-ops' });
 });

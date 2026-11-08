@@ -48,6 +48,7 @@ const TILES: Readonly<Record<string, IconComponent>> = { inKibra: monogram('I'),
  * whose organization is unknown. */
 const TODAY: GitHubState = {
   app: { id: 1, slug: 'gitspace-bradleat', name: APP, htmlUrl: 'https://github.com/apps/gitspace-bradleat', owner: { login: 'bradleat', kind: 'user' }, createdAt: '2026-10-17T08:25:25.000Z', keyUpdatedAt: '2026-10-17T08:25:25.000Z' },
+  person: { login: null, source: null },
   installations: [{ id: 11, account: { login: 'inKibra', kind: 'organization' }, repositorySelection: 'selected', repositories: ['inKibra/core', 'inKibra/gitspace.sh'], permissions: { checks: 'write', contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write', statuses: 'write', workflows: 'write' }, installedAt: '2026-10-17T08:30:00.000Z', projects: [{ id: 'gitspace', name: 'GitSpace', repository: 'inKibra/gitspace.sh' }, { id: 'core', name: 'inkibra core', repository: 'inKibra/core' }] }],
   requests: [{ id: 'migrated', organization: null, project: null, repository: null, firstRequestedAt: '2026-10-31T01:16:03.000Z', lastRequestedAt: '2026-10-31T10:22:46.000Z', times: 2 }],
   unconfirmed: [],

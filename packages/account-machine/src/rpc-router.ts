@@ -1,5 +1,5 @@
 import {
-  gitspaceContract, deploymentLaunchContract, createWorkspaceTerminalContract,
+  gitspaceContract, deploymentLaunchContract, projectSeedContract, createWorkspaceTerminalContract,
   listWorkspaceTerminalsContract, readWorkspaceTerminalContract, sendWorkspaceTerminalContract,
   stopWorkspaceTerminalContract, terminalEventsContract, terminalLiveContract,
   type GitSpaceRpcContext,
@@ -17,6 +17,8 @@ export type GitSpaceRpcRouterOptions = {
   terminals: WorkspaceHubTerminalCoordinator;
   environments?: WorkspaceEnvironmentManager;
   deployment?: Pick<DeploymentLauncher, 'launch'>;
+  /** Copies a project's base branch from its origin into the project's repository with this machine's git identity. */
+  projects?: { seed(projectId: string): Promise<{ baseBranch: string; commit: string }> };
   machineId: string;
   onInternalError?: (input: { incidentId: string; phase: string; cause: unknown; procedurePath?: string }) => void;
 };
@@ -36,6 +38,16 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     } catch (error) {
       if (error instanceof DeploymentLaunchError && error.code === 'WORKSPACE_NOT_FOUND' && input.source.kind === 'workspace') return err(errors.WorkspaceNotFound({ workspaceId: input.source.workspaceId }));
       return err(errors.OperationFailed({ operation: 'launch release', message: error instanceof Error ? error.message : 'Unable to launch release' }));
+    }
+  });
+  const projectSeed = server.implement(projectSeedContract).handler(async ({ input, errors }) => {
+    if (!options.projects) return err(errors.OperationFailed({ operation: 'copy project repository', message: 'This machine cannot copy project repositories' }));
+    // The account forwards a copy to the machine the person chose; no other machine reads the origin for it.
+    if (input.machineId !== options.machineId) return err(errors.OperationFailed({ operation: 'copy project repository', message: `Copy for machine ${input.machineId} reached machine ${options.machineId}` }));
+    try {
+      return ok(await options.projects.seed(input.projectId));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'copy project repository', message: error instanceof Error ? error.message : 'Unable to copy the project repository' }));
     }
   });
   /** The account forwards a terminal call to the machine it names; no other machine answers for it. */
@@ -120,6 +132,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   return server.router({
     deployment: { launch: deploymentLaunch },
+    project: { seed: projectSeed },
     terminals: { events: terminalEvents, live: terminalLive, list: listTerminals, create: createTerminal, read: readTerminal, send: sendTerminal, stop: stopTerminal },
   });
 }

@@ -87,11 +87,12 @@ export function artifactsWorkspaceRepository(workspaceId: string): string {
 
 export type ProjectImportRequiresMachineReason = 'private' | 'too-large' | 'pending';
 const PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES: Record<ProjectImportRequiresMachineReason, string> = {
-  private: "This repository is private. GitSpace reads a private GitHub repository only through your GitHub App: install it on the repository's owner from this project's page.",
-  'too-large': "This repository is larger than Cloudflare Artifacts' 40 MB import limit. Create a workspace in this project with a machine connected; the machine does the initial import.",
-  pending: "The initial import from a machine hasn't finished yet. Keep that machine online and try again shortly.",
+  private: "This repository is private and your GitHub App doesn't cover it. On this project's page, install the GitSpace App on the repository's owner, or copy it in through one of your machines that can read it.",
+  'too-large': "This repository is larger than Cloudflare Artifacts' 40 MB import limit. On this project's page, copy it in through one of your machines that can read it.",
+  pending: "This repository hasn't been copied into GitSpace yet. On this project's page, copy it in through one of your machines that can read it, or install the GitSpace App on the repository's owner.",
 };
-/** Artifacts cannot import this origin itself: a connected machine seeds the project repository. */
+/** Artifacts cannot import this origin itself: one of the account's machines copies the base branch into the project
+ * repository. A refused import leaves that repository empty as the machine's target (`ensureMachineSeedTarget`). */
 export class ProjectImportRequiresMachineError extends TaggedError('ProjectImportRequiresMachineError')<{ reason: ProjectImportRequiresMachineReason; message: string }> {
   constructor(reason: ProjectImportRequiresMachineReason) {
     super({ reason, message: PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES[reason] });
@@ -276,6 +277,13 @@ export class ArtifactsCodeStore {
     return await this.importState(projectId, branch) === 'complete';
   }
 
+  /** Whether the project repository is a machine's copy target its base branch has not reached yet: the cloud's import
+   * was refused, and one of the account's machines copies the base branch in. */
+  async awaitsMachineSeed(projectId: string, branch: string): Promise<boolean> {
+    const existing = await this.find(artifactsProjectRepository(projectId));
+    return existing?.description?.startsWith(`GitSpace machine-seeded project ${projectId} `) === true && await this.importState(projectId, branch) === 'pending';
+  }
+
   /** The project repository with its origin's history. Artifacts' native import reads a public origin and cannot send
    * credentials, so a covered origin's repository is created empty and its base branch streamed in over authenticated
    * smart HTTP; an empty repository whose branch never landed (an interrupted import) is filled the same way. */
@@ -295,9 +303,11 @@ export class ArtifactsCodeStore {
       await this.importCoveredProject(projectId, source, credentials, false);
       return this.info(name);
     }
-    const created = await this.binding.import({ source: { ...source, depth: ARTIFACTS_COPY_DEPTH }, target: { name } }).catch((error: unknown) => {
+    const created = await this.binding.import({ source: { ...source, depth: ARTIFACTS_COPY_DEPTH }, target: { name } }).catch(async (error: unknown) => {
       const refusal = ArtifactsImportRefusalSchema.safeParse(error);
-      throw refusal.success ? new ProjectImportRequiresMachineError(IMPORT_REFUSAL_REASONS[refusal.data.code]) : error;
+      if (!refusal.success) throw error;
+      await this.ensureMachineSeedTarget(projectId, source.branch ?? 'HEAD');
+      throw new ProjectImportRequiresMachineError(IMPORT_REFUSAL_REASONS[refusal.data.code]);
     });
     // Initial tokens are not persisted or exposed: callers mint explicitly scoped leases.
     const repo = await this.binding.get(name);
@@ -348,7 +358,7 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(repo); }
   }
 
-  /** The empty repository a connected machine seeds with the audited base branch graph.
+  /** The empty repository one of the account's machines copies the base branch into, left by a refused import.
    * Never imports or commits: importProject reports 'pending' until the branch exists. */
   async ensureMachineSeedTarget(projectId: string, branch: string) {
     const name = artifactsProjectRepository(projectId);

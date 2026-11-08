@@ -2,15 +2,18 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { automationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
 import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { verticalSliceFixture } from './App.js';
 import { Composer, type ComposerProps } from './Composer.js';
 import { currentDevice } from './device-session.js';
-import type { GitSpaceShellProps } from './GitSpaceShell.js';
+import type { GitSpaceShellProps, SessionControlsProps } from './GitSpaceShell.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
 
 vi.mock('./device-session.js', () => ({ currentDevice: vi.fn(), deviceRejected: vi.fn() }));
+const automations = vi.hoisted(() => ({ cancelRun: vi.fn() }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { automations } }));
 
 let root: Root;
 let container: HTMLDivElement;
@@ -213,4 +216,36 @@ it('turns a capture mention into a chip named from the workspace’s captures an
   await send();
   expect(onSend.mock.calls.map(([text]) => text)).toEqual([`capture://${captureId}\nMake a skill of it`]);
   expect(container.querySelector('[aria-label="Mentioned captures"]')).toBeNull();
+});
+
+const reviewEvents: AutomationMessageEvent[] = [
+  ...[12, 40, 7].map((line, index): AutomationMessageEvent => ({ kind: 'comment', event: 'pull_request_review_comment.created', author: 'dana', path: 'src/cart/total.ts', line, state: null, text: `Comment ${index + 1}`, url: null })),
+  { kind: 'review', event: 'pull_request_review.submitted', author: 'dana', path: null, line: null, state: 'changes_requested', text: '', url: null },
+];
+const waitingRun = automationMessage({ run: 'run-41', name: 'Review feedback', source: 'github', subject: 'PR #1434', instruction: 'Address the review.', events: reviewEvents });
+
+it('shows an automation run waiting in the queue as its run, apart from the person’s queued messages, and acts on its run', async () => {
+  automations.cancelRun.mockResolvedValue({ status: 'ok', value: {} });
+  const done = async (): Promise<void> => undefined;
+  const promote = vi.fn<SessionControlsProps['onPromoteQueuedMessage']>(done);
+  const remove = vi.fn<SessionControlsProps['onRemoveQueuedMessage']>(done);
+  const controls: SessionControlsProps = {
+    value: { ...control, queue: { steering: [], followUp: ['Also update the docs', waitingRun] } },
+    onCycleRole: done, onSetModel: done, onSetThinking: done, onSetFast: done, onSetGoal: done, onCompact: done, onClearQueue: done, onAnswerAsk: done, onStop: done, onNavigateTree: done,
+    onRemoveQueuedMessage: remove, onPromoteQueuedMessage: promote,
+  };
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} controls={controls} running pending={false} onSend={vi.fn()} />));
+
+  const run = container.querySelector('[aria-label="Automation Review feedback"]')!;
+  expect(run.textContent).toBe('Review feedback · PR #14343 comments, 1 review · delivered when this turn endsDeliver nowDismissOpen run');
+  expect([...container.querySelectorAll('[aria-label^="Queued message"]')].map((row) => row.getAttribute('aria-label'))).toEqual(['Queued message 1 of 1: Also update the docs']);
+  expect(container.textContent).not.toContain('Automation input');
+
+  const [deliver, dismiss] = [...run.querySelectorAll('button')];
+  await act(async () => deliver!.click());
+  expect(promote).toHaveBeenCalledExactlyOnceWith(1);
+  await act(async () => dismiss!.click());
+  expect(automations.cancelRun).toHaveBeenCalledExactlyOnceWith({ projectId: verticalSliceFixture.workspace.projectId, runId: 'run-41' });
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Remove queued message: Also update the docs"]')!.click());
+  expect(remove).toHaveBeenCalledExactlyOnceWith('followUp', 0);
 });

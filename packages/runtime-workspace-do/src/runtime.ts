@@ -28,12 +28,15 @@ import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat, type TranscriptImageUrl, type WithdrawnNotices } from './transcript.js';
 import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
 import { createRequestLoad, estimateMemory } from './memory-estimate.js';
+import { createStorageReads, type StorageReads } from './storage-reads.js';
+import { measureTables, openWakeRecord, type WakeRecord } from './wake-record.js';
+import { isolateRuntimes, openIsolateRuntime, type IsolateRuntime } from './isolate-runtimes.js';
 import { createStoredRetry } from './stored-retry.js';
 import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
 import { createToolResultStore, type WorkspaceToolResults } from './tool-results.js';
 import { createMessageDecisions, type SentDecisions } from './message-decisions.js';
 export type { SentDecisions } from './message-decisions.js';
-export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools' | 'contextRead'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** The decisions a person's prompt carried, once the prompt is placed in its conversation; called again (on the next submission change or wake) until it resolves, so it must accept the same message twice. */ recordMessageDecisions?(sent: SentDecisions): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl; /** What the host keeps in memory for this runtime, by holder name, for the memory estimate line. */ memoryHolders?(): Promise<Record<string, unknown>> };
+export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools' | 'contextRead'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** The decisions a person's prompt carried, once the prompt is placed in its conversation; called again (on the next submission change or wake) until it resolves, so it must accept the same message twice. */ recordMessageDecisions?(sent: SentDecisions): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl; /** What the host keeps in memory for this runtime, by holder name, for the memory estimate line. */ memoryHolders?(): Promise<Record<string, unknown>>; /** The release this code is, recorded at each open so the next one can tell a code update from a restart. */ version?: string };
 /** The main conversation's turn for an input submitted with a request id. */
 export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
 /** One message of a turn, its text cut short. */
@@ -121,6 +124,9 @@ export type WorkspaceRuntime = {
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
   /** An automation run's instruction to the main conversation, submitted once per request id; its turn reports through `turnChanged`. */
   automationSubmit(input: RuntimeAutomationInput): Promise<{ conversationId: string }>;
+  /** The run's batch grew while its instruction is queued behind the running turn: the instruction takes the new text,
+   * still one input. False once it was placed or withdrawn. */
+  automationUpdate(input: { requestId: string; text: string }): Promise<boolean>;
   /** A person's cancel: withdraws the instruction, or stops the workspace agent once it has started. */
   automationCancel(requestId: string): Promise<RuntimeRequestStatus>;
   transcript(conversationId?: string, format?: RuntimeTranscriptFormat, range?: RuntimeTranscriptRange): Promise<Response>;
@@ -187,17 +193,33 @@ async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harne
 const HEARTBEAT_MS = 30_000;
 /** The least time between two turn-end memory estimates of one object; a burst of turn ends runs one. */
 const MEMORY_ESTIMATE_INTERVAL_MS = 30_000;
+/** How long an open may spend measuring the database's tables; the tables left over are named only. */
+const TABLES_BUDGET_MS = 2_000;
 export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): Promise<WorkspaceRuntime> {
   const heartbeat = () => { options.schedule(Date.now() + HEARTBEAT_MS).catch(options.onReport); };
   const marks = createRunningMarks(options.storage.sql, heartbeat);
   if (marks.leftover.length) console.error(JSON.stringify({ event: 'runtime_reset_during', workspaceId: options.identity.workspaceId, running: marks.leftover }));
+  const wake = openWakeRecord(options.storage.sql, options.version ?? null, marks.leftover.map(mark => mark.step));
+  // Counted open from here until its session closes, so the lines of this open include it.
+  const resident = openIsolateRuntime(options.identity.workspaceId);
+  // Before the open, so an open that exhausts the object's memory still leaves the line.
+  if (wake.tablesDue()) {
+    try { console.info(JSON.stringify({ event: 'workspace_database_tables', workspaceId: options.identity.workspaceId, projectId: options.identity.projectId, databaseBytes: options.storage.sql.databaseSize, ...measureTables(options.storage.sql, TABLES_BUDGET_MS), ...isolateRuntimes() })); }
+    catch (error) { console.error(JSON.stringify({ event: 'workspace_database_tables_failed', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); }
+  }
   // Opening reads every conversation's newest entries, screenshots included: its mark names the stage it reached.
   const opening = marks.stage('runtime open', `opening storage; database ${megabytes(options.storage.sql.databaseSize)}`);
-  try { return await openWorkspaceRuntime(options, marks, heartbeat, opening); }
-  finally { opening.end(); }
+  try {
+    const runtime = await openWorkspaceRuntime(options, marks, heartbeat, opening, wake, createStorageReads(), resident);
+    void runtime.harness.closed.then(() => { resident.close(); });
+    return runtime;
+  } catch (error) {
+    resident.close();
+    throw error;
+  } finally { opening.end(); }
 }
-async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: RunningMarks, heartbeat: () => void, opening: RunningStep): Promise<WorkspaceRuntime> {
-  const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage));
+async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: RunningMarks, heartbeat: () => void, opening: RunningStep, wake: WakeRecord, reads: StorageReads, resident: IsolateRuntime): Promise<WorkspaceRuntime> {
+  const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage, reads));
   opening.update('opening the harness');
   const toolResults = createToolResultStore(options.storage.sql, options.identity.workspaceId, WORKSPACE_TOOL_RESULTS_MAX_BYTES);
   // pi keeps the context of each conversation with live work in memory, out of reach: its size is taken from the
@@ -531,21 +553,25 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     publicationPending = true;
     const next = line.catch(error => { publishing.failed(error); }).then(async () => {
       publicationPending = false;
-      await rebuild();
+      await reads.within('rebuild', rebuild);
       publishing.succeeded();
     });
     line = next;
     options.waitUntil(next);
   }
   /** When the last turn-end estimate ran: a turn ending within `MEMORY_ESTIMATE_INTERVAL_MS` of it logs only that it was
-   * skipped, and its requests count in the next estimate. */
+   * skipped, and its requests and storage reads count in the next estimate. */
   let turnEstimatedAt = Number.NEGATIVE_INFINITY;
   /** One line when the runtime opens and one each time a conversation's turn ends: what this object holds, by holder
-   * (memory-estimate.ts), and the model requests since the previous line. A failed estimate is only logged. */
+   * (memory-estimate.ts), and since the previous line the model requests and the rows and bytes storage returned
+   * (storage-reads.ts); the wake line's reads are the open's, and it says why the object opened (wake-record.ts). Every
+   * line names the runtimes open in this isolate and the sum of their latest estimates (isolate-runtimes.ts). A failed
+   * estimate is only logged. */
   async function logMemory(phase: 'wake' | 'turn-end', conversationId?: string) {
     const heading = { event: 'workspace_memory_estimate', workspaceId: options.identity.workspaceId, projectId: options.identity.projectId, phase, ...(conversationId === undefined ? {} : { conversationId }) };
     if (phase === 'turn-end') {
-      if (Date.now() - turnEstimatedAt < MEMORY_ESTIMATE_INTERVAL_MS) { console.info(JSON.stringify({ ...heading, skipped: 'busy' })); return; }
+      wake.turnEnded();
+      if (Date.now() - turnEstimatedAt < MEMORY_ESTIMATE_INTERVAL_MS) { console.info(JSON.stringify({ ...heading, skipped: 'busy', ...isolateRuntimes() })); return; }
       turnEstimatedAt = Date.now();
     }
     try {
@@ -560,11 +586,13 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       // The views come before the snapshot built from them, so the text they share counts as theirs.
       const estimate = estimateMemory({ conversationViews, taskViews, snapshot, watchDeltas: replica.retained(), withdrawnNotices: withdrawn.ids, agentDefinitions: definitionFiles, latestGenerations, ...host });
       const estimateMs = Math.round((performance.now() - started) * 100) / 100;
+      const totalBytes = contexts + estimate.totalBytes;
+      resident.estimated(totalBytes);
       console.info(JSON.stringify({
         ...heading,
-        holders: { conversationContexts: contexts, ...estimate.holders }, totalBytes: contexts + estimate.totalBytes,
-        conversations: conversationViews.size, tasks: taskViews.size, requests: requestLoad.take(),
-        databaseBytes: options.storage.sql.databaseSize, visited: estimate.visited, truncated: estimate.truncated, estimateMs,
+        holders: { conversationContexts: contexts, ...estimate.holders }, totalBytes,
+        conversations: conversationViews.size, tasks: taskViews.size, requests: requestLoad.take(), reads: reads.take(), ...(phase === 'wake' ? { reopen: wake.reopen } : {}),
+        databaseBytes: options.storage.sql.databaseSize, visited: estimate.visited, truncated: estimate.truncated, estimateMs, ...isolateRuntimes(),
       }));
     } catch (error) {
       console.error(JSON.stringify({ event: 'workspace_memory_estimate_failed', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) }));
@@ -615,7 +643,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   opening.update('flushing cloud retention');
   await flushCloudRetention();
   opening.update('rebuilding the snapshot');
-  await rebuild();
+  await reads.within('rebuild', rebuild);
   options.waitUntil(logMemory('wake'));
   async function conversation(id?: string) {
     if (id === undefined) return runtime.root;
@@ -649,8 +677,9 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     },
     automationSubmit: input => runtime.lifecycle.runWhileActive(String(runtime.root.id), () => automations.submit(input)),
     automationCancel: automations.cancel,
+    automationUpdate: automations.update,
     async transcript(conversationId, format, range) {
-      return transcriptResponse(storage, await conversation(conversationId), withdrawn, format, range);
+      return reads.within('transcript', async () => transcriptResponse(storage, await conversation(conversationId), withdrawn, format, range));
     },
     async qa(input, actor) {
       if (!actor.canApprove) throw new Error('QA management requires human capability');

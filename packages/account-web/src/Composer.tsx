@@ -1,7 +1,8 @@
 import type { SkillView } from '@gitspace/protocol';
+import { automationEventCount, parseAutomationMessage, type AutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import type { RuntimeMessageDecision, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
-import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
+import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, badgeColors, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { connectedTabText, TabChip } from './connected-tab.js';
@@ -9,9 +10,11 @@ import { CaptureChip } from './capture-chip.js';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { rpcClient } from './rpc-client.js';
+import { settle } from './automations/automation-formatters.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
 import { ModelCombobox, modelOptions } from './ModelCombobox.js';
-import { navigateProductUrl, setProductRoute } from './routes.js';
+import { automationsUrl, navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
@@ -86,6 +89,24 @@ function PlanSteps({ controls }: { controls: SessionControlsProps }) {
       />)}
     </ThinkingStepsContent>
   </ThinkingSteps>;
+}
+
+/** An automation run's message waiting in the conversation's inbox: GitHub's events, not the person's words, delivered
+ * as one message when the turn ends. Later events of its run join it while it waits. */
+function AutomationQueueRow({ message, dismissing, onDeliver, onDismiss, onOpen }: { message: AutomationMessage; dismissing: boolean; onDeliver(): void; onDismiss(): void; onOpen: (() => void) | null }) {
+  const shape = useShape();
+  return <li aria-label={`Automation ${message.name}`} className={`${shape.container} flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 bg-surface-3 py-1.5 pl-2.5 pr-1.5 shadow-surface-1`}>
+    <span aria-hidden className="flex size-6 shrink-0 items-center justify-center rounded-full" style={{ color: badgeColors.amber, background: `color-mix(in oklab, ${badgeColors.amber} 14%, transparent)` }}><Zap width={14} height={14} strokeWidth={1.75} /></span>
+    <span className="flex min-w-0 flex-[1_1_12rem] flex-col">
+      <span className="truncate text-caption font-medium text-foreground">{[message.name, message.subject].filter(Boolean).join(' · ')}</span>
+      <span className="text-caption text-muted-foreground">{automationEventCount(message.events)} · delivered when this turn ends</span>
+    </span>
+    <span className="ml-auto flex shrink-0 items-center gap-0.5">
+      <Button variant="ghost" size="compact" type="button" onClick={onDeliver}>Deliver now</Button>
+      <Button variant="ghost" size="compact" type="button" loading={dismissing} disabled={dismissing} onClick={onDismiss}>Dismiss</Button>
+      {onOpen ? <Button variant="ghost" size="compact" type="button" onClick={onOpen}>Open run</Button> : null}
+    </span>
+  </li>;
 }
 
 interface SlashCommand { name: string; hint: string; run(): void }
@@ -253,19 +274,27 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   };
 
   // The cloud session owns the queue. The input reports human intent;
-  // each edit/remove is reconciled against the canonical queue.
-  const queue = useMemo<QueuedMessage[]>(() => controls
-    ? [
-      ...controls.value.queue.steering.map((text, index) => ({ id: `steering:${index}`, text: withoutCaptureSummaries(text), files: [], kind: 'steering' as const })),
-      ...controls.value.queue.followUp.map((text, index) => ({ id: `followUp:${index}`, text: withoutCaptureSummaries(text), files: [], kind: 'followUp' as const })),
-    ]
-    : [], [controls]);
+  // each edit/remove is reconciled against the canonical queue. Follow-ups
+  // that are automation runs' messages show as their runs' rows instead.
+  const { queue, automationRuns } = useMemo(() => {
+    const followUps = (controls?.value.queue.followUp ?? []).map((text, index) => ({ text, index, automation: parseAutomationMessage(text) }));
+    return {
+      queue: [
+        ...(controls?.value.queue.steering ?? []).map((text, index): QueuedMessage => ({ id: `steering:${index}`, text: withoutCaptureSummaries(text), files: [], kind: 'steering' })),
+        ...followUps.flatMap(({ text, index, automation }): QueuedMessage[] => automation ? [] : [{ id: `followUp:${index}`, text: withoutCaptureSummaries(text), files: [], kind: 'followUp' }]),
+      ],
+      automationRuns: followUps.flatMap(({ index, automation }) => automation ? [{ index, message: automation }] : []),
+    };
+  }, [controls]);
   const onQueueChange = async (next: QueuedMessage[]): Promise<boolean | void> => {
     if (!controls) return false;
     setSubmitError(null);
     try {
       if (next.length === 0 && queue.length > 1) {
-        await controls.onClearQueue();
+        // Clearing the session's queue drops automation runs' messages too: those stay, and the person's messages
+        // are removed one by one, last first, so the indexes still to remove stay put.
+        if (!automationRuns.length) await controls.onClearQueue();
+        else for (const item of [...queue].reverse()) if (item.kind) await controls.onRemoveQueuedMessage(item.kind, Number(item.id.split(':')[1]));
         return;
       }
       const remaining = new Set(next.map((item) => item.id));
@@ -286,6 +315,14 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const steerQueued = (item: QueuedMessage): void => {
     if (!controls || item.kind !== 'followUp') return;
     runControl(controls.onPromoteQueuedMessage(Number(item.id.split(':')[1])));
+  };
+  const [dismissing, setDismissing] = useState<string | null>(null);
+  const dismissRun = (runId: string): void => {
+    setSubmitError(null);
+    setDismissing(runId);
+    void settle(rpcClient.automations.cancelRun({ projectId: workspace.projectId, runId }))
+      .catch((failure: unknown) => setSubmitError(rpcErrorMessage(failure, 'Dismiss automation run')))
+      .finally(() => setDismissing(null));
   };
 
   const availableSkills = skills.filter((skill) => {
@@ -347,6 +384,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       </li>;
     })}</ul> : null}
     {staging ? <StagedChips staging={staging} disabled={pending || uploading !== null || connecting} /> : null}
+    {controls && automationRuns.length ? <ul aria-label="Automation runs waiting" className="flex flex-col gap-1.5">{automationRuns.map(({ index, message: run }) => <AutomationQueueRow key={run.run ?? `followUp:${index}`} message={run} dismissing={run.run !== null && dismissing === run.run}
+      onDeliver={() => runControl(controls.onPromoteQueuedMessage(index))}
+      onDismiss={() => { if (run.run === null) runControl(controls.onRemoveQueuedMessage('followUp', index)); else dismissRun(run.run); }}
+      onOpen={run.run === null ? null : () => navigateProductUrl(automationsUrl(workspace.projectId, run.run))} />)}</ul> : null}
     <InputMessage
       data-slot="input-message"
       onBlurCapture={() => workspaceDraft?.onBlur()}

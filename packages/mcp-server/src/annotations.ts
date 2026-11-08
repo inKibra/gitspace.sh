@@ -503,6 +503,12 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
+  "automations.retryRun": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+  },
   "automations.runs": {
     "readOnlyHint": true,
     "openWorldHint": false
@@ -599,6 +605,7 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   },
   "project.setRepository": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   "project.updateBase": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  "project.seed": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   "project.remote.refresh": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   "project.remote.checkInterval": { readOnlyHint: true, openWorldHint: false },
   "project.remote.setCheckInterval": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },

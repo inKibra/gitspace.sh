@@ -69,7 +69,7 @@ export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof Ru
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
   if (name === 'service') return args.op === 'list' || args.op === 'logs';
   if (name === 'browser') return args.action === 'chromes';
-  if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'operations', 'status', 'progress', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
+  if (name.startsWith('space_') || name === 'environment') return ['get', 'current', 'list', 'board', 'operations', 'status', 'progress', 'describe', 'read', 'readCode', 'listScopes', 'listPromotions', 'runLog', 'log'].includes(String(args.method));
   return false;
 }
 export const RuntimeWorkspaceStatusArgumentsSchema = z.object({}).strict();

@@ -18,7 +18,7 @@ import { glyph } from './glyph.js';
 import { PageCanvas, PageHeader, StatusDot } from './GitSpaceShell.js';
 import { verticalSliceFixture } from './App.js';
 import { restoreAppearance } from './appearance.js';
-import { RepositoryAccessCard, type BlockedProjectAccess } from './GitHubAccess.js';
+import { RepositoryAccessCard, type BlockedProjectAccess, type MachineCopyProps } from './GitHubAccess.js';
 
 type State = 'needs-app' | 'requested' | 'not-selected' | 'importing' | 'today' | 'built';
 type View = 'project' | 'settings';
@@ -37,11 +37,23 @@ const STATES: readonly { id: State; label: string }[] = [
 const hoursAgo = (hours: number): string => new Date(Date.now() - hours * 3_600_000).toISOString();
 /** The built card for each state it shows, with this project's data. */
 const BUILT: readonly BlockedProjectAccess[] = [
-  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, bridge: null },
-  { state: 'requested', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, request: { id: 'request', organization: ORG, project: { id: 'portal', name: 'Harbor Portal' }, repository: `${ORG}/${REPO}`, firstRequestedAt: hoursAgo(17), lastRequestedAt: hoursAgo(8), times: 2 }, bridge: null },
-  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/brandbyx-site`, `${ORG}/field-notes`], permissions: {}, installedAt: hoursAgo(3), projects: [] }, bridge: null },
-  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: null, bridge: null },
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, bridge: null, awaitsCopy: true },
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, bridge: null, awaitsCopy: false },
+  { state: 'requested', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, request: { id: 'request', organization: ORG, project: { id: 'portal', name: 'Harbor Portal' }, repository: `${ORG}/${REPO}`, firstRequestedAt: hoursAgo(17), lastRequestedAt: hoursAgo(8), times: 2 }, bridge: null, awaitsCopy: true },
+  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/brandbyx-site`, `${ORG}/field-notes`], permissions: {}, installedAt: hoursAgo(3), projects: [] }, bridge: null, awaitsCopy: false },
+  { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: null, bridge: null, awaitsCopy: true },
+  { state: 'awaits-copy', origin: 'https://git.example.org/harbor/portal-assets.git' },
 ];
+/** Two online machines; a copy fails the way a machine without SSH access to the repository fails. */
+const MOCK_COPY: MachineCopyProps = {
+  machines: [{ id: 'studio', label: 'studio-mac' }, { id: 'build', label: 'build-box' }],
+  onCopy: async () => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 800);
+    await promise;
+    throw new Error('git ls-remote failed (exit 128): SSH authentication failed. Add the public key from Settings → Git to a GitHub account that can access this repository.');
+  },
+};
 
 const icon = (Icon: typeof Lock01, size = 16): ReactNode => <Icon width={size} height={size} strokeWidth={1.5} />;
 
@@ -153,7 +165,7 @@ function ProjectPage({ state }: { state: State }): ReactElement {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-4 px-6 pb-48 pt-10">
           {state === 'built'
-            ? BUILT.map((access, index) => <RepositoryAccessCard key={index} access={access} onInstall={async () => '#'} onOpenSettings={() => undefined} onAttachMachine={() => undefined} />)
+            ? BUILT.map((access, index) => <RepositoryAccessCard key={index} access={access} copy={MOCK_COPY} onInstall={async () => '#'} onOpenSettings={() => undefined} onAttachMachine={() => undefined} />)
             : state === 'today'
               ? <p role="alert" className="w-full whitespace-pre-wrap break-words text-caption text-destructive">Cloud session control: This is a private repository, so GitSpace Cloud can't import it. Create a workspace in this project with a machine connected; the machine does the initial import.</p>
               : <AccessCard state={state} />}

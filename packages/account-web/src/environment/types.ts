@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { BrowserSiteLevel, LifecycleRunPhase } from '@gitspace/protocol-environment';
+import type { BrowserSiteLevel, BrowserSiteView, LifecycleRunPhase } from '@gitspace/protocol-environment';
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import type { BrowserActivity } from '../RuntimeBrowserTab.js';
 import type { MachineStatus } from '../workspace-status.js';
@@ -54,8 +54,9 @@ export interface EnvironmentViewModel {
   /** The machine whose results the Setup section shows and whose runs it starts. */
   setupMachineId: string | null;
   steps: readonly EnvironmentStep[];
-  /** Committed browser sites; `level` is null until a site is approved. */
-  browserOrigins: readonly { hash: string; pattern: string; level: BrowserSiteLevel | null }[];
+  /** The workspace's browser sites: committed ones are approved or need approval; one only the working copy declares
+   * is uncommitted and cannot be approved until it is committed. */
+  browserSites: readonly BrowserSiteView[];
   /** The routes `.gitspace/services.json` opens to signed callers: approved like a script, never run. */
   signedCallers: readonly { id: string; label: string; approved: boolean }[];
   /** Conflicted paths in the cloud working copy. */

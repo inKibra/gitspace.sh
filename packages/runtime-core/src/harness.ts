@@ -20,6 +20,7 @@ import { ConversationLifecycleDoc, createConversationLifecycle, type Conversatio
 import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls';
 import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/inference';
 import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_REQUEST_IMAGES } from './inference/image-limits.js';
+import { boardAfterCompaction, boardForTurn, PROJECT_BOARD_INSTRUCTION } from './project-board.js';
 /** `role` is the profile role the model came from, when it came from one. */
 export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string };
 export type RuntimeHarnessOptions = {
@@ -84,6 +85,8 @@ const DROPPED_SUMMARY_NOTE = 'Older tool output and images were left out of the 
 /** UTF-8 bytes of JSON-encoded summary text a compaction entry may hold: half a Durable Object's 2 MB SQLite row, which
  * holds the entry's whole record. A larger write fails the commit, and pi then fails the whole session (SQLITE_TOOBIG). */
 const COMPACTION_SUMMARY_BYTES = 1024 * 1024;
+/** pi's result for a call a restart of this object cut off: in its execute phase (recovered after the restart) or abandoned with it. */
+const RESTART_INTERRUPTED = /^Tool \S+ was interrupted (?:by a restart )?and may have partially run$/u;
 /**
  * A message as a lean turn or a summary request carries it: a tool result as text cut to its start with its images
  * named, an assistant message with its tool-call arguments (a written file, say) cut to their start, others whole.
@@ -156,7 +159,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
-    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra].filter(Boolean).join('\n\n');
+    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra, !child && options.tools.projectBoard ? PROJECT_BOARD_INSTRUCTION : ''].filter(Boolean).join('\n\n');
   } }], hooks: [hook(GenerationTask, { async beforeRequest(input, runtime, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Generation hook requires an invocation abort signal');
@@ -181,20 +184,32 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const controls = await runtime.snapshot(SessionControlsDoc, runtime.conversationId, context);
     await options.bindInferenceConversation(String(runtime.conversationId), signal, ids.map(String), ids.flatMap(id => { const request = requests.get(String(id)); return request === undefined ? [] : [request]; }), { fastMode: controls?.fastMode ?? false });
     // Anthropic rejects an error tool result with no content; older entries recorded failures as empty or blank text.
-    const empty = (message: (typeof input.messages)[number]) => message.role === 'toolResult' && message.isError && !message.content.some(item => item.type !== 'text' || item.text.trim() !== '');
-    const repaired = input.messages.some(empty) ? input.messages.map(message => empty(message) ? { ...message, content: [{ type: 'text' as const, text: '(no output)' }] } : message) : undefined;
+    // pi words a call this object's restart cut off without the restart's likely cause, which the agent is to name.
+    const fix = (message: Message): Message => {
+      if (message.role !== 'toolResult') return message;
+      if (message.isError && !message.content.some(item => item.type !== 'text' || item.text.trim() !== '')) return { ...message, content: [{ type: 'text', text: '(no output)' }] };
+      const [only] = message.content;
+      if (message.content.length !== 1 || only?.type !== 'text' || !RESTART_INTERRUPTED.test(only.text)) return message;
+      return { ...message, content: [{ type: 'text', text: `Tool ${message.toolName} was interrupted because this ${String(options.identity.workspaceId) === String(options.identity.projectId) ? 'project' : 'workspace'}'s object restarted (often its memory limit; see Monitoring); it may have partially run.` }] };
+    };
+    const fixed = input.messages.map(fix);
+    const repaired = fixed.some((message, index) => message !== input.messages[index]) ? fixed : undefined;
     // Resets cut off earlier attempts of this request: the lean form sends older tool output cut down (the transcript keeps it).
     const lean = form === 'lean' ? (repaired ?? input.messages).map(cutForSummary) : undefined;
     const described = await options.describeImages?.(signal, lean ?? repaired ?? input.messages);
     const outgoing = described ?? lean ?? repaired ?? input.messages;
     // A subagent does one task and rarely needs old screenshots: it sends fewer images than a main conversation.
-    if ((await runtime.snapshot(AgentDefinitionContextDoc, runtime.conversationId, context))?.child) {
+    const child = (await runtime.snapshot(AgentDefinitionContextDoc, runtime.conversationId, context))?.child;
+    if (child) {
       const agent = await runtime.snapshot(AgentDoc, runtime.conversationId, context);
       const limits = imageLimits(agent?.model ? options.models.getModel(agent.model.provider, agent.model.modelId) : undefined);
       const request = { messages: [...outgoing] };
       const fitted = fitRequestImages(request, { ...limits, maxInlinePerRequest: Math.min(limits.maxInlinePerRequest, SUBAGENT_REQUEST_IMAGES), maxInlineBytes: Math.min(limits.maxInlineBytes, SUBAGENT_REQUEST_IMAGE_BYTES) });
       if (fitted !== request) return { messages: fitted.messages };
     }
+    // The project agent's turn starts with its workspace board, appended after everything earlier requests sent.
+    const board = !child && options.tools.projectBoard && live?.run ? await boardForTurn(harness, runtime.conversationId, String(live.run.taskId), input.messages, options.tools.projectBoard, context) : null;
+    if (board) return { messages: [...outgoing, board] };
     return described || lean || repaired ? { messages: outgoing } : undefined;
   }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
@@ -236,7 +251,10 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       }
       const text = response.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n');
       if (!text.trim()) throw new Error('Compaction returned no summary');
-      const summary = dropped ? `${DROPPED_SUMMARY_NOTE}\n\n${text}` : text;
+      const summarized = dropped ? `${DROPPED_SUMMARY_NOTE}\n\n${text}` : text;
+      // The project agent's summary ends with the full workspace board.
+      const projectBoard = options.tools.projectBoard;
+      const summary = projectBoard && !(await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child ? await boardAfterCompaction(harness, api.conversationId, summarized, projectBoard, context) : summarized;
       const bytes = utf8ByteLength(JSON.stringify(summary));
       if (bytes > COMPACTION_SUMMARY_BYTES) throw new Error(`The compaction summary was ${(bytes / 1024 / 1024).toFixed(1)} MB, more than the ${COMPACTION_SUMMARY_BYTES / 1024 / 1024} MB a conversation entry holds, so GitSpace did not keep it. Send a message to try again.`);
       return { summary };

@@ -13,6 +13,7 @@ import {
   AutomationSubjectSchema,
   AutomationTriggerSchema,
   automationConditionKinds,
+  automationEventCount,
   automationFields,
   automationSubjectKey,
   automationSubjectName,
@@ -27,6 +28,7 @@ import {
   type AutomationException,
   type AutomationLinkSource,
   type AutomationLinkView,
+  type AutomationMessageEvent,
   type AutomationMode,
   type AutomationProjectSummary,
   type AutomationRecordedEvent,
@@ -47,7 +49,7 @@ import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { cloudResourceId, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { profileModelRoles } from '@gitspace/runtime-core/inference';
 import { z } from 'zod';
-import { AutomationEventSchema, automationEventName, describeAutomationEvent, globMatches, triggerMatches, watchedEvent, type AutomationEvent } from './automation-events.js';
+import { AutomationEventSchema, automationEventName, automationMessageEvent, describeAutomationEvent, foldsIntoComments, globMatches, triggerMatches, watchedEvent, type AutomationEvent } from './automation-events.js';
 import { completedOperation, createCloudWorkspace, restoreCloudWorkspace, retryCloudWorkspaceCreation } from './cloud-workspace-lifecycle.js';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
@@ -60,6 +62,13 @@ const INDEXED_RUNS = 20;
 /** A run whose message cannot reach its workspace (or whose workspace cannot be started) is tried again after each of
  * these delays, then fails. */
 const SUBMIT_RETRY_MS: readonly number[] = [30_000, 2 * 60_000, 10 * 60_000];
+/** GitHub events for the same automation and pull request or issue collect into one run: it is delivered once no
+ * further event arrived for `BATCH_QUIET_MS`, at most `BATCH_MAX_MS` after its first. */
+const BATCH_QUIET_MS = 90_000;
+const BATCH_MAX_MS = 10 * 60_000;
+/** Workspace agents post on GitHub as the person (they run `gh` signed in as them), so what the person's own login
+ * authored is never delivered to a workspace: it may be an agent's own post. */
+const OWN_ACCOUNT_SKIP = 'Skipped: posted from your account while agents post as you';
 const MAX_NAME = 120;
 const MAX_INSTRUCTION = 16_000;
 /** Recorded deliveries a test without a chosen one reads, and the matching ones it shows. */
@@ -106,6 +115,8 @@ export const AutomationRunRecordSchema = z.object({
   scheduledFor: z.number(),
   startedAt: z.number().nullable(),
   finishedAt: z.number().nullable(),
+  /** Runs indexed before batches list no events. */
+  events: z.array(z.object({ at: z.number(), event: z.string(), label: z.string(), url: z.string().nullable(), folded: z.boolean() })).default([]),
 });
 export type AutomationRunRecord = z.infer<typeof AutomationRunRecordSchema>;
 
@@ -116,6 +127,7 @@ export function automationRunView(record: AutomationRunRecord): AutomationRunVie
     scheduledFor: new Date(record.scheduledFor),
     startedAt: record.startedAt === null ? null : new Date(record.startedAt),
     finishedAt: record.finishedAt === null ? null : new Date(record.finishedAt),
+    events: record.events.map(entry => ({ ...entry, at: new Date(entry.at) })),
   };
 }
 
@@ -290,7 +302,7 @@ function defaultAutomations(bot: string): Array<{ key: string; draft: Automation
       name: 'Review feedback to its workspace', enabled: true,
       trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] },
       conditions: [{ kind: 'linked', linked: true }, { kind: 'author', mode: 'noneOf', values: ['*[bot]'] }],
-      action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'A person reviewed this workspace\'s pull request or commented on it. Read the feedback and address it.' },
+      action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'New review feedback on this workspace\'s pull request: the reviews and comments below. Read each one and address it.' },
     } },
     { key: 'failed-checks', draft: {
       name: 'Failed checks to its workspace', enabled: true,
@@ -374,6 +386,13 @@ interface RunRow extends Record<string, SqlStorageValue> {
   phase: AutomationMode | null;
   /** `phase` when the workspace's phase ruled the run out; null otherwise, and on runs recorded before it. */
   skip_reason: 'phase' | null;
+  /** A GitHub event's run for an automation, subject and target: later events for the same key join it while it waits
+   * to be delivered, or while its message waits behind the workspace's running turn. Null for every other run. */
+  batch_key: string | null;
+  /** The run's GitHub events (`AutomationEventSchema`), oldest first; null for a schedule or manual run. */
+  events_json: string | null;
+  /** When a waiting batch is delivered: 90 s after its latest event, at most 10 minutes after its first. */
+  deliver_at: number | null;
 }
 
 interface LinkRow extends Record<string, SqlStorageValue> {
@@ -444,6 +463,8 @@ interface EventContext {
   changedFiles(): Promise<string[]>;
   /** Linked workspaces this delivery was already sent to, with the automation that sent it. */
   sentTo: Map<string, string>;
+  /** The person's own GitHub login, or null when GitSpace does not know it. */
+  ownLogin(): Promise<string | null>;
 }
 
 /** Remembers one call's promise: the first call runs it. */
@@ -512,10 +533,14 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           attempts INTEGER NOT NULL DEFAULT 0,
           retry_at INTEGER,
           phase TEXT,
-          skip_reason TEXT
+          skip_reason TEXT,
+          batch_key TEXT,
+          events_json TEXT,
+          deliver_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS automation_runs_automation ON automation_runs(automation_id, created_at);
         CREATE INDEX IF NOT EXISTS automation_runs_state ON automation_runs(state, created_at);
+        CREATE INDEX IF NOT EXISTS automation_runs_batch ON automation_runs(batch_key);
         CREATE TABLE IF NOT EXISTS automation_links(
           subject_key TEXT PRIMARY KEY,
           subject_json TEXT NOT NULL,
@@ -554,7 +579,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 
   /** Objects written before GitHub events: their automations kept a schedule and a message target in columns, and their
-   * runs table refused event triggers. Objects written before phases lack the automations' phases and the runs' phase. */
+   * runs table refused event triggers. Objects written before phases lack the automations' phases and the runs' phase;
+   * those written before batches lack the runs' batch key, events and delivery time. */
   private migrate(): void {
     const sql = this.ctx.storage.sql;
     const columns = (table: string) => sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(column => column.name);
@@ -600,6 +626,9 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const recorded = columns('automation_runs');
     if (recorded.length > 0 && !recorded.includes('phase')) sql.exec('ALTER TABLE automation_runs ADD COLUMN phase TEXT');
     if (recorded.length > 0 && !recorded.includes('skip_reason')) sql.exec('ALTER TABLE automation_runs ADD COLUMN skip_reason TEXT');
+    for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER']]) {
+      if (recorded.length > 0 && !recorded.includes(column)) sql.exec(`ALTER TABLE automation_runs ADD COLUMN ${column} ${type}`);
+    }
   }
 
   /** The project's automations, the limits and trust list they run under, its subject links, and the model roles a
@@ -612,6 +641,12 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       links: this.rows<LinkRow>('SELECT * FROM automation_links ORDER BY COALESCE(activity_at, linked_at) DESC, subject_key').map(linkView),
       modelRoles: await this.modelRoles(projectId),
     };
+  }
+
+  /** Each pull request linked to a workspace, the newest link first: the project agent's workspace board shows them. */
+  pullRequestLinks(projectIdInput: string): Array<{ workspaceId: string; number: number }> {
+    this.ensureProject(projectIdInput);
+    return this.rows<LinkRow>("SELECT * FROM automation_links WHERE subject_key LIKE 'pr:%' ORDER BY linked_at DESC, subject_key").map(row => ({ workspaceId: row.workspace_id, number: Number(row.subject_key.slice('pr:'.length)) }));
   }
 
   /** A person's automation: it takes effect at once. */
@@ -746,8 +781,19 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   /** A GitHub delivery: for this project's repository, or a release, tag or deployment of any repository (a watch may
    * name any). Links by branch first, then every switched-on automation whose trigger starts on it records a run, skipped
    * ones included; a watch records each release, tag or deployment it has seen, so one a check also finds runs once.
-   * Returns the number of runs recorded. */
+   * An event that reaches a workspace or the project agent joins its automation's batch for the subject when one is
+   * open (`addToBatch`). Deliveries are taken one at a time, so two events never open two batches for one key. Returns
+   * the number of automations the event matched. */
   async receive(input: { projectId: string; event: AutomationEvent; bot: string | null }): Promise<number> {
+    const received = this.receiving.then(() => this.receiveOne(input));
+    this.receiving = received.catch(() => undefined);
+    return received;
+  }
+
+  /** The delivery `receive` takes now; the next waits for it. */
+  private receiving: Promise<unknown> = Promise.resolve();
+
+  private async receiveOne(input: { projectId: string; event: AutomationEvent; bot: string | null }): Promise<number> {
     const projectId = this.ensureProject(input.projectId);
     const event = AutomationEventSchema.parse(input.event);
     const own = (await this.repository(projectId))?.toLowerCase() === event.repository.toLowerCase();
@@ -767,11 +813,46 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     for (const automation of matching) {
       const plan = await this.evaluate(projectId, automation, context)
         .catch((error: unknown) => failedPlan(`Failed: ${errorMessage(error)}`));
-      const runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, { trigger: 'event', event, replayedBy: null }, plan, Date.now()));
-      if (plan.sendsTo !== null && this.requiredRun(runId).state === 'queued') context.sentTo.set(plan.sendsTo, automation.name);
+      const subject = event.subjects[0];
+      const batch = plan.ended === null && automation.trigger.kind === 'github' && plan.kind !== 'start' && plan.workspaceId !== null && subject
+        ? `${automation.id} ${automationSubjectKey(subject)} ${plan.workspaceId}` : null;
+      const joined = batch === null ? null : await this.addToBatch(projectId, automation, batch, event);
+      const runId = joined ?? this.ctx.storage.transactionSync(() => this.recordRun(automation, { trigger: 'event', event, replayedBy: null }, plan, Date.now(), { batch }));
+      const state = this.requiredRun(runId).state;
+      if (plan.sendsTo !== null && (state === 'queued' || state === 'running')) context.sentTo.set(plan.sendsTo, automation.name);
     }
     await this.changed(projectId);
     return matching.length;
+  }
+
+  /**
+   * Adds `event` to its automation's open batch for the subject and target, returning the batch's run; null when none
+   * is open, so the event opens one. A batch is open while it waits to be delivered (each event moves its delivery to
+   * 90 s later, at most 10 minutes after its first), and while its message waits behind the workspace's running turn:
+   * then the waiting message takes the new text, still one input, delivered when the turn ends. A message the
+   * workspace has placed (or cannot update) no longer changes.
+   */
+  private async addToBatch(projectId: string, automation: Automation, batch: string, event: AutomationEvent): Promise<string | null> {
+    const open = this.rows<RunRow>("SELECT * FROM automation_runs WHERE batch_key=? AND (state='queued' OR (state='running' AND submitted=1 AND started_at IS NULL)) ORDER BY created_at DESC, rowid DESC LIMIT 1", batch)[0];
+    if (!open || open.workspace_id === null) return null;
+    const events = [...runEvents(open), event];
+    const message = eventMessage(open.id, automation, events);
+    if (open.state === 'running') {
+      const updated = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${open.workspace_id}`)
+        .runtimeAutomationUpdate({ projectId, workspaceId: open.workspace_id, requestId: `${AUTOMATION_REQUEST_PREFIX}${open.id}`, text: message })
+        .catch((error: unknown) => {
+          console.warn(JSON.stringify({ event: 'automation_batch_update_failed', projectId, runId: open.id, message: errorMessage(error) }));
+          return false;
+        });
+      if (!updated) return null;
+    }
+    const now = Date.now();
+    const current = this.requiredRun(open.id);
+    const deliverAt = current.state === 'queued' ? Math.min(now + BATCH_QUIET_MS, current.created_at + BATCH_MAX_MS) : current.deliver_at;
+    const waits = current.state === 'queued' ? 'it is delivered 90 s after the latest event' : 'its message waits for the running turn to end';
+    this.ctx.storage.sql.exec('UPDATE automation_runs SET events_json=?, message=?, deliver_at=?, timeline_json=? WHERE id=?', JSON.stringify(events), message, deliverAt,
+      timelineWith(current, now, `${describeAutomationEvent(event)} joined the batch (${automationEventCount(messageEvents(events))}); ${waits}`), current.id);
+    return current.id;
   }
 
   /** The four default automations, added once per project (a person may delete or change them afterwards). */
@@ -810,6 +891,26 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       }
       await this.changed(projectId);
       return this.runView(projectId, this.requiredRun(run.id));
+    });
+  }
+
+  /** Run again: a GitHub event run that ended is recorded again with all its events and delivered at once, as one
+   * message; trust, conditions and the target are checked again on its first event. */
+  async retryRun(input: { projectId: string; runId: string; requestedBy: string }): Promise<AutomationOutcome<AutomationRunView>> {
+    return settled(async () => {
+      const projectId = this.ensureProject(input.projectId);
+      const run = this.requiredRun(input.runId);
+      if (run.state === 'queued' || run.state === 'running') refuse('runId', 'This run has not ended: cancel it, or wait for it to end');
+      const events = runEvents(run);
+      const first = events[0];
+      if (!first) refuse('runId', 'Only a run on GitHub events runs again; start a schedule or manual automation with Run now');
+      const row = this.requiredAutomation(run.automation_id);
+      if (row.proposal_json !== null) refuse('proposal', 'Approve this automation before it runs');
+      const automation = this.automation(row);
+      const plan = await this.evaluate(projectId, automation, this.eventContext(projectId, first, await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).botHandle()));
+      const runId = this.ctx.storage.transactionSync(() => this.recordRun(automation, { trigger: 'event', event: first, replayedBy: input.requestedBy }, plan, Date.now(), { events }));
+      await this.changed(projectId);
+      return this.runView(projectId, this.requiredRun(runId));
     });
   }
 
@@ -966,13 +1067,14 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND created_at <= ?", now - AUTOMATION_MAX_QUEUE_MS)) {
         this.finish(run, 'skipped', 'Skipped: waited more than a day for a slot', now);
       }
-      // A notice wakes no agent, so it takes no slot.
-      for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND kind='notice'")) {
+      // A notice wakes no agent, so it takes no slot. A batch waits for its delivery time.
+      for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND kind='notice' AND (deliver_at IS NULL OR deliver_at <= ?)", now)) {
         this.ctx.storage.sql.exec("UPDATE automation_runs SET state='running' WHERE id=?", run.id);
       }
       const free = this.settings().concurrency - this.working();
-      for (const run of free > 0 ? this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' ORDER BY created_at, rowid LIMIT ?", free) : []) {
-        this.ctx.storage.sql.exec("UPDATE automation_runs SET state='running', timeline_json=? WHERE id=?", timelineWith(run, now, run.kind === 'start' ? `Starting workspace ${run.target_name}` : `Sent to ${run.target_name}`), run.id);
+      for (const run of free > 0 ? this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND (deliver_at IS NULL OR deliver_at <= ?) ORDER BY created_at, rowid LIMIT ?", now, free) : []) {
+        const sent = run.batch_key === null ? `Sent to ${run.target_name}` : `Sent to ${run.target_name} as one message: ${automationEventCount(messageEvents(runEvents(run)))}`;
+        this.ctx.storage.sql.exec("UPDATE automation_runs SET state='running', timeline_json=? WHERE id=?", timelineWith(run, now, run.kind === 'start' ? `Starting workspace ${run.target_name}` : sent), run.id);
       }
     });
     await this.submit(projectId);
@@ -1064,6 +1166,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       event,
       bot,
       sentTo: new Map(),
+      ownLogin: once(async () => (await github.person()).login),
       trust: once(async () => {
         const actor = event.actor;
         // Choosing to watch a repository trusts what its maintainers publish (docs/AUTOMATIONS-DESIGN.md §4a).
@@ -1156,11 +1259,16 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return this.reach(projectId, automation, await this.eventPlan(projectId, automation, context));
   }
 
-  /** What an automation does with an event: trust, then its conditions in order (the first that fails skips it), then
-   * its action's target. */
+  /** What an automation does with an event: one that would reach a workspace is skipped when the person's own login
+   * acted (an agent may have posted it), then trust, then its conditions in order (the first that fails skips it), then
+   * its action's target. The run's message is written when it is recorded, from its events (`eventMessage`). */
   private async eventPlan(projectId: string, automation: Automation, context: EventContext): Promise<RunPlan> {
     const { event } = context;
     const pending = automation.conditions.map(condition => ({ label: conditionLabel(condition, context.bot), passed: null }));
+    if ((automation.action.kind === 'sendToLinked' || automation.action.kind === 'messageWorkspace') && event.actor !== null && (await context.ownLogin())?.toLowerCase() === event.actor.toLowerCase()) {
+      const label = `@${event.actor} is your GitHub account, and agents post as you`;
+      return { ...failedPlan(OWN_ACCOUNT_SKIP, 'skipped'), checks: [{ label, passed: false }, ...pending], timeline: [label] };
+    }
     const trust = await context.trust();
     if ('error' in trust) return { ...failedPlan(`Failed: ${trust.error}`), checks: [{ label: 'The author\'s access', passed: null }, ...pending] };
     if (!trust.trusted) return { ...failedPlan(`Skipped: author not trusted (@${event.actor ?? 'unknown'})`, 'skipped'), checks: [{ label: trust.label, passed: false }, ...pending], timeline: [trust.label] };
@@ -1176,9 +1284,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     if (automation.conditions.length > 0) timeline.push('Conditions passed');
     const subject = event.subjects[0];
     const summary = describeAutomationEvent(event);
-    const instruction = renderAutomationInstruction(automation.action.instruction, { ...event.fields, 'automation.name': automation.name });
-    const message = automationMessage({ name: automation.name, event: automationEventName(event), summary, instruction, fields: event.fields });
-    const plan = { checks, ended: null, message, start: null, timeline, sendsTo: null, phase: null };
+    const plan = { checks, ended: null, message: '', start: null, timeline, sendsTo: null, phase: null };
     const { action } = automation;
     switch (action.kind) {
       case 'messageProjectAgent': return { ...plan, kind: 'message', workspaceId: projectId, targetName: 'the project agent', would: 'Would message the project agent' };
@@ -1225,7 +1331,6 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           const how = action.wake ? 'wakes its agent' : 'a notice; the agent stays asleep';
           return {
             ...plan, kind: action.wake ? 'message' : 'notice', workspaceId: linked.workspaceId, targetName: linked.name, sendsTo: linked.workspaceId,
-            message: action.wake ? message : `${summary}\n\n${instruction}`,
             timeline: [...timeline, `Linked to ${linked.name} (${LINK_LABEL[linked.source]})`, `${summary}: ${how}`],
             would: action.wake ? `Would wake the agent of ${linked.name}` : `Would add a notice to ${linked.name}`,
           };
@@ -1309,28 +1414,35 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 
   /** Records a run: queued, or skipped (its plan skipped it, the automation's previous scheduled or manual run still
-   * works, or the daily cap is reached), or failed. */
-  private recordRun(automation: Automation, firing: Firing, plan: RunPlan, now: number): string {
+   * works, or the daily cap is reached), or failed. A GitHub event's run lists its events: the firing's, or `events`
+   * (a run started again on a batch). `batch` opens a batch: the run waits `BATCH_QUIET_MS` for more events. */
+  private recordRun(automation: Automation, firing: Firing, plan: RunPlan, now: number, options: { batch?: string | null; events?: readonly AutomationEvent[] } = {}): string {
     const id = crypto.randomUUID();
     const event = firing.trigger === 'event' ? firing.event : null;
+    const events = event === null ? [] : options.events ?? [event];
+    const batch = options.batch ?? null;
     const scheduledFor = firing.trigger === 'schedule' ? firing.scheduledFor : now;
     const first = firing.trigger === 'schedule' ? `Scheduled for ${utcLabel(scheduledFor)}`
       : firing.trigger === 'manual' ? `Started by ${firing.requestedBy}`
-        : firing.replayedBy === null ? 'Delivery received' : `Run it by ${firing.replayedBy} on a delivery received ${utcLabel(firing.event.receivedAt)}`;
+        : firing.replayedBy === null ? 'Delivery received' : `Run it by ${firing.replayedBy} on ${events.length > 1 ? `${events.length} events received from` : 'a delivery received'} ${utcLabel(firing.event.receivedAt)}`;
     const today = this.count("SELECT COUNT(*) AS count FROM automation_runs WHERE automation_id=? AND created_at >= ? AND state != 'skipped'", automation.id, utcDay(now));
     const skippedFor = plan.ended === null && firing.trigger !== 'event' && this.activeRun(automation.id) ? 'Skipped: its previous run is still working'
       : plan.ended === null && today >= this.settings().dailyRunCap ? 'Skipped: daily run cap' : null;
     const ended: RunPlan['ended'] = plan.ended ?? (skippedFor === null ? null : { state: 'skipped', outcome: skippedFor });
-    const labels = [first, ...plan.timeline, ended?.outcome ?? 'Queued'];
+    const subject = event?.subjects[0];
+    const waiting = batch !== null && subject ? `Waiting for more events on ${automationSubjectName(subject)}: delivered 90 s after the latest, at most 10 minutes after this one` : 'Queued';
+    const labels = [first, ...plan.timeline, ended?.outcome ?? waiting];
     const timeline: Timeline = labels.map(label => ({ at: now, label }));
     const trigger = event === null ? firing.trigger === 'schedule' ? 'schedule' : 'manual' : automation.trigger.kind === 'label' ? 'label' : 'github';
+    const message = event !== null && ended === null ? eventMessage(id, automation, events) : plan.message;
     this.ctx.storage.sql.exec(`
-      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, id, automation.id, automation.name, trigger, plan.kind, event === null ? null : automationEventName(event), event?.subjects[0] ? JSON.stringify(event.subjects[0]) : null,
+      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason, batch_key, events_json, deliver_at)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, id, automation.id, automation.name, trigger, plan.kind, event === null ? null : automationEventName(event), subject ? JSON.stringify(subject) : null,
     event === null ? null : JSON.stringify(event), JSON.stringify(plan.checks), plan.start === null ? null : JSON.stringify(plan.start), ended?.state ?? 'queued',
-    plan.ended === null || plan.phase !== null ? plan.workspaceId : null, plan.targetName, plan.message, ended?.outcome ?? null, JSON.stringify(timeline),
-    scheduledFor, now, ended === null ? null : now, plan.phase, ended?.skipReason ?? null);
+    plan.ended === null || plan.phase !== null ? plan.workspaceId : null, plan.targetName, message, ended?.outcome ?? null, JSON.stringify(timeline),
+    scheduledFor, now, ended === null ? null : now, plan.phase, ended?.skipReason ?? null,
+    ended === null ? batch : null, event === null ? null : JSON.stringify(events), ended === null && batch !== null ? now + BATCH_QUIET_MS : null);
     this.ctx.storage.sql.exec(`
       DELETE FROM automation_runs WHERE automation_id=? AND state IN ('finished', 'skipped', 'failed')
         AND id NOT IN (SELECT id FROM automation_runs WHERE automation_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?)
@@ -1501,21 +1613,23 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return AutomationEventSchema.parse(event);
   }
 
-  /** Sets the one alarm to the earliest deadline the work names, or now for a run that holds a slot and has not been
-   * submitted (a restart resumes it), a queued notice, or a queued run with a free slot. */
+  /** Sets the one alarm to the earliest deadline the work names (a waiting batch's delivery time among them), or now for
+   * a run that holds a slot and has not been submitted (a restart resumes it), a due queued notice, or a due queued run
+   * with a free slot. */
   private async reschedule(): Promise<void> {
     const now = Date.now();
     const immediate = this.count("SELECT COUNT(*) AS count FROM automation_runs WHERE state='running' AND submitted=0 AND retry_at IS NULL") > 0
-      || this.count("SELECT COUNT(*) AS count FROM automation_runs WHERE state='queued' AND kind='notice'") > 0
-      || (this.working() < this.settings().concurrency && this.count("SELECT COUNT(*) AS count FROM automation_runs WHERE state='queued'") > 0);
+      || this.count("SELECT COUNT(*) AS count FROM automation_runs WHERE state='queued' AND kind='notice' AND (deliver_at IS NULL OR deliver_at <= ?)", now) > 0
+      || (this.working() < this.settings().concurrency && this.count("SELECT COUNT(*) AS count FROM automation_runs WHERE state='queued' AND (deliver_at IS NULL OR deliver_at <= ?)", now) > 0);
     const due = immediate ? now : this.rows<{ at: number | null }>(`
       SELECT MIN(at) AS at FROM (
         SELECT MIN(next_run_at) AS at FROM automations
         UNION ALL SELECT MIN(next_check_at) FROM automation_watches
         UNION ALL SELECT MIN(retry_at) FROM automation_runs WHERE state='running' AND submitted=0
         UNION ALL SELECT MIN(created_at) + ? FROM automation_runs WHERE state='queued'
+        UNION ALL SELECT MIN(deliver_at) FROM automation_runs WHERE state='queued' AND deliver_at > ?
       )
-    `, AUTOMATION_MAX_QUEUE_MS)[0]?.at ?? null;
+    `, AUTOMATION_MAX_QUEUE_MS, now)[0]?.at ?? null;
     if (due === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(due);
   }
@@ -1735,6 +1849,7 @@ function linkView(row: LinkRow): AutomationLinkView {
 }
 
 function runRecord(projectId: string, row: RunRow): AutomationRunRecord {
+  const events = runEvents(row);
   return {
     id: row.id,
     projectId,
@@ -1753,7 +1868,30 @@ function runRecord(projectId: string, row: RunRow): AutomationRunRecord {
     scheduledFor: row.scheduled_for,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    events: events.map(event => ({ at: event.receivedAt, event: automationEventName(event), label: describeAutomationEvent(event), url: automationMessageEvent(event).url, folded: foldsIntoComments(event, events) })),
   };
+}
+
+/** A run's GitHub events, oldest first: its batch, or the one event of a run recorded before batches. */
+function runEvents(row: RunRow): AutomationEvent[] {
+  if (row.events_json !== null) return z.array(AutomationEventSchema).parse(JSON.parse(row.events_json));
+  return row.event_json === null ? [] : [AutomationEventSchema.parse(JSON.parse(row.event_json))];
+}
+
+/** The events a run's message lists: all but the empty reviews that only wrap comments among them. */
+function messageEvents(events: readonly AutomationEvent[]): AutomationMessageEvent[] {
+  return events.filter(event => !foldsIntoComments(event, events)).map(automationMessageEvent);
+}
+
+/** A GitHub event run's message: its automation's instruction filled in from the first event, and its events. */
+function eventMessage(runId: string, automation: Automation, events: readonly AutomationEvent[]): string {
+  const first = events[0];
+  const subject = first?.subjects[0];
+  return automationMessage({
+    run: runId, name: automation.name, source: 'github', subject: subject ? automationSubjectName(subject) : null,
+    instruction: renderAutomationInstruction(automation.action.instruction, { ...first?.fields, 'automation.name': automation.name }),
+    events: messageEvents(events),
+  });
 }
 
 /** What a schedule or manual draft would do: for a schedule its next three run times, for manual that it runs only

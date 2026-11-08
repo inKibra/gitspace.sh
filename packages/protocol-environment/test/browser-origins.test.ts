@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { BrowserOriginPatternSchema, EnvironmentBundleSchema, LifecycleMutationSchema, LifecycleStateSchema, approvedBrowserOrigins, approvedBrowserSites, browserOriginHash, browserOriginLevel, browserOriginMatches, emptyLifecycleState, executionHash, transitionLifecycle, type LifecycleMutation, type LifecycleState } from '../src/index.js';
+import { BrowserOriginPatternSchema, EnvironmentBundleSchema, LifecycleMutationSchema, LifecycleStateSchema, approvedBrowserOrigins, approvedBrowserSites, browserOriginHash, browserOriginLevel, browserOriginMatches, emptyLifecycleState, executionHash, projectEnvironmentState, transitionLifecycle, type LifecycleMutation, type LifecycleState } from '../src/index.js';
 
 const human = { actorId: 'owner-browser', machineId: 'browser', kind: 'browser' as const, lifecycleControl: true };
 const apply = (state: LifecycleState, input: LifecycleMutation, actor = human) => transitionLifecycle({ state, runs: [], actor, now: '2026-10-04T00:00:00.000Z' }, input).state;
@@ -16,6 +16,21 @@ describe('browser origin permissions', () => {
     expect(browserOriginMatches('example.com', 'EXAMPLE.COM')).toBe(true);
     expect(browserOriginMatches('example.com', 'api.example.com')).toBe(false);
     for (const host of ['https://example.com', 'example.com/path', 'example.com:443', 'example.com@evil.com', '']) expect(browserOriginMatches('*', host)).toBe(false);
+  });
+
+  it('reports the sites only the working copy declares as uncommitted and the committed ones as approvable or approved', async () => {
+    const docs = await browserOriginHash('docs.example');
+    const bank = await browserOriginHash('bank.example');
+    const state = emptyLifecycleState('project', 'workspace');
+    // The working copy's bundle adds staging.example and drops bank.example, neither committed yet.
+    state.bundleJson = JSON.stringify(EnvironmentBundleSchema.parse({ version: 1, profiles: { base: {} }, browser: { origins: ['docs.example', 'staging.example'] } }));
+    state.browserOrigins = [{ pattern: 'docs.example', hash: docs }, { pattern: 'bank.example', hash: bank }];
+    const approved = apply(state, { op: 'approval', scope: 'project', executionHash: bank, approved: true, level: 'read' });
+    expect(projectEnvironmentState(approved).browserSites).toEqual([
+      { pattern: 'docs.example', state: 'needs-approval', hash: docs },
+      { pattern: 'bank.example', state: 'approved', hash: bank, level: 'read' },
+      { pattern: 'staging.example', state: 'uncommitted' },
+    ]);
   });
 
   it('hashes each entry independently and separates origins from executable content', async () => {

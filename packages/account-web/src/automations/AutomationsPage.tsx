@@ -1,6 +1,6 @@
 import { Badge, Button, CardGroup, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DropdownContent, DropdownMenu, DropdownTrigger, MenuItem, ThinkingIndicator, useShape } from '@gitspace/ui';
 import { ChevronDown } from '@untitledui/icons';
-import { useRef, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { useResultQuery } from 'result-rpc/react';
 import { AUTOMATION_DEFAULT_SETTINGS, automationSubjectKey, type AutomationMode, type AutomationRunView, type AutomationSubjectRef, type AutomationView } from '@gitspace/protocol/automations-contract';
 import { BUILT_IN_MODEL_ROLES } from '@gitspace/protocol/inference';
@@ -40,7 +40,11 @@ export interface AutomationsPageProps {
   projects: readonly AutomationsProject[];
   /** The project chosen in the header; null shows every project. */
   projectId: string | null;
+  /** The run whose detail opens once it is among the runs read; null opens none. */
+  runId: string | null;
   onSelectProject(projectId: string | null): void;
+  /** The detail of the run `runId` names closed. */
+  onCloseRun(): void;
   /** `workspaceId` equal to `projectId` is the project agent. */
   onOpenWorkspace(projectId: string, workspaceId: string): void;
 }
@@ -65,7 +69,7 @@ function useClosingValue<T>(value: T | null): T | null {
   return value ?? last.current;
 }
 
-export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWorkspace }: AutomationsPageProps): ReactElement {
+export function AutomationsPage({ projects, projectId, runId, onSelectProject, onCloseRun, onOpenWorkspace }: AutomationsPageProps): ReactElement {
   const shape = useShape();
   const now = Date.now();
   const project = projectId === null ? undefined : projects.find(entry => entry.id === projectId);
@@ -91,6 +95,14 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
   const shownLink = useClosingValue(linking);
   const shownDelete = useClosingValue(deleting);
   const shownRun = useClosingValue(openRun);
+  const requestedRun = runId === null ? undefined : [...runsRead.value ?? [], ...overviewRead.value?.runs ?? []].find(run => run.id === runId);
+  useEffect(() => {
+    if (requestedRun) setOpenRun(requestedRun);
+  }, [requestedRun?.id]);
+  const closeRun = (): void => {
+    setOpenRun(null);
+    if (runId !== null) onCloseRun();
+  };
 
   /** Runs one change, then rereads; the change's value, or null when it failed and its error is shown. */
   const perform = async <T,>(id: string, operation: string, work: () => Promise<T>): Promise<{ value: T } | null> => {
@@ -146,6 +158,10 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
 
   const cancelRun = async (run: AutomationRunView): Promise<void> => {
     const done = await perform(run.id, run.state === 'queued' ? 'Cancel run' : 'Stop run', () => settle(rpcClient.automations.cancelRun({ projectId: run.projectId, runId: run.id })));
+    if (done) setOpenRun(done.value);
+  };
+  const retryRun = async (run: AutomationRunView): Promise<void> => {
+    const done = await perform(run.id, 'Run again', () => settle(rpcClient.automations.retryRun({ projectId: run.projectId, runId: run.id })));
     if (done) setOpenRun(done.value);
   };
 
@@ -248,9 +264,9 @@ export function AutomationsPage({ projects, projectId, onSelectProject, onOpenWo
         </DialogFooter>
       </> : null}</DialogContent>
     </Dialog>
-    <Dialog open={openRun !== null} onOpenChange={open => { if (!open) setOpenRun(null); }}>
-      <DialogContent size="lg">{shownRun ? <RunDetail key={shownRun.id} run={shownRun} project={projects.find(entry => entry.id === shownRun.projectId)} busy={busy === shownRun.id} onCancel={run => void cancelRun(run)}
-        onOpenWorkspace={workspaceId => { setOpenRun(null); onOpenWorkspace(shownRun.projectId, workspaceId); }} /> : null}</DialogContent>
+    <Dialog open={openRun !== null} onOpenChange={open => { if (!open) closeRun(); }}>
+      <DialogContent size="lg">{shownRun ? <RunDetail key={shownRun.id} run={shownRun} project={projects.find(entry => entry.id === shownRun.projectId)} busy={busy === shownRun.id} onCancel={run => void cancelRun(run)} onRetry={run => void retryRun(run)}
+        onOpenWorkspace={workspaceId => { closeRun(); onOpenWorkspace(shownRun.projectId, workspaceId); }} /> : null}</DialogContent>
     </Dialog>
     <Dialog open={limitsOpen} onOpenChange={setLimitsOpen}>
       <DialogContent size="sm">{limitsOpen && projectId !== null ? <LimitsEditor settings={settings} onCancel={() => setLimitsOpen(false)} onSave={async next => {

@@ -130,7 +130,7 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
   const [[project, definitions, relations, operations], statusRead] = await Promise.all([
     readOnceMore(() => Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations(), authority.visibleOperations()])),
     readOnceMore(() => env.USER_PROJECTS.getByName(userId).projectWorkspaceStatuses(projectId))
-      .then(statuses => ({ statuses, error: null }), (error: unknown) => ({ statuses: Object.fromEntries<WorkspaceStatusSummary>([]), error: error instanceof Error ? error.message : String(error) })),
+      .then(statuses => ({ statuses, error: null }), (error: unknown) => ({ statuses: Object.fromEntries<{ status: WorkspaceStatusSummary }>([]), error: error instanceof Error ? error.message : String(error) })),
   ]);
   if (!project || project.lifecycle === 'deleting') throw new Error(`Project ${projectId} is unavailable`);
   const live = definitions.filter(definition => definition.lifecycle !== 'deleting');
@@ -138,7 +138,7 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
   const worktrees = live.filter(definition => definition.kind === 'worktree');
   const listed = (definition: CloudWorkspaceDefinition) => ({
     closedAt: definition.archivedAt ? new Date(definition.archivedAt) : null,
-    status: statusRead.statuses[definition.id] ?? emptyWorkspaceStatus,
+    status: statusRead.statuses[definition.id]?.status ?? emptyWorkspaceStatus,
   });
   const stacks = validateStack(worktrees.map(definition => ({
     id: definition.id, name: definition.name, phase: definition.phase ?? 'plan', closedAt: definition.archivedAt, relations: relations[definition.id] ?? emptyRelations(),

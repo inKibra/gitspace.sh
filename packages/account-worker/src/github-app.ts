@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import {
   GITHUB_REMOVED_KEPT, GitHubAppOwnerSchema, GitHubLoginSchema, GitHubRepositoryNameSchema, GitHubStateSchema, githubRepositoryOf,
-  type GitHubAppManifestForm, type GitHubAppOwner, type GitHubInstallationView, type GitHubInstallRequestView, type GitHubProjectAccess,
+  type GitHubAppManifestForm, type GitHubAppOwner, type GitHubInstallationView, type GitHubInstallRequestView, type GitHubPerson, type GitHubProjectAccess,
   type GitHubProjectBridge, type GitHubRepositoryAccess, type GitHubRepositoryToken, type GitHubState,
 } from '@gitspace/protocol/github';
+import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
 import type { AutomationWatchOn } from '@gitspace/protocol/automations-contract';
@@ -302,6 +303,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
         projects_json TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS automation_defaults (project_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS person (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), login TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (
         id TEXT PRIMARY KEY,
         event TEXT NOT NULL,
@@ -344,6 +346,7 @@ export class GitHubAppDO extends BudgetedDurableObject {
         owner: { login: app.owner_login, kind: app.owner_kind },
         createdAt: new Date(app.created_at).toISOString(), keyUpdatedAt: new Date(app.key_updated_at).toISOString(),
       } : null,
+      person: this.person(),
       installations: this.installationViews(projects),
       requests: this.requestViews(projects),
       unconfirmed: this.ctx.storage.sql.exec<UnclaimedRow>('SELECT * FROM unclaimed_installations WHERE confirm = 1 ORDER BY installed_at, installation_id').toArray().map((row) => ({
@@ -363,27 +366,47 @@ export class GitHubAppDO extends BudgetedDurableObject {
     });
   }
 
+  /** The person's own GitHub login (`GitHubPersonSchema`): saved in Settings, else the owner of a user-owned App. */
+  person(): GitHubPerson {
+    const saved = this.ctx.storage.sql.exec<{ login: string }>('SELECT login FROM person WHERE singleton = 1').toArray()[0];
+    if (saved) return { login: saved.login, source: 'settings' };
+    const app = this.app();
+    return app?.owner_kind === 'user' ? { login: app.owner_login, source: 'app-owner' } : { login: null, source: null };
+  }
+
+  /** Saves the person's own GitHub login (a leading `@` is dropped); null forgets it. */
+  async setPerson(login: string | null): Promise<GitHubState> {
+    if (login === null) this.ctx.storage.sql.exec('DELETE FROM person');
+    else this.ctx.storage.sql.exec('INSERT OR REPLACE INTO person(singleton, login) VALUES (1, ?)', GitHubLoginSchema.parse(login.trim().replace(/^@/u, '')));
+    return this.state();
+  }
+
   /**
    * Whether the cloud reads a project's repository itself. A repository not on GitHub, public, or covered by an
-   * installation is ready. A private one the App does not cover is read through the machine attached to the project's
-   * base workspace, its `bridge`; the answer also says what stands in the way of the App: no install on its owner, a
-   * request an owner there has not answered, or an install that leaves this repository out.
+   * installation is ready, unless the cloud's import was refused anyway (`awaits-copy`). A private one the App does not
+   * cover is read through the machine attached to the project's base workspace, its `bridge`; the answer also says what
+   * stands in the way of the App: no install on its owner, a request an owner there has not answered, or an install that
+   * leaves this repository out, and whether the project's repository waits for a machine to copy it in (`awaitsCopy`).
    */
   async projectAccess(projectId: string): Promise<GitHubProjectAccess> {
     const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
     if (!project) throw new Error(`Project ${projectId} was not found`);
-    const repository = project.repositoryReference === null ? null : githubRepositoryOf(project.repositoryReference);
-    if (repository === null || this.coverage(repository) !== null || await this.publicOnGitHub(repository)) return { state: 'ready' };
+    const origin = project.repositoryReference;
+    if (origin === null) return { state: 'ready' };
+    const repository = githubRepositoryOf(origin);
+    if (repository !== null && this.coverage(repository) !== null) return { state: 'ready' };
+    const awaitsCopy = await new ArtifactsCodeStore(this.env.ARTIFACTS).awaitsMachineSeed(project.id, project.baseBranch);
+    if (repository === null || await this.publicOnGitHub(repository)) return awaitsCopy ? { state: 'awaits-copy', origin } : { state: 'ready' };
     const organization = repository.slice(0, repository.indexOf('/'));
     const bridge = await this.projectBridge(projectId);
     const appName = this.app()?.name ?? null;
-    if (appName === null) return { state: 'needs-app', repository, organization, appName, bridge };
+    if (appName === null) return { state: 'needs-app', repository, organization, appName, bridge, awaitsCopy };
     const projects = await this.repositoryProjects();
     const request = this.requestViews(projects).find((candidate) => candidate.organization?.toLowerCase() === organization.toLowerCase());
-    if (request) return { state: 'requested', repository, organization, appName, request, bridge };
+    if (request) return { state: 'requested', repository, organization, appName, request, bridge, awaitsCopy };
     const installation = this.installationViews(projects).find((candidate) => candidate.account.login.toLowerCase() === organization.toLowerCase());
-    if (installation) return { state: 'not-selected', repository, organization, appName, installation, bridge };
-    return { state: 'needs-app', repository, organization, appName, bridge };
+    if (installation) return { state: 'not-selected', repository, organization, appName, installation, bridge, awaitsCopy };
+    return { state: 'needs-app', repository, organization, appName, bridge, awaitsCopy };
   }
 
   /** The machine a ref import or a checkout's origin fetch goes through: one attached (not detached) to the project's

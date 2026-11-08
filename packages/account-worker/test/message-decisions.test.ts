@@ -70,15 +70,17 @@ test('a person\'s message journals each decision it carried once, citing the mes
   await runInDurableObject(room(), async (_instance, ctx) => {
     const f = await decisionsFixture(ctx);
     try {
-      const text = 'Postgres already runs in production.\n\nDecided: Postgres (Storage engine)\nDecided: No cache';
+      const text = 'Postgres already runs in production.\n\nDecided: Postgres (Storage engine)\nDecided: No cache\n~~~json\n{\n  "reason": "small data"\n}\n~~~';
       await f.runtime.session(undefined, { type: 'prompt', text, decisions: [{ title: 'Storage engine', choice: 'Postgres', sectionId: 'storage' }, { title: 'No cache', payload: { reason: 'small data' } }] }, false, 'device-a');
       await f.settle();
       const messageId = await f.messageId(text);
       expect(messageId).toBeDefined();
-      const citation = { conversationId: String(f.root.id), messageId, who: 'A person', at: expect.any(String), quote: text };
+      // The entries quote the message as people read it: the staged choice's data, sent for the agent, is left out.
+      const shown = 'Postgres already runs in production.\n\nDecided: Postgres (Storage engine)\nDecided: No cache';
+      const citation = { conversationId: String(f.root.id), messageId, who: 'A person', at: expect.any(String), quote: shown };
       expect(await f.journal()).toEqual([
-        expect.objectContaining({ id: `message-decision:${String(f.root.id)}:${messageId}:0`, kind: 'decision', phase: 'code', title: 'Storage engine', body: text, decisions: ['Decided: Postgres (Storage engine)'], createdBy: 'device-a', sectionId: 'storage', citations: [citation] }),
-        expect.objectContaining({ id: `message-decision:${String(f.root.id)}:${messageId}:1`, kind: 'decision', title: 'No cache', decisions: ['Decided: No cache\n~~~json\n{\n  "reason": "small data"\n}\n~~~'], createdBy: 'device-a', citations: [citation] }),
+        expect.objectContaining({ id: `message-decision:${String(f.root.id)}:${messageId}:0`, kind: 'decision', phase: 'code', title: 'Storage engine', body: shown, decisions: ['Decided: Postgres (Storage engine)'], createdBy: 'device-a', sectionId: 'storage', citations: [citation] }),
+        expect.objectContaining({ id: `message-decision:${String(f.root.id)}:${messageId}:1`, kind: 'decision', title: 'No cache', decisions: ['Decided: No cache'], createdBy: 'device-a', citations: [citation] }),
       ]);
       expect(f.sent).toHaveLength(1);
 

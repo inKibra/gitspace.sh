@@ -11,7 +11,8 @@ import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
 
 const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; shell: GitSpaceShellProps | null; saved: unknown; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, access: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal } } }));
+const copyCalls = vi.hoisted(() => ({ seed: vi.fn(async (_input: { projectId: string; machineId: string }) => ({ status: 'ok' as const, value: { baseBranch: 'main', commit: 'c'.repeat(40) } })), attach: vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })) }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } } } }));
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
@@ -161,5 +162,21 @@ it('walls off a project no machine bridges with a card whose machine button open
   const attach = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].find(button => button.textContent === 'Attach a machine');
   await act(() => attach?.click());
   expect(inspectEnvironment).toHaveBeenCalledTimes(1);
+});
+
+it('copies a refused repository in through the chosen online machine, then attaches it to the project', async () => {
+  mocks.access = { ...needsApp, bridge: { machineId: 'machine-old', label: 'old-laptop', online: false }, awaitsCopy: true };
+  const machine = (id: string, label: string, state: 'online' | 'offline'): InspectorView['machines'][number] => ({ id, label, state, kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null, rpcEndpoint: null });
+  const machines = [machine('machine-off', 'attic-box', 'offline'), machine('machine-on', 'studio-mac', 'online')];
+  await act(async () => { root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={{ ...baseInspection, machines }} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />); });
+  // A repository still waiting for its copy stays walled even with a machine attached.
+  expect(mocks.shell?.accessBanner).toBeUndefined();
+  const labels = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].map(button => button.textContent);
+  expect(labels).toContain('Copy through studio-mac');
+  expect(labels).not.toContain('Copy through attic-box');
+  await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].find(button => button.textContent === 'Copy through studio-mac')?.click(); });
+  expect(copyCalls.seed).toHaveBeenCalledWith({ projectId: project.id, machineId: 'machine-on' });
+  expect(copyCalls.attach).toHaveBeenCalledWith({ projectId: project.id, workspaceId: project.id, machineId: 'machine-on' });
+  expect(mocks.refresh).toHaveBeenCalled();
 });
 

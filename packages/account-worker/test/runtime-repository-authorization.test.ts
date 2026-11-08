@@ -137,6 +137,20 @@ describe('signed repository credential authority', () => {
     expect(write.status, await write.text()).toBe(200);
   });
 
+  it('lets any machine of the account write the project repository only while it waits for a machine to copy it in', async () => {
+    const f = await fixture(['storage.access'], 'https://github.com/acme-labs/widgets.git', false);
+    const copy = { workspaceId: undefined, generation: undefined, repository: `project-${projectId}`, scope: 'write' };
+    const awaits = vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(true);
+    const copied = await f.request(copy, 'unassigned');
+    expect({ status: copied.status, body: await copied.json() }).toEqual({ status: 200, body: { status: 'ok', value: lease } });
+    expect(ArtifactsCodeStore.prototype.credentials).toHaveBeenCalledWith(`project-${projectId}`, 'write');
+    // Once its base branch landed, only a machine attached to the base workspace seeds it.
+    awaits.mockResolvedValue(false);
+    const refused = await f.request(copy, 'unassigned');
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(await refused.json())).toContain('Project repository lease requires a checkout of the base workspace on this machine');
+  });
+
   it('authorizes leases from the stored checkout records while the workspace runtime cannot start', async () => {
     const f = await fixture(['storage.access']);
     await runInDurableObject(f.authority, async (_instance, state) => {

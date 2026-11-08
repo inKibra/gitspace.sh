@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 import { APPROVAL_DECISION, APPROVE, planQuestions, type TranscriptItem } from '@gitspace/blocks';
-import { automationMessage } from '@gitspace/protocol/automations-contract';
+import { automationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TranscriptItemView } from './TranscriptItemView.js';
 
 function html(item: TranscriptItem): string {
@@ -44,16 +46,65 @@ describe('the plan approval card', () => {
 });
 
 describe('turns that are not the person\'s or the agent\'s', () => {
-  const run = automationMessage({ name: 'Review feedback', event: 'pull_request_review.submitted', summary: 'Review on PR #12', instruction: 'Read the review and address it.', fields: { pull_request: 12, reviewer: 'sam' } });
+  const comment = (author: string, path: string, line: number, text: string, id: number): AutomationMessageEvent => ({ kind: 'comment', event: 'pull_request_review_comment.created', author, path, line, state: null, text, url: `https://github.com/acme/widgets/pull/1434#discussion_r${id}` });
+  const events: AutomationMessageEvent[] = [
+    comment('dana', 'src/cart/total.ts', 12, 'Round after summing, not per line.', 1),
+    comment('dana', 'src/cart/total.ts', 40, 'This branch is never reached.', 2),
+    comment('sam', 'src/cart/tax.ts', 7, 'Tax belongs to the shipping address.', 3),
+    { kind: 'review', event: 'pull_request_review.submitted', author: 'sam', path: null, line: null, state: 'changes_requested', text: 'Close, two fixes left.', url: 'https://github.com/acme/widgets/pull/1434#pullrequestreview-9' },
+  ];
+  const run = automationMessage({ run: 'run-7', name: 'Review feedback', source: 'github', subject: 'PR #1434', instruction: 'Read the review and address it.', events });
 
   it('shows an automation run\'s message as the run\'s card, the turn it started or a notice', () => {
     const turnText = text({ id: 'u1', type: 'message', role: 'user', text: run });
-    expect(turnText).not.toContain('The event:');
-    expect(turnText).toContain('Automation · Review feedback');
-    expect(turnText).toContain('pull_request_review.submitted · Review on PR #12');
+    expect(turnText).not.toContain('Automation input');
+    expect(turnText).not.toContain('"kind"');
+    expect(turnText).toContain('Review feedback · PR #1434 · 3 comments, 1 review');
     expect(turnText).toContain('Read the review and address it.');
     expect(turnText).toContain('Started this turn');
     expect(text({ id: 'n1', type: 'interruption', reason: 'machine', title: 'GitHub', detail: run })).toContain('The agent reads this on its next turn');
+  });
+
+  it('lists the run\'s events under a fold: who, where, what they said and the link to GitHub', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(() => root.render(<TranscriptItemView item={{ id: 'u2', type: 'message', role: 'user', text: run }} active={false} />));
+    expect(container.textContent).not.toContain('Round after summing');
+    const fold = [...container.querySelectorAll('button')].find(button => button.textContent === 'Events · 3 comments, 1 review');
+    await act(async () => fold?.click());
+    const rows = [...container.querySelectorAll('[aria-label="Events"] > li')];
+    expect(rows.map(row => row.textContent)).toEqual([
+      '@danasrc/cart/total.ts:12GitHubRound after summing, not per line.',
+      '@danasrc/cart/total.ts:40GitHubThis branch is never reached.',
+      '@samsrc/cart/tax.ts:7GitHubTax belongs to the shipping address.',
+      '@samreview · requested changesGitHubClose, two fixes left.',
+    ]);
+    expect(rows.map(row => row.querySelector('a')?.getAttribute('href'))).toEqual(events.map(event => event.url));
+    await act(() => root.unmount());
+    vi.unstubAllGlobals();
+  });
+
+  it('shows an automation message stored in the single-event form as the run\'s card, not as the person\'s message', async () => {
+    const fields = {
+      action: 'created', 'sender.login': 'dana', 'repository.full_name': 'acme/widgets', 'subject.title': 'Cart totals', 'subject.url': 'https://github.com/acme/widgets/pull/14',
+      'pull_request.html_url': 'https://github.com/acme/widgets/pull/14', 'pull_request.title': 'Cart totals', 'pull_request.number': '14', 'pull_request.user.login': 'robin',
+      'pull_request.base.ref': 'main', 'pull_request.head.ref': 'cart-totals', 'comment.html_url': 'https://github.com/acme/widgets/pull/14#discussion_r5',
+      'comment.user.login': 'dana', 'comment.body': 'Round after summing, not per line.', 'comment.path': 'src/cart/total.ts',
+    };
+    const stored = `Automation "Review feedback to its workspace" · pull_request_review_comment.created · Review comment from @dana on PR #14 · Cart totals\n\nA person reviewed this workspace's pull request or commented on it. Read the feedback and address it.\n\nThe event:\n${JSON.stringify(fields, null, 2)}`;
+    const turn = text({ id: 'u3', type: 'message', role: 'user', text: stored });
+    expect(turn).toContain('Review feedback to its workspace · PR #14 · 1 comment');
+    expect(turn).toContain('Started this turn');
+    expect(turn).not.toContain('The event:');
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(() => root.render(<TranscriptItemView item={{ id: 'u3', type: 'message', role: 'user', text: stored }} active={false} />));
+    await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Events · 1 comment')?.click());
+    expect([...container.querySelectorAll('[aria-label="Events"] > li')].map(row => row.textContent)).toEqual(['@danasrc/cart/total.tsGitHubRound after summing, not per line.']);
+    await act(() => root.unmount());
+    vi.unstubAllGlobals();
   });
 
   it('shows GitSpace\'s own notices as quiet rows and delivered events as cards of their kind', () => {

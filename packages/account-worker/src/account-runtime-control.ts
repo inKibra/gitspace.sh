@@ -11,8 +11,10 @@ import { requireWorkspaceAccess } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
 import { originAccess } from './origin-access.js';
 
-/** Only a machine attached to the project's base workspace may seed `project-<projectId>`. The repository
- * is created empty (no import, no initial commit): the machine publishes the base branch's history. */
+/** Who may write `project-<projectId>`. While it is an empty copy target its base branch has not reached (the cloud's
+ * import was refused), any of the account's machines copies the base branch in (`project.seed`); otherwise only a
+ * machine attached to the project's base workspace seeds it, the repository created empty (no import, no initial
+ * commit) for the machine to publish the base branch's history. */
 async function projectRepositoryCredentials(env: Env, userId: string, machine: string, input: RuntimeRepositoryCredentialsInput) {
   if (userId !== env.ACCOUNT_ID) throw new Error('Repository lease belongs to a different account');
   const base = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
@@ -21,12 +23,14 @@ async function projectRepositoryCredentials(env: Env, userId: string, machine: s
   const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:${input.projectId}`).getProject();
   if (!project) throw new Error('Runtime project is unavailable');
   if (project.repositoryReference === null) throw new Error('Only imported projects are seeded from a machine');
+  const code = new ArtifactsCodeStore(env.ARTIFACTS);
+  const repository = artifactsProjectRepository(project.id);
+  if (await code.awaitsMachineSeed(project.id, project.baseBranch)) return code.credentials(repository, input.scope);
   const attachments = await access.authority.runtimeAttachmentRecords(base);
   if (!attachments.some(item => item.machineId === machine && item.state !== 'detached'
     && (input.generation === undefined || item.generation === input.generation))) throw new Error('Project repository lease requires a checkout of the base workspace on this machine');
-  const code = new ArtifactsCodeStore(env.ARTIFACTS);
   await code.ensureMachineSeedTarget(project.id, project.baseBranch);
-  return code.credentials(artifactsProjectRepository(project.id), input.scope);
+  return code.credentials(repository, input.scope);
 }
 
 /** How this machine's checkout reaches its project's origin, and the installation tokens it uses there. Authorized like

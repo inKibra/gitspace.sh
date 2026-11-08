@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { Harness, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
+import { Harness, InboxDoc, MemoryStorage, createRegistry } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
@@ -76,6 +76,38 @@ test('a retried submission delivers its instruction once, and a request id canno
     expect(admissions).toBe(1);
     expect(prompts.filter(prompt => prompt.includes('Nightly audit'))).toHaveLength(1);
     expect(prompts).toHaveLength(2);
+  } finally { release.resolve(); await harness.close(context); }
+});
+
+test('a batch that grows while the turn runs stays one queued input, delivered once with every event when the turn ends, and no longer changes once placed', async () => {
+  const storage = new MemoryStorage();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const prompts: string[] = [];
+  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+    prompts.push(JSON.stringify(input));
+    const stream = createAssistantMessageEventStream();
+    const finish = () => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
+    if (prompts.length === 1) { entered.resolve(); void release.promise.then(finish); } else finish();
+    return stream;
+  } };
+  const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { followUpMode: 'one-at-a-time', compaction: { enabled: false } } }, context);
+  try {
+    const root = await harness.root(context, { agent: { model: reference } });
+    const automation = requests(harness, storage);
+    await root.submit({ type: 'input', content: 'Busy user work', requestId: 'user' }, context);
+    await entered.promise;
+    await automation.submit({ requestId: 'automation:batch', text: 'Review feedback: two comments' });
+    expect(await automation.update({ requestId: 'automation:batch', text: 'Review feedback: three comments' })).toBe(true);
+    expect((await harness.snapshot(InboxDoc, root.id, context))?.items.map(item => item.mode === 'write' ? item.entry : item.content)).toEqual(['Review feedback: three comments']);
+    release.resolve();
+    await root.waitForIdle(context);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('Review feedback: three comments');
+    expect(prompts.some(prompt => prompt.includes('two comments'))).toBe(false);
+    expect(await automation.status('automation:batch')).toMatchObject({ state: 'succeeded' });
+    expect(await automation.update({ requestId: 'automation:batch', text: 'Review feedback: four comments' })).toBe(false);
+    expect(await automation.update({ requestId: 'automation:unknown', text: 'Anything' })).toBe(false);
   } finally { release.resolve(); await harness.close(context); }
 });
 

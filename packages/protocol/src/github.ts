@@ -121,8 +121,15 @@ export const GitHubUninstalledInstallationViewSchema = z.object({
 });
 export type GitHubUninstalledInstallationView = z.infer<typeof GitHubUninstalledInstallationViewSchema>;
 
+/** The person's own GitHub login. Workspace agents post on GitHub as the person (they run `gh` signed in as them), so
+ * automations deliver nothing this login authored. `source`: saved in Settings, or the owner of a user-owned App when
+ * nothing is saved; null login when neither is known. */
+export const GitHubPersonSchema = z.object({ login: GitHubLoginSchema.nullable(), source: z.enum(['settings', 'app-owner']).nullable() });
+export type GitHubPerson = z.infer<typeof GitHubPersonSchema>;
+
 export const GitHubStateSchema = z.object({
   app: GitHubAppViewSchema.nullable(),
+  person: GitHubPersonSchema,
   installations: z.array(GitHubInstallationViewSchema),
   /** Oldest first. */
   requests: z.array(GitHubInstallRequestViewSchema),
@@ -145,16 +152,21 @@ export type GitHubProjectBridge = z.infer<typeof GitHubProjectBridgeSchema>;
 /** Whether the cloud reads a project's repository itself, and if not, what stands in the way of the App and which machine
  * bridges it meanwhile. A private GitHub repository the App does not cover is read through the machine attached to the
  * project's base workspace (`bridge`, null when none is); the App, named by `appName` (null before the account creates
- * one), adds pull requests, checks, GitHub-event automations and syncing with no machine. */
+ * one), adds pull requests, checks, GitHub-event automations and syncing with no machine. `awaitsCopy`: the cloud's
+ * import was refused and the project's repository waits, empty, for one of the account's machines to copy the base
+ * branch in (`project.seed`). */
 export const GitHubProjectAccessSchema = z.discriminatedUnion('state', [
   /** Not on GitHub, public, or covered by an installation. */
   z.object({ state: z.literal('ready') }),
+  /** Not on GitHub or public, but the cloud's import of `origin` was refused (private outside GitHub, or larger than the
+   * import limit): the project's repository waits for one of the account's machines to copy the base branch in. */
+  z.object({ state: z.literal('awaits-copy'), origin: z.string().min(1) }),
   /** Private, and the App is not installed on its owner. */
-  z.object({ state: z.literal('needs-app'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string().nullable(), bridge: GitHubProjectBridgeSchema.nullable() }),
+  z.object({ state: z.literal('needs-app'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string().nullable(), bridge: GitHubProjectBridgeSchema.nullable(), awaitsCopy: z.boolean() }),
   /** Private, and an install on its owner waits for an organization owner. */
-  z.object({ state: z.literal('requested'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), request: GitHubInstallRequestViewSchema, bridge: GitHubProjectBridgeSchema.nullable() }),
+  z.object({ state: z.literal('requested'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), request: GitHubInstallRequestViewSchema, bridge: GitHubProjectBridgeSchema.nullable(), awaitsCopy: z.boolean() }),
   /** Private, and the App is installed on its owner for other repositories only. */
-  z.object({ state: z.literal('not-selected'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), installation: GitHubInstallationViewSchema, bridge: GitHubProjectBridgeSchema.nullable() }),
+  z.object({ state: z.literal('not-selected'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string(), installation: GitHubInstallationViewSchema, bridge: GitHubProjectBridgeSchema.nullable(), awaitsCopy: z.boolean() }),
 ]);
 export type GitHubProjectAccess = z.infer<typeof GitHubProjectAccessSchema>;
 
@@ -162,7 +174,7 @@ export type GitHubProjectAccess = z.infer<typeof GitHubProjectAccessSchema>;
 export const GitHubAppManifestFormSchema = z.object({ action: z.string().url(), manifest: z.string().min(2).max(16_384) });
 export type GitHubAppManifestForm = z.infer<typeof GitHubAppManifestFormSchema>;
 
-export const GitHubStateCodec = wire.serializable((value): value is GitHubState => GitHubStateSchema.safeParse(value).success, { id: 'gitspace/github-state/v2', jsonSchema: GitHubStateSchema });
-export const GitHubProjectAccessCodec = wire.serializable((value): value is GitHubProjectAccess => GitHubProjectAccessSchema.safeParse(value).success, { id: 'gitspace/github-project-access/v2', jsonSchema: GitHubProjectAccessSchema });
+export const GitHubStateCodec = wire.serializable((value): value is GitHubState => GitHubStateSchema.safeParse(value).success, { id: 'gitspace/github-state/v3', jsonSchema: GitHubStateSchema });
+export const GitHubProjectAccessCodec = wire.serializable((value): value is GitHubProjectAccess => GitHubProjectAccessSchema.safeParse(value).success, { id: 'gitspace/github-project-access/v3', jsonSchema: GitHubProjectAccessSchema });
 export const GitHubAppOwnerCodec = wire.serializable((value): value is GitHubAppOwner => GitHubAppOwnerSchema.safeParse(value).success, { id: 'gitspace/github-app-owner/v1', jsonSchema: GitHubAppOwnerSchema });
 export const GitHubAppManifestFormCodec = wire.serializable((value): value is GitHubAppManifestForm => GitHubAppManifestFormSchema.safeParse(value).success, { id: 'gitspace/github-app-manifest-form/v1', jsonSchema: GitHubAppManifestFormSchema });

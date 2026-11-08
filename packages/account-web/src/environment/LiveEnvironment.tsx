@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useResultQuery } from 'result-rpc/react';
-import { RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeSyncRequestInput, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime';
-import { BROWSER_SITE_LEVELS, EnvironmentBundleSchema, browserOriginLevel, executionHash, isLifecycleRunActive, latestExecutionRun, lifecycleExecutionOutcome, projectEnvironmentState, type BrowserSiteLevel, type LifecycleRunPhase } from '@gitspace/protocol-environment';
+import { LIFECYCLE_APPROVAL_CHOICES, RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeLifecycleApprovalAnswer, type RuntimeSyncRequestInput, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime';
+import { BROWSER_SITE_LEVELS, BrowserSiteLevelSchema, EnvironmentBundleSchema, executionHash, isLifecycleRunActive, latestExecutionRun, lifecycleExecutionOutcome, projectEnvironmentState, type BrowserSiteLevel, type LifecycleRunPhase } from '@gitspace/protocol-environment';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@gitspace/ui';
 import { rpcClient } from '../rpc-client.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
@@ -14,7 +14,7 @@ import { runtimeLfsHeldBack, useLfsTransition } from '../LfsTransition.js';
 import type { RuntimeInspectorContext } from '../RuntimeWorkspace.js';
 import { EnvironmentView } from './EnvironmentView.js';
 import { LifecycleLogDialog } from './LifecycleLogDialog.js';
-import { OPTIONAL_STEPS, SETUP_STEPS, STEP_LABEL } from './lifecycle.js';
+import { BROWSER_SITE_LEVEL_LABEL, OPTIONAL_STEPS, SETUP_STEPS, STEP_LABEL } from './lifecycle.js';
 import type { EnvironmentMachine, EnvironmentScript, EnvironmentViewModel, EnvironmentViewProps, ScriptRun } from './types.js';
 
 const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
@@ -43,13 +43,15 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [readingEvidence, setReadingEvidence] = useState(false);
-  const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string; site?: boolean } | null>(null);
+  /** `level` is the level a browser site is approved at, chosen in the dialog; scripts have none. */
+  const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string; level?: BrowserSiteLevel } | null>(null);
   const [logSelection, setLogSelection] = useState<{ runId: string; script: { id: string; label: string } } | null>(null);
   const [unsent, setUnsent] = useState<{ machine: string; result: Extract<RuntimeSyncRequestResult, { method: 'diff' }> } | null>(null);
   const lfsTransition = useLfsTransition();
   if (!read.value) return read.error ? <div className="flex flex-col gap-2 p-4"><p role="alert" className="text-caption text-destructive">{rpcErrorMessage(read.error, 'environment.get')}</p><Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></div> : <p className="p-4 text-caption text-muted-foreground" role="status">Loading environment…</p>;
   const remote = read.value;
   const bundle = EnvironmentBundleSchema.parse(JSON.parse(remote.bundleJson));
+  const committedSites = remote.browserSites.flatMap(site => site.state === 'uncommitted' ? [] : [site]);
   const attached = workspaceMachines(snapshot);
   const mutate = (operation: () => Promise<unknown>): void => {
     if (busy) return;
@@ -65,9 +67,9 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
     if (readingEvidence) return;
     setReadingEvidence(true); setActionError(null);
     void (async () => {
-      const origin = remote.lifecycle.browserOrigins.find(entry => entry.hash === targetId);
-      if (origin) {
-        setEvidence({ title: `Browser origin: ${origin.pattern}`, output: `Allow logged-in Chrome access to ${origin.pattern}.\nOnly tabs in this workspace's browser group are accessible.\nRead: agents may open, observe and screenshot this site, never click, type or run scripts on it.\nInteract: agents also click and type, one step at a time; scripts are refused (for a bank or a production admin).\nFull: agents may also run Playwright scripts on this site.`, site: true, ...(approve ? { approvalHash: origin.hash } : {}) });
+      const site = committedSites.find(entry => entry.hash === targetId);
+      if (site) {
+        setEvidence({ title: `Browser origin: ${site.pattern}`, output: `Allow logged-in Chrome access to ${site.pattern}.\nOnly tabs in this workspace's browser group are accessible.\nRead: agents may open, observe and screenshot this site, never click, type or run scripts on it.\nInteract: agents also click and type, one step at a time; scripts are refused (for a bank or a production admin).\nFull: agents may also run Playwright scripts on this site.`, ...(approve ? { approvalHash: site.hash, level: 'full' } : {}) });
         return;
       }
       const execution = remote.executions.find(item => item.id === targetId);
@@ -76,11 +78,13 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
       setEvidence({ title: execution.label, output: execution.content, ...(approve ? { approvalHash: execution.hash } : {}) });
     })().catch((error: unknown) => setActionError(rpcErrorMessage(error, 'Read environment evidence'))).finally(() => setReadingEvidence(false));
   };
-  const approveEvidence = (level?: BrowserSiteLevel): void => {
+  /** Approval is keyed by content hash: approved for the project, it covers every workspace with the same content. */
+  const approveEvidence = (scope: Exclude<RuntimeLifecycleApprovalAnswer, 'not-now'>): void => {
     const executionHash = evidence?.approvalHash;
     if (!executionHash) return;
+    const level = evidence.level;
     mutate(async () => {
-      const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash, ...(level ? { level } : {}) });
+      const result = await rpcClient.environment.approve({ spaceId, scope, executionHash, ...(level ? { level } : {}) });
       if (result.status === 'error') throw result.error;
       setEvidence(null);
     });
@@ -122,7 +126,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
     attachable: snapshot ? (directory ?? []).filter(entry => !snapshot.attachments.some(attachment => attachment.state !== 'detached' && attachment.machineId === entry.id)).map(entry => ({ id: entry.id, label: `${entry.label} · ${entry.state}` })) : [],
     setupMachineId: machineId ?? null,
     steps: [...SETUP_STEPS, ...OPTIONAL_STEPS.filter(phase => remote.executions.some(item => item.phase === phase))].map((phase: LifecycleRunPhase) => ({ phase, label: STEP_LABEL[phase], scripts: remote.executions.filter(item => phase === 'checks' ? item.kind === 'check' : item.kind === 'script' && item.phase === phase).map(script) })),
-    browserOrigins: remote.lifecycle.browserOrigins.map(origin => ({ hash: origin.hash, pattern: origin.pattern, level: browserOriginLevel(remote.lifecycle, origin.hash) })),
+    browserSites: remote.browserSites,
     signedCallers: remote.executions.filter(item => item.kind === 'ingress').map(item => ({ id: item.id, label: item.label, approved: item.approval !== null })),
     conflicts: workspaceStatus(snapshot).cloud.conflicts,
     secrets: remote.effective.secrets.map(name => ({ name, source: remote.secretMetadata.find(secret => secret.name === name)?.source ?? 'project', granted: remote.configuredSecrets.includes(name) })),
@@ -173,7 +177,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
       })}
       onApprove={targetId => openExecution(targetId, true)}
       onRevoke={targetId => {
-        const hash = remote.lifecycle.browserOrigins.find(entry => entry.hash === targetId)?.hash ?? remote.executions.find(item => item.id === targetId)?.hash;
+        const hash = committedSites.find(site => site.hash === targetId)?.hash ?? remote.executions.find(item => item.id === targetId)?.hash;
         const approval = remote.lifecycle.approvals.find(entry => entry.executionHash === hash && entry.scope === 'project')
           ?? remote.lifecycle.approvals.find(entry => entry.executionHash === hash && entry.scope === 'workspace');
         if (approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: approval.scope, executionHash: approval.executionHash }); if (result.status === 'error') throw result.error; });
@@ -226,13 +230,17 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
       </DialogContent>
     </Dialog>
     <Dialog open={evidence !== null} onOpenChange={open => { if (!open) setEvidence(null); }}>
-      <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? `Review ${evidence.title}` : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this exact content. Changed content needs a new approval. Approving does not run anything.' : 'Script content as the machine runs it.'}</DialogDescription></DialogHeader>
+      <DialogContent size="lg"><DialogHeader><DialogTitle>{evidence?.approvalHash ? `Review ${evidence.title}` : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? `Approves only this exact content. Changed content needs a new approval. Approving does not run anything.${workspace ? ' Approved for the project, it covers every workspace with the same content.' : ''}` : 'Script content as the machine runs it.'}</DialogDescription></DialogHeader>
         {evidence?.approvalHash ? <code className="break-all font-mono text-caption text-muted-foreground">{evidence.approvalHash}</code> : null}
         <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{evidence?.output || 'No content.'}</pre>
+        {evidence?.approvalHash && evidence.level ? <select aria-label="Site level" className="min-h-10 rounded-md bg-surface-3 px-3 text-caption" value={evidence.level} disabled={busy} onChange={event => setEvidence({ ...evidence, level: BrowserSiteLevelSchema.parse(event.target.value) })}>
+          {BROWSER_SITE_LEVELS.map(level => <option key={level} value={level}>{BROWSER_SITE_LEVEL_LABEL[level]}</option>)}
+        </select> : null}
         {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
-        <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.approvalHash ? evidence.site
-          ? BROWSER_SITE_LEVELS.map(level => <Button key={level} variant={level === 'full' ? 'primary' : 'secondary'} disabled={busy} onClick={() => approveEvidence(level)}>Approve {level}</Button>)
-          : <Button variant="primary" disabled={busy} onClick={() => approveEvidence()}>Approve this content</Button> : null}</DialogFooter>
+        <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.approvalHash ? <>
+          {workspace ? <Button variant="secondary" disabled={busy} onClick={() => approveEvidence('workspace')}>{LIFECYCLE_APPROVAL_CHOICES.workspace}</Button> : null}
+          <Button variant="primary" disabled={busy} onClick={() => approveEvidence('project')}>{LIFECYCLE_APPROVAL_CHOICES.project}</Button>
+        </> : null}</DialogFooter>
       </DialogContent>
     </Dialog>
   </div>;

@@ -1,6 +1,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTOMATION_MAX_QUEUE_MS, type AutomationDraft, type AutomationMode } from '@gitspace/protocol/automations-contract';
+import { automationEvent } from '../src/automation-events.js';
 import { automationValue } from '../src/project-automations.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 
@@ -10,12 +11,12 @@ const DAY = 24 * HOUR;
 /** A UTC midnight days ahead: the alarms these tests set never come due on the real clock, so only the tests run them. */
 const midnight = Math.ceil(Date.now() / DAY) * DAY + 3 * DAY;
 
-/** A project with one active workspace, as the account knows it. */
-async function project() {
+/** A project with one active workspace, as the account knows it; `repositoryReference` names its GitHub remote. */
+async function project(repositoryReference: string | null = null) {
   const projectId = `project-${crypto.randomUUID()}`;
   const workspaceId = `space-${crypto.randomUUID()}`;
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-  const created = await authority.bootstrap({ id: projectId, name: `Automations ${projectId}`, repositoryReference: null, baseBranch: 'main', createdBy: 'human' });
+  const created = await authority.bootstrap({ id: projectId, name: `Automations ${projectId}`, repositoryReference, baseBranch: 'main', createdBy: 'human' });
   await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(await authority.setProjectLifecycle(created.revision, 'active'));
   for (const [id, kind] of [[projectId, 'base'], [workspaceId, 'worktree']] as const) {
     await authority.putWorkspace({ id, projectId, kind, name: kind === 'base' ? 'Project' : 'release-work', branch: kind === 'base' ? 'main' : 'release', phase: kind === 'base' ? null : 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
@@ -161,6 +162,40 @@ describe('ProjectAutomationsDO', () => {
       results: [{ label: 'Manual', result: 'Runs only when someone starts it', runs: false }],
       instruction: 'Started by Brad', checks: [],
     });
+  });
+
+  it('delivers a pull request\'s batch 90 s after its latest event, and no later than 10 minutes after its first', async () => {
+    const submit = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
+    const { projectId, workspaceId, automations, alarm } = await project('https://github.com/acme/widgets.git');
+    await automations.updateSettings({ projectId, settings: { concurrency: 2, dailyRunCap: 50, trusted: ['dana'] } });
+    automationValue(await automations.create({ projectId, draft: { name: 'Comments to release', enabled: true, trigger: { kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'Answer them.' } } }));
+    const comment = async (body: string) => {
+      const event = automationEvent({ event: 'issue_comment', deliveryId: crypto.randomUUID(), slug: null, receivedAt: Date.now(), payload: {
+        action: 'created', sender: { login: 'dana' }, repository: { full_name: 'acme/widgets', html_url: 'https://github.com/acme/widgets' },
+        issue: { number: 9, title: 'Widgets jam', html_url: 'https://github.com/acme/widgets/pull/9', user: { login: 'dana' }, labels: [], pull_request: {} },
+        comment: { html_url: 'https://github.com/acme/widgets/pull/9#issuecomment-1', body, user: { login: 'dana' } },
+      } });
+      if (!event) throw new Error('The comment is not an automation event');
+      await automations.receive({ projectId, event, bot: null });
+    };
+    const first = midnight + HOUR;
+    await comment('First');
+    expect(await alarm()).toBe(first + 90_000);
+    // A comment every 80 s keeps it waiting, never past 10 minutes after the first.
+    for (let at = first + 80_000; at < first + 10 * MINUTE; at += 80_000) {
+      vi.setSystemTime(at);
+      await runDurableObjectAlarm(automations);
+      await comment(`At ${at - first}`);
+      expect(await alarm()).toBe(Math.min(at + 90_000, first + 10 * MINUTE));
+    }
+    expect(submit).not.toHaveBeenCalled();
+    vi.setSystemTime(first + 10 * MINUTE);
+    await runDurableObjectAlarm(automations);
+    expect(submit).toHaveBeenCalledTimes(1);
+    const [run, ...others] = automationValue(await automations.runs({ projectId }));
+    expect(others).toEqual([]);
+    expect(run).toMatchObject({ state: 'running', workspaceId, events: Array.from({ length: 8 }, () => expect.objectContaining({ event: 'issue_comment.created' })) });
+    expect(run?.timeline.at(-1)?.label).toBe('Sent to release-work as one message: 8 comments');
   });
 
   describe('phases', () => {

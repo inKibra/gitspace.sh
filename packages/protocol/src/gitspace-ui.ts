@@ -879,6 +879,9 @@ const EXAMPLE_SPEC = {
   state: { choice: '', options: [{ value: 'kv', label: 'Workers KV', description: 'Eventually consistent, cheap reads' }, { value: 'do', label: 'Durable Object', description: 'Strongly consistent, one region' }] },
 };
 
+/** What a subagent is told about blocks; the full format is the `gitspace-ui` skill. */
+export const UI_BLOCK_SUMMARY = 'GitSpace draws three fenced blocks in Markdown: ```gitspace-ui is ONE JSON object { "root", "elements", "state" }, where "root" names a Card (or an AskCard for one question) in "elements", each element is { "type", "props", "children": [keys] } using only the catalog\'s components and props, and the data it shows sits in "state", read with {"$state": "/path"}; ```svg is one <svg> drawing coloured with currentColor or theme variables; ```mermaid is a Mermaid diagram. GitSpace rejects an invalid block with the path that failed. Read skill://gitspace-ui for the full format before you write a block.';
+
 /** The agent's instructions for writing blocks; the body of the `gitspace-ui` skill. */
 export function uiBlockPrompt(): string {
   const fence = '```';

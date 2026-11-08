@@ -6,7 +6,8 @@ import { createBrowserClient } from 'result-rpc/client';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, signDeviceInvite } from '@gitspace/protocol';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
-import type { AutomationDraft } from '@gitspace/protocol/automations-contract';
+import { automationEventCount, parseAutomationMessage, type AutomationDraft } from '@gitspace/protocol/automations-contract';
+import { z } from 'zod';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { archiveCloudWorkspace, completedOperation } from '../src/cloud-workspace-lifecycle.js';
 import { ProjectAutomationsDO, automationValue } from '../src/project-automations.js';
@@ -53,7 +54,7 @@ function cloudArtifacts(refs: Map<string, string>): void {
 /**
  * The account's GitHub App installed on inKibra/pantry, a project using that repository, and one workspace on the
  * branch `feature/search`. GitHub answers write access for `writers` only. The automations' workspaces never run an
- * agent: what a run submits or notes is recorded instead.
+ * agent: what a run submits, updates or notes is recorded instead.
  */
 async function installed(writers: readonly string[]) {
   await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(23)) });
@@ -79,6 +80,7 @@ async function installed(writers: readonly string[]) {
   cloudArtifacts(refs);
   vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
   const submitted = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
+  const updated = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationUpdate').mockResolvedValue(true);
   const noticed = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationNotice').mockResolvedValue(undefined);
 
   const github = env.GITHUB_APP.getByName(env.ACCOUNT_ID);
@@ -95,10 +97,14 @@ async function installed(writers: readonly string[]) {
     expect(response.status).toBe(202);
     return deliveryId;
   };
-  /** Runs the queue; the alarm may also have fired on its own. */
-  const work = async () => { await runDurableObjectAlarm(automations); };
+  /** Runs the queue with every waiting batch due, as 90 s without another event makes it; the alarm may also have fired
+   * on its own. */
+  const work = async () => {
+    await runInDurableObject(automations, (_instance, state) => { state.storage.sql.exec("UPDATE automation_runs SET deliver_at=0 WHERE state='queued' AND deliver_at IS NOT NULL"); });
+    await runDurableObjectAlarm(automations);
+  };
   const runs = async () => automationValue(await automations.runs({ projectId }));
-  return { projectId, searchId, authority, automations, send, work, runs, submitted, noticed };
+  return { projectId, searchId, authority, automations, send, work, runs, submitted, updated, noticed };
 }
 
 /** A browser enrolled on the account (whose vault `installed` bootstrapped), calling the account's RPC as a person. */
@@ -132,6 +138,17 @@ const pull = (number: number, change: { author: string; base?: string; head: str
   number, title: `Change ${number}`, html_url: `https://github.com/inKibra/pantry/pull/${number}`, body: change.body ?? '', draft: change.draft ?? false, merged: false,
   user: { login: change.author }, base: { ref: change.base ?? 'main' }, head: { ref: change.head }, labels: [],
 });
+/** A review comment on a line of `src/search.ts` in PR #14, part of review `review`. */
+const lineComment = (id: number, body: string, login: string, review: number) => ({
+  action: 'created', sender: { login }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }),
+  comment: { html_url: `https://github.com/inKibra/pantry/pull/14#discussion_r${id}`, body, user: { login }, path: 'src/search.ts', line: id, pull_request_review_id: review },
+});
+const submittedReview = (id: number, body: string, login: string, state: string) => ({
+  action: 'submitted', sender: { login }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }),
+  review: { id, html_url: `https://github.com/inKibra/pantry/pull/14#pullrequestreview-${id}`, body, state, user: { login } },
+});
+/** What a run submitted: its message's text. */
+const submittedText = (call: readonly unknown[] | undefined) => z.object({ text: z.string() }).parse(call?.[0]).text;
 
 const reviewPullRequests: AutomationDraft = {
   name: 'Review pull requests', enabled: true,
@@ -263,6 +280,103 @@ describe('automations on GitHub events', () => {
     const [later, first] = await runs();
     expect(first).toMatchObject({ automationName: 'Mentions of @gitspace-test', outcome: null, workspaceId: searchId });
     expect(later).toMatchObject({ automationName: 'Review feedback to its workspace', state: 'skipped', outcome: 'Skipped: already sent to search-work by Mentions of @gitspace-test' });
+  });
+
+  it('never delivers what the person\'s own GitHub login posted, whichever automation would send it to a workspace', async () => {
+    const { projectId, searchId, automations, send, runs } = await installed(['jules', 'dana']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    expect((await env.GITHUB_APP.getByName(env.ACCOUNT_ID).setPerson('@jules')).person).toEqual({ login: 'jules', source: 'settings' });
+    automationValue(await automations.create({ projectId, draft: { name: 'Comments to search', enabled: true, trigger: { kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] }, conditions: [], action: { kind: 'messageWorkspace', workspaceId: searchId, instruction: 'Read it.' } } }));
+    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
+
+    // An agent's thread reply posted with gh as the person: its empty review and its comment.
+    await send('pull_request_review', submittedReview(501, '', 'jules', 'commented'));
+    await send('pull_request_review_comment', lineComment(601, 'Done: empty queries return no results.', 'jules', 501));
+    await send('issue_comment', { action: 'created', sender: { login: 'jules' }, issue: { number: 14, title: 'Change 14', html_url: 'https://github.com/inKibra/pantry/pull/14', user: { login: 'jules' }, labels: [], pull_request: {} }, comment: { html_url: 'https://github.com/inKibra/pantry/pull/14#issuecomment-9', body: 'Pushed the fix.', user: { login: 'jules' } } });
+    const recorded = await runs();
+    expect(recorded.filter(run => run.state !== 'skipped')).toEqual([]);
+    expect(recorded.map(run => [run.automationName, run.event, run.outcome])).toEqual(expect.arrayContaining([
+      ['Review feedback to its workspace', 'pull_request_review.submitted', 'Skipped: posted from your account while agents post as you'],
+      ['Review feedback to its workspace', 'pull_request_review_comment.created', 'Skipped: posted from your account while agents post as you'],
+      ['Comments to search', 'issue_comment.created', 'Skipped: posted from your account while agents post as you'],
+    ]));
+    expect(recorded.find(run => run.automationName === 'Comments to search')?.checks[0]).toEqual({ label: '@jules is your GitHub account, and agents post as you', passed: false });
+
+    // Another person's comment still reaches the workspace.
+    await send('pull_request_review_comment', lineComment(602, 'Please also cover null.', 'dana', 502));
+    expect((await runs())[0]).toMatchObject({ automationName: 'Review feedback to its workspace', state: 'queued', workspaceId: searchId, outcome: null });
+  });
+
+  it('collects a review\'s comments into one run and one message once the pull request goes quiet, folding the empty review that wraps them', async () => {
+    const { projectId, searchId, automations, send, work, runs, submitted } = await installed(['jules', 'dana']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
+    await send('pull_request_review_comment', lineComment(701, 'Handle empty queries.', 'dana', 700));
+    await send('pull_request_review_comment', lineComment(702, 'Name this searchTerm.', 'dana', 700));
+    await send('pull_request_review_comment', lineComment(703, 'Add a test for paging.', 'dana', 700));
+    await send('pull_request_review', submittedReview(700, '', 'dana', 'commented'));
+    await send('pull_request_review', submittedReview(705, 'Close; three things to fix.', 'dana', 'changes_requested'));
+    const [batch, ...others] = (await runs()).filter(run => run.automationName === 'Review feedback to its workspace');
+    expect(others).toEqual([]);
+    expect(batch).toMatchObject({ state: 'queued', workspaceId: searchId });
+    expect(batch?.events.map(event => [event.event, event.folded])).toEqual([
+      ['pull_request_review_comment.created', false], ['pull_request_review_comment.created', false], ['pull_request_review_comment.created', false],
+      ['pull_request_review.submitted', true], ['pull_request_review.submitted', false],
+    ]);
+    // Until 90 s pass without another event, nothing is delivered.
+    await runDurableObjectAlarm(automations);
+    expect(submitted).not.toHaveBeenCalled();
+
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
+    expect(submitted).toHaveBeenCalledWith(expect.objectContaining({ projectId, workspaceId: searchId, requestId: `automation:${batch?.id}` }));
+    const message = parseAutomationMessage(submittedText(submitted.mock.calls[0]));
+    expect(message).toMatchObject({ run: batch?.id, name: 'Review feedback to its workspace', source: 'github', subject: 'PR #14' });
+    expect(message?.events.map(event => [event.kind, event.author, event.path, event.line, event.text])).toEqual([
+      ['comment', 'dana', 'src/search.ts', 701, 'Handle empty queries.'], ['comment', 'dana', 'src/search.ts', 702, 'Name this searchTerm.'], ['comment', 'dana', 'src/search.ts', 703, 'Add a test for paging.'],
+      ['review', 'dana', null, null, 'Close; three things to fix.'],
+    ]);
+    expect(automationEventCount(message?.events ?? [])).toBe('3 comments, 1 review');
+
+    // Run again delivers the whole batch at once, as one message.
+    await automations.runTurnChanged({ projectId, workspaceId: searchId, requestId: `automation:${batch?.id}`, state: 'ended', outcome: 'finished', text: 'Fixed all three.' });
+    const again = automationValue(await automations.retryRun({ projectId, runId: batch?.id ?? '', requestedBy: 'Robin' }));
+    expect(again).toMatchObject({ outcome: null, events: batch?.events });
+    await runDurableObjectAlarm(automations);
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(2));
+    expect(parseAutomationMessage(submittedText(submitted.mock.calls[1]))?.events).toEqual(message?.events);
+  });
+
+  it('adds events that arrive while the workspace\'s turn runs to its waiting message, and opens a new batch once that message was placed', async () => {
+    const { projectId, searchId, automations, send, work, runs, submitted, updated } = await installed(['jules', 'dana']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
+    const feedback = async () => (await runs()).filter(run => run.automationName === 'Review feedback to its workspace');
+    await send('pull_request_review_comment', lineComment(801, 'Handle empty queries.', 'dana', 800));
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
+    const [waiting] = await feedback();
+
+    // The agent is mid-turn, so the message waits in the workspace: the next comment joins it there.
+    await send('pull_request_review_comment', lineComment(802, 'And null queries.', 'dana', 810));
+    expect(updated).toHaveBeenCalledTimes(1);
+    expect(updated).toHaveBeenCalledWith({ projectId, workspaceId: searchId, requestId: `automation:${waiting?.id}`, text: expect.any(String) });
+    expect(parseAutomationMessage(submittedText(updated.mock.calls[0]))?.events.map(event => event.text)).toEqual(['Handle empty queries.', 'And null queries.']);
+    expect(await feedback()).toMatchObject([{ id: waiting?.id, state: 'running', events: [{ event: 'pull_request_review_comment.created' }, { event: 'pull_request_review_comment.created' }] }]);
+    expect(submitted).toHaveBeenCalledTimes(1);
+
+    // The workspace placed the message meanwhile: it no longer changes, so the event opens a new batch.
+    updated.mockResolvedValueOnce(false);
+    await send('pull_request_review_comment', lineComment(803, 'One more thing.', 'dana', 820));
+    const [opened, earlier] = await feedback();
+    expect(earlier).toMatchObject({ id: waiting?.id, events: [{}, {}] });
+    expect(opened).toMatchObject({ state: 'queued', events: [{ label: expect.stringContaining('Review comment from @dana') }] });
+
+    // Once its turn started, the workspace is not asked to change it.
+    await automations.runTurnChanged({ projectId, workspaceId: searchId, requestId: `automation:${waiting?.id}`, state: 'running' });
+    await send('pull_request_review_comment', lineComment(804, 'Last one.', 'dana', 830));
+    expect(updated).toHaveBeenCalledTimes(2);
+    expect((await feedback())[0]).toMatchObject({ id: opened?.id, events: [{}, {}] });
   });
 
   it('tests a draft against a recorded delivery without acting, and Run it acts on that delivery once', async () => {

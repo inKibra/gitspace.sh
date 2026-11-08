@@ -53,6 +53,10 @@ export const RuntimeMessageDecisionSchema = z.object({
   sectionId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/u).optional(), payload: RuntimeJsonSchema.optional(),
 }).strict();
 export type RuntimeMessageDecision = z.infer<typeof RuntimeMessageDecisionSchema>;
+/** A staged choice's data in a sent message: the `~~~json` block right under its "Decided: …", "Answered: …",
+ * "Review batch: …" or "Message: …" line. The agent reads it; anything shown to people replaces each match with `$1`,
+ * the line alone. */
+export const STAGED_CHOICE_DATA = /^((?:Decided|Answered|Review batch|Message): [^\n]*)\n~~~json\n[\s\S]*?\n~~~$/gmu;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),

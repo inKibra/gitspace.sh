@@ -83,3 +83,28 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+export interface ProjectCopyOptions {
+  /** The project as the account holds it: its origin and base branch ('HEAD': the origin's default branch). */
+  project(projectId: string): Promise<{ repositoryReference: string | null; baseBranch: string } | null>;
+  scratchRoot: string;
+  /** How Git reaches an origin address with the account's shared git identity. */
+  gitEnvironment(repositoryUrl: string): Record<string, string>;
+  projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>;
+}
+
+/** Copies a project's base branch from its origin into `project-<projectId>` with this machine's git identity: the
+ * project page's "Copy through <machine>" for a repository the cloud could not import itself. A repository with no
+ * commits has nothing to copy and is an error naming it. */
+export async function copyProjectThroughMachine(options: ProjectCopyOptions, projectId: string): Promise<{ baseBranch: string; commit: string }> {
+  const project = await options.project(projectId);
+  if (!project) throw new Error(`Project ${projectId} is not in this account`);
+  if (project.repositoryReference === null) throw new Error('This project has no origin repository to copy');
+  const repositoryUrl = normalizeRemoteRepositoryUrl(project.repositoryReference.trim());
+  const seeded = await seedProjectRepository({
+    projectId, repositoryUrl, baseBranch: project.baseBranch === 'HEAD' ? null : project.baseBranch,
+    scratchRoot: options.scratchRoot, gitEnvironment: options.gitEnvironment(repositoryUrl), projectRepository: options.projectRepository,
+  });
+  if (seeded.commit === null) throw new Error(`${project.repositoryReference} has no commits for GitSpace to copy yet: push a first commit to it, then copy again`);
+  return { baseBranch: seeded.baseBranch, commit: seeded.commit };
+}

@@ -5,6 +5,7 @@ import {
   AutomationSubjectSchema,
   automationSubjectName,
   type AutomationGitHubEvent,
+  type AutomationMessageEvent,
   type AutomationSubject,
   type AutomationTrigger,
   type AutomationWatchOn,
@@ -61,6 +62,9 @@ export const AutomationEventSchema = z.object({
   deploymentState: z.string().nullable().default(null),
   /** What a watch remembers it has seen: `release:<tag>`, `tag:<name>`, `deployment:<id>:<state>`. */
   watchKey: z.string().nullable().default(null),
+  /** A review's id, or the review a review comment belongs to: an empty review that only wraps comments folds into
+   * them. Absent on events recorded before batches. */
+  reviewId: z.number().int().nullable().default(null),
 });
 export type AutomationEvent = z.infer<typeof AutomationEventSchema>;
 
@@ -75,8 +79,8 @@ const IssueSchema = z.object({
   number: z.number().int().positive(), title: z.string(), html_url: z.string(), body: z.string().nullish(), user: UserSchema,
   labels: LabelsSchema, pull_request: z.object({}).optional(),
 });
-const CommentSchema = z.object({ html_url: z.string(), body: z.string().nullish(), user: UserSchema, path: z.string().optional() });
-const ReviewSchema = z.object({ html_url: z.string(), body: z.string().nullish(), state: z.string(), user: UserSchema });
+const CommentSchema = z.object({ html_url: z.string(), body: z.string().nullish(), user: UserSchema, path: z.string().optional(), line: z.number().int().nullish(), original_line: z.number().int().nullish(), pull_request_review_id: z.number().int().nullish() });
+const ReviewSchema = z.object({ id: z.number().int().optional(), html_url: z.string(), body: z.string().nullish(), state: z.string(), user: UserSchema });
 const CommonSchema = z.object({
   action: z.string().optional(),
   repository: z.object({ full_name: z.string(), html_url: z.string() }),
@@ -147,7 +151,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
     fromApp: slug !== null && sender !== null && sender.toLowerCase() === `${slug.toLowerCase()}[bot]`,
     baseBranch: null, headBranch: null, branch: null, draft: null, labels: null, label: common.label?.name ?? null, changedFiles: null,
     conclusion: null, reviewState: null, mentionsBot: false, merged: null, closes: [],
-    tag: null, prerelease: null, environment: null, deploymentState: null, watchKey: null,
+    tag: null, prerelease: null, environment: null, deploymentState: null, watchKey: null, reviewId: null,
   };
   const fieldsOf = (subject: AutomationSubject | undefined, specific: Record<string, string>): Record<string, string> => ({
     action: action ?? '', 'sender.login': sender ?? '', 'repository.full_name': common.repository.full_name,
@@ -179,7 +183,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       const body = text(review.body);
       return {
         ...shared, actor: reviewer, author: reviewer, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref,
-        reviewState: review.state.toLowerCase(), mentionsBot: mentions(body, slug),
+        reviewState: review.state.toLowerCase(), mentionsBot: mentions(body, slug), reviewId: review.id ?? null,
         fields: fieldsOf(subject, { ...pullRequestFields(pull), 'review.html_url': review.html_url, 'review.user.login': reviewer ?? '', 'review.state': review.state.toLowerCase(), 'review.body': body }),
       };
     }
@@ -191,8 +195,8 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       const subject = pullRequestSubject(pull);
       const body = text(comment.body);
       return {
-        ...shared, actor: commenter, author: commenter, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref, mentionsBot: mentions(body, slug),
-        fields: fieldsOf(subject, { ...pullRequestFields(pull), 'comment.html_url': comment.html_url, 'comment.user.login': commenter ?? '', 'comment.body': body, 'comment.path': comment.path ?? '' }),
+        ...shared, actor: commenter, author: commenter, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref, mentionsBot: mentions(body, slug), reviewId: comment.pull_request_review_id ?? null,
+        fields: fieldsOf(subject, { ...pullRequestFields(pull), 'comment.html_url': comment.html_url, 'comment.user.login': commenter ?? '', 'comment.body': body, 'comment.path': comment.path ?? '', 'comment.line': String(comment.line ?? comment.original_line ?? '') }),
       };
     }
     case 'issues': {
@@ -289,6 +293,29 @@ export function describeAutomationEvent(event: AutomationEvent): string {
   }
 }
 
+/** An event as a run's message lists it: a review comment with its file and line, a review, another comment, or any
+ * other event as its one-line description. */
+export function automationMessageEvent(event: AutomationEvent): AutomationMessageEvent {
+  const { fields } = event;
+  const shared = { event: automationEventName(event), author: event.author, path: null, line: null, state: null };
+  switch (event.event) {
+    case 'pull_request_review_comment': {
+      const line = Number.parseInt(fields['comment.line'] ?? '', 10);
+      return { ...shared, kind: 'comment', path: fields['comment.path'] || null, line: Number.isNaN(line) ? null : line, text: fields['comment.body'] ?? '', url: fields['comment.html_url'] || null };
+    }
+    case 'issue_comment': return { ...shared, kind: 'comment', text: fields['comment.body'] ?? '', url: fields['comment.html_url'] || null };
+    case 'pull_request_review': return { ...shared, kind: 'review', state: event.reviewState, text: fields['review.body'] ?? '', url: fields['review.html_url'] || null };
+    default: return { ...shared, kind: 'event', text: describeAutomationEvent(event), url: fields['subject.url'] || fields['release.url'] || fields['tag.url'] || fields['deployment.url'] || null };
+  }
+}
+
+/** An empty `pull_request_review.submitted` (state commented, no text) that only wraps review comments among `events`:
+ * those comments carry it, so it is not delivered on its own. */
+export function foldsIntoComments(event: AutomationEvent, events: readonly AutomationEvent[]): boolean {
+  return event.event === 'pull_request_review' && event.action === 'submitted' && event.reviewState === 'commented' && (event.fields['review.body'] ?? '').trim() === ''
+    && event.reviewId !== null && events.some(other => other.event === 'pull_request_review_comment' && other.reviewId === event.reviewId);
+}
+
 /** A glob for branches, paths and logins: `*` within one path segment, `**` across segments. */
 export function globMatches(pattern: string, value: string, caseless: boolean): boolean {
   let source = '';
@@ -320,7 +347,7 @@ export function watchedEvent(input: { repository: string; item: WatchedItem; del
     deliveryId: input.deliveryId, receivedAt: input.receivedAt, repository: input.repository, fromApp: input.fromApp, subjects: [],
     baseBranch: null, headBranch: null, branch: null, draft: null, labels: null, label: null, changedFiles: null,
     conclusion: null, reviewState: null, mentionsBot: false, merged: null, closes: [],
-    tag: null, prerelease: null, environment: null, deploymentState: null,
+    tag: null, prerelease: null, environment: null, deploymentState: null, reviewId: null,
   };
   const common = { 'repository.full_name': input.repository };
   switch (item.on) {

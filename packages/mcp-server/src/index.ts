@@ -34,11 +34,12 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
 };
 // Human authorization, protected terminal bytes and GitHub App credentials (manifest and install forms whose state the
 // browser callback consumes, private key upload) are browser-only, as are deciding which GitHub accounts the App serves
-// (keeping, uninstalling, forgetting requests and removals).
+// (keeping, uninstalling, forgetting requests and removals) and the person's own login, whose events automations skip.
 const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'mcp.connections.signIn', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
   'inspector.guide.setApproval', 'inspector.requirement.setAcceptance', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
   'github.request.cancel', 'github.request.record', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
+  'github.person.set',
   'storageIncidents.list', 'storageIncidents.resume',
 ].includes(path);
 const agentSessionCommands = [

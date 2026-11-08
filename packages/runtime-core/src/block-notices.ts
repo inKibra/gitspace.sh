@@ -9,7 +9,8 @@ const FIRST_BLOCK = 'block 1';
 /**
  * The agent's notice for the ```gitspace-ui, ```svg and ```mermaid blocks of its message that do not validate, or null
  * when every block does. Blocks are numbered through the message's text parts in order, from 1; one line per block with
- * its issues, the first 8 issues listed and the rest counted.
+ * the JSON pointer and message of each issue, the first 8 issues listed and the rest counted; the last line points at
+ * skill://gitspace-ui.
  */
 export function invalidBlocksNotice(content: AssistantMessage['content']): string | null {
   const issues: { block: number; path: string; message: string }[] = [];
@@ -32,7 +33,7 @@ export function invalidBlocksNotice(content: AssistantMessage['content']): strin
   if (unlisted > 0) lines.push(`…and ${unlisted} more ${unlisted === 1 ? 'issue' : 'issues'}.`);
   const invalid = new Set(issues.map(issue => issue.block)).size;
   lines.push(invalid === 1
-    ? 'The chat shows an error in place of that block; send a corrected block in a new message.'
-    : 'The chat shows an error in place of those blocks; send corrected blocks in a new message.');
+    ? 'The chat shows an error in place of that block. Check the failing paths against skill://gitspace-ui and send a corrected block in a new message.'
+    : 'The chat shows an error in place of those blocks. Check the failing paths against skill://gitspace-ui and send corrected blocks in a new message.');
   return lines.join('\n');
 }

@@ -1,5 +1,5 @@
 import type { GitHubInstallationView, GitHubProjectAccess, GitHubProjectBridge } from '@gitspace/protocol/github';
-import { Badge, Button, useShape } from '@gitspace/ui';
+import { Badge, Button, Select, SelectContent, SelectItem, SelectTrigger, useShape } from '@gitspace/ui';
 import { Check, Clock, Copy01, LinkExternal01, Lock01, Monitor01 } from '@untitledui/icons';
 import { useState, type ReactElement, type ReactNode } from 'react';
 import { z } from 'zod';
@@ -9,6 +9,8 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 
 /** A project's repository access while its agent cannot read it. */
 export type BlockedProjectAccess = Exclude<GitHubProjectAccess, { state: 'ready' }>;
+/** Blocked access to a private GitHub repository the App does not cover. */
+export type GitHubBlockedAccess = Exclude<BlockedProjectAccess, { state: 'awaits-copy' }>;
 
 const INSTALL_INTENT_KEY = 'gitspace.github.install';
 /** An install started longer ago than this is not the one GitHub just returned from. */
@@ -111,23 +113,87 @@ function useInstall(onInstall: () => Promise<string>): { installing: boolean; er
   return { installing, error, install };
 }
 
-/** The other way in: a machine of the person's that can read the repository bridges a project whose cloud copy exists. */
+/** The other way in once the project has its cloud copy: a machine of the person's that can read the repository, attached
+ * to the project, bridges it to GitHub. */
 function MachineWayIn({ repository, onAttachMachine }: { repository: string; onAttachMachine(): void }): ReactElement {
   const shape = useShape();
   return <div className={`flex flex-col gap-2 bg-surface-2 p-3 ${shape.container}`}>
     <span className="text-caption font-medium text-foreground">Or attach a machine that can read it</span>
-    <span className="text-caption text-muted-foreground">When this project already has its cloud copy, attach one of your machines that can read <span className="font-mono text-foreground">{repository}</span> (your account SSH key on GitHub) to it, and GitSpace syncs with GitHub through that machine, using your own access. A new project's first copy still needs the App, which also adds pull requests, checks, automations and syncing without a machine.</span>
+    <span className="text-caption text-muted-foreground">Attach one of your machines that can read <span className="font-mono text-foreground">{repository}</span> (your account SSH key on GitHub) to this project, and GitSpace syncs with GitHub through that machine, using your own access. The App also adds pull requests, checks, automations and syncing without a machine.</span>
     <div className="flex flex-wrap gap-2"><Button variant="secondary" size="compact" type="button" leadingIcon={glyph(Monitor01)} onClick={onAttachMachine}>Attach a machine</Button></div>
   </div>;
 }
 
+/** An online machine of the account a project's repository can be copied through. */
+export interface CopyMachine { id: string; label: string }
+
+/** Copying a repository the cloud could not import through one of the person's online machines; `onCopy` resolves once
+ * the machine copied the base branch in, and rejects with the reason it could not. */
+export interface MachineCopyProps { machines: readonly CopyMachine[]; onCopy(machineId: string): Promise<void> }
+
+/** The way in for a project whose cloud import was refused: one of the person's online machines that can read the
+ * repository copies its base branch in with their own access. A failed copy shows its reason, with `alternative` naming
+ * what else there is to do, and leaves the machine choice open. */
+function MachineCopy({ target, lead, alternative, machines, onCopy }: MachineCopyProps & { target: string; lead: string; alternative: string }): ReactElement {
+  const shape = useShape();
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [copying, setCopying] = useState(false);
+  const [failure, setFailure] = useState<{ label: string; message: string } | null>(null);
+  const machine = machines.find((candidate) => candidate.id === chosen) ?? machines[0] ?? null;
+  const copy = async (through: CopyMachine) => {
+    setCopying(true);
+    setFailure(null);
+    try { await onCopy(through.id); }
+    catch (cause) { setFailure({ label: through.label, message: rpcErrorMessage(cause, `Copy through ${through.label}`) }); }
+    finally { setCopying(false); }
+  };
+  return <div className={`flex flex-col gap-2 bg-surface-2 p-3 ${shape.container}`}>
+    <span className="text-caption font-medium text-foreground">{lead}</span>
+    <span className="text-caption text-muted-foreground">One of your machines that can read <span className="font-mono text-foreground [overflow-wrap:anywhere]">{target}</span> (with your account SSH key) copies its base branch into GitSpace with your own access, then stays attached to this project to keep it in sync.</span>
+    {machine === null
+      ? <span role="status" className="text-caption text-muted-foreground">None of your machines is online. Start one that can read it, or add a computer in Settings → Machines.</span>
+      : <div className="flex flex-wrap items-center gap-2">
+        {machines.length > 1 ? <div className="w-48"><Select size="compact" value={machine.id} disabled={copying} onValueChange={setChosen}><SelectTrigger aria-label="Machine to copy through" /><SelectContent>{machines.map((candidate, index) => <SelectItem key={candidate.id} value={candidate.id} index={index}>{candidate.label}</SelectItem>)}</SelectContent></Select></div> : null}
+        <Button variant="secondary" size="compact" type="button" loading={copying} leadingIcon={glyph(Monitor01)} onClick={() => void copy(machine)}>Copy through {machine.label}</Button>
+      </div>}
+    {failure ? <div role="alert" className="flex flex-col gap-1 text-caption">
+      <span className="text-destructive">Copying through {failure.label} failed: {failure.message}</span>
+      <span className="text-muted-foreground">{alternative}</span>
+    </div> : null}
+  </div>;
+}
+
 /**
- * The project page's card while its agent cannot read its repository and no machine bridges it: it offers both ways in,
- * installing the account's App or attaching a machine that can read the repository, and tracks an App install.
- * `onInstall` resolves to the App's install page with the repository's owner chosen; `onAttachMachine` opens the
+ * The project page's card while its agent cannot read its repository and no machine bridges it. For a private GitHub
+ * repository it offers both ways in, installing the account's App or a machine that can read the repository, and tracks
+ * an App install; the machine copies the repository in while the cloud's import was refused (`awaitsCopy`), and is
+ * attached to bridge an existing cloud copy otherwise. Any other repository whose import was refused offers the copy
+ * only. `onInstall` resolves to the App's install page with the repository's owner chosen; `onAttachMachine` opens the
  * project's Environment.
  */
-export function RepositoryAccessCard({ access, onInstall, onOpenSettings, onAttachMachine }: { access: BlockedProjectAccess; onInstall(): Promise<string>; onOpenSettings(): void; onAttachMachine(): void }): ReactElement {
+export function RepositoryAccessCard({ access, copy, onInstall, onOpenSettings, onAttachMachine }: { access: BlockedProjectAccess; copy: MachineCopyProps; onInstall(): Promise<string>; onOpenSettings(): void; onAttachMachine(): void }): ReactElement {
+  return access.state === 'awaits-copy'
+    ? <OriginCopyCard origin={access.origin} copy={copy} />
+    : <GitHubAccessCard access={access} copy={copy} onInstall={onInstall} onOpenSettings={onOpenSettings} onAttachMachine={onAttachMachine} />;
+}
+
+/** A repository the cloud reads but could not import (private outside GitHub, or larger than the import limit). */
+function OriginCopyCard({ origin, copy }: { origin: string; copy: MachineCopyProps }): ReactElement {
+  const shape = useShape();
+  return <section aria-label="Repository access" className={`flex w-full max-w-[560px] flex-col gap-4 border border-border bg-card p-5 ${shape.container}`}>
+    <div className="flex items-start justify-between gap-3">
+      <span className="min-w-0 font-mono text-caption text-muted-foreground [overflow-wrap:anywhere]">{origin}</span>
+      <Badge variant="dot" size="compact" color="gray">Not copied yet</Badge>
+    </div>
+    <div className="flex flex-col gap-1.5">
+      <h2 className="text-subtitle font-semibold text-foreground">Copy this repository in through one of your machines</h2>
+      <p className="text-body text-muted-foreground">GitSpace couldn't import it itself: it is private outside GitHub, or larger than Cloudflare Artifacts' 40 MB import limit. This project's agent and workspaces start once it is copied in.</p>
+    </div>
+    <MachineCopy target={origin} lead="Copy through a machine" alternative="Choose another machine that can read it." {...copy} />
+  </section>;
+}
+
+function GitHubAccessCard({ access, copy, onInstall, onOpenSettings, onAttachMachine }: { access: GitHubBlockedAccess; copy: MachineCopyProps; onInstall(): Promise<string>; onOpenSettings(): void; onAttachMachine(): void }): ReactElement {
   const shape = useShape();
   const { installing, error, install } = useInstall(onInstall);
   const { repository, organization, appName } = access;
@@ -135,6 +201,10 @@ export function RepositoryAccessCard({ access, onInstall, onOpenSettings, onAtta
   const badge = access.state === 'needs-app' ? <Badge variant="dot" size="compact" color="gray">Not connected</Badge>
     : access.state === 'requested' ? <Badge variant="dot" size="compact" color="amber">Waiting on {organization}</Badge>
       : <Badge variant="dot" size="compact" color="amber">Repository not allowed</Badge>;
+  const alternative = access.state === 'needs-app' && access.appName === null ? 'Choose another machine that can read it, or create your GitHub App in Settings → GitHub and install it on its owner.'
+    : access.state === 'needs-app' ? `Choose another machine that can read it, or install ${access.appName} on ${organization} instead.`
+      : access.state === 'requested' ? `Choose another machine that can read it, or wait for an owner of ${organization} to approve ${access.appName}.`
+        : `Choose another machine that can read it, or have an owner of ${organization} add ${name} to ${access.appName}.`;
   return <section aria-label="Repository access" className={`flex w-full max-w-[560px] flex-col gap-4 border border-border bg-card p-5 ${shape.container}`}>
     <div className="flex items-start justify-between gap-3">
       <span className="flex items-center gap-2 text-caption text-muted-foreground"><Lock01 width={14} height={14} strokeWidth={1.5} /><span className="font-mono">{repository}</span> · private</span>
@@ -142,13 +212,13 @@ export function RepositoryAccessCard({ access, onInstall, onOpenSettings, onAtta
     </div>
     {access.state === 'needs-app' && access.appName === null ? <>
       <div className="flex flex-col gap-1.5">
-        <h2 className="text-subtitle font-semibold text-foreground">Create your GitHub App first, or attach a machine</h2>
-        <p className="text-body text-muted-foreground">This repository is private, and this account has no GitHub App yet. Create it in Settings → GitHub, then install it on {organization} from here, or attach one of your machines that can read the repository.</p>
+        <h2 className="text-subtitle font-semibold text-foreground">Create your GitHub App first, or use one of your machines</h2>
+        <p className="text-body text-muted-foreground">This repository is private, and this account has no GitHub App yet. Create it in Settings → GitHub, then install it on {organization} from here, or use one of your machines that can read the repository.</p>
       </div>
       <div className="flex flex-wrap gap-2"><Button variant="primary" size="compact" type="button" onClick={onOpenSettings}>Open Settings → GitHub</Button></div>
     </> : access.state === 'needs-app' ? <>
       <div className="flex flex-col gap-1.5">
-        <h2 className="text-subtitle font-semibold text-foreground">Install your GitHub App on {organization}, or attach a machine</h2>
+        <h2 className="text-subtitle font-semibold text-foreground">Install your GitHub App on {organization}, or use one of your machines</h2>
         <p className="text-body text-muted-foreground">This repository is private, and your GitHub App, <span className="text-foreground">{appName}</span>, isn't installed on {organization}. This project's agent and workspaces start once GitSpace can read it, through the App or through one of your machines.</p>
       </div>
       <p className="text-caption text-muted-foreground">If you're not an owner of {organization}, GitHub sends your install to its owners as a request, and this page tracks it.</p>
@@ -185,7 +255,9 @@ export function RepositoryAccessCard({ access, onInstall, onOpenSettings, onAtta
         <CopyStepsButton variant="secondary" label="Copy steps for an owner" text={[`To let ${access.appName} read ${repository}:`, `1. Open ${githubInstallationUrl(access.installation)}`, `2. Under Repository access, add ${name} (or choose All repositories), then Save.`].join('\n')} />
       </div>
     </>}
-    <MachineWayIn repository={repository} onAttachMachine={onAttachMachine} />
+    {access.awaitsCopy
+      ? <MachineCopy target={repository} lead="Or copy it in through one of your machines" alternative={alternative} {...copy} />
+      : <MachineWayIn repository={repository} onAttachMachine={onAttachMachine} />}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
   </section>;
 }
@@ -194,7 +266,7 @@ export function RepositoryAccessCard({ access, onInstall, onOpenSettings, onAtta
  * The project page's strip while a machine bridges its private repository to GitHub in place of the App: which machine
  * syncs (or that sync is paused while it is offline), and what the App would add, with the next step towards it.
  */
-export function RepositoryBridgeBanner({ access, bridge, onInstall, onOpenSettings }: { access: BlockedProjectAccess; bridge: GitHubProjectBridge; onInstall(): Promise<string>; onOpenSettings(): void }): ReactElement {
+export function RepositoryBridgeBanner({ access, bridge, onInstall, onOpenSettings }: { access: GitHubBlockedAccess; bridge: GitHubProjectBridge; onInstall(): Promise<string>; onOpenSettings(): void }): ReactElement {
   const shape = useShape();
   const { installing, error, install } = useInstall(onInstall);
   const { repository, organization } = access;

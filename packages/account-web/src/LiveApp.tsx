@@ -25,7 +25,7 @@ import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
 import type { InspectorDrive } from './inspector/DriveSurface.js';
-import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
+import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, AUTOMATIONS_RUN_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
@@ -923,7 +923,8 @@ function GitSpaceProduct() {
         : action.kind === 'uninstall' ? await rpcClient.github.installation.uninstall({ installationId: action.installationId })
           : action.kind === 'dismiss-uninstalled' ? await rpcClient.github.uninstalled.dismiss({ installationId: action.installationId })
             : action.kind === 'record-request' ? await rpcClient.github.request.record(action.projectId === null ? {} : { projectId: action.projectId })
-              : await rpcClient.github.removed.clear({});
+              : action.kind === 'set-login' ? await rpcClient.github.person.set({ login: action.login })
+                : await rpcClient.github.removed.clear({});
     if (result.status === 'error') throw result.error;
     await githubQuery.refetch();
   };
@@ -1458,8 +1459,10 @@ function AccountAutomations() {
     // Automations read a workspace with no phase as in Plan.
     workspaces: (account.directory[project.id]?.workspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.name, active: !workspace.closedAt, phase: workspace.definition?.phase ?? 'plan' })),
   }));
-  return <AutomationsPage projects={projects} projectId={location.searchParams.get(AUTOMATIONS_PROJECT_PARAM)}
+  const chosenProject = location.searchParams.get(AUTOMATIONS_PROJECT_PARAM);
+  return <AutomationsPage projects={projects} projectId={chosenProject} runId={location.searchParams.get(AUTOMATIONS_RUN_PARAM)}
     onSelectProject={(projectId) => navigateProductUrl(automationsUrl(projectId))}
+    onCloseRun={() => navigateProductUrl(automationsUrl(chosenProject), 'replace')}
     onOpenWorkspace={(projectId, workspaceId) => selectInspection(projectId, workspaceId === projectId ? null : workspaceId)} />;
 }
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { gitspaceContract, terminalStreamResource } from '@gitspace/protocol/rpc-contract';
@@ -7,6 +7,13 @@ import { createBrowserClient, fetchTransport } from 'result-rpc/client';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 import { createGitSpaceRpcHandler } from '../src/rpc-router.js';
+import { copyProjectThroughMachine } from '../src/project-lifecycle.js';
+
+function git(cwd: string, ...args: string[]): string {
+  const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...Bun.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout.toString().trim();
+}
 
 // Cloud authorities own repository, lifecycle, Inspector, and session regressions.
 // This router only owns explicitly addressed machine tools.
@@ -25,6 +32,45 @@ test('refuses a launch addressed to another machine before running the builder',
   expect(builds).toBe(1);
   expect(await client.settings.get({})).toMatchObject({ status: 'error' });
   expect(builds).toBe(1);
+});
+
+test('copies a project base branch from its origin into the project repository, only on the machine it was sent to', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gitspace-project-copy-'));
+  try {
+    const origin = join(root, 'origin');
+    git(root, 'init', '-q', '-b', 'trunk', origin);
+    writeFileSync(join(origin, 'README.md'), 'widgets\n');
+    git(origin, 'add', '.');
+    git(origin, 'commit', '-qm', 'first');
+    const head = git(origin, 'rev-parse', 'HEAD');
+    const blank = join(root, 'blank');
+    git(root, 'init', '-q', '--bare', blank);
+    // The account's origins, and the local repositories this machine's git identity reaches them as.
+    const origins: Record<string, string> = { widgets: 'https://github.com/acme-labs/widgets.git', blank: 'https://github.com/acme-labs/blank.git' };
+    const reached: Record<string, string> = { 'https://github.com/acme-labs/widgets.git': origin, 'https://github.com/acme-labs/blank.git': blank };
+    const published: Array<{ repository: string; ref: string; commit: string }> = [];
+    const rpc = createGitSpaceRpcHandler({
+      machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {} }),
+      projects: {
+        seed: projectId => copyProjectThroughMachine({
+          project: async id => ({ repositoryReference: origins[id] ?? null, baseBranch: 'HEAD' }),
+          scratchRoot: root,
+          gitEnvironment: url => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${reached[url]}.insteadOf`, GIT_CONFIG_VALUE_0: url }),
+          projectRepository: { async publishRef(input) { published.push({ repository: input.binding.repository, ref: input.ref, commit: input.commit }); } },
+        }, projectId),
+      },
+    });
+    const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
+      url: 'https://machine.test/rpc', fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => rpc.handler(new Request(input, init)), { preconnect: fetch.preconnect }),
+    }) });
+    expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-b' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
+    expect(published).toEqual([]);
+    expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-a' })).toEqual({ status: 'ok', value: { baseBranch: 'trunk', commit: head } });
+    expect(published).toEqual([{ repository: 'project-widgets', ref: 'refs/heads/trunk', commit: head }]);
+    // A repository with nothing in it has nothing to copy, and says so.
+    expect(await client.project.seed({ projectId: 'blank', machineId: 'machine-a' })).toMatchObject({ status: 'error', error: { data: { message: 'https://github.com/acme-labs/blank.git has no commits for GitSpace to copy yet: push a first commit to it, then copy again' } } });
+    expect(published).toHaveLength(1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('runs a shell in an explicit ready cache without a held workspace and fences other machines', async () => {

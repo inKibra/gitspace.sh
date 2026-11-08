@@ -495,15 +495,16 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   }
   const named = items.filter((item) => accountRpcAuthority(item.path) === 'machine');
   if (named.length > 0) {
-    // A release builds on the machine the caller chose; it never follows a placement holder or an arbitrary online machine.
-    if (named.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Launch operations require a separate signed batch');
+    // A release builds, and a project's repository is copied in, on the machine the caller chose; neither follows a
+    // placement holder or an arbitrary online machine.
+    if (named.length !== items.length) return reject(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Machine operations require a separate signed batch');
     const targets = items.map((item) => rpcCallTarget(item.path, item.input));
     const target = targets[0];
-    if (target?.kind !== 'machine') return reject(400, 'LAUNCH_MACHINE_REQUIRED', 'A launch must name the machine that builds the release');
-    if (targets.some((other) => other?.kind !== 'machine' || other.machineId !== target.machineId)) return reject(400, 'RPC_MIXED_MACHINE_BATCH', 'Launches on different machines require separate signed batches');
+    if (target?.kind !== 'machine') return reject(400, 'LAUNCH_MACHINE_REQUIRED', 'A launch or a project copy must name the machine that runs it');
+    if (targets.some((other) => other?.kind !== 'machine' || other.machineId !== target.machineId)) return reject(400, 'RPC_MIXED_MACHINE_BATCH', 'Operations on different machines require separate signed batches');
     const machine = await env.FLEET_CATALOG.getByName(userId).getMachine(target.machineId);
     if (!machine || machine.desiredState === 'removed') return reject(409, 'LAUNCH_MACHINE_NOT_ENROLLED', `Machine ${target.machineId} is not enrolled in this account`);
-    if (machine.state !== 'online' || machine.desiredState !== 'online' || !machine.rpcEndpoint) return reject(503, 'LAUNCH_MACHINE_OFFLINE', `Machine ${target.machineId} is not online; start it or choose another machine to build the release`);
+    if (machine.state !== 'online' || machine.desiredState !== 'online' || !machine.rpcEndpoint) return reject(503, 'LAUNCH_MACHINE_OFFLINE', `Machine ${machine.label || target.machineId} is not online; start it or choose another machine`);
     return { kind: 'machine', procedures, machine };
   }
   // A CPU-limit kill leaves no later log line; joining this line by request ID names the batch.

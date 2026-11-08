@@ -334,7 +334,8 @@ describe('GitHub App', () => {
       id: 'darktop', label: 'Darktop', state: 'online', rpcEndpoint: '/tunnel/darktop/rpc', kind: 'physical', provider: 'physical',
       notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
     });
-    const needsApp = { state: 'needs-app', repository: 'octo-labs/private-app', organization: 'octo-labs', appName: null };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(false);
+    const needsApp = { state: 'needs-app', repository: 'octo-labs/private-app', organization: 'octo-labs', appName: null, awaitsCopy: false };
     expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: null });
 
     const base = RuntimeIdentitySchema.parse({ projectId: app.id, workspaceId: app.id });
@@ -352,15 +353,28 @@ describe('GitHub App', () => {
     expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: null });
   });
 
+  it('says when a refused import left the project repository waiting for a machine to copy it in', async () => {
+    const awaits = vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(true);
+    const app = await project('Acme Widgets', 'https://github.com/acme-labs/widgets.git');
+    network.use(http.get('https://github.com/acme-labs/widgets.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })));
+    expect(await github().projectAccess(app.id)).toEqual({ state: 'needs-app', repository: 'acme-labs/widgets', organization: 'acme-labs', appName: null, bridge: null, awaitsCopy: true });
+    // An origin GitSpace reads without the App whose import was still refused (outside GitHub here) waits for the copy too.
+    const assets = await project('Acme Assets', 'https://git.example.org/acme/assets.git');
+    expect(await github().projectAccess(assets.id)).toEqual({ state: 'awaits-copy', origin: 'https://git.example.org/acme/assets.git' });
+    awaits.mockResolvedValue(false);
+    expect(await github().projectAccess(assets.id)).toEqual({ state: 'ready' });
+  });
+
   it("keeps an installation that answers a project's request for its organization, and one the App's owner made", async () => {
     const key = await rsaKey('pkcs1');
     await createApp(key);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(false);
     const portal = await project('Landscaping Portal', 'https://github.com/BrandByX/payne-portals.git');
     network.use(
       http.get(`${API}/users/BrandByX`, () => HttpResponse.json({ id: 160976157, login: 'BrandByX' })),
       http.get('https://github.com/BrandByX/payne-portals.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })),
     );
-    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test', bridge: null });
+    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test', bridge: null, awaitsCopy: false });
 
     // Started from the project, GitHub opens with the repository's owner chosen, and the request names it.
     for (let attempt = 0; attempt < 2; attempt++) {

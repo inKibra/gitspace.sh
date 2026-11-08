@@ -866,7 +866,9 @@ export const RuntimeWorkspaceLinkArgumentsSchema = z.discriminatedUnion('method'
   z.object({ method: z.literal('unlink'), subject: AutomationSubjectRefSchema }).strict(),
 ]);
 export const RuntimeWorkspaceArgumentsSchema = z.union([
-  z.object({ method: z.enum(['get', 'current', 'list', 'operations', 'status']), workspaceId: z.string().min(1).optional() }).strict(),
+  z.object({ method: z.enum(['get', 'current', 'list', 'operations', 'board']), workspaceId: z.string().min(1).optional() }).strict(),
+  /** One workspace's stored report; `list` and `board` carry every workspace's status in one read. */
+  z.object({ method: z.literal('status'), workspaceId: z.string().min(1) }).strict(),
   RuntimeWorkspaceProgressArgumentsSchema,
   RuntimeWorkspaceQuestionsArgumentsSchema,
   RuntimeWorkspaceStartArgumentsSchema,

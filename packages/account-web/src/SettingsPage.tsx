@@ -6,7 +6,7 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import type { ApiClientDraft } from './device.js';
 import type { McpAccessView } from '@gitspace/protocol/mcp-access';
-import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubInstallRequestView, GitHubState } from '@gitspace/protocol/github';
+import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubInstallRequestView, GitHubPerson, GitHubState } from '@gitspace/protocol/github';
 import { GITHUB_REMOVED_KEPT, GitHubLoginSchema } from '@gitspace/protocol/github';
 import { CopyStepsButton, OwnerSteps, githubInstallationUrl, githubInstallationsUrl, githubTime, ownerStepsText, rememberGitHubInstall, takeGitHubInstall } from './GitHubAccess.js';
 import { formatRelativeTime } from './relative-time.js';
@@ -1053,7 +1053,7 @@ function GitHubAppSummary({ app, onStartGitHubInstall, onRotateGitHubKey }: { ap
     <GitHubKeyDialog open={rotating} onOpenChange={setRotating} app={app} onRotate={onRotateGitHubKey} onRotated={() => setRotated(true)} />
   </section>;
 }
-/** What changes an installation or request; the page's state arrives again afterwards. */
+/** What changes an installation, a request or the person's GitHub login; the page's state arrives again afterwards. */
 export type GitHubAction =
   | { kind: 'cancel-request'; requestId: string }
   | { kind: 'confirm'; installationId: number }
@@ -1061,7 +1061,39 @@ export type GitHubAction =
   | { kind: 'dismiss-uninstalled'; installationId: number }
   | { kind: 'clear-removed' }
   /** A request this browser made on GitHub that came back without GitSpace's state; `projectId` when it started there. */
-  | { kind: 'record-request'; projectId: string | null };
+  | { kind: 'record-request'; projectId: string | null }
+  /** The person's own GitHub login; null forgets the saved one. */
+  | { kind: 'set-login'; login: string | null };
+/** The person's own GitHub login. Workspace agents post on GitHub as the person, so automations deliver nothing it
+ * posts; without a saved login, a user-owned App's owner stands in. */
+function GitHubPersonLogin({ person, onGitHubAction }: { person: GitHubPerson } & Pick<SettingsPageProps, 'onGitHubAction'>) {
+  const [login, setLogin] = useState(person.login ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setLogin(person.login ?? ''), [person.login]);
+  const trimmed = login.trim();
+  const invalid = trimmed !== '' && !GitHubLoginSchema.safeParse(trimmed).success;
+  const unchanged = person.source !== 'app-owner' && trimmed === (person.login ?? '');
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try { await onGitHubAction({ kind: 'set-login', login: trimmed === '' ? null : trimmed }); }
+    catch (cause) { setError(rpcErrorMessage(cause, 'Save GitHub login')); }
+    finally { setSaving(false); }
+  };
+  return <section className="flex flex-col gap-2" aria-label="Your GitHub login">
+    <SettingRows>
+      <SettingRow title="Your GitHub login" description={<>Workspace agents post on GitHub as you, so automations never deliver what this login posts.{person.source === 'app-owner' ? <> This one is from your GitHub App&apos;s owner.</> : null}</>}>
+        <span className="flex flex-wrap items-center gap-2">
+          <TextField label="Your GitHub login" value={login} placeholder="your-login" autoComplete="off" onChange={(value) => { setLogin(value); setError(null); }} />
+          <Button variant="secondary" size="compact" loading={saving} disabled={saving || invalid || unchanged} onClick={() => void save()}>Save</Button>
+        </span>
+      </SettingRow>
+    </SettingRows>
+    {invalid ? <p role="alert" className="text-caption text-destructive">A GitHub login has letters, digits and hyphens, at most 39, and starts with a letter or digit.</p> : null}
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+  </section>;
+}
 const GITHUB_TILES = new Map<string, IconComponent>();
 /** An account's tile: its initial, one component per letter so rows keep their icons across renders. */
 function githubTile(login: string | null): IconComponent {
@@ -1126,7 +1158,7 @@ export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall,
   };
   const banner = callback ? <p role={callback.error ? 'alert' : 'status'} className={`${shape.container} bg-surface-2 px-3 py-2 text-body shadow-surface-1 ${callback.error ? 'text-destructive' : 'text-foreground'}`}>{callback.text}</p> : null;
   if (!github) return <>{banner}<Group title="GitHub App"><EmptyState icon={icon(GitPullRequest, 20)} title="Loading GitHub…" description="Asking GitSpace Cloud for your GitHub App." /></Group></>;
-  if (!github.app) return <>{banner}<GitHubAppCreate onStartGitHubApp={onStartGitHubApp} /></>;
+  if (!github.app) return <>{banner}<GitHubAppCreate onStartGitHubApp={onStartGitHubApp} /><GitHubPersonLogin person={github.person} onGitHubAction={onGitHubAction} /></>;
   const app = github.app;
   let index = 0;
   const rows = [
@@ -1185,6 +1217,7 @@ export function GitHubSettings({ github, onStartGitHubApp, onStartGitHubInstall,
   return <>
     {banner}
     <GitHubAppSummary app={app} onStartGitHubInstall={onStartGitHubInstall} onRotateGitHubKey={onRotateGitHubKey} />
+    <GitHubPersonLogin person={github.person} onGitHubAction={onGitHubAction} />
     <Group title="Organizations">
       {rows.length ? <SettingRows>{rows}</SettingRows> : <EmptyState icon={icon(GitPullRequest, 20)} title="Not installed yet" description="Install the App on GitHub and choose its repositories. GitSpace projects whose remote is one of them link automatically." />}
       {github.removed[0]

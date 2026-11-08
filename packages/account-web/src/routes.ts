@@ -34,6 +34,8 @@ const ROUTE_BY_PATH: Record<string, ProductRoute> = Object.fromEntries(Object.en
 
 /** The project chosen on the Automations page; absent, it shows every project. */
 export const AUTOMATIONS_PROJECT_PARAM = 'for';
+/** The run whose detail the Automations page opens. */
+export const AUTOMATIONS_RUN_PARAM = 'run';
 
 export function productRouteFromLocation(location: Pick<Location, 'pathname' | 'search'>): ProductRoute {
   const pathname = location.pathname.length > 1 ? location.pathname.replace(/\/+$/, '') : location.pathname;
@@ -51,7 +53,7 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   if (route !== 'settings') url.searchParams.delete('mode');
   if (route !== 'inference') url.searchParams.delete('profile');
   if (route !== 'plugins') { url.searchParams.delete('tab'); url.searchParams.delete('pair'); url.searchParams.delete('manage'); }
-  if (route !== 'automations') url.searchParams.delete(AUTOMATIONS_PROJECT_PARAM);
+  if (route !== 'automations') { url.searchParams.delete(AUTOMATIONS_PROJECT_PARAM); url.searchParams.delete(AUTOMATIONS_RUN_PARAM); }
   if (isGlobalView(route)) {
     url.searchParams.delete('project');
     url.searchParams.delete('workspace');
@@ -68,11 +70,13 @@ export function browserPluginsUrl(pairFor?: string): URL {
   return url;
 }
 
-/** Automations with `projectId` chosen in its header, or every project when null. */
-export function automationsUrl(projectId: string | null): URL {
+/** Automations with `projectId` chosen in its header, or every project when null; `runId` opens that run's detail. */
+export function automationsUrl(projectId: string | null, runId: string | null = null): URL {
   const url = setProductRoute(new URL(window.location.href), 'automations');
   if (projectId) url.searchParams.set(AUTOMATIONS_PROJECT_PARAM, projectId);
   else url.searchParams.delete(AUTOMATIONS_PROJECT_PARAM);
+  if (runId) url.searchParams.set(AUTOMATIONS_RUN_PARAM, runId);
+  else url.searchParams.delete(AUTOMATIONS_RUN_PARAM);
   return url;
 }
 

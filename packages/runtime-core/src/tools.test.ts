@@ -469,7 +469,9 @@ test('a rejected tool call names only the problems of the method it asked for, o
   expect(create).not.toMatch(/"get"|workspaceId|instruction/);
   expect(reject({ method: 'launch' })).toMatch(/method: unknown value, expected one of .*status, progress, questions, answer, start, create, open/);
   expect(reject({ name: 'x' })).toMatch(/method: required, one of .*start, create, open, restore, setRelations, links, link, unlink$/);
-  expect(parseToolArguments('space_workspace', RuntimeWorkspaceArgumentsSchema, { method: 'status' })).toEqual({ method: 'status' });
+  expect(parseToolArguments('space_workspace', RuntimeWorkspaceArgumentsSchema, { method: 'board' })).toEqual({ method: 'board' });
+  // Every workspace's status comes from list or board in one read; status reads one workspace's report.
+  expect(reject({ method: 'status' })).toMatch(/workspaceId/);
 });
 
 /** `count` numbered lines of 30 bytes each. */

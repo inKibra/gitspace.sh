@@ -54,7 +54,7 @@ const environment: WorkspaceEnvironmentView = {
   bundleJson: JSON.stringify({ version: 1, defaultProfile: 'base', profiles: { base: { checks: [], secrets: [], values: [] } }, checks: {}, values: {}, browser: { origins: [] } }),
   selectedProfile: 'base', effective: { name: 'base', checks: [], secrets: [], values: [], notes: [] },
   configuredSecrets: [], secretMetadata: [], values: { global: {}, project: {}, workspace: {}, effective: {} },
-  executions: [], runs: [], lifecycle: emptyLifecycleState('project', 'workspace'),
+  executions: [], browserSites: [], runs: [], lifecycle: emptyLifecycleState('project', 'workspace'),
 };
 const scope = (possessedBy: string, generation: number): WorkspaceView => ({
   kind: 'workspace', id: 'workspace', projectId: 'project', projectName: 'Project', name: 'Work', branch: 'work', phase: 'code',

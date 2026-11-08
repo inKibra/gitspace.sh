@@ -91,27 +91,30 @@ describe('workspace environment', () => {
     });
   });
 
-  it('inherits base approvals only where the committed workspace declares the origin', async () => {
+  it('a person approves a site for the project from any workspace; it takes effect, at its level, only where the committed bundle lists it', async () => {
     const p = await project();
     const shared = { pattern: 'example.com', hash: await browserOriginHash('example.com') };
     const branch = { pattern: 'branch.example.com', hash: await browserOriginHash('branch.example.com') };
     await p.setOrigins('project', [shared]);
     await p.setOrigins('workspace', [shared, branch]);
+    await p.setOrigins('other', [shared]);
     await p.mutate('project', { op: 'approval', scope: 'project', executionHash: shared.hash, approved: true }, human);
     expect(approvedBrowserOrigins(await p.get('workspace'))).toEqual(['example.com']);
-    await expect(p.mutate('workspace', { op: 'approval', scope: 'project', executionHash: branch.hash, approved: true }, human)).rejects.toThrow();
-    await p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: branch.hash, approved: true }, human);
-    expect(approvedBrowserOrigins(await p.get('workspace'))).toEqual(['example.com', 'branch.example.com']);
+    // An agent never approves, at either scope.
+    await expect(p.mutate('workspace', { op: 'approval', scope: 'project', executionHash: branch.hash, approved: true })).rejects.toThrow();
+    await expect(p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: branch.hash, approved: true })).rejects.toThrow();
+    await p.mutate('workspace', { op: 'approval', scope: 'project', executionHash: branch.hash, approved: true, level: 'read' }, human);
+    expect(approvedBrowserSites(await p.get('workspace'))).toEqual([{ pattern: 'example.com', level: 'full' }, { pattern: 'branch.example.com', level: 'read' }]);
+    // Neither the base nor a workspace whose committed bundle lacks the site gets it.
+    expect(approvedBrowserOrigins(await p.get('project'))).toEqual(['example.com']);
+    expect(approvedBrowserOrigins(await p.get('other'))).toEqual(['example.com']);
     await p.setOrigins('future', [shared, branch]);
-    expect(approvedBrowserOrigins(await p.get('future'))).toEqual(['example.com']);
+    expect(approvedBrowserSites(await p.get('future'))).toEqual([{ pattern: 'example.com', level: 'full' }, { pattern: 'branch.example.com', level: 'read' }]);
     await p.setOrigins('workspace', [branch]);
     expect(approvedBrowserOrigins(await p.get('workspace'))).toEqual(['branch.example.com']);
     expect((await p.get('workspace')).approvals.some(entry => entry.executionHash === hash)).toBe(true);
     await p.setOrigins('workspace', [shared, branch]);
     expect(approvedBrowserOrigins(await p.get('workspace'))).toEqual(['example.com', 'branch.example.com']);
-    await p.setOrigins('project', [shared, branch]);
-    await p.mutate('project', { op: 'approval', scope: 'project', executionHash: branch.hash, approved: true }, human);
-    expect(approvedBrowserOrigins(await p.get('future'))).toEqual(['example.com', 'branch.example.com']);
     await p.mutate('project', { op: 'approval', scope: 'project', executionHash: shared.hash, approved: false }, human);
     expect(approvedBrowserOrigins(await p.get('future'))).toEqual(['branch.example.com']);
   });

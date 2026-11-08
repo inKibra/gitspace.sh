@@ -19,7 +19,8 @@ function artifactsError(code: string, numericCode: number, message: string) {
 
 /** An Artifacts namespace whose repositories resolve only the refs listed in `refs` ('HEAD' is the default branch). */
 function namespace(options: { repositories?: string[]; refs?: string[]; importError?: Error; createError?: Error } = {}) {
-  const repositories = new Set(options.repositories);
+  /** Each repository's description, as `create` set it. */
+  const repositories = new Map<string, string | null>((options.repositories ?? []).map(name => [name, null]));
   const refs = new Set(options.refs);
   const calls: string[] = [];
   const created = { ...info, token: 'initial-token', tokenExpiresAt: '' };
@@ -32,34 +33,47 @@ function namespace(options: { repositories?: string[]; refs?: string[]; importEr
     log: async query => refs.has(query?.ref ?? 'HEAD') ? [commit] : [],
   };
   const binding: Artifacts = {
-    list: async () => ({ repos: [...repositories].map(name => ({ ...info, name })), total: repositories.size }),
+    list: async () => ({ repos: [...repositories].map(([name, description]) => ({ ...info, name, description })), total: repositories.size }),
     get: async () => repo,
     import: async ({ target }) => {
       calls.push(`import ${target.name}`);
       if (options.importError) throw options.importError;
-      repositories.add(target.name);
+      repositories.set(target.name, null);
       return created;
     },
     create: async (name, opts) => {
       calls.push(`create ${name} ${JSON.stringify(opts)}`);
       if (options.createError) throw options.createError;
-      repositories.add(name);
+      repositories.set(name, opts?.description ?? null);
       return created;
     },
     delete: unsupported,
   };
-  return { code: new ArtifactsCodeStore(binding), calls, refs };
+  return { code: new ArtifactsCodeStore(binding), calls, refs, repositories };
 }
 
 describe('project import classification', () => {
   it.each([
     ['REMOTE_AUTH_REQUIRED', 10106, 'private'],
     ['MEMORY_LIMIT', 10402, 'too-large'],
-  ])('asks for a machine import when Artifacts refuses with %s', async (code, numericCode, reason) => {
+  ])('leaves an empty copy target for a machine when Artifacts refuses with %s', async (code, numericCode, reason) => {
     const artifacts = namespace({ importError: artifactsError(code, numericCode, 'Repository at "https://github.com/example/repository.git" was refused.') });
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(false);
     const imported = artifacts.code.importProject(projectId, origin, null);
     await expect(imported).rejects.toBeInstanceOf(ProjectImportRequiresMachineError);
     await expect(imported).rejects.toMatchObject({ _tag: 'ProjectImportRequiresMachineError', reason });
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(true);
+    await expect(artifacts.code.importProject(projectId, origin, null)).rejects.toMatchObject({ reason: 'pending' });
+    // A machine published the base branch: the import completes from the copy, and nothing waits any more.
+    artifacts.refs.add('main');
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(false);
+    await expect(artifacts.code.importProject(projectId, origin, null)).resolves.toEqual(info);
+  });
+
+  it('does not take an interrupted authenticated import for a machine copy target', async () => {
+    const artifacts = namespace();
+    artifacts.repositories.set('project-imported', 'GitSpace authenticated import of project imported (main)');
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(false);
   });
 
   it('propagates other import failures unchanged', async () => {

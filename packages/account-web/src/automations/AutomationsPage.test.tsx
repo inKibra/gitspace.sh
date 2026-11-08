@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { AUTOMATION_DEFAULT_SETTINGS, automationErrors, parseAutomationSchedule, type AutomationException, type AutomationLinkView, type AutomationRecordedEvent, type AutomationRunView, type AutomationSettings, type AutomationView } from '@gitspace/protocol/automations-contract';
 import { AutomationsPage, type AutomationWorkspace } from './AutomationsPage.js';
 
-const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), update: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn(), setException: vi.fn() }));
+const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), update: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn(), setException: vi.fn(), retryRun: vi.fn() }));
 const queries = vi.hoisted(() => new Map<string, unknown>());
 vi.mock('../rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', exceptions: { list: 'exceptions', set: rpc.setException }, ...rpc } } }));
 vi.mock('result-rpc/react', async () => ({
@@ -74,9 +74,9 @@ afterEach(async () => {
   else Reflect.deleteProperty(Element.prototype, 'getAnimations');
 });
 
-async function renderProject(automations: readonly AutomationView[], { links = [], settings = AUTOMATION_DEFAULT_SETTINGS, modelRoles = ['default', 'deep', 'fast', 'taste'] }: { links?: readonly AutomationLinkView[]; settings?: AutomationSettings; modelRoles?: readonly string[] } = {}): Promise<void> {
+async function renderProject(automations: readonly AutomationView[], { links = [], settings = AUTOMATION_DEFAULT_SETTINGS, modelRoles = ['default', 'deep', 'fast', 'taste'], runId = null }: { links?: readonly AutomationLinkView[]; settings?: AutomationSettings; modelRoles?: readonly string[]; runId?: string | null } = {}): Promise<void> {
   queries.set('list', { automations, settings, links, modelRoles, github });
-  await act(() => root.render(<AutomationsPage projects={[{ id: 'project', name: 'GitSpace', workspaces }]} projectId="project" onSelectProject={() => undefined} onOpenWorkspace={() => undefined} />));
+  await act(() => root.render(<AutomationsPage projects={[{ id: 'project', name: 'GitSpace', workspaces }]} projectId="project" runId={runId} onSelectProject={() => undefined} onCloseRun={() => undefined} onOpenWorkspace={() => undefined} />));
 }
 
 function button(label: string): HTMLButtonElement {
@@ -246,6 +246,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
     id: 'run-1144', projectId: 'project', automationId: 'review', automationName: 'Review pull requests', trigger: 'github', event: 'pull_request.opened',
     subject: { kind: 'pullRequest', number: 1144, branch: 'tone', title: 'Faster tone detection', url: 'https://github.com/inKibra/inkibra-core/pull/1144' },
     state: 'running', workspaceId: 'review-pr-1144', phase: 'review', skipReason: null, outcome: 'Started in Review and linked to PR #1144', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: null,
+    events: [{ at, event: 'pull_request.opened', label: 'PR #1144 · Faster tone detection opened', url: null, folded: false }],
   };
   rpc.runOnEvent.mockResolvedValue({ status: 'ok', value: run });
   await renderProject([review]);
@@ -368,7 +369,7 @@ it('records a workspace\'s exception when a cell leaves the automation\'s phases
 });
 
 it('shows the workspace\'s phase a run reached, and a skip its phase decided apart from other skips', async () => {
-  const run = { projectId: 'project', automationId: 'feedback', automationName: 'Review feedback', trigger: 'github', event: 'pull_request_review_comment.created', subject: null, timeline: [], scheduledFor: at, startedAt: null, finishedAt: at } satisfies Partial<AutomationRunView>;
+  const run = { projectId: 'project', automationId: 'feedback', automationName: 'Review feedback', trigger: 'github', event: 'pull_request_review_comment.created', subject: null, timeline: [], scheduledFor: at, startedAt: null, finishedAt: at, events: [] } satisfies Partial<AutomationRunView>;
   const trust = { label: '@bradleat has write access', passed: true };
   queries.set('runs', [
     { ...run, id: 'by-phase', state: 'skipped', workspaceId: 'ws-recovery', phase: 'code', skipReason: 'phase', outcome: 'Skipped: session-recovery is in Code; it runs in Review', checks: [trust, { label: 'session-recovery is in Code; it runs in Review', passed: false }] },
@@ -383,4 +384,27 @@ it('shows the workspace\'s phase a run reached, and a skip its phase decided apa
 
   await act(() => field('tr[data-run="by-phase"]').click());
   expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('session-recovery was in Code');
+});
+
+it('opens the run a link names with its batch of events, and runs an ended batch again as one new run', async () => {
+  const url = 'https://github.com/acme/widgets/pull/1434';
+  const batch: AutomationRunView = {
+    id: 'run-batch', projectId: 'project', automationId: 'feedback', automationName: 'Review feedback', trigger: 'github', event: 'pull_request_review_comment.created',
+    subject: { kind: 'pullRequest', number: 1434, branch: 'cart', title: 'Cart totals', url }, state: 'finished', workspaceId: 'ws-recovery', phase: 'code', skipReason: null,
+    outcome: 'Sent to session-recovery', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: at,
+    events: [
+      { at: new Date('2026-10-27T08:58:00Z'), event: 'pull_request_review_comment.created', label: 'Review comment from @dana on PR #1434 · Cart totals', url: `${url}#discussion_r1`, folded: false },
+      { at: new Date('2026-10-27T08:58:00Z'), event: 'pull_request_review.submitted', label: 'Review (commented) from @dana on PR #1434 · Cart totals', url: `${url}#pullrequestreview-2`, folded: true },
+    ],
+  };
+  queries.set('runs', [batch]);
+  rpc.retryRun.mockResolvedValue({ status: 'ok', value: { ...batch, id: 'run-again', state: 'queued', outcome: 'Waiting for a slot', finishedAt: null } });
+  await renderProject([linked], { runId: 'run-batch' });
+
+  const events = [...field('[role="dialog"] [aria-label="Events"]').querySelectorAll('li')].map(event => event.textContent);
+  expect(events).toEqual(['08:58:00Review comment from @dana on PR #1434 · Cart totalsGitHub', '08:58:00Review (commented) from @dana on PR #1434 · Cart totalsEmpty review, folded into its commentsGitHub']);
+  await act(async () => button('Run again').click());
+  expect(rpc.retryRun).toHaveBeenCalledExactlyOnceWith({ projectId: 'project', runId: 'run-batch' });
+  expect(field('[role="dialog"]').textContent).toContain('Waiting for a slot');
+  expect([...document.body.querySelectorAll('button')].some(element => element.textContent?.trim() === 'Run again')).toBe(false);
 });

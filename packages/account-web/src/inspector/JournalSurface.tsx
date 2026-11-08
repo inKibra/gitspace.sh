@@ -1,5 +1,6 @@
 import { Badge, Button, Card, CardDescription, CardGroup, CardHeader, CardImage, CardMedia, CardTitle, InputField, InputGroup, ScrollArea, Tooltip, type BadgeProps } from '@gitspace/ui';
 import type { ChangeGuideView, EvidenceReference, JournalEntryView } from '@gitspace/protocol';
+import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
 import { Check, File02, Image01, SearchMd } from '@untitledui/icons';
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { glyph } from '../glyph.js';
@@ -120,11 +121,11 @@ export function JournalSurface({ entries, guide, artifactContent, artifactLoad, 
             <time dateTime={entry.createdAt} className="ml-auto tabular-nums">{formatDate(entry.createdAt)}</time>
           </span>
           <span className={`text-body ${replaced ? 'text-muted-foreground line-through' : 'text-foreground'}`}>{entry.title}</span>
-          {entry.body ? <div className="min-w-0 text-body text-muted-foreground"><GitSpaceMarkdown>{entry.body}</GitSpaceMarkdown></div> : null}
+          {entry.body ? <div className="min-w-0 text-body text-muted-foreground"><GitSpaceMarkdown>{entry.body.replace(STAGED_CHOICE_DATA, '$1')}</GitSpaceMarkdown></div> : null}
           {entry.outcome ? <p className="text-body text-muted-foreground"><span className="font-medium text-foreground">Outcome · </span>{entry.outcome}</p> : null}
-          {entry.decisions.length ? <ul className="flex flex-col gap-1">{entry.decisions.map((decision, index) => <li className="flex items-start gap-1.5 text-body text-muted-foreground" key={index}><span className="mt-0.5 shrink-0 text-foreground">{ic(Check, 14)}</span>{decision}</li>)}</ul> : null}
+          {entry.decisions.length ? <ul className="flex flex-col gap-1">{entry.decisions.map((decision, index) => <li className="flex items-start gap-1.5 text-body text-muted-foreground" key={index}><span className="mt-0.5 shrink-0 text-foreground">{ic(Check, 14)}</span>{decision.replace(STAGED_CHOICE_DATA, '$1')}</li>)}</ul> : null}
           {entry.citations?.length ? <ul aria-label="Citations" className="flex flex-col gap-1.5">{entry.citations.map((citation, index) => <li key={`${citation.messageId}:${index}`} className="flex flex-col gap-0.5 rounded-md bg-surface-1 px-2.5 py-1.5">
-            <blockquote className="text-body text-foreground">“{citation.quote}”</blockquote>
+            <blockquote className="text-body text-foreground">“{citation.quote.replace(STAGED_CHOICE_DATA, '$1')}”</blockquote>
             <span className="text-caption text-muted-foreground">{citation.who} · <time dateTime={citation.at} className="tabular-nums">{formatDate(citation.at)}</time></span>
           </li>)}</ul> : null}
           {entry.supersedes ? <p className="text-caption text-muted-foreground">Replaces {superseded

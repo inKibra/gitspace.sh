@@ -36,6 +36,7 @@ import {
   approveAutomationContract,
   runAutomationNowContract,
   cancelAutomationRunContract,
+  retryAutomationRunContract,
   automationRunsContract,
   testAutomationContract,
   automationEventsContract,
@@ -452,6 +453,20 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'cancelAutomationRun', message: failure(error) }));
     }
   });
+  const retryAutomationRun = server.implement(retryAutomationRunContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId);
+      const outcome = await automations(input.projectId).retryRun({ ...input, requestedBy: await person() });
+      if (outcome.status === 'ok') return ok(outcome.value);
+      const refused = outcome.failure;
+      if (refused.kind === 'runNotFound') return err(errors.RunNotFound({ projectId: input.projectId, runId: refused.runId }));
+      if (refused.kind === 'notFound') return err(errors.AutomationNotFound({ projectId: input.projectId, automationId: refused.automationId }));
+      if (refused.kind === 'invalid') return err(errors.AutomationInvalid({ field: refused.field, message: refused.message }));
+      return err(errors.OperationFailed({ operation: 'retryAutomationRun', message: automationFailureMessage(refused) }));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'retryAutomationRun', message: failure(error) }));
+    }
+  });
   const automationRuns = server.implement(automationRunsContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId);
@@ -553,7 +568,7 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
-    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview, exceptions: { list: listAutomationExceptions, set: setAutomationException } },
+    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, retryRun: retryAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview, exceptions: { list: listAutomationExceptions, set: setAutomationException } },
     mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus, signIn }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

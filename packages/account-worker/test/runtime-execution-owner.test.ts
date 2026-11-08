@@ -11,6 +11,8 @@ import { createRuntimeServices } from '../src/runtime-services.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
 import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
+import { UI_BLOCK_SUMMARY, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
@@ -54,6 +56,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
       attachRequests.push(machineId);
       return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);
     }, documentMarkdown: async () => null });
+    const instructions = services.tools.instructions;
     services.tools.instructions = async () => 'Local codemode fixture instructions.';
     const models = createModels();
     const calls: ToolCall[] = [];
@@ -71,7 +74,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     const root = await runtime.harness.root(BACKGROUND_CONTEXT);
     const invoke = (tool: string, args: Parameters<typeof services.tools.invoke>[0]['args']) => services.tools.invoke({ tool, args, conversationId: String(root.id), taskId: 'proof', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), replay: 'unsafe', signal: AbortSignal.timeout(500) });
     const text = (result: RuntimeToolResult) => result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-    return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports, attachRequests };
+    return { runtime, services, root, invoke, text, identity, checkpoint, calls, reports, attachRequests, instructions };
 }
 
 test('the agent machines list names every account machine with its platform and this workspace\'s attachment; dispatch uses only live ones', async () => {
@@ -162,6 +165,41 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
       expect(text(denied)).toContain('subagent cannot use codemode');
     } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
+});
+
+test('workspace and project agents carry the gitspace-ui skill in full, a subagent its summary and pointer, and neither once the account turns the skill off', async () => {
+  const projectId = `ui-${crypto.randomUUID()}`, workspaceId = `ui-space-${crypto.randomUUID()}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Bakery', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  await authority.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Menu', branch: 'menu', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  const prompt = uiBlockPrompt();
+  // The workspace's agent, then the project agent (the project's base workspace).
+  for (const id of [workspaceId, projectId]) {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`ui-skill:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const { runtime, root, instructions } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: id }));
+      const skills = env.USER_SKILLS.getByName(env.ACCOUNT_ID);
+      const child = String(await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT));
+      try {
+        const main = await instructions(String(root.id), BACKGROUND_CONTEXT);
+        expect(main).toContain(prompt);
+        const subagent = await instructions(child, BACKGROUND_CONTEXT);
+        expect(subagent).toContain(UI_BLOCK_SUMMARY);
+        expect(subagent).toContain('Read skill://gitspace-ui for the full format');
+        expect(subagent).not.toContain(prompt);
+        const before = (await skills.list()).find(skill => skill.id === 'gitspace-ui');
+        if (!before) throw new Error('gitspace-ui is not an account skill');
+        const off = await skills.update({ id: 'gitspace-ui', expectedRevision: before.revision, enabled: false, scope: before.scope, exceptions: before.exceptions, assignments: before.assignments });
+        try {
+          for (const conversation of [String(root.id), child]) {
+            const disabled = await instructions(conversation, BACKGROUND_CONTEXT);
+            expect(disabled).not.toContain(prompt);
+            expect(disabled).not.toContain(UI_BLOCK_SUMMARY);
+            expect(disabled).not.toContain('skill://gitspace-ui');
+          }
+        } finally { await skills.update({ id: 'gitspace-ui', expectedRevision: off.revision, enabled: true, scope: before.scope, exceptions: before.exceptions, assignments: before.assignments }); }
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  }
 });
 
 test('only the project agent manages automations: a workspace agent is refused every method', async () => {
@@ -550,4 +588,42 @@ test('an agent runs cloud/destroy for its own workspace; on the project\'s base 
       } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   }
+});
+
+test('space_workspace list and board give every workspace\'s status in one read of stored rows, and a failed read its reason', async () => {
+  const projectId = `board-${crypto.randomUUID().slice(0, 8)}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Board project', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  const workspace = { projectId, kind: 'worktree', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 } satisfies Partial<Parameters<typeof authority.putWorkspace>[0]>;
+  await authority.putWorkspace({ ...workspace, id: 'billing', name: 'Billing export', branch: 'billing', phase: 'code' });
+  await authority.putWorkspace({ ...workspace, id: 'search', name: 'Search index', branch: 'search', phase: 'plan' });
+  const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' } });
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null });
+  await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).link({ projectId, subject: { kind: 'pullRequest', number: 42 }, workspaceId: 'billing', source: 'person', detail: 'Ada' });
+  // The account's one-time seed of status rows reads every workspace once; later reads read rows only.
+  await index.projectWorkspaceStatuses(projectId);
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`board:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text, services } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
+    // No workspace object is read: the rows are the account's and the project's.
+    const workspaceRead = vi.spyOn(env.SPACE_AUTHORITY, 'getByName');
+    try {
+      const listed = z.array(z.object({ id: z.string(), name: z.string(), status: z.unknown() })).parse(JSON.parse(text(await invoke('space_workspace', { method: 'list' }))));
+      expect(listed.find(item => item.id === 'billing')?.status).toEqual({ activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequest: 42, since: expect.any(String) });
+      expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequest: null });
+      const board = text(await invoke('space_workspace', { method: 'board' }));
+      expect(board).toMatch(/^Workspace board, .+ UTC \(2 workspaces\):\n/u);
+      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n/u);
+      expect(board).toMatch(/\n- Search index \(search\) · plan · working · since \d\d:\d\d$/u);
+      // The project agent's turns read the same rows.
+      expect((await services.tools.projectBoard?.())?.map(row => row.name)).toEqual(['Billing export', 'Search index']);
+      expect(workspaceRead).not.toHaveBeenCalled();
+      const unreachable = vi.spyOn(env.USER_PROJECTS, 'getByName').mockImplementation(() => { throw new Error('Network connection lost.'); });
+      try {
+        const failed = await invoke('space_workspace', { method: 'board' });
+        expect(failed.status).toBe('failed');
+        expect(text(failed)).toBe('Network connection lost.');
+      } finally { unreachable.mockRestore(); }
+    } finally { workspaceRead.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
 });

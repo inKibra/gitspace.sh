@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
-import { browserOriginHash, emptyLifecycleState, executionHash } from '@gitspace/protocol-environment';
+import { browserOriginHash, emptyLifecycleState, executionHash, projectEnvironmentState, type LifecycleState } from '@gitspace/protocol-environment';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { WorkspaceEnvironmentView } from '@gitspace/protocol/rpc-contract';
 import { LiveEnvironment } from './LiveEnvironment.js';
@@ -53,7 +53,13 @@ function environment(): WorkspaceEnvironmentView {
     ],
     runs: [],
     lifecycle: { ...lifecycle, bundleJson: '{}', approvals: [{ scope: 'project', executionHash: nodeHash, approvedBy: 'device', approvedAt: stamp }, { scope: 'project', executionHash: loginHash, approvedBy: 'device', approvedAt: stamp }] },
+    browserSites: [],
   };
+}
+/** The view with `lifecycle` and the working copy's browser origins, its sites as the server reports them. */
+function withSites(view: WorkspaceEnvironmentView, lifecycle: LifecycleState, workingCopy: string[]): WorkspaceEnvironmentView {
+  const bundleJson = JSON.stringify({ ...JSON.parse(view.bundleJson), browser: { origins: workingCopy } });
+  return { ...view, bundleJson, lifecycle, browserSites: projectEnvironmentState({ ...lifecycle, bundleJson }).browserSites };
 }
 
 type MachineFixture = { id: string; online?: boolean; ready?: boolean; platform?: string; unsent?: number | null };
@@ -125,12 +131,17 @@ it('lists the named setup steps with approvals and interactive scripts', async (
   rpc.runPhase.mockResolvedValue({ status: 'ok', value: { machineId: 'darktop', terminalName: 'lifecycle-1' } });
   await render(snapshot([{ id: 'darktop' }]));
   for (const name of ['Prepare machine', 'Prepare checkout', 'Checks', 'Agent setup']) expect(step(name), name).not.toBeNull();
-  // An unapproved script needs approval; approving reviews its exact content first.
+  // An unapproved script needs approval; approving reviews its exact content first, and approves it for the project.
   expect(step('Prepare checkout').textContent).toContain('Needs approval');
   await click('Review & approve', step('Prepare checkout'));
   expect(document.body.textContent).toContain('pnpm install');
-  await click('Approve this content');
-  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: prepareHash });
+  await click('Approve for the project');
+  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: prepareHash });
+  // Only this workspace is the explicit second choice.
+  rpc.approve.mockClear();
+  await click('Review & approve', step('Prepare checkout'));
+  await click('Only this workspace');
+  expect(rpc.approve.mock.calls).toEqual([[{ spaceId: 'workspace', scope: 'workspace', executionHash: prepareHash }]]);
   // An approved interactive script runs only in a terminal on the machine, which then opens.
   const loginRow = step('Prepare machine').querySelector(`[aria-label="Script ${login.fileName}"]`)!;
   expect(loginRow.textContent).toContain('Interactive');
@@ -155,8 +166,8 @@ it('asks for approval of the routes services.json opens to signed callers, and r
   expect(step('Signed callers').textContent).toContain('Needs approval');
   await click('Review & approve', step('Signed callers'));
   expect(document.body.textContent).toContain('/webhooks/*');
-  await click('Approve this content');
-  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
+  await click('Approve for the project');
+  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: hash });
   const approved = environment();
   reads.set('environment', { ...approved, executions: [...approved.executions, { ...ingress, approval: 'workspace' }], lifecycle: { ...approved.lifecycle, approvals: [...approved.lifecycle.approvals, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp }] } });
   await render(snapshot([{ id: 'darktop' }]));
@@ -165,25 +176,34 @@ it('asks for approval of the routes services.json opens to signed callers, and r
   expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
 });
 
-it('approves a browser site at read, interact or full, shows stored steps and scripts approvals as interact, and changes the level of every approval of it', async () => {
+it('approves a committed browser site for the project at the chosen level, shows a working-copy-only site as uncommitted, and changes the level of every approval of a site', async () => {
   const hash = await browserOriginHash('bank.example');
   const unapproved = environment();
-  reads.set('environment', { ...unapproved, lifecycle: { ...unapproved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }] } });
+  // staging.example is only in the working copy's bundle.
+  reads.set('environment', withSites(unapproved, { ...unapproved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }] }, ['bank.example', 'staging.example']));
   await render(snapshot([{ id: 'darktop' }]));
+  const staging = step('Browser access').querySelector('[aria-label="Site staging.example"]')!;
+  expect(staging.textContent).toContain('In your working copy, not committed — commit to approve');
+  expect(staging.querySelector('button')).toBeNull();
+  expect(document.querySelector('[aria-label="Overview"] [role="status"]')?.textContent).toContain('2 need approval');
   await click('Review & approve', step('Browser access'));
-  expect([...document.querySelectorAll('[role="dialog"] button')].map(button => button.textContent).filter(text => text?.startsWith('Approve'))).toEqual(['Approve read', 'Approve interact', 'Approve full']);
-  await click('Approve read');
-  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'read' });
+  expect([...document.querySelectorAll('[role="dialog"] button')].map(button => button.textContent).filter(text => text?.startsWith('Approve') || text?.startsWith('Only'))).toEqual(['Only this workspace', 'Approve for the project']);
+  const level = document.querySelector<HTMLSelectElement>('[role="dialog"] select[aria-label="Site level"]')!;
+  await act(async () => { level.value = 'read'; level.dispatchEvent(new Event('change', { bubbles: true })); });
+  await click('Approve for the project');
+  expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: hash, level: 'read' });
   const approved = environment();
   // Approvals stored before the levels were renamed: steps (now interact) and scripts (now full).
-  reads.set('environment', { ...approved, lifecycle: { ...approved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }], approvals: [...approved.lifecycle.approvals, { scope: 'project', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'steps' }, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'scripts' }] } });
+  reads.set('environment', withSites(approved, { ...approved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }], approvals: [...approved.lifecycle.approvals, { scope: 'project', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'steps' }, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'scripts' }] }, ['bank.example']));
   await render(snapshot([{ id: 'darktop' }]));
-  const level = step('Browser access').querySelector<HTMLSelectElement>('select[aria-label="Level for bank.example"]')!;
-  expect([...level.options].map(option => option.value)).toEqual(['read', 'interact', 'full']);
-  expect(level.value).toBe('interact');
+  const selected = step('Browser access').querySelector<HTMLSelectElement>('select[aria-label="Level for bank.example"]')!;
+  expect([...selected.options].map(option => option.value)).toEqual(['read', 'interact', 'full']);
+  expect(selected.value).toBe('interact');
   rpc.approve.mockClear();
-  await act(async () => { level.value = 'full'; level.dispatchEvent(new Event('change', { bubbles: true })); });
+  await act(async () => { selected.value = 'full'; selected.dispatchEvent(new Event('change', { bubbles: true })); });
   expect(rpc.approve.mock.calls).toEqual([[{ spaceId: 'workspace', scope: 'project', executionHash: hash, level: 'full' }], [{ spaceId: 'workspace', scope: 'workspace', executionHash: hash, level: 'full' }]]);
+  await click('Revoke', step('Browser access'));
+  expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: hash });
 });
 
 it('lists secrets and values by name and never renders a value', async () => {

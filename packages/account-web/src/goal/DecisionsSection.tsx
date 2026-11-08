@@ -2,6 +2,7 @@
 // the conversation messages they cite, the guide section they belong to, and which later decision replaced them.
 import { Badge, Button } from '@gitspace/ui';
 import type { ChangeGuideView, JournalEntryView } from '@gitspace/protocol';
+import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
 import { ArrowUpRight, BookOpen01 } from '@untitledui/icons';
 import type { ReactElement } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
@@ -27,11 +28,11 @@ export function DecisionsSection({ entries, guide, viewerId, onOpenGuideSection,
             {replacement ? <Badge size="compact" color="gray">Superseded by “{replacement.title}”</Badge> : null}
           </p>
           <p className="text-caption text-muted-foreground">Decided by <span className="text-foreground">{personLabel(decision.createdBy, viewerId)}</span> · <time className="tabular-nums">{formatDate(decision.createdAt)}</time>{replaced ? <> · replaces “{replaced.title}”</> : null}</p>
-          {decision.body.trim() ? <GitSpaceMarkdown className="text-body">{decision.body}</GitSpaceMarkdown> : null}
+          {decision.body.trim() ? <GitSpaceMarkdown className="text-body">{decision.body.replace(STAGED_CHOICE_DATA, '$1')}</GitSpaceMarkdown> : null}
           {decision.citations?.length ? <ol className="flex flex-col gap-2 border-l-2 border-border pl-3" aria-label="Citations">
             {decision.citations.map(citation => <li key={`${citation.conversationId}:${citation.messageId}`} className="flex flex-col">
               <span className="text-[11px] text-muted-foreground">{citation.who} · <time className="tabular-nums">{formatDate(citation.at)}</time></span>
-              <blockquote className="text-body text-foreground/85">“{citation.quote}”</blockquote>
+              <blockquote className="text-body text-foreground/85">“{citation.quote.replace(STAGED_CHOICE_DATA, '$1')}”</blockquote>
             </li>)}
           </ol> : null}
           {section >= 0 && decision.sectionId ? <Button variant="ghost" size="compact" type="button" className="self-start" onClick={() => { if (decision.sectionId) onOpenGuideSection(decision.sectionId); }}><BookOpen01 width={13} height={13} />Guide §{section + 1}</Button> : null}

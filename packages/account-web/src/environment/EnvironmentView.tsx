@@ -1,11 +1,11 @@
 import { Badge, Button, Card, CardContent, CardDescription, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DropdownContent, DropdownMenu, DropdownTrigger, InputField, InputGroup, MenuItem, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger } from '@gitspace/ui';
 import { DotsHorizontal, FileCode02, Key01, Play, Plus, RefreshCw01, Terminal, XClose } from '@untitledui/icons';
 import { useState, type ReactNode } from 'react';
-import { BROWSER_SITE_LEVELS, BrowserSiteLevelSchema, type BrowserSiteLevel } from '@gitspace/protocol-environment';
+import { BROWSER_SITE_LEVELS, BrowserSiteLevelSchema } from '@gitspace/protocol-environment';
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import { StatusDot } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
-import { STEP_LABEL } from './lifecycle.js';
+import { BROWSER_SITE_LEVEL_LABEL, STEP_LABEL } from './lifecycle.js';
 import type { EnvironmentMachine, EnvironmentScript, EnvironmentStep, EnvironmentViewProps, ScriptRun } from './types.js';
 
 const TerminalIcon = glyph(Terminal);
@@ -20,8 +20,6 @@ const RUN_DOT: Record<ScriptRun['status'], WorkspaceStatusColor> = { succeeded: 
 const RUN_TEXT: Record<Exclude<ScriptRun['status'], 'succeeded' | 'failed'>, string> = { running: 'running', interrupted: 'interrupted', 'not-started': 'waiting', never: 'not run' };
 const SETUP_TEXT = { pending: 'waiting', 'waiting-for-approval': 'needs approval', running: 'running', succeeded: 'succeeded', failed: 'failed' } as const;
 const SETUP_DOT = { pending: 'dim', 'waiting-for-approval': 'orange', running: 'blue', succeeded: 'green', failed: 'red' } as const;
-/** What each browser site level lets agents do on your Chrome. */
-const BROWSER_SITE_LEVEL_LABEL: Record<BrowserSiteLevel, string> = { read: 'Read: open, observe, screenshot', interact: 'Interact: single steps, no scripts', full: 'Full: scripts and single steps' };
 
 function Section({ title, label, action, children }: { title: ReactNode; label: string; action?: ReactNode; children: ReactNode }) {
   return <section aria-label={label} className="flex flex-col gap-2">
@@ -139,7 +137,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   const [editing, setEditing] = useState<{ name: string; value: string } | null>(null);
   const [retiring, setRetiring] = useState(false);
   const setupMachine = model.machines.find(machine => machine.id === model.setupMachineId) ?? null;
-  const approvals = model.steps.flatMap(step => step.scripts).filter(script => !script.approval.approved).length + model.browserOrigins.filter(origin => origin.level === null).length + model.signedCallers.filter(entry => !entry.approved).length;
+  const approvals = model.steps.flatMap(step => step.scripts).filter(script => !script.approval.approved).length + model.browserSites.filter(site => site.state === 'needs-approval').length + model.signedCallers.filter(entry => !entry.approved).length;
   const ready = model.machines.filter(machine => machine.ready).length;
   const scriptActions = { onApprove: props.onApprove, onRevoke: props.onRevoke, onOpenScript: props.onOpenScript, onOpenLog: props.onOpenLog, onRunPhase: props.onRunPhase };
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full">
@@ -204,16 +202,18 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             <span className="flex flex-col"><span className="text-caption font-medium">Browser</span><span className="text-caption tabular-nums text-muted-foreground">{!props.browser ? 'Your Chromes and the cloud browser, with their tabs.' : props.browser.open ? `${props.browser.open} ${props.browser.open === 1 ? 'browser' : 'browsers'}${props.browser.running ? `, ${props.browser.running} running` : ''}` : 'No open tabs'}</span></span>
             <Button variant="ghost" size="compact" onClick={props.onOpenBrowser}>Open Browser</Button>
           </div> : null}
-          {model.browserOrigins.length ? <div aria-label="Setup step Browser access" className="flex flex-col">
+          {model.browserSites.length ? <div aria-label="Setup step Browser access" className="flex flex-col">
             <span className="flex min-h-10 items-center text-caption font-medium">Browser access</span>
-            <ul className="flex flex-col">{model.browserOrigins.map(origin => <li key={origin.hash} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
-              <StatusDot color={origin.level ? 'green' : 'orange'} /><code className="min-w-0 flex-1 break-all font-mono">{origin.pattern}</code>
-              {origin.level ? <>
-                <select aria-label={`Level for ${origin.pattern}`} className="min-h-10 rounded-md bg-surface-3 px-3 text-caption" value={origin.level} disabled={busy} onChange={event => props.onBrowserLevel(origin.hash, BrowserSiteLevelSchema.parse(event.target.value))}>
+            <ul className="flex flex-col">{model.browserSites.map(site => <li key={site.pattern} aria-label={`Site ${site.pattern}`} className="flex min-h-10 flex-wrap items-center gap-2 text-caption">
+              <StatusDot color={site.state === 'approved' ? 'green' : site.state === 'needs-approval' ? 'orange' : 'dim'} /><code className="min-w-0 flex-1 break-all font-mono">{site.pattern}</code>
+              {site.state === 'approved' ? <>
+                <select aria-label={`Level for ${site.pattern}`} className="min-h-10 rounded-md bg-surface-3 px-3 text-caption" value={site.level} disabled={busy} onChange={event => props.onBrowserLevel(site.hash, BrowserSiteLevelSchema.parse(event.target.value))}>
                   {BROWSER_SITE_LEVELS.map(level => <option key={level} value={level}>{BROWSER_SITE_LEVEL_LABEL[level]}</option>)}
                 </select>
-                <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(origin.hash)}>Revoke</Button>
-              </> : <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(origin.hash)}>Review & approve</Button></>}
+                <Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(site.hash)}>Revoke</Button>
+              </> : site.state === 'needs-approval'
+                ? <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(site.hash)}>Review & approve</Button></>
+                : <span className="text-muted-foreground">In your working copy, not committed — commit to approve</span>}
             </li>)}</ul>
           </div> : null}
           {model.signedCallers.length ? <div aria-label="Setup step Signed callers" className="flex flex-col">

@@ -680,7 +680,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
 
   /** The project records a lifecycle this workspace has already applied to itself. */
   private async recordLifecycle(applied: WorkspaceMetadata, lifecycle: WorkspaceLifecycle): Promise<CloudWorkspaceDefinition> {
-    const recorded = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${applied.projectId}`).commitWorkspaceLifecycle(applied.workspaceId, lifecycle);
+    const result = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${applied.projectId}`).commitWorkspaceLifecycle(applied.workspaceId, lifecycle);
+    // An RPC result holds its call's resources until disposed: this keeps a plain copy and frees them now, so the
+    // caller never receives a result it would have to dispose.
+    const recorded = structuredClone(result);
+    result[Symbol.dispose]();
     this.adopt(recorded);
     return recorded;
   }
@@ -740,7 +744,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`);
     assertWorkspacePhase(phase, await project.workspaceDependencies(identity.workspaceId));
     const applied = writeWorkspaceMetadata(this.ctx.storage, { ...current, phase });
-    const recorded = await project.commitWorkspacePhase(identity.workspaceId, phase);
+    const result = await project.commitWorkspacePhase(identity.workspaceId, phase);
+    const recorded = structuredClone(result);
+    result[Symbol.dispose]();
     this.adopt(recorded);
     return recorded;
   }
@@ -1139,6 +1145,14 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1), role: z.string().min(1).optional() }).parse(raw);
     await this.runtimeAccess(input, true);
     return submitAutomationTurn(this.ctx.storage, await this.getRuntime(input), { requestId: input.requestId, text: input.text, ...(input.role === undefined ? {} : { role: input.role }) });
+  }
+
+  /** A run's batch grew while its instruction waits behind the running turn: the instruction takes the new text. False
+   * once it was placed or withdrawn; the automations then start a new batch. */
+  async runtimeAutomationUpdate(raw: unknown): Promise<boolean> {
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1) }).parse(raw);
+    await this.runtimeAccess(input, true);
+    return (await this.getRuntime(input)).automationUpdate({ requestId: input.requestId, text: input.text });
   }
 
   /** A person's cancel of an automation run: withdrawn before it starts, or the workspace agent stopped. */

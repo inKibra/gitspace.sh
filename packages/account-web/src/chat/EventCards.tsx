@@ -1,5 +1,5 @@
 import type { TranscriptItem, WorkspaceReportBlock } from '@gitspace/blocks';
-import type { AutomationMessage } from '@gitspace/protocol/automations-contract';
+import { automationEventCount, type AutomationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
 import { Button, badgeColors, useShape } from '@gitspace/ui';
 import { ArrowUpRight, ChevronDown, ChevronRight, Globe02, MessageChatCircle, Terminal, Users01, Zap } from '@untitledui/icons';
 import { useState, type CSSProperties, type ReactNode } from 'react';
@@ -105,18 +105,36 @@ function FoldedMarkdown({ text }: { text: string }) {
   </>;
 }
 
-/** An automation run's message: the turn it started, or a notice the agent reads on its next turn. */
+const REVIEW_STATE: Record<string, string> = { approved: 'approved', changes_requested: 'requested changes', commented: 'commented', dismissed: 'dismissed' };
+
+/** One GitHub event of a run: who, where (`path:line` for a review comment), a review's verdict, its text and link. */
+function AutomationEventRow({ event }: { event: AutomationMessageEvent }) {
+  return <li className="flex min-w-0 flex-col gap-1 border-l-2 border-border pl-3">
+    <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-caption text-muted-foreground">
+      <span className="font-medium text-foreground">{event.author ? `@${event.author}` : 'GitHub'}</span>
+      {event.kind === 'review' ? <span>{event.state ? `review · ${REVIEW_STATE[event.state] ?? event.state}` : 'review'}</span> : null}
+      {event.path ? <span className="font-mono [overflow-wrap:anywhere]">{event.line === null ? event.path : `${event.path}:${event.line}`}</span> : null}
+      {event.kind === 'event' ? <span className="font-mono">{event.event}</span> : null}
+      {event.url ? <a href={event.url} target="_blank" rel="noreferrer" className="ml-auto inline-flex items-center gap-0.5 hover:text-foreground hover:underline">GitHub<ArrowUpRight width={12} height={12} strokeWidth={1.5} /></a> : null}
+    </span>
+    {event.text ? <FoldedMarkdown text={event.text} /> : null}
+  </li>;
+}
+
+/** An automation run's message: the turn it started, or a notice the agent reads on its next turn. Its GitHub events
+ * fold under the instruction. */
 export function AutomationCard({ message, delivery, at }: { message: AutomationMessage; delivery: 'turn' | 'notice'; at?: string }) {
+  const count = automationEventCount(message.events);
   return <OriginCard tone={badgeColors.amber} icon={<Zap {...ICON} />}
-    kind={<>Automation <span className="font-normal text-muted-foreground">·</span> {message.name}</>}
-    source={<><span className="font-mono">{message.event}</span> · {message.summary}</>}
+    kind={[message.name, message.subject, count].filter(Boolean).join(' · ')}
+    source="Automation · GitHub events, not a message from you"
     footer={<>
-      <Button variant="ghost" size="compact" type="button" onClick={() => navigateProductUrl(automationsUrl(new URL(window.location.href).searchParams.get('project')))}>Open automations<ArrowUpRight width={12} height={12} strokeWidth={1.5} className="ml-0.5 opacity-60" /></Button>
+      <Button variant="ghost" size="compact" type="button" onClick={() => navigateProductUrl(automationsUrl(new URL(window.location.href).searchParams.get('project'), message.run))}>Open run<ArrowUpRight width={12} height={12} strokeWidth={1.5} className="ml-0.5 opacity-60" /></Button>
       <span className="ml-auto pr-1">{delivery === 'turn' ? 'Started this turn' : 'The agent reads this on its next turn'}</span>
       <ItemTime at={at} className="pr-1" />
     </>}>
     <FoldedMarkdown text={message.instruction} />
-    {isJsonValue(message.fields) ? <Disclosure label="The event"><JsonTree value={message.fields} name="event" /></Disclosure> : null}
+    {message.events.length ? <Disclosure label={`Events · ${count}`}><ul aria-label="Events" className="flex min-w-0 flex-col gap-3">{message.events.map((event, index) => <AutomationEventRow key={`${index}:${event.event}`} event={event} />)}</ul></Disclosure> : null}
   </OriginCard>;
 }
 

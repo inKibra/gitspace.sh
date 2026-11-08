@@ -74,7 +74,9 @@ export function RunsTable({ runs, projects, showProject, now, onOpen }: { runs: 
   </>;
 }
 
-export function RunDetail({ run, project, busy, onCancel, onOpenWorkspace }: { run: AutomationRunView; project: AutomationsProject | undefined; busy: boolean; onCancel(run: AutomationRunView): void; onOpenWorkspace(workspaceId: string): void }): ReactElement {
+const ENDED: readonly AutomationRunState[] = ['finished', 'skipped', 'failed'];
+
+export function RunDetail({ run, project, busy, onCancel, onRetry, onOpenWorkspace }: { run: AutomationRunView; project: AutomationsProject | undefined; busy: boolean; onCancel(run: AutomationRunView): void; onRetry(run: AutomationRunView): void; onOpenWorkspace(workspaceId: string): void }): ReactElement {
   const [confirmStop, setConfirmStop] = useState(false);
   const { workspaceId } = run;
   const workspace = workspaceId === null ? null : workspaceLabel(project, run.projectId, workspaceId);
@@ -90,6 +92,14 @@ export function RunDetail({ run, project, busy, onCancel, onOpenWorkspace }: { r
         <strong className="text-caption font-medium text-muted-foreground">Only if</strong>
         <CheckList checks={run.checks} />
       </section> : null}
+      {run.events.length ? <section aria-label="Events" className="flex flex-col gap-2">
+        <strong className="text-caption font-medium text-muted-foreground">{run.events.length === 1 ? 'Event (UTC)' : `${run.events.length} events, one message (UTC)`}</strong>
+        <ol className="flex flex-col gap-1.5">{run.events.map((event, index) => <li key={`${index}:${event.event}`} className="flex gap-3 text-body">
+          <time dateTime={event.at.toISOString()} className="w-16 shrink-0 font-mono text-caption tabular-nums text-muted-foreground">{UTC_CLOCK.format(event.at)}</time>
+          <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] ${event.folded ? 'text-muted-foreground' : ''}`}>{event.label}{event.folded ? <span className="block text-caption">Empty review, folded into its comments</span> : null}</span>
+          {event.url ? <a href={event.url} target="_blank" rel="noreferrer" className="shrink-0 text-caption text-muted-foreground underline underline-offset-2 hover:text-foreground">GitHub</a> : null}
+        </li>)}</ol>
+      </section> : null}
       <section className="flex flex-col gap-2">
         <strong className="text-caption font-medium text-muted-foreground">Timeline (UTC)</strong>
         {run.timeline.length ? <ol className="flex flex-col gap-1.5">{run.timeline.map((step, index) => <li key={`${index}:${step.label}`} className="flex gap-3 text-body">
@@ -100,6 +110,7 @@ export function RunDetail({ run, project, busy, onCancel, onOpenWorkspace }: { r
     </div>
     <DialogFooter>
       {run.state === 'queued' ? <Button variant="secondary" type="button" loading={busy} disabled={busy} onClick={() => onCancel(run)}>Cancel run</Button> : null}
+      {ENDED.includes(run.state) && run.events.length ? <Button variant="secondary" type="button" loading={busy} disabled={busy} onClick={() => onRetry(run)}>Run again</Button> : null}
       {run.state === 'running' && !confirmStop ? <Button variant="secondary" type="button" disabled={busy} onClick={() => setConfirmStop(true)}>Stop run</Button> : null}
       {stopping ? <>
         <Button variant="secondary" type="button" onClick={() => setConfirmStop(false)}>Keep running</Button>

@@ -13,10 +13,13 @@ import { searchWasmModule } from './search-wasm.js';
 const identity = { projectId: 'smoke-project', workspaceId: 'smoke-workspace' };
 /** Rows an alarm may read in a workspace with nothing to do: recovery and resume read live state, never history. */
 const IDLE_WAKE_ROWS = 200;
+/** Characters of each task result the fixture's operations return ('full durable receipt ' 1,000 times). */
+const RECEIPT_CHARACTERS = 21_000;
 const directory = await mkdtemp(join(tmpdir(), 'gitspace-runtime-smoke-'));
 let worker: Miniflare | undefined;
 try {
-  const built = await Bun.build({ entrypoints: [new URL('./fixture.ts', import.meta.url).pathname], target: 'browser', conditions: ['workerd'], external: ['cloudflare:workers', '*.wasm'] });
+  // workerd supplies node:async_hooks (nodejs_compat); a browser build would replace it with an empty stand-in.
+  const built = await Bun.build({ entrypoints: [new URL('./fixture.ts', import.meta.url).pathname], target: 'browser', conditions: ['workerd'], external: ['cloudflare:workers', '*.wasm'], plugins: [{ name: 'workerd-async-hooks', setup(build) { build.onResolve({ filter: /^node:async_hooks$/u }, args => ({ path: args.path, external: true })); } }] });
   if (!built.success) throw new AggregateError(built.logs, 'Runtime smoke fixture build failed');
   assert.equal(built.outputs.length, 1);
   const contents = await built.outputs[0]!.text();
@@ -47,13 +50,39 @@ try {
   console.log('PASS replica stores the cursor only: migration, in-memory replay, reset after reopen, large Unicode draft', await request('/replica-proof'));
 
   // The memory estimate: a line as the runtime opens and one as each turn ends, each holder's bytes where its data is; a
-  // turn ending within 30 s of the last estimate logs only that it was skipped.
+  // turn ending within 30 s of the last estimate logs only that it was skipped. The first open also measures the
+  // database's tables; an open within 24 hours of that does not.
   {
-    const lines = z.array(z.looseObject({ phase: z.string(), skipped: z.string().optional() })).parse(await request('/memory-estimate'));
-    assert.deepEqual(lines.map(line => [line.phase, line.skipped ?? null]), [['wake', null], ['turn-end', null], ['turn-end', 'busy'], ['wake', null]]);
-    const estimates = lines.map(line => line.skipped === undefined ? z.looseObject({ holders: z.record(z.string(), z.number()), totalBytes: z.number(), tasks: z.number(), truncated: z.boolean(), requests: z.object({ count: z.number(), largestBytes: z.number() }) }).parse(line) : null);
-    const [, conversation, , reopened] = estimates;
-    assert(conversation && reopened);
+    const logged = z.array(z.looseObject({ event: z.string() })).parse(await request('/memory-estimate'));
+    const tableLines = z.array(z.object({ tables: z.array(z.object({ name: z.string(), rows: z.number(), bytes: z.number(), estimated: z.boolean() })), measuredBytes: z.number(), unmeasured: z.array(z.string()) }).loose()).parse(logged.filter(line => line.event === 'workspace_database_tables'));
+    assert.equal(tableLines.length, 1, `${tableLines.length} table lines for three opens within 24 hours`);
+    const [tables] = tableLines;
+    assert(tables);
+    // 50 notes of 2,000 characters and their ids, the largest table, first.
+    assert.deepEqual(tables.tables[0], { name: 'smoke_notes', rows: 50, bytes: 100_091, estimated: false });
+    assert.equal(tables.measuredBytes, tables.tables.reduce((sum, table) => sum + table.bytes, 0));
+    assert.deepEqual(tables.unmeasured, []);
+    const lines = z.array(z.looseObject({ phase: z.string(), skipped: z.string().optional() })).parse(logged.filter(line => line.event === 'workspace_memory_estimate'));
+    assert.deepEqual(lines.map(line => [line.phase, line.skipped ?? null]), [['wake', null], ['turn-end', null], ['turn-end', 'busy'], ['wake', null], ['wake', null]]);
+    const tally = z.object({ queries: z.number(), rows: z.number(), bytes: z.number() });
+    const reopen = z.object({ reason: z.string(), sincePreviousOpenMs: z.number().nullable(), sinceTurnEndMs: z.number().nullable() }).loose();
+    const isolate = z.object({ isolate: z.object({ id: z.string(), objectsOpen: z.number(), workspaceIds: z.array(z.string()) }), isolateTotalBytes: z.number() });
+    // Every line, the skipped one and the table line included, names this isolate's open runtimes.
+    const isolates = z.array(isolate.loose()).parse([...tableLines, ...lines]);
+    assert.equal(new Set(isolates.map(line => line.isolate.id)).size, 1, 'Lines of one isolate named different isolates');
+    const estimates = lines.map(line => line.skipped === undefined ? z.looseObject({ holders: z.record(z.string(), z.number()), totalBytes: z.number(), tasks: z.number(), truncated: z.boolean(), requests: z.object({ count: z.number(), largestBytes: z.number() }), reads: z.object({ rebuild: tally, transcript: tally, other: tally, largestBytes: z.number() }), reopen: reopen.optional() }).merge(isolate).parse(line) : null);
+    const [opened, conversation, , reopened, third] = estimates;
+    assert(opened && conversation && reopened && third);
+    // The second runtime opens beside the first; the third replaces the first, which closed. The isolate's total is the
+    // latest estimate of each runtime open, the first's from its turn end.
+    const smokeRuntimes = (line: typeof opened) => line.isolate.workspaceIds.filter(id => id === identity.workspaceId).length;
+    assert.equal(reopened.isolate.objectsOpen, opened.isolate.objectsOpen + 1);
+    assert.equal(smokeRuntimes(reopened), smokeRuntimes(opened) + 1);
+    assert.equal(third.isolate.objectsOpen, reopened.isolate.objectsOpen);
+    assert.equal(smokeRuntimes(third), smokeRuntimes(reopened));
+    const others = reopened.isolateTotalBytes - reopened.totalBytes - conversation.totalBytes;
+    assert(others >= 0, `The isolate total ${reopened.isolateTotalBytes} left out an open runtime`);
+    assert.equal(third.isolateTotalBytes - third.totalBytes - reopened.totalBytes, others, 'The closed runtime still counted in the isolate total');
     for (const line of [conversation, reopened]) {
       assert.equal(line.totalBytes, Object.values(line.holders).reduce((sum, bytes) => sum + bytes, 0));
       assert.equal(line.truncated, false);
@@ -69,7 +98,19 @@ try {
     assert(reopened.tasks >= 128);
     assert(reopened.holders.taskViews! - conversation.holders.taskViews! >= 128 * 4096, `128 large task results added ${reopened.holders.taskViews! - conversation.holders.taskViews!} bytes to the task views`);
     assert(Math.abs(reopened.holders.conversationViews! - conversation.holders.conversationViews!) < 100_000, 'Task results were counted in the conversation views');
-    console.log('PASS memory estimate lines on open and at a turn end attribute a large conversation and large task results to their holders; a burst skips', JSON.stringify(lines[1]));
+    // Storage reads by what asked: each rebuild during the turn reads the conversation's newest 256 entries again, and
+    // pi reads all 300 (3 million characters) to build the turn's context. Opening again reads them, and the 128 task
+    // results, only for the first rebuild.
+    assert(conversation.reads.rebuild.bytes >= 2_560_000, `The turn's rebuilds read ${conversation.reads.rebuild.bytes} bytes`);
+    assert(conversation.reads.other.bytes >= 3_000_000, `The turn's context assembly read ${conversation.reads.other.bytes} bytes`);
+    assert(reopened.reads.rebuild.bytes >= 2_560_000 + 128 * RECEIPT_CHARACTERS, `The reopened runtime's rebuild read ${reopened.reads.rebuild.bytes} bytes`);
+    assert(reopened.reads.other.bytes < 100_000, `Opening read ${reopened.reads.other.bytes} bytes outside the rebuild`);
+    assert.deepEqual(reopened.reads.transcript, { queries: 0, rows: 0, bytes: 0 });
+    // Why each runtime opened: the first had no previous open; the second follows it on the same code with nothing running.
+    assert.equal(opened.reopen?.reason, 'first');
+    assert.equal(reopened.reopen?.reason, 'cold-start');
+    assert(reopened.reopen.sincePreviousOpenMs !== null && reopened.reopen.sincePreviousOpenMs >= 0 && reopened.reopen.sinceTurnEndMs !== null);
+    console.log('PASS memory estimate lines on open and at a turn end attribute a large conversation and large task results to their holders, and storage reads to the rebuild or the turn; a burst skips; tables measured once', JSON.stringify({ ...lines[1], holders: undefined }), JSON.stringify(tables));
   }
 
   // A reset during the open's rebuild or the alarm's conversation recovery is reported on the next open: the stage it
@@ -146,7 +187,7 @@ try {
   // The fixture model echoes the prompt, so this reply holds an invalid block: the main agent gets one notice, which
   // starts no turn.
   {
-    const told = 'user: Block 1 in your last message is invalid: the Mermaid source is empty\nThe chat shows an error in place of that block; send a corrected block in a new message.';
+    const told = 'user: Block 1 in your last message is invalid: the Mermaid source is empty\nThe chat shows an error in place of that block. Check the failing paths against skill://gitspace-ui and send a corrected block in a new message.';
     const texts = (snapshot: RuntimeSnapshot) => snapshot.conversations.find(item => item.title === 'Workspace')!.messages.flatMap(message => message.content.flatMap(part => part.type === 'text' ? [`${message.role}: ${part.text}`] : []));
     await request(`/submit?text=${encodeURIComponent('Status:\n```mermaid\n\n```')}`);
     await until(snapshot => texts(snapshot).includes(told));

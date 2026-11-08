@@ -121,7 +121,9 @@ The project agent can propose an automation, or a change to one, from its conver
 
 ## Manage workspaces from an agent
 
-Agents use typed tools directly, not a CLI or a JavaScript `space` namespace. `space_workspace` with `args: { method: 'list' }` discovers workspace definitions in the current project, including closed workspaces. Method `current` reads the current workspace.
+Agents use typed tools directly, not a CLI or a JavaScript `space` namespace. `space_workspace` with `args: { method: 'list' }` returns the workspace definitions in the current project, including closed workspaces, each with its status: what its agents are doing (working, waiting on you and on what, idle or failed), its linked pull request and since when. Method `board` returns the same as one line per workspace. Both read stored rows once and wake no workspace. Method `status` with a `workspaceId` reads one workspace's last report. Method `current` reads the current workspace.
+
+The project agent sees a workspace board in its own turns. Its first turn, and its first turn after a compaction, starts with the full board; later turns carry only the workspaces whose line changed since its previous turn, with the time. When those changes grow past a size, a fresh full board comes instead. The compaction summary ends with the full board. The board never goes into the agent's instructions, so the cached prompt stays the same from turn to turn. When the board or a `space_workspace` read fails, the agent gets the reason and says it could not read the current state instead of answering from memory. A tool call cut off by a restart of the project's object says so, and points to Monitoring for the likely cause, often its memory limit.
 
 Use `space_workspace` with `args: { method: 'create', name, branch, sourceKind, sourceRef }` to create a workspace. Optional fields include `phase`, `dependsOn`, `goal`, `workflow`, and `rubric`. Check the returned `ready` field. If an instruction write fails after creation, the result includes the created workspace identity and completed writes so the agent can repair that workspace instead of creating a duplicate.
 

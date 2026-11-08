@@ -160,7 +160,6 @@ export class SpaceEnvironmentStore {
         .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), scope: row.scope }));
       const stored = this.stored(projectId, spaceId, shared);
       const current = availableState(stored);
-      if (input.op === 'approval' && input.approved && input.scope === 'project' && spaceId !== projectId && current.browserOrigins.some((entry) => entry.hash === input.executionHash)) throw new EnvironmentError('PermissionDenied', 'Approve browser origins on the base workspace for project-wide access');
       const transition = transitionLifecycle({ state: current, runs, actor, now: new Date().toISOString() }, input);
       if (!transition.changed) return { state: transition.state, shared: null };
       const { state, record, log } = transition;

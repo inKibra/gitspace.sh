@@ -106,14 +106,12 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   });
   const approve = async (spaceId: string, input: Extract<LifecycleMutation, { op: 'approval' }>) => {
     const device = await requireLifecycleControl();
-    const { authority, space, identity } = await authorityFor(spaceId);
+    const { space, identity } = await authorityFor(spaceId);
     if (input.approved) {
       const state = await currentState(spaceId);
       const origin = state.browserOrigins.find((entry) => entry.hash === input.executionHash);
       if (origin) {
         if (await browserOriginHash(origin.pattern) !== origin.hash) throw new EnvironmentError('ContentChanged', 'Browser origin does not match its content hash');
-        const workspace = (await authority.listWorkspaces()).find((entry) => entry.id === spaceId);
-        if (input.scope === 'project' && workspace?.kind !== 'base') throw new EnvironmentError('PermissionDenied', 'Approve browser origins on the base workspace for project-wide access');
       } else {
         const execution = state.executions.find((entry) => entry.hash === input.executionHash);
         if (!execution) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review current content before approving');

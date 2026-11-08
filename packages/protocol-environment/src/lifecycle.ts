@@ -195,6 +195,12 @@ export async function deriveLifecycleExecutions(input: {
   }];
   return [...checks, ...scripts.flat(), ...declared];
 }
+/** A browser site of the workspace. Approval reads the committed HEAD, so a site only the working copy declares is
+ * `uncommitted`: it cannot be approved until it is committed. */
+export type BrowserSiteView =
+  | { pattern: string; state: 'approved'; hash: string; level: BrowserSiteLevel }
+  | { pattern: string; state: 'needs-approval'; hash: string }
+  | { pattern: string; state: 'uncommitted' };
 export function projectEnvironmentState(lifecycle: LifecycleState) {
   const bundle = lifecycle.bundleJson === null ? loadEnvironmentBundle({ version: 1, profiles: { base: {} } }) : parseEnvironmentBundleJson(lifecycle.bundleJson);
   const selectedProfile = lifecycle.selectedProfile ?? bundle.defaultProfile;
@@ -208,6 +214,13 @@ export function projectEnvironmentState(lifecycle: LifecycleState) {
       approval: lifecycle.approvals.find((entry) => entry.executionHash === execution.hash && entry.scope === 'project')?.scope
         ?? lifecycle.approvals.find((entry) => entry.executionHash === execution.hash && entry.scope === 'workspace')?.scope ?? null,
     })),
+    browserSites: [
+      ...lifecycle.browserOrigins.map(({ pattern, hash }): BrowserSiteView => {
+        const level = browserOriginLevel(lifecycle, hash);
+        return level ? { pattern, state: 'approved', hash, level } : { pattern, state: 'needs-approval', hash };
+      }),
+      ...bundle.browser.origins.filter((pattern) => !lifecycle.browserOrigins.some((entry) => entry.pattern === pattern)).map((pattern): BrowserSiteView => ({ pattern, state: 'uncommitted' })),
+    ],
     runs: lifecycle.runs, lifecycle,
   };
 }

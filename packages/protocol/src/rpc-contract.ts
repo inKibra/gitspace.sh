@@ -378,6 +378,11 @@ export const WorkspaceEnvironmentViewCodec = wire.object({
     effective: wire.record(wire.string),
   }),
   executions: wire.array(EnvironmentExecutionViewCodec),
+  browserSites: wire.array(wire.union([
+    wire.object({ pattern: wire.string, state: wire.literal('approved'), hash: wire.string, level: wire.enum(['read', 'interact', 'full']) }),
+    wire.object({ pattern: wire.string, state: wire.literal('needs-approval'), hash: wire.string }),
+    wire.object({ pattern: wire.string, state: wire.literal('uncommitted') }),
+  ])),
   runs: wire.array(LifecycleRunCodec),
   lifecycle: LifecycleStateCodec,
 });
@@ -706,6 +711,16 @@ export const updateProjectBaseContract = gitspaceRpc
   .input(wire.object({ projectId: wire.string }))
   .output(ProjectOperationViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Copy the project's base branch from its origin into the project's repository through the named machine, with that
+ * machine's git identity (the account SSH key). The account forwards it to that machine only; the cloud accepts the
+ * copy only while the project's repository waits, empty, for one (its import was refused). */
+export const projectSeedContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, machineId: wire.string }))
+  .output(wire.object({ baseBranch: wire.string, commit: wire.string }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const deleteProjectContract = gitspaceRpc
@@ -1129,6 +1144,14 @@ export const githubUninstalledDismissContract = gitspaceRpc
 export const githubRemovedClearContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
+  .output(GitHubStateCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Save the person's own GitHub login (null forgets it): automations deliver nothing it authored. */
+export const githubPersonSetContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ login: wire.nullable(wire.string) }))
   .output(GitHubStateCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
@@ -1668,6 +1691,14 @@ export const cancelAutomationRunContract = gitspaceRpc
   .input(wire.object({ ...automationProject, runId: wire.string }))
   .output(AutomationRunViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, RunNotFound: automationErrors.runNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Run again: a GitHub event run that ended is recorded again with all its events, delivered at once as one message. */
+export const retryAutomationRunContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, runId: wire.string }))
+  .output(AutomationRunViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, RunNotFound: automationErrors.runNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 /** Recent runs of a project, or of one automation, newest first. */
@@ -2499,6 +2530,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     installation: { confirm: githubInstallationConfirmContract, uninstall: githubInstallationUninstallContract },
     uninstalled: { dismiss: githubUninstalledDismissContract },
     removed: { clear: githubRemovedClearContract },
+    person: { set: githubPersonSetContract },
     projectAccess: githubProjectAccessContract,
   },
   mcp: {
@@ -2538,6 +2570,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     approve: approveAutomationContract,
     runNow: runAutomationNowContract,
     cancelRun: cancelAutomationRunContract,
+    retryRun: retryAutomationRunContract,
     runs: automationRunsContract,
     test: testAutomationContract,
     events: automationEventsContract,
@@ -2621,6 +2654,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     setBaseBranch: setProjectBaseBranchContract,
     setRepository: setProjectRepositoryContract,
     updateBase: updateProjectBaseContract,
+    seed: projectSeedContract,
     remote: { refresh: refreshProjectRemoteContract, checkInterval: projectOriginCheckContract, setCheckInterval: setProjectOriginCheckContract },
     delete: deleteProjectContract,
     operation: projectOperationContract,

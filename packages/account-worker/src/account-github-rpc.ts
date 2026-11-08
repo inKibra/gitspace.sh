@@ -1,6 +1,6 @@
 import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
 import {
-  githubAppRotateKeyContract, githubAppStartContract, githubInstallationConfirmContract, githubInstallationUninstallContract, githubInstallStartContract,
+  githubAppRotateKeyContract, githubAppStartContract, githubInstallationConfirmContract, githubInstallationUninstallContract, githubInstallStartContract, githubPersonSetContract,
   githubProjectAccessContract, githubRemovedClearContract, githubRequestCancelContract, githubRequestRecordContract, githubStateContract, githubUninstalledDismissContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
@@ -53,12 +53,16 @@ export function githubCloudProcedures(env: Env, requireAdministration: () => Pro
     try { await requireAdministration(); return ok(await github.clearRemoved()); }
     catch (error) { return err(errors.OperationFailed({ operation: 'clear removed GitHub installations', message: message(error) })); }
   });
+  const setPerson = server.implement(githubPersonSetContract).handler(async ({ input, errors }) => {
+    try { await requireAdministration(); return ok(await github.setPerson(input.login)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'save your GitHub login', message: message(error) })); }
+  });
   const projectAccess = server.implement(githubProjectAccessContract).handler(async ({ input, errors }) => {
     try { return ok(await github.projectAccess(input.projectId)); }
     catch (error) { return err(errors.OperationFailed({ operation: 'read project repository access', message: message(error) })); }
   });
   return {
     state, app: { start: startApp, rotateKey }, install: { start: startInstall }, request: { cancel: cancelRequest, record: recordRequest },
-    installation: { confirm, uninstall }, uninstalled: { dismiss: dismissUninstalled }, removed: { clear: clearRemoved }, projectAccess,
+    installation: { confirm, uninstall }, uninstalled: { dismiss: dismissUninstalled }, removed: { clear: clearRemoved }, person: { set: setPerson }, projectAccess,
   };
 }

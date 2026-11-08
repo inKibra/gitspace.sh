@@ -56,6 +56,24 @@ export function createAutomationRequests(options: Pick<RuntimeHarnessOptions, 'a
       await options.wake();
       return { conversationId: id };
     }); },
+    /** A run's batch grew while its instruction waited: the queued input takes the new text and stays one input. False
+     * once the input was placed or withdrawn, or when the request is unknown; nothing changes then. */
+    update(input: { requestId: string; text: string }): Promise<boolean> { return serialized(async () => {
+      const record = (await options.harness.snapshot(AutomationRequestsDoc, context))?.requests[input.requestId];
+      if (!record || record.withdrawn) return false;
+      if (record.text === input.text) return true;
+      const target = await conversation(record.conversationId);
+      return target.commit(async tx => {
+        const submission = await tx.submissionByRequest(target.id, input.requestId);
+        if (!submission || submission.status !== 'queued') return false;
+        const inbox = await tx.doc(InboxDoc, target.id);
+        const item = inbox.items.find(entry => entry.id === submission.id);
+        if (!item || item.mode === 'write') return false;
+        item.content = input.text;
+        (await tx.doc(AutomationRequestsDoc)).requests[input.requestId]!.text = input.text;
+        return true;
+      }, context);
+    }); },
     async status(requestId: string): Promise<RuntimeRequestStatus> {
       const requests = await options.harness.snapshot(AutomationRequestsDoc, context);
       const record = requests?.requests[requestId];

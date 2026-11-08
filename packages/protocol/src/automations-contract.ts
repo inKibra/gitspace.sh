@@ -138,26 +138,112 @@ export function describeAutomationSchedule(expression: string): string {
   return `${trimmed} (UTC)`;
 }
 
-/** What an automation run tells the agent it reaches: which automation, the event, the instruction, the event's fields. */
-export interface AutomationMessage { name: string; event: string; summary: string; instruction: string; fields: unknown }
+/** One GitHub event a run delivers, as the agent reads it and the conversation's card lists it: a review comment on a
+ * line of a file, a review, another comment, or any other event (a check suite, a push, a pull request change). */
+export const AutomationMessageEventSchema = z.object({
+  kind: z.enum(['comment', 'review', 'event']),
+  /** The GitHub event and action: `pull_request_review_comment.created`. */
+  event: z.string(),
+  author: z.string().nullable(),
+  path: z.string().nullable(),
+  line: z.number().int().nullable(),
+  /** A review's state: `approved`, `changes_requested`, `commented`. */
+  state: z.string().nullable(),
+  text: z.string(),
+  url: z.string().nullable(),
+}).strict();
+export type AutomationMessageEvent = z.infer<typeof AutomationMessageEventSchema>;
 
-const AUTOMATION_MESSAGE = /^Automation "(.*?)" · ([^\n]*?) · ([^\n]*)\n\n([\s\S]*?)\n\nThe event:\n([\s\S]*)$/u;
+/** What an automation run tells the agent it reaches: the automation, its run, what the events are about ("PR #1434"),
+ * the instruction, and the events, oldest first. Its events are GitHub's, never the person's words. `run` is null only
+ * for a message stored before runs were named in it. */
+export interface AutomationMessage { run: string | null; name: string; source: 'github'; subject: string | null; instruction: string; events: AutomationMessageEvent[] }
 
-export function automationMessage(message: AutomationMessage): string {
-  return `Automation "${message.name}" · ${message.event} · ${message.summary}\n\n${message.instruction}\n\nThe event:\n${JSON.stringify(message.fields, null, 2)}`;
+const AUTOMATION_OPEN = /^<automation name="([^"]*)" source="(github)" subject="([^"]*)" run="([^"]*)">\n/u;
+const AUTOMATION_LEAD = 'Automation input: the GitHub events below, not a message from the person.\n\n';
+const EVENTS_OPEN = '\n\n<events>\n';
+const EVENTS_CLOSE = '\n</events>\n</automation>';
+
+function attribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
 }
 
-/** An automation run's message read back (the conversation shows it as the run's card); null for any other text. */
-export function parseAutomationMessage(text: string): AutomationMessage | null {
-  const match = AUTOMATION_MESSAGE.exec(text);
+function unattribute(value: string): string {
+  return value.replaceAll('&lt;', '<').replaceAll('&quot;', '"').replaceAll('&amp;', '&');
+}
+
+/** The run's message as the agent reads it: wrapped in `<automation …>` and labelled as events, the events as JSON. */
+export function automationMessage(message: AutomationMessage): string {
+  const events = JSON.stringify(message.events, null, 2).replaceAll('<', '\\u003c');
+  return `<automation name="${attribute(message.name)}" source="${message.source}" subject="${attribute(message.subject ?? '')}" run="${attribute(message.run ?? '')}">\n${AUTOMATION_LEAD}${message.instruction}${EVENTS_OPEN}${events}${EVENTS_CLOSE}`;
+}
+
+/** The single-event form automation messages were stored in before batches: `Automation "<name>" · <event> · <summary>`,
+ * the instruction, then "The event:" and the event's fields as JSON. Read only, so stored transcripts keep their cards. */
+const STORED_AUTOMATION_MESSAGE = /^Automation "(.*?)" · ([^\n]*?) · ([^\n]*)\n\n([\s\S]*?)\n\nThe event:\n([\s\S]*)$/u;
+
+/** A message in the stored single-event form as one event of the message's shape. */
+function storedAutomationMessage(text: string): AutomationMessage | null {
+  const match = STORED_AUTOMATION_MESSAGE.exec(text);
   if (!match) return null;
-  let fields: unknown;
+  let raw: unknown;
   try {
-    fields = JSON.parse(match[5]!);
+    raw = JSON.parse(match[5] ?? '');
   } catch {
     return null;
   }
-  return { name: match[1]!, event: match[2]!, summary: match[3]!, instruction: match[4]!, fields };
+  const parsed = z.record(z.string(), z.unknown()).safeParse(raw);
+  if (!parsed.success) return null;
+  const field = (key: string): string | null => {
+    const value = parsed.data[key];
+    return typeof value === 'string' && value !== '' ? value : typeof value === 'number' ? String(value) : null;
+  };
+  const event = match[2] ?? '';
+  const summary = match[3] ?? '';
+  const kind = event.startsWith('pull_request_review_comment.') || event.startsWith('issue_comment.') ? 'comment' : event.startsWith('pull_request_review.') ? 'review' : 'event';
+  const pull = field('pull_request.number');
+  const issue = field('issue.number');
+  return {
+    run: null, name: match[1] ?? '', source: 'github', subject: pull !== null ? `PR #${pull}` : issue !== null ? `Issue #${issue}` : null, instruction: match[4] ?? '',
+    events: [{
+      kind, event, author: field('comment.user.login') ?? field('review.user.login') ?? field('sender.login'), path: field('comment.path'), line: null, state: field('review.state'),
+      text: field('comment.body') ?? field('review.body') ?? summary, url: field('comment.html_url') ?? field('review.html_url') ?? field('subject.url'),
+    }],
+  };
+}
+
+/** An automation run's message read back (the conversation shows it as the run's card, the composer's queue as the
+ * run's row), in the `<automation …>` form or the stored single-event form; null for any other text. */
+export function parseAutomationMessage(text: string): AutomationMessage | null {
+  const open = AUTOMATION_OPEN.exec(text);
+  if (!open) return storedAutomationMessage(text);
+  if (!text.endsWith(EVENTS_CLOSE)) return null;
+  const body = text.slice(open[0].length, -EVENTS_CLOSE.length);
+  const split = body.lastIndexOf(EVENTS_OPEN);
+  if (!body.startsWith(AUTOMATION_LEAD) || split < AUTOMATION_LEAD.length) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body.slice(split + EVENTS_OPEN.length));
+  } catch {
+    return null;
+  }
+  const events = z.array(AutomationMessageEventSchema).safeParse(raw);
+  if (!events.success) return null;
+  const subject = unattribute(open[3] ?? '');
+  const run = unattribute(open[4] ?? '');
+  return { run: run === '' ? null : run, name: unattribute(open[1] ?? ''), source: 'github', subject: subject === '' ? null : subject, instruction: body.slice(AUTOMATION_LEAD.length, split), events: events.data };
+}
+
+const EVENT_KIND_WORDS: Record<AutomationMessageEvent['kind'], [string, string]> = { comment: ['comment', 'comments'], review: ['review', 'reviews'], event: ['event', 'events'] };
+
+/** A run's events counted by kind, as its card, queue row and timeline say it: "3 comments, 1 review". */
+export function automationEventCount(events: readonly Pick<AutomationMessageEvent, 'kind'>[]): string {
+  const parts = AutomationMessageEventSchema.shape.kind.options.flatMap(kind => {
+    const count = events.filter(event => event.kind === kind).length;
+    const [one, many] = EVENT_KIND_WORDS[kind];
+    return count === 0 ? [] : [`${count} ${count === 1 ? one : many}`];
+  });
+  return parts.length === 0 ? 'no events' : parts.join(', ');
 }
 
 // GitHub events (docs/AUTOMATIONS-DESIGN.md §4).
@@ -500,6 +586,11 @@ export const AutomationRunViewCodec = wire.object({
   scheduledFor: wire.date,
   startedAt: wire.nullable(wire.date),
   finishedAt: wire.nullable(wire.date),
+  /** The GitHub events the run delivers, oldest first: one for a single event, every event of a batch for its
+   * pull request or issue (events that arrive within 90 seconds of each other, at most 10 minutes after the first, and
+   * those that arrive while its message waits for the workspace's turn to end). `folded`: an empty review that only
+   * wraps comments of the batch; its comments carry it. Empty for a schedule or manual run. */
+  events: wire.array(wire.object({ at: wire.date, event: wire.string, label: wire.string, url: wire.nullable(wire.string), folded: wire.boolean })),
 });
 export type AutomationRunView = InputOf<typeof AutomationRunViewCodec>;
 
