@@ -25,10 +25,8 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   SidebarUserFooter,
-  SidebarWorkspaceHeader,
   ThinkingIndicator,
   Tooltip,
-  WorkspaceTile,
   type IconComponent,
 } from '@gitspace/ui';
 import { Activity, Archive, ArrowDown, BookOpen01, ChevronRight, Columns03, DotsHorizontal, FolderClosed, FolderPlus, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap } from '@untitledui/icons';
@@ -482,7 +480,6 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
   const all = shown.flatMap((project) => project.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, undefined)));
   return <Sidebar variant="inset">
     <SidebarHeader>
-      <SidebarWorkspaceHeader name="GitSpace" tile={<WorkspaceTile>G</WorkspaceTile>} />
       <nav aria-label="Navigate" className="flex items-center justify-between px-0.5">
         {NAV.map((item) => <Tooltip key={item.view} content={item.view === 'automations' && failedAutomationRuns > 0 ? `${PRODUCT_ROUTE_LABELS[item.view]} · ${failedAutomationRuns} ${failedAutomationRuns === 1 ? 'run' : 'runs'} failed today` : PRODUCT_ROUTE_LABELS[item.view]} side="bottom">
           <button type="button" aria-label={PRODUCT_ROUTE_LABELS[item.view]} aria-current={view === item.view ? 'page' : undefined} onClick={() => onView(item.view)}
