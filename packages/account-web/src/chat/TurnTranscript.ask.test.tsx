@@ -56,6 +56,15 @@ describe('an answered ask', () => {
     expect(title?.className).toContain('text-display');
     expect(container.textContent).not.toContain('###');
   });
+
+  it('says the project agent answered a question it answered in the person\'s place', () => {
+    const question = { id: 'question-1', prompt: 'Which bucket?', options: [{ id: 'assets', title: 'assets' }, { id: 'uploads', title: 'uploads' }], answer: 'uploads' };
+    render({ id: 'ask-2', type: 'ask', toolCallId: 'ask-2', status: 'answered', answeredBy: { by: 'project-agent', at: '2026-11-07T10:00:00.000Z' }, questions: [question] });
+    expect(container.querySelector('[data-ask-origin]')?.textContent).toBe('Questionasked by the workspace agent· Answered by the project agent');
+    // A person's answer carries no attribution and reads as before.
+    render({ id: 'ask-3', type: 'ask', toolCallId: 'ask-3', status: 'answered', questions: [question] });
+    expect(container.querySelector('[data-ask-origin]')?.textContent).toBe('Questionasked by the workspace agent· answered');
+  });
 });
 
 describe('a pending ask', () => {

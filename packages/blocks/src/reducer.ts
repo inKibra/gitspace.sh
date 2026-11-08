@@ -1,6 +1,6 @@
 import { planQuestions } from './approval.js';
 import { providerErrorText } from './provider-error.js';
-import { WORKSPACE_REPORT_ENTRY, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
+import { WORKSPACE_REPORT_ENTRY, askAnswererSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
 import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
@@ -340,9 +340,11 @@ export class TranscriptProjector {
   #answerAsk(toolCallId: string, isError: boolean, details: unknown): boolean {
     const previous = this.#findAsk(toolCallId);
     if (!previous) return false;
+    const answeredBy = askAnswererSchema.safeParse(record(details)?.answeredBy);
     const ask: AskBlock = {
       ...previous,
       status: isError ? 'dismissed' : 'answered',
+      ...(answeredBy.success ? { answeredBy: answeredBy.data } : {}),
       questions: previous.questions.map((question) => ({ ...question })),
     };
     applyAskAnswers(ask, details);

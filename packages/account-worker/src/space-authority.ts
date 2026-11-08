@@ -14,10 +14,10 @@ import { captureReplayAskedText, withCaptureSummaries } from './browser-capture-
 import { readCapture } from './browser-capture.js';
 import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type ProjectQuestion, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { createRuntimeQaServices } from './runtime-services.js';
-import { RuntimeSessionInputSchema } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
@@ -194,6 +194,16 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async projectProgress(raw: unknown): Promise<ProjectProgress> {
     const identity = RuntimeIdentitySchema.parse(raw);
     return projectProgress(this.ctx.storage, () => this.getRuntime(identity));
+  }
+
+  /** The questions this workspace's agents wait on, for the project agent. */
+  async projectQuestions(raw: unknown): Promise<ProjectQuestion[]> {
+    return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).projectQuestions();
+  }
+
+  /** The project agent's answer to a plain ask here, recorded as its answer, not a person's. */
+  async projectAnswer(raw: unknown, input: { questionId: string; answers: PendingAskAnswer[] }): Promise<RuntimeAccepted> {
+    return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).projectAnswer(input);
   }
 
   /** Base workspace only: a workspace's report of a turn the project agent started. */

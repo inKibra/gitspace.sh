@@ -148,6 +148,22 @@ describe('reduceTranscriptToTurns', () => {
     }));
   });
 
+  it('keeps who answered an ask when the project agent answered it in the person\'s place', () => {
+    const started = [
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'ask-1', toolName: 'ask', args: { prompt: 'Which bucket?', choices: ['assets', 'uploads'] } } },
+    ];
+    const results = [{ selectedOptions: ['uploads'], customInput: null }];
+    const answeredBy = { by: 'project-agent', at: '2026-11-07T10:00:00.000Z' };
+    // The project agent's answer carries who answered; a person's carries nothing more than before.
+    const [byAgent, byPerson] = [{ results, answeredBy }, { results }].map(details => reduceTranscriptToTurns([...started,
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'toolResult', toolCallId: 'ask-1', details, content: [] } } },
+    ])[0]?.items[0]);
+    expect(byAgent).toEqual(expect.objectContaining({ status: 'answered', answeredBy, questions: [expect.objectContaining({ answer: 'uploads' })] }));
+    expect(byPerson).toEqual(expect.objectContaining({ status: 'answered', questions: [expect.objectContaining({ answer: 'uploads' })] }));
+    expect(byPerson).not.toHaveProperty('answeredBy');
+  });
+
   it('projects a propose_plan call as a plan card: the plan decided by Approve or Reject, then an optional note', () => {
     const started = [
       { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },

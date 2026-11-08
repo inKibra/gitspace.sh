@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
 import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
 import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
+import { PendingAskAnswerSchema } from '@gitspace/protocol-runtime/session-controls';
 import { AutomationDraftSchema, AutomationSubjectRefSchema } from './automations-contract.js';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
@@ -826,6 +827,12 @@ export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('met
 export const RuntimeWorkspaceStartArgumentsSchema = z.object({ method: z.literal('start'), workspaceId: z.string().min(1), instruction: z.string().trim().min(1).max(32_768), onDone: z.enum(['quiet', 'wake']).default('quiet') }).strict();
 /** The turn the project agent started in a workspace, while it is watched: its state and its newest items. */
 export const RuntimeWorkspaceProgressArgumentsSchema = z.object({ method: z.literal('progress'), workspaceId: z.string().min(1) }).strict();
+/** The project agent reads the questions a workspace's agents wait on, and answers a plain ask (`ask`) in the person's
+ * place, with the answer shape a person's `answerAsk` carries. Approvals and take-over requests stay a person's. */
+export const RuntimeWorkspaceQuestionsArgumentsSchema = z.discriminatedUnion('method', [
+  z.object({ method: z.literal('questions'), workspaceId: z.string().min(1) }).strict(),
+  z.object({ method: z.literal('answer'), workspaceId: z.string().min(1), questionId: z.string().min(1), answers: z.array(PendingAskAnswerSchema).min(1) }).strict(),
+]);
 /** Subject links (docs/AUTOMATIONS-DESIGN.md §4): a pull request, issue or branch linked to this workspace, or to a named
  * one, gets the project's events about it through its automations; one subject has one workspace. */
 export const RuntimeWorkspaceLinkArgumentsSchema = z.discriminatedUnion('method', [
@@ -836,6 +843,7 @@ export const RuntimeWorkspaceLinkArgumentsSchema = z.discriminatedUnion('method'
 export const RuntimeWorkspaceArgumentsSchema = z.union([
   z.object({ method: z.enum(['get', 'current', 'list', 'operations', 'status']), workspaceId: z.string().min(1).optional() }).strict(),
   RuntimeWorkspaceProgressArgumentsSchema,
+  RuntimeWorkspaceQuestionsArgumentsSchema,
   RuntimeWorkspaceStartArgumentsSchema,
   RuntimeWorkspaceMutationArgumentsSchema,
   RuntimeWorkspaceLinkArgumentsSchema,

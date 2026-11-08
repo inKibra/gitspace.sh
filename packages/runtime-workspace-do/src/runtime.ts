@@ -11,7 +11,7 @@ import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, Runt
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
-import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
+import type { PendingAskAnswer, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createAutomationRequests, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
@@ -38,6 +38,20 @@ export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 
 /** One message of a turn, its text cut short. */
 export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: string };
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
+/** A pending question as the project agent sees it. `kind` tells a plan approval (`propose_plan`) from a tool action's
+ * approval; `why` says why a person decides it, null for a plain ask the project agent may answer. */
+export type ProjectQuestion = { id: string; conversation: string; kind: ProjectQuestionKind; prompt: string; choices: string[]; answerable: boolean; why: string | null };
+type ProjectQuestionKind = 'ask' | 'plan-approval' | 'tool-approval' | 'lifecycle-approval' | 'takeover';
+const PERSON_DECIDES: Record<Exclude<ProjectQuestionKind, 'ask'>, string> = {
+  'plan-approval': 'A person approves this: approving or rejecting a plan is their decision.',
+  'tool-approval': 'A person approves this: the agent asked a person to allow a tool action.',
+  'lifecycle-approval': 'A person approves this: lifecycle scripts run only once a person allows them.',
+  takeover: 'A person answers this: it asks them to take over a browser tab.',
+};
+function projectQuestionKind(question: { kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; tool?: unknown }): ProjectQuestionKind {
+  if (question.kind === 'approval') return question.tool === undefined ? 'plan-approval' : 'tool-approval';
+  return question.kind;
+}
 /** Waking a paused cache before its environment run is dispatched can take minutes; discovery cannot. A sync capture
  * uploads the machine's changes. */
 const MANAGEMENT_TIMEOUT_MS: Readonly<Record<'mcp_discover' | 'lifecycle' | 'sync', number>> = { mcp_discover: 30_000, lifecycle: 240_000, sync: 120_000 };
@@ -87,6 +101,11 @@ export type WorkspaceRuntime = {
   /** Project base workspace: a workspace's report of a turn the project agent started. Quiet, a line the agent reads on
    * its next turn; wake, an event that starts one (after the current one when it is busy). */
   workspaceReport(report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void>;
+  /** The questions this workspace's agents wait on, main and subagents, as the project agent reads them. */
+  projectQuestions(): Promise<ProjectQuestion[]>;
+  /** The project agent answers a plain ask in the person's place: the answer records it, and the asking call resumes as
+   * it does for a person's answer. Approvals and take-over requests are refused. */
+  projectAnswer(input: { questionId: string; answers: readonly PendingAskAnswer[] }): Promise<RuntimeAccepted>;
   /** You took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2), or asked for a capture's
    * steps to be replayed (§11); a person commented on a page or replied in a comment thread (§9): an event for the
    * main conversation, which starts a turn when it is idle (after the current one when it is busy). */
@@ -627,7 +646,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return page.items.filter(entry => !withdrawn.has(String(entry.id))).reverse().flatMap(entry => (entry.model ?? []).flatMap(turnItem)).slice(-limit);
     },
     async workspaceReport(report, onDone) {
-      const text = `Workspace ${report.name} ${REPORT_VERB[report.outcome]}${report.excerpt ? `: ${report.excerpt}` : '.'}`;
+      // An ask names the workspace's id, which the project agent's `questions` and `answer` take.
+      const text = `Workspace ${report.name} ${REPORT_VERB[report.outcome]}${report.excerpt ? `: ${report.excerpt}` : '.'}${report.outcome === 'asked' ? ` (space_workspace questions, workspaceId ${report.workspaceId}, lists it.)` : ''}`;
       const event = { requestId: `workspace:${report.workspaceId}:${report.requestId}`, sender: { id: report.workspaceId, name: report.name }, text, payload: report };
       // The report arrives inside the reporting workspace's request. Started here, the project agent's turn would run one
       // level deeper than that workspace, which the project agent started one level deeper than itself: a project agent
@@ -639,6 +659,36 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       }
       else await harness.commit(tx => tx.appendEntry(runtime.root.id, { kind: WORKSPACE_REPORT_ENTRY, data: event, model: [{ role: 'user', content: text, timestamp: Date.now() }] }), BACKGROUND_CONTEXT);
       publish(); await line;
+    },
+    async projectQuestions() {
+      await line;
+      const rootId = String(runtime.root.id);
+      const questions = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
+      // An ask_takeover card left open after its call stopped waiting no longer holds the agent.
+      return questions.filter(item => item.answer === null && (item.kind !== 'takeover' || item.takeover?.waiting === true)).map((item): ProjectQuestion => {
+        const kind = projectQuestionKind(item);
+        const conversation = item.conversationId === rootId ? 'main' : conversationViews.get(item.conversationId)?.subagent?.name ?? item.conversationId;
+        return { id: item.id, conversation, kind, prompt: item.prompt, choices: item.choices, answerable: kind === 'ask', why: kind === 'ask' ? null : PERSON_DECIDES[kind] };
+      });
+    },
+    async projectAnswer(input) {
+      const at = new Date().toISOString();
+      await harness.commit(async tx => {
+        const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === input.questionId);
+        if (!question) throw new Error(`Question ${input.questionId} is not one this workspace's agents asked`);
+        if (question.answer !== null) throw new Error(`Question ${input.questionId} is already answered`);
+        const kind = projectQuestionKind(question);
+        if (kind !== 'ask') throw new Error(`Question ${input.questionId} is a ${kind}, not a plain question. ${PERSON_DECIDES[kind]} The project agent answers only plain questions (ask).`);
+        const stray = input.answers.find(answer => answer.id !== question.id);
+        if (stray) throw new Error(`Each answer's id is the question's id, ${question.id}; ${stray.id} is not`);
+        const unknown = question.choices.length > 0 ? input.answers.flatMap(answer => answer.selectedOptions).filter(option => !question.choices.includes(option)) : [];
+        if (unknown.length > 0) throw new Error(`${unknown.join(', ')} ${unknown.length === 1 ? 'is not one of its choices' : 'are not its choices'}: ${question.choices.join(', ')}`);
+        if (input.answers.every(answer => answer.selectedOptions.length === 0 && !answer.customInput?.trim())) throw new Error('An answer selects a choice or writes customInput');
+        question.answer = input.answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput }));
+        question.answeredBy = { by: 'project-agent', at };
+      }, BACKGROUND_CONTEXT);
+      harness.resume();
+      await line; return { accepted: true, cursor: snapshot.cursor };
     },
     noticeWhenReady(input) {
       options.storage.sql.exec('INSERT OR IGNORE INTO runtime_attach_notices(attachment_id,generation,conversation_id,label) VALUES(?,?,?,?)', input.attachmentId, input.generation, input.conversationId, input.label);

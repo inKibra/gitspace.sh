@@ -149,6 +149,13 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
       const started = await invoke('space_workspace', { method: 'start', workspaceId: 'sibling', instruction: 'Begin.' });
       expect(started.status).toBe('failed');
       expect(text(started)).toContain('Only the project agent');
+      // Nor does a workspace read or answer another workspace's questions.
+      const read = await invoke('space_workspace', { method: 'questions', workspaceId: 'sibling' });
+      expect(read.status).toBe('failed');
+      expect(text(read)).toContain('Only the project agent (the project\'s base workspace) can read other workspaces\' questions');
+      const answered = await invoke('space_workspace', { method: 'answer', workspaceId: 'sibling', questionId: 'question', answers: [{ id: 'question', selectedOptions: ['Yes'], customInput: null }] });
+      expect(answered.status).toBe('failed');
+      expect(text(answered)).toContain('Only the project agent (the project\'s base workspace) can answer other workspaces\' questions');
       const child = await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT);
       const denied = await services.tools.invoke({ tool: 'codemode', args: { code: 'return 1' }, conversationId: String(child), taskId: 'subagent', requestId: 'subagent', attemptId: 'subagent', replay: 'unsafe' });
       expect(denied.status).toBe('failed');

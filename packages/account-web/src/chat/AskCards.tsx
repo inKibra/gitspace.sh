@@ -17,13 +17,13 @@ function ChosenMark() {
   </span>;
 }
 
-/** What the card asks and of whom, above it: a pending one waits for the person. */
+/** What the card asks and of whom, above it: a pending one waits for the person; one the project agent answered says so. */
 function AskOrigin({ item }: { item: AskBlock }) {
   return <p className="flex min-w-0 flex-wrap items-center gap-2 text-caption text-muted-foreground" data-ask-origin>
     <span className="flex size-5 items-center justify-center rounded-full" style={{ color: badgeColors.orange, background: `color-mix(in oklab, ${badgeColors.orange} 14%, transparent)` }}><MessageQuestionCircle width={12} height={12} strokeWidth={1.75} aria-hidden /></span>
     <span className="text-foreground">{item.kind === 'plan' ? 'Plan approval' : item.questions.length > 1 ? 'Questions' : 'Question'}</span>
     <span>asked by the workspace agent</span>
-    {item.status === 'pending' ? <Badge size="compact" variant="dot" color="orange">Waiting for you</Badge> : <span>· {item.status}</span>}
+    {item.status === 'pending' ? <Badge size="compact" variant="dot" color="orange">Waiting for you</Badge> : item.answeredBy ? <span title={item.answeredBy.at}>· Answered by the project agent</span> : <span>· {item.status}</span>}
   </p>;
 }
 

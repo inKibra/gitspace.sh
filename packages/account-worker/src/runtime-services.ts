@@ -696,6 +696,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (runtimeSpaceToolNames.includes(input.tool)) return completed(input, await invokeRuntimeSpaceTool(env, identity, input));
       if (input.tool === 'space_workspace') {
         const args = RuntimeWorkspaceArgumentsSchema.parse(input.args);
+        // Only the project agent acts on other workspaces' agents: workspaces starting or answering each other could loop without a person.
+        const projectAgentOnly = (what: string) => { if (identity.workspaceId !== baseWorkspaceId) throw new Error(`Only the project agent (the project's base workspace) can ${what}`); };
         switch (args.method) {
           case 'get': case 'current': {
             if (args.workspaceId === undefined || args.workspaceId === identity.workspaceId) return completed(input, identity.workspaceId === baseWorkspaceId ? await authority().getProject() : (await source()).workspace);
@@ -734,9 +736,18 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
             return completed(input, { workspaceId: target.id, name: target.name, ...await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectProgress({ projectId: identity.projectId, workspaceId: target.id }) });
           }
+          case 'questions': case 'answer': {
+            projectAgentOnly(args.method === 'questions' ? 'read other workspaces\' questions' : 'answer other workspaces\' questions');
+            const target = await authority().getWorkspace(args.workspaceId);
+            if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
+            const space = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`);
+            const scope = { projectId: identity.projectId, workspaceId: target.id };
+            if (args.method === 'questions') return completed(input, { workspaceId: target.id, name: target.name, questions: await space.projectQuestions(scope) });
+            await space.projectAnswer(scope, { questionId: args.questionId, answers: args.answers });
+            return completed(input, { workspaceId: target.id, name: target.name, questionId: args.questionId, answered: true });
+          }
           case 'start': {
-            // Only the project agent starts workspaces; workspaces starting each other could loop without a person.
-            if (identity.workspaceId !== baseWorkspaceId) throw new Error('Only the project agent (the project\'s base workspace) can start other workspaces');
+            projectAgentOnly('start other workspaces');
             const target = await authority().getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
             if (target.lifecycle !== 'active') throw new Error(`Workspace ${target.name} is ${target.lifecycle}; only an active workspace can be started`);

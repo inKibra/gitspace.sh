@@ -3,7 +3,8 @@ import { expect, test } from 'vitest';
 import { createAssistantMessageEventStream, createModels, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { AgentDoc, type JsonObject } from '@earendil-works/pi-durable';
-import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
+import { QuestionsDoc } from '@gitspace/runtime-core';
 import { createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { WorkspaceTurnReport } from '@gitspace/blocks';
 import { projectProgress, projectWatchHooks, startFromProject } from '../src/project-watch.js';
@@ -216,16 +217,75 @@ test('progress shows the running turn\'s newest messages; a question in it repor
   });
 });
 
+test('the project agent reads a pending ask and answers it: the asking call resumes with the answer, told the project agent gave it', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    try {
+      const asking = f.call('ask', { prompt: 'Which bucket?', choices: ['assets', 'uploads'] });
+      await f.start('start:ask', 'Move the uploads.');
+      await asking.requested.promise;
+      await f.reported();
+      const [question, ...others] = await f.runtime.projectQuestions();
+      if (!question) throw new Error('The ask left no open question');
+      expect(others).toEqual([]);
+      expect(question).toEqual({ id: question.id, conversation: 'main', kind: 'ask', prompt: 'Which bucket?', choices: ['assets', 'uploads'], answerable: true, why: null });
+      // An option the question does not offer is refused before anything is recorded.
+      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['archive'], customInput: null }] })).rejects.toThrow('archive is not one of its choices: assets, uploads');
+      f.reply('Moved to uploads.');
+      await f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['uploads'], customInput: null }] });
+      await f.settle();
+      const stored = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === question.id);
+      expect(stored).toMatchObject({ answer: [{ id: question.id, selectedOptions: ['uploads'], customInput: null }], answeredBy: { by: 'project-agent' } });
+      expect(Number.isNaN(Date.parse(stored?.answeredBy?.at ?? ''))).toBe(false);
+      const result = (await f.root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolName === 'ask');
+      expect(result?.role === 'toolResult' ? result.content : null).toEqual([{ type: 'text', text: `The project agent answered this question, not the person: [{"id":"${question.id}","selectedOptions":["uploads"],"customInput":null}]` }]);
+      expect(result?.role === 'toolResult' ? result.details : null).toMatchObject({ answeredBy: { by: 'project-agent' } });
+      expect(await f.runtime.projectQuestions()).toEqual([]);
+      // Answered once; a second answer is refused.
+      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['assets'], customInput: null }] })).rejects.toThrow('already answered');
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('plan, tool and lifecycle approvals and take-over requests are listed as a person\'s, and answering them is refused without changing them', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    try {
+      const conversationId = String(f.root.id);
+      const takeover: RuntimeTakeoverQuestion = { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '0b6a4c1e-2f3d-4a5b-8c7d-9e0f1a2b3c4d', targetId: 'tab', url: 'https://shop.test/checkout', title: 'Checkout', holder: 'agent', callId: 'call', askedAt: '2026-11-07T10:00:00.000Z', until: '2026-11-07T10:30:00.000Z', waiting: true };
+      await f.runtime.harness.commit(async tx => {
+        (await tx.doc(QuestionsDoc)).items.push(
+          { id: 'plan', conversationId, kind: 'approval', prompt: 'Approve the plan?', choices: [], answer: null },
+          { id: 'machine', conversationId, kind: 'approval', prompt: 'Attach Darktop?', choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: 'darktop' } } },
+          { id: 'scripts', conversationId, kind: 'lifecycle-approval', prompt: 'Run setup?', choices: ['project', 'workspace', 'not-now'], answer: null },
+          { id: 'tab', conversationId, kind: 'takeover', prompt: 'Sign in for me.', choices: ['Take over', 'Not now'], answer: null, takeover },
+        );
+      }, BACKGROUND_CONTEXT);
+      const listed = await f.runtime.projectQuestions();
+      expect(listed.map(question => [question.id, question.kind, question.answerable])).toEqual([['plan', 'plan-approval', false], ['machine', 'tool-approval', false], ['scripts', 'lifecycle-approval', false], ['tab', 'takeover', false]]);
+      expect(listed.every(question => question.why?.startsWith('A person'))).toBe(true);
+      for (const { id, choice, kind } of [{ id: 'plan', choice: 'Approve', kind: 'plan-approval' }, { id: 'machine', choice: 'Approve', kind: 'tool-approval' }, { id: 'scripts', choice: 'project', kind: 'lifecycle-approval' }, { id: 'tab', choice: 'Not now', kind: 'takeover' }]) {
+        await expect(f.runtime.projectAnswer({ questionId: id, answers: [{ id, selectedOptions: [choice], customInput: null }] })).rejects.toThrow(`Question ${id} is a ${kind}, not a plain question`);
+      }
+      const items = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
+      expect(items.map(item => [item.id, item.answer, item.answeredBy])).toEqual([['plan', null, undefined], ['machine', null, undefined], ['scripts', null, undefined], ['tab', null, undefined]]);
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
 test('a wake report starts the project agent\'s turn with a workspace event from its own alarm, not inside the report call; a quiet one does not', async () => {
   await runInDurableObject(room(), async (_instance, ctx) => {
     const f = await watchFixture(ctx);
     try {
       const report: WorkspaceTurnReport = { projectId: 'watch-project', workspaceId: 'feat-33', name: 'FEAT-33', requestId: 'start:a', outcome: 'finished', excerpt: 'Plan drafted.' };
       await f.runtime.workspaceReport(report, 'quiet');
+      // A question names the workspace's id, which the project agent's questions and answer take.
+      await f.runtime.workspaceReport({ ...report, requestId: 'start:asked', outcome: 'asked', excerpt: 'Which bucket?' }, 'quiet');
       await f.settle();
       expect(f.requests).toEqual([]);
-      const context = (await f.root.context(BACKGROUND_CONTEXT)).messages;
-      expect(context.map(message => message.role === 'user' ? message.content : null)).toContain('Workspace FEAT-33 finished: Plan drafted.');
+      const context = (await f.root.context(BACKGROUND_CONTEXT)).messages.map(message => message.role === 'user' ? message.content : null);
+      expect(context).toContain('Workspace FEAT-33 finished: Plan drafted.');
+      expect(context).toContain('Workspace FEAT-33 asked: Which bucket? (space_workspace questions, workspaceId feat-33, lists it.)');
 
       const answered = f.reply('I will review FEAT-33 next.');
       const before = Date.now();
