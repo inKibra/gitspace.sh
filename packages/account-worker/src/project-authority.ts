@@ -1753,20 +1753,17 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   }
 
   /** The operations views show: queued or running, failed and not dismissed nor run again since, or finished within
-   * `RECENT_OPERATION_MS`. Only background operations: ones a request ran itself ended with that request. */
+   * `RECENT_OPERATION_MS`. Only background operations: ones a request ran itself ended with that request. A failure
+   * that a later operation of its kind on its target followed is superseded, however long ago that one finished: it
+   * came back red once its retry left the recent list. */
   visibleOperations(): CloudProjectOperation[] {
     const recent = new Date(Date.now() - RECENT_OPERATION_MS).toISOString();
-    const rows = this.ctx.storage.sql.exec<OperationRow>(
-      "SELECT * FROM operations WHERE input_json IS NOT NULL AND dismissed_at IS NULL AND (state != 'succeeded' OR updated_at >= ?) ORDER BY created_at DESC LIMIT 100", recent,
+    return this.ctx.storage.sql.exec<OperationRow>(
+      `SELECT * FROM operations AS failure WHERE input_json IS NOT NULL AND dismissed_at IS NULL AND (state != 'succeeded' OR updated_at >= ?)
+        AND NOT (state = 'failed' AND EXISTS (SELECT 1 FROM operations AS later WHERE later.input_json IS NOT NULL AND later.kind = failure.kind
+          AND later.workspace_id IS failure.workspace_id AND later.created_at > failure.created_at))
+        ORDER BY created_at DESC LIMIT 100`, recent,
     ).toArray().map(projectOperation);
-    // A failure that a later operation of its kind on its target followed is superseded.
-    const later = new Set<string>();
-    return rows.filter(operation => {
-      const target = `${operation.kind}:${operation.workspaceId ?? ''}`;
-      const superseded = operation.state === 'failed' && later.has(target);
-      later.add(target);
-      return !superseded;
-    });
   }
 
   dismissOperation(id: string): void {

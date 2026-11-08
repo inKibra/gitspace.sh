@@ -851,4 +851,32 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await space.runtimeRepositoryCheckpoint(identity)).toEqual(dirty);
     expect(notices.mock.calls.map(call => call[1])).toEqual([expect.stringContaining('The base workspace was left for later')]);
   });
+
+  it('keeps a failed operation hidden once its retry succeeded, after the retry has aged out of the recent list', async () => {
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Retried base', 'https://github.com/acme/app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    const clean = await space.runtimeRepositoryCheckpoint(identity);
+    const setCheckpoint = (checkpoint: unknown) => runInDurableObject(space, (_instance, state) => {
+      state.storage.sql.exec('UPDATE runtime_code_snapshot SET checkpoint=? WHERE singleton=1', JSON.stringify(checkpoint));
+    });
+    await setCheckpoint({ ...clean, worktreeTree: commit('4'), worktreeCommit: commit('6') });
+    cloudHistory({ [commit('1')]: [], [commit('2')]: [commit('1')] });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockImplementation(async (projectId, _url, branch) => {
+      artifacts.refs.set(`project-${projectId} refs/gitspace/origin/heads/${branch}`, commit('2'));
+      return commit('2');
+    });
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    const failed = await run(client.project.updateBase({ projectId: project.id }));
+    expect(failed).toMatchObject({ state: 'failed' });
+    await setCheckpoint(clean);
+    expect(await run(client.project.operations.retry({ projectId: project.id, operationId: failed.id }))).toMatchObject({ state: 'succeeded' });
+    const updateBases = async () => (await authority.visibleOperations()).filter(operation => operation.kind === 'project.updateBase').map(operation => operation.state);
+    expect(await updateBases()).toEqual(['succeeded']);
+    // An hour later the retry has left the recent list; the failure it replaced stays hidden.
+    await runInDurableObject(authority, (_instance, state) => {
+      state.storage.sql.exec("UPDATE operations SET updated_at=? WHERE state='succeeded'", new Date(Date.now() - 60 * 60_000).toISOString());
+    });
+    expect(await updateBases()).toEqual([]);
+  });
 });
