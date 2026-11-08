@@ -48,6 +48,8 @@ export function imageLimits(model: Pick<Model<Api>, 'inputLimits'> | undefined):
 
 /** Enough base64 for any header this reads; a JPEG whose frame header lies beyond it is decoded whole. */
 const HEADER_BASE64 = 65_536;
+/** Image data a provider can decode: base64, as every one of them expects. */
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/u;
 
 /** The width and height an image declares in its header, without decoding it; null when it cannot be read. */
 export function imageDimensions(image: Pick<ImageContent, 'data' | 'mimeType'>): { width: number; height: number } | null {
@@ -88,6 +90,8 @@ export function imageRefusal(image: Pick<ImageContent, 'data' | 'mimeType'>, lim
   const bytes = imageDataBytes(image.data);
   if (bytes > limits.maxBytes) return `${megabytes(bytes)}, more than the ${megabytes(limits.maxBytes)} the model accepts`;
   const reference = parseImageReference(image.data);
+  // Images stored before references existed (`blob:sha256:…`) are neither: a provider decoding one fails the whole turn.
+  if (!reference && !BASE64.test(image.data)) return 'stored in a form that can no longer be sent';
   const size = reference ? reference.width > 0 && reference.height > 0 ? reference : null : imageDimensions(image);
   if (!size) return null;
   if (size.width > limits.maxWidth || size.height > limits.maxHeight) return `${size.width}x${size.height}, larger than the ${limits.maxWidth}x${limits.maxHeight} the model accepts`;

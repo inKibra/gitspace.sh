@@ -72,6 +72,12 @@ it('leaves a stored image larger than the model accepts out of every request, sa
   expect(fitted).toEqual(['capture 1', '[Image not shown: it is 3000x900, larger than the 2000x2000 the model accepts.]', 'capture 2', 'image', 'capture 3', 'image']);
 });
 
+it('sends an image stored in a retired form as a note, so it cannot fail every turn of an older conversation', () => {
+  const retired: ImageContent = { type: 'image', mimeType: 'image/webp', data: 'blob:sha256:9e6cdf2351e1cc1fe4d0e5ae02067e85e7c585a58215fdd607509a59fa6753aa' };
+  const fitted = sent(fitRequestImages({ messages: [screenshot(retired, 'old'), screenshot(stored('2'), 'stored'), screenshot(png(100, 100), 'inline')] }, opus));
+  expect(fitted).toEqual(['capture old', '[Image not shown: it is stored in a form that can no longer be sent.]', 'capture stored', 'image', 'capture inline', 'image']);
+});
+
 it('sends stored images up to the model\'s own limits, not the cap on images held in the request', () => {
   // 60 stored screenshots of 600 KB (36 MB of base64 once written in) against Opus's 32 MiB: the oldest go in blocks of 8.
   const fitted = sent(fitRequestImages({ messages: Array.from({ length: 60 }, (_, index) => screenshot(stored(String(index)), String(index))) }, opus));
