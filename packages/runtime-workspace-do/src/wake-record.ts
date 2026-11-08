@@ -41,8 +41,10 @@ const quoted = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
 export function openWakeRecord(sql: SqlStorage, version: string | null, interrupted: string[], now = Date.now()): WakeRecord {
   sql.exec('CREATE TABLE IF NOT EXISTS runtime_wakes(id INTEGER PRIMARY KEY CHECK (id = 1), opened_at INTEGER NOT NULL, version TEXT, turn_ended_at INTEGER, tables_at INTEGER)');
-  try { sql.exec('ALTER TABLE runtime_wakes ADD COLUMN entries_at INTEGER'); }
-  catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
+  for (const column of ['entries_at INTEGER', 'entries_version TEXT']) {
+    try { sql.exec(`ALTER TABLE runtime_wakes ADD COLUMN ${column}`); }
+    catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
+  }
   const previous = sql.exec<{ opened_at: number; version: string | null; turn_ended_at: number | null }>('SELECT opened_at, version, turn_ended_at FROM runtime_wakes WHERE id = 1').toArray()[0];
   const tasksTable = sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").toArray().length > 0;
   const liveTasks = tasksTable ? sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM tasks WHERE status != 'terminal' AND background = 0").one().count : 0;
@@ -61,9 +63,9 @@ export function openWakeRecord(sql: SqlStorage, version: string | null, interrup
       return true;
     },
     entriesDue() {
-      const at = sql.exec<{ entries_at: number | null }>('SELECT entries_at FROM runtime_wakes WHERE id = 1').one().entries_at;
-      if (at !== null && Date.now() - at < TABLES_INTERVAL_MS) return false;
-      sql.exec('UPDATE runtime_wakes SET entries_at = ? WHERE id = 1', Date.now());
+      const row = sql.exec<{ entries_at: number | null; entries_version: string | null }>('SELECT entries_at, entries_version FROM runtime_wakes WHERE id = 1').one();
+      if (row.entries_at !== null && row.entries_version === version && Date.now() - row.entries_at < TABLES_INTERVAL_MS) return false;
+      sql.exec('UPDATE runtime_wakes SET entries_at = ?, entries_version = ? WHERE id = 1', Date.now(), version);
       return true;
     },
     turnEnded() { sql.exec('UPDATE runtime_wakes SET turn_ended_at = ? WHERE id = 1', Date.now()); },
@@ -104,11 +106,16 @@ export type EntrySizes = {
   conversations: Array<{ conversationId: number; entries: number; bytes: number; rangeFrom: number | null; rangeEntries: number; rangeBytes: number }>;
   /** The range's entries of every conversation together, by kind. */
   rangeKinds: Array<{ kind: string | null; entries: number; bytes: number }>;
+  /** Where the range's bytes are, largest first: per entry kind, each top-level field of the record (`record.model`,
+   * `record.data`…), each field of its messages (`model.content`, `model.details`…), each field of their content blocks
+   * by block type (`model.content[thinking].thinkingSignature`…) and of tool results' `details`. A string counts its
+   * characters, an object or array its JSON. */
+  rangeFields: Array<{ kind: string | null; path: string; count: number; bytes: number }>;
   ms: number;
 };
 
-/** Measures pi's `entries` table (see `EntrySizes`): four reads of every entry, so at most once a day per object. Null
- * when the database has no such table. */
+/** Measures pi's `entries` table (see `EntrySizes`): several reads of every entry, so at most once a day per object
+ * and code version. Null when the database has no such table. */
 export function measureEntries(sql: SqlStorage): EntrySizes | null {
   if (!sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'").toArray().length) return null;
   const started = performance.now();
@@ -127,5 +134,22 @@ export function measureEntries(sql: SqlStorage): EntrySizes | null {
     `SELECT json_extract(e.record, '$.kind') AS kind, COUNT(*) AS entries, SUM(LENGTH(CAST(e.record AS BLOB))) AS bytes
      FROM entries e LEFT JOIN (${ranges}) r ON r.conversation_id = e.conversation_id WHERE r.head IS NULL OR e.id >= r.head GROUP BY kind ORDER BY bytes DESC LIMIT 15`,
   ).toArray();
-  return { largest, conversations, rangeKinds, ms: Math.round(performance.now() - started) };
+  const range = `SELECT e.id, e.record, json_extract(e.record, '$.kind') AS kind FROM entries e LEFT JOIN (${ranges}) r ON r.conversation_id = e.conversation_id WHERE r.head IS NULL OR e.id >= r.head`;
+  const size = 'SUM(LENGTH(CAST(f.value AS BLOB)))';
+  const rangeFields = sql.exec<{ kind: string | null; path: string; count: number; bytes: number }>(
+    `WITH range AS (${range})
+     SELECT kind, 'record.' || f.key AS path, COUNT(*) AS count, ${size} AS bytes FROM range, json_each(range.record) f GROUP BY kind, f.key
+     UNION ALL
+     SELECT kind, 'model.' || f.key, COUNT(*), ${size} FROM range, json_each(range.record, '$.model') m, json_each(m.value) f GROUP BY kind, f.key
+     UNION ALL
+     SELECT kind, 'model.content[' || COALESCE(json_extract(b.value, '$.type'), '?') || '].' || f.key, COUNT(*), ${size}
+       FROM range, json_each(range.record, '$.model') m, json_each(m.value, '$.content') b, json_each(b.value) f
+       WHERE json_type(m.value, '$.content') = 'array' AND json_type(b.value) = 'object' GROUP BY kind, json_extract(b.value, '$.type'), f.key
+     UNION ALL
+     SELECT kind, 'model.details.' || f.key, COUNT(*), ${size}
+       FROM range, json_each(range.record, '$.model') m, json_each(m.value, '$.details') f
+       WHERE json_type(m.value, '$.details') = 'object' GROUP BY kind, f.key
+     ORDER BY bytes DESC LIMIT 40`,
+  ).toArray();
+  return { largest, conversations, rangeKinds, rangeFields, ms: Math.round(performance.now() - started) };
 }

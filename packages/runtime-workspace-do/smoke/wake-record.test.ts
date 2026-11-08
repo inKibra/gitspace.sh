@@ -57,8 +57,11 @@ test('entries have their own daily measurement, due on a database whose tables w
   expect(opened.entriesDue()).toBe(true);
   setSystemTime(new Date('2026-11-02T09:59:59Z'));
   expect(openWakeRecord(storage(database), null, []).entriesDue()).toBe(false);
-  setSystemTime(new Date(Date.parse('2026-11-01T10:00:00Z') + TABLES_INTERVAL_MS));
-  expect(openWakeRecord(storage(database), null, []).entriesDue()).toBe(true);
+  // New code measures again the same day, then waits a day on that code.
+  expect(openWakeRecord(storage(database), 'release-b', []).entriesDue()).toBe(true);
+  expect(openWakeRecord(storage(database), 'release-b', []).entriesDue()).toBe(false);
+  setSystemTime(new Date(Date.parse('2026-11-02T09:59:59Z') + TABLES_INTERVAL_MS));
+  expect(openWakeRecord(storage(database), 'release-b', []).entriesDue()).toBe(true);
 });
 
 test('entries are measured as a turn reads them: from each conversation\'s newest compaction marker\'s head, by kind, largest first', () => {
@@ -94,6 +97,25 @@ test('entries are measured as a turn reads them: from each conversation\'s newes
     { kind: 'pi.compaction', entries: 1, bytes: size(6) },
   ]);
   expect(measureEntries(storage(new Database(':memory:')))).toBeNull();
+});
+
+test('the range\'s bytes are attributed to record fields, message fields, content blocks by type and tool result details', () => {
+  const database = new Database(':memory:');
+  database.run('CREATE TABLE entries(id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, head INTEGER, commit_seq INTEGER NOT NULL, record TEXT NOT NULL)');
+  const add = (id: number, record: object) => database.run('INSERT INTO entries(id, conversation_id, head, commit_seq, record) VALUES(?, 1, NULL, ?, ?)', [id, id, JSON.stringify(record)]);
+  add(1, { kind: 'pi.tool-result', model: [{ role: 'toolResult', content: [{ type: 'text', text: 'x'.repeat(300) }], details: { browser: 'b'.repeat(4000), fullOutput: 'r'.repeat(50) } }] });
+  add(2, { kind: 'pi.assistant', model: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 't'.repeat(200), thinkingSignature: 's'.repeat(2500) }, { type: 'text', text: 'y'.repeat(100) }] }] });
+  const fields = measureEntries(storage(database))?.rangeFields ?? [];
+  const bytes = (kind: string, path: string) => fields.find(field => field.kind === kind && field.path === path)?.bytes;
+  expect(bytes('pi.tool-result', 'model.details.browser')).toBe(4000);
+  expect(bytes('pi.tool-result', 'model.details.fullOutput')).toBe(50);
+  expect(bytes('pi.tool-result', 'model.content[text].text')).toBe(300);
+  expect(bytes('pi.assistant', 'model.content[thinking].thinkingSignature')).toBe(2500);
+  expect(bytes('pi.assistant', 'model.content[thinking].thinking')).toBe(200);
+  expect(bytes('pi.assistant', 'model.content[text].text')).toBe(100);
+  // Largest first: the whole record's model field, then the details holding most of it.
+  expect(fields.slice(0, 2).map(field => field.path)).toEqual(['record.model', 'model.details']);
+  expect(fields.map(field => field.bytes)).toEqual([...fields.map(field => field.bytes)].sort((left, right) => right - left));
 });
 
 test('a database fixture is measured table by table, largest first, without SQLite or Durable Object internals', () => {
