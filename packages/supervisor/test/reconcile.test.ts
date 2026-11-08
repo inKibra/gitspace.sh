@@ -1,12 +1,13 @@
 import { expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { daemonClientForProject } from '../src/client.js';
 import { reconcileBrokers } from '../src/reconcile.js';
 import { getDaemonRuntimeDir } from '../src/process-identity.js';
-import { ProcessIdentitySchema, type DaemonStartSpec } from '../src/protocol.js';
+import { DAEMON_BROKER_WORKER_ARG, ProcessIdentitySchema, type DaemonStartSpec } from '../src/protocol.js';
 
 const sleeper = (cwd: string): DaemonStartSpec => ({ name: 'dev-server', application: '/bin/sh', args: ['-c', 'exec sleep 300'], env: {}, cwd, pty: false, restart: 'no', persist: true, detached: false });
 const running = (pid: number | null | undefined) => pid != null && existsSync(`/proc/${pid}`);
@@ -89,6 +90,35 @@ test('a broker whose shutdown fails exits, and the next request reaches a new br
     const pid = Number(await readFile(orphan, 'utf8').catch(() => '0'));
     if (pid > 0) process.kill(pid, 'SIGKILL');
     await (await daemonClientForProject(project)).request({ op: 'shutdown' }).catch(() => null);
+    await rm(base, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test('a broker lock left without an owner record is taken over once past the start-up grace, and fences before it', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'gitspace-broker-ownerless-'));
+  process.env.GITSPACE_SUPERVISOR_HOME = join(base, 'home');
+  // A broker killed between creating the lock and writing its identity leaves no owner.json, or an empty one.
+  const leaveLock = async (name: string, owner: string | null, ageSeconds: number) => {
+    const project = join(base, name);
+    await mkdir(project);
+    const lock = join(getDaemonRuntimeDir(project), 'broker.lock');
+    await mkdir(lock, { recursive: true });
+    if (owner !== null) await writeFile(join(lock, 'owner.json'), owner);
+    const at = Date.now() / 1000 - ageSeconds;
+    await utimes(lock, at, at);
+    return project;
+  };
+  const missing = await leaveLock('missing', null, 60);
+  const empty = await leaveLock('empty', '', 60);
+  const young = await leaveLock('young', '', 0);
+  try {
+    for (const project of [missing, empty]) expect((await (await daemonClientForProject(project)).request({ op: 'list' })).op).toBe('list');
+    const broker = Bun.spawn([process.execPath, fileURLToPath(new URL('../src/entry.ts', import.meta.url)), DAEMON_BROKER_WORKER_ARG], { env: { ...process.env, GITSPACE_SUPERVISOR_PROJECT: young }, stdout: 'ignore', stderr: 'pipe' });
+    expect(await broker.exited).not.toBe(0);
+    expect(await new Response(broker.stderr).text()).toContain('Supervisor already running');
+    expect(existsSync(join(getDaemonRuntimeDir(young), 'broker.sock'))).toBe(false);
+  } finally {
+    for (const project of [missing, empty]) await (await daemonClientForProject(project)).request({ op: 'shutdown' }).catch(() => null);
     await rm(base, { recursive: true, force: true });
   }
 }, 60_000);

@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DaemonRequestSchema, ProcessIdentitySchema, SHUTDOWN_DEADLINE_MS, SupervisorRequestError } from './protocol.js';
 import { getDaemonRuntimeDir, processIdentity, sameProcess } from './process-identity.js';
@@ -10,6 +10,10 @@ import { BROKER_RECORD } from './reconcile.js';
 /** A broker with nothing to supervise and no requests for this long exits; the next caller starts one again. */
 const IDLE_EXIT_MS = 10 * 60_000;
 const IDLE_CHECK_MS = 60_000;
+/** A broker writes `owner.json` right after creating `broker.lock` (milliseconds; seconds on a loaded machine). An
+ * ownerless lock older than this belongs to a broker killed in between and is taken over. It is well inside the
+ * client's `SHUTDOWN_DEADLINE_MS + 10s` respawn loop, so the acquisition that meets such a lock still succeeds. */
+const OWNERLESS_LOCK_GRACE_MS = 10_000;
 
 export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   const project = process.env.GITSPACE_SUPERVISOR_PROJECT;
@@ -19,9 +23,10 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
   const lock = join(root, 'broker.lock');
   try { await mkdir(lock, { mode: 0o700 }); } catch (error) {
     if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-    // A live identity, or a launch with no committed identity, fences a competing broker.
-    const owner = ProcessIdentitySchema.parse(JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8')));
-    if (await sameProcess(owner)) throw new Error('Supervisor already running');
+    // A live identity fences a competing broker. A missing, empty or unparseable identity fences only while the lock
+    // is young enough to be a broker still starting; past that its broker died before committing one.
+    const owner = await readFile(join(lock, 'owner.json'), 'utf8').then(text => ProcessIdentitySchema.parse(JSON.parse(text))).catch(() => null);
+    if (owner ? await sameProcess(owner) : Date.now() - (await stat(lock)).mtimeMs < OWNERLESS_LOCK_GRACE_MS) throw new Error('Supervisor already running');
     await rm(lock, { recursive: true });
     await mkdir(lock, { mode: 0o700 });
   }
