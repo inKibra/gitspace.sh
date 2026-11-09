@@ -6,6 +6,10 @@ export interface ModelOption {
   label: string;
   /** Provider shown beside the name; also matched by search. */
   provider?: string;
+  /** Why no account can use the model now, and when one can again; shown greyed beside it. */
+  unavailable?: string;
+  /** Not choosable. */
+  disabled?: boolean;
 }
 
 /** Every query word must match the model name, its id, or its provider, so "bedrock sonnet" narrows across both. */
@@ -14,8 +18,13 @@ export function matchesModelQuery(option: ModelOption, query: string): boolean {
   return query.toLowerCase().split(/\s+/u).every((word) => haystack.includes(word));
 }
 
-export function modelOptions(models: readonly { provider: string; id: string; name: string }[]): ModelOption[] {
-  return models.map((model) => ({ value: `${model.provider}/${model.id}`, label: model.name || model.id, provider: model.provider }));
+/** `disableUnavailable`: a model no account can use now is shown but not choosable (a run picker); otherwise it stays
+ * choosable (a role's model, which outlasts the limit). */
+export function modelOptions(models: readonly { provider: string; id: string; name: string; unavailable?: { until: string; reason: string } | null }[], disableUnavailable = false): ModelOption[] {
+  return models.map((model) => ({
+    value: `${model.provider}/${model.id}`, label: model.name || model.id, provider: model.provider,
+    ...(model.unavailable ? { unavailable: `${model.unavailable.reason} until ${new Date(model.unavailable.until).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}`, disabled: disableUnavailable } : {}),
+  }));
 }
 
 export function ModelCombobox({ options, value, onValueChange, ariaLabel, placeholder = 'Search models…', disabled, clearable, size, variant, icon, side }: {
@@ -33,8 +42,8 @@ export function ModelCombobox({ options, value, onValueChange, ariaLabel, placeh
   icon?: IconComponent;
   side?: 'top' | 'bottom';
 }) {
-  // The list hands rows back as the kit's base item type; the provider detail lives on our option.
-  const providers = new Map(options.map((option) => [option.value, option.provider]));
+  // The list hands rows back as the kit's base item type; the provider and availability live on our option.
+  const byValue = new Map(options.map((option) => [option.value, option]));
   return <Combobox items={options} value={value} onValueChange={onValueChange} filter={matchesModelQuery} disabled={disabled} size={size}>
     {/* Selecting the shown model on focus or click (after Escape the field stays focused) makes typing start a fresh search instead of appending to its name. */}
     <ComboboxInput aria-label={ariaLabel} placeholder={placeholder} variant={variant} icon={icon} clearable={clearable}
@@ -42,12 +51,12 @@ export function ModelCombobox({ options, value, onValueChange, ariaLabel, placeh
     <ComboboxContent side={side}>
       <ComboboxEmpty>No matching models</ComboboxEmpty>
       <ComboboxList>{(item) => {
-        const option = typeof item === 'string' ? { value: item, label: item } : item;
-        const provider = providers.get(option.value);
-        return <ComboboxItem value={option.value} key={option.value}>
-          <span className="flex min-w-0 items-baseline gap-2">
+        const option = byValue.get(typeof item === 'string' ? item : item.value) ?? { value: typeof item === 'string' ? item : item.value, label: typeof item === 'string' ? item : item.label };
+        return <ComboboxItem value={option.value} key={option.value} disabled={option.disabled}>
+          <span className={`flex min-w-0 items-baseline gap-2${option.unavailable ? ' text-muted-foreground' : ''}`}>
             <span className="truncate">{option.label}</span>
-            {provider ? <span className="shrink-0 text-caption text-muted-foreground">{provider}</span> : null}
+            {option.provider ? <span className="shrink-0 text-caption text-muted-foreground">{option.provider}</span> : null}
+            {option.unavailable ? <span className="shrink-0 text-caption text-muted-foreground">· {option.unavailable}</span> : null}
           </span>
         </ComboboxItem>;
       }}</ComboboxList>

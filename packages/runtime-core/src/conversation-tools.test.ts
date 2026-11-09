@@ -44,7 +44,7 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: 'parent-only-model' }, thinkingLevel: 'max', instructions: 'PRIVATE PARENT PERSONA', tools } });
   await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);
   const catalog = async () => ({
-    models: available.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })),
+    models: available.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, unavailable: null })),
     roles: ['review', 'reviewer'].map(id => { const role = resolveProfileModel(settings, models, id); return { id, label: id === 'review' ? 'Reviewer role' : id, provider: role.model.provider, model: role.model.id, thinking: role.thinking, current: false }; }),
   });
   const admitInference: RuntimeHarnessOptions['admitInference'] = async ({ selection }) => {

@@ -30,6 +30,7 @@ function selection(vault: { cloudCredentialAccounts: VaultAccess['list'] }): Vau
     list: (profileId, provider) => vault.cloudCredentialAccounts(profileId, provider),
     async resolve() { throw new Error('Selection never resolves credentials'); },
     async recordFailure() { throw new Error('Selection never records failures'); },
+    async catalog() { throw new Error('Selection never reads the catalog'); },
   };
 }
 
@@ -222,6 +223,42 @@ describe('Cloud inference credential authority', () => {
     const refreshed = await vault.cloudUsage('default', 'anthropic', true);
     expect(refreshed.reports.map(report => report.credentialId).sort()).toEqual([reads!.id, refused!.id].sort());
     expect(refreshed.errors).toEqual([]);
+  });
+
+  it('offers the models each account lists, from pi.dev and the accounts\' own lists, and says when no account can use one now', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'cyber', provider: 'anthropic', access: 'access-cyber', email: 'cyber@example.com' },
+      { id: 'plain', provider: 'anthropic', access: 'access-plain', email: 'plain@example.com' },
+    ]));
+    const reset = new Date(Math.ceil((Date.now() + 3 * 3_600_000) / 1000) * 1000).toISOString();
+    const model = (id: string, line: string) => ({ type: 'model', id, display_name: id, line, max_input_tokens: 1_000_000, max_tokens: 128_000, capabilities: { image_input: { supported: true }, thinking: { supported: true, types: { adaptive: { supported: true }, disabled: { supported: false } } }, effort: { supported: true, high: { supported: true } } } });
+    const listed = { cyber: [model('claude-mythos-5-2', 'mythos'), model('claude-fable-5-2', 'fable'), model('claude-fable-5-1', 'fable'), model('claude-opus-5-5', 'opus')], plain: [model('claude-fable-5-2', 'fable'), model('claude-fable-5-1', 'fable'), model('claude-opus-5-5', 'opus')] };
+    let reads = 0;
+    network.use(
+      http.get('https://pi.dev/api/models/providers/:provider', () => HttpResponse.json([])),
+      http.get('https://api.anthropic.com/v1/models', ({ request }) => { reads += 1; return HttpResponse.json({ data: request.headers.get('authorization') === 'Bearer access-cyber' ? listed.cyber : listed.plain, has_more: false, last_id: null }); }),
+      // The subscription that lists Mythos has used up its Fable allowance, which Mythos draws on.
+      http.get('https://api.anthropic.com/api/oauth/usage', ({ request }) => HttpResponse.json(request.headers.get('authorization') === 'Bearer access-cyber'
+        ? { five_hour: { utilization: 10, resets_at: reset }, limits: [{ kind: 'weekly_scoped', percent: 100, resets_at: reset, scope: { model: { display_name: 'Fable' } } }] }
+        : { five_hour: { utilization: 10, resets_at: reset } })),
+    );
+    await vault.cloudUsage('default', 'anthropic', true);
+    const models = await vault.cloudModels('default');
+    expect(models.find(entry => entry.id === 'claude-mythos-5-2')).toMatchObject({ provider: 'anthropic', contextWindow: 1_000_000, unavailable: { until: reset, reason: 'Fable limit used up' } });
+    expect(models.find(entry => entry.id === 'claude-fable-5-2')).toMatchObject({ unavailable: null });
+    expect(models.find(entry => entry.id === 'claude-opus-5-5')).toMatchObject({ unavailable: null });
+    // In pi-ai's catalog, but neither account lists it.
+    expect(models.some(entry => entry.id === 'claude-sonnet-5-5')).toBe(false);
+    // A workspace's runtime reads the same rows: Mythos built from its account's list over Fable's request settings.
+    const rows = JSON.parse(await vault.cloudProfileCatalog('default'));
+    expect(rows.anthropic.find((row: { id: string }) => row.id === 'claude-mythos-5-2')).toMatchObject({ api: 'anthropic-messages', maxTokens: 128_000, compat: { forceAdaptiveThinking: true } });
+    expect((await vault.cloudCredentialAccounts('default')).map(account => account.models?.includes('claude-mythos-5-2'))).toEqual([true, false]);
+    // Each account's list is read once in six hours; a refresh reads them again.
+    expect(reads).toBe(2);
+    await vault.cloudModels('default');
+    expect(reads).toBe(2);
+    await vault.cloudProfileCatalog('default', true);
+    expect(reads).toBe(4);
   });
 
   it('signing out a whole provider only disables its accounts', async () => {

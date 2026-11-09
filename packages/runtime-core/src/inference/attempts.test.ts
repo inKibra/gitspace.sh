@@ -52,7 +52,7 @@ async function models(run: AttemptRunner, providers: Provider[]) {
   return createVaultModels({
     profileId: 'profile', workspaceId: 'workspace', modelsStore: new InMemoryModelsStore(), providers, gate: createRequestGate(), run,
     pins: { async read() { return null; }, async write() {} },
-    vault: { async list() { return [account]; }, async resolve() { return { id: 'key', provider: providerId, revision: 1, credential: { type: 'api_key', key: 'key' } }; }, async recordFailure() { return { label: 'key', until: 0 }; } },
+    vault: { async list() { return [account]; }, async resolve() { return { id: 'key', provider: providerId, revision: 1, credential: { type: 'api_key', key: 'key' } }; }, async recordFailure() { return { label: 'key', until: 0 }; }, async catalog() { return {}; } },
   });
 }
 

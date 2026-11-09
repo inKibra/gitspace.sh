@@ -43,8 +43,13 @@ export function attemptOptions(options: object | undefined): Record<string, unkn
   return Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== undefined && typeof value !== 'function' && !(value instanceof AbortSignal)));
 }
 
-/** pi-ai's providers and GitSpace's own, before a profile admits them. */
+/** pi-ai's providers and GitSpace's own, before a profile admits them. Their models are pi-ai's pinned rows; a
+ * workspace's catalog replaces them with the vault's (`withCatalogRows`). */
 export function inferenceProviderSource(): readonly Provider[] {
+  return [...builtinProviders(), ...createLegacyCloudProviders()];
+}
+/** The source the vault builds profile catalogs from: pi-ai's providers with pi.dev's published rows over their own. */
+export function publishedProviderSource(): readonly Provider[] {
   return [...builtinProviders().map(provider => withPublishedCatalog(provider)), ...createLegacyCloudProviders()];
 }
 /** The providers a profile admits, with GitSpace's catalog patches. */

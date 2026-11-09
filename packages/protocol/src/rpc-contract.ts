@@ -1453,7 +1453,8 @@ export const providerUsageContract = gitspaceRpc
   .output(ProviderUsageCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
-export const AvailableModelCodec = wire.object({ provider: wire.string, id: wire.string, name: wire.string, contextWindow: wire.nullable(wire.number), images: wire.boolean });
+/** `unavailable`: no account of the profile can serve the model now: when the soonest can again (ISO), and why. */
+export const AvailableModelCodec = wire.object({ provider: wire.string, id: wire.string, name: wire.string, contextWindow: wire.nullable(wire.number), images: wire.boolean, unavailable: wire.nullable(wire.object({ until: wire.string, reason: wire.string })) });
 export type AvailableModel = InputOf<typeof AvailableModelCodec>;
 /** Models the machine can run right now (authenticated providers only). */
 export const DeviceViewCodec = wire.object({

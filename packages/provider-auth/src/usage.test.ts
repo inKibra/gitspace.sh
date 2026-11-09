@@ -52,3 +52,13 @@ it('reports an account as used up until the latest reset among its exhausted sha
   const report = await collectUsage({ ...credential, provider: 'anthropic' }, fetcher);
   expect(usageObservation(report)?.exhausted).toEqual({ until: Date.parse('2099-01-07T00:00:00.000Z'), label: '7 days' });
 });
+it('keeps an account out of one model family while that family\'s limit is used up, and nothing else', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+    five_hour: { utilization: 20, resets_at: '2099-01-01T01:00:00.000Z' },
+    limits: [{ kind: 'weekly_scoped', percent: 100, resets_at: '2099-01-07T00:00:00.000Z', scope: { model: { display_name: 'Fable' } } }, { kind: 'weekly_scoped', percent: 60, resets_at: '2099-01-07T00:00:00.000Z', scope: { model: { display_name: 'Opus' } } }],
+  }));
+  const observation = usageObservation(await collectUsage({ ...credential, provider: 'anthropic' }, fetcher));
+  expect(observation?.scoped).toEqual({ fable: { until: Date.parse('2099-01-07T00:00:00.000Z'), label: 'Fable' } });
+  expect(observation?.exhausted).toBeUndefined();
+  expect(observation?.usedFraction).toBeCloseTo(0.2);
+});

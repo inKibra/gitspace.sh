@@ -4,10 +4,11 @@ import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, mode
 import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
-  createVaultModels, createRunModelsRouter, createDurableModelsStore, createRequestGate,
-  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
+  createVaultModels, createRunModelsRouter, createRequestGate,
+  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, ProfileCatalogSchema, modelAvailability, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
   type AttemptRunner, type CredentialPins, type VaultModels,
 } from '@gitspace/runtime-core/inference';
+import { InMemoryModelsStore } from '@earendil-works/pi-ai';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
@@ -28,6 +29,9 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
   const catalogs = new Map<string, Promise<VaultModels>>();
   /** This object's model requests, every catalog's, wait here to build and upload their bodies. */
   const gate = createRequestGate();
+  // Published catalog rows this object fetched and stored before the vault built every profile's catalog.
+  const stale = await ctx.storage.list({ prefix: 'runtime-inference:["catalog",' });
+  if (stale.size) await ctx.storage.delete([...stale.keys()]);
   const pinsFor = (profileId: string, conversationId: string): CredentialPins => ({
     async read(provider) { const stored = await ctx.storage.get<unknown>(key('pin', profileId, conversationId, provider)); return stored === undefined ? null : pinSchema.parse(stored); },
     async write(provider, pin) { await ctx.storage.put(key('pin', profileId, conversationId, provider), pinSchema.parse(pin)); },
@@ -36,15 +40,11 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     const id = JSON.stringify([profile.id, profile.revision]);
     let pending = catalogs.get(id);
     if (!pending) {
-      const store = createDurableModelsStore({
-        read: name => ctx.storage.get<unknown>(key('catalog', name)),
-        write: (name, value) => ctx.storage.put(key('catalog', name), value),
-        delete: async name => { await ctx.storage.delete(key('catalog', name)); },
-      });
-      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: store, pins: pinsFor(profile.id, 'catalog'), gate, run, vault: {
+      pending = createVaultModels({ profileId: profile.id, workspaceId: identity.workspaceId, settings: profile.settings, modelsStore: new InMemoryModelsStore(), pins: pinsFor(profile.id, 'catalog'), gate, run, vault: {
         list: (profileId, provider) => vault().cloudCredentialAccounts(profileId, provider),
         resolve: input => { input.signal?.throwIfAborted(); return vault().cloudResolveCredential({ profileId: input.profileId, credentialId: input.credentialId, ...(input.forceRefresh === undefined ? {} : { forceRefresh: input.forceRefresh }) }); },
         recordFailure: input => vault().cloudCredentialFailure(input),
+        catalog: async (profileId, refresh) => ProfileCatalogSchema.parse(JSON.parse(await vault().cloudProfileCatalog(profileId, refresh))),
       } });
       catalogs.set(id, pending);
       void pending.catch(() => { if (catalogs.get(id) === pending) catalogs.delete(id); });
@@ -201,13 +201,12 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         const readonly = async (): Promise<never> => { throw new Error('Passive inference catalogs cannot mutate state or resolve credentials'); };
         const currentModels = await createVaultModels({
           profileId: currentProfile.id, workspaceId: identity.workspaceId, settings: currentProfile.settings, gate,
-          modelsStore: createDurableModelsStore({
-            read: name => ctx.storage.get<unknown>(key('catalog', name)), write: readonly, delete: readonly,
-          }),
+          modelsStore: new InMemoryModelsStore(),
           pins: { read: async () => null, write: readonly },
           vault: {
             list: async (_profileId, provider) => resolved.accounts.filter(account => provider === undefined || account.provider === provider),
             resolve: readonly, recordFailure: readonly,
+            catalog: async () => resolved.catalogJson === null ? {} : ProfileCatalogSchema.parse(JSON.parse(resolved.catalogJson)),
           },
         });
         router.register(currentModels, 'catalog');
@@ -225,7 +224,11 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
             if (!(error instanceof Error) || error.message !== `Inference profile has no admitted model for role ${role}`) throw error;
           }
         }
-        return { models: models.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow })), roles,
+        const now = Date.now();
+        return { models: models.map(model => {
+          const { out } = modelAvailability(resolved.accounts, model.provider, model.id, now);
+          return { provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, unavailable: out && { until: new Date(out.until).toISOString(), reason: out.reason } };
+        }), roles,
           ...(currentAssignment === null ? {} : { inference: { profileId: currentProfile.id, profileName: currentProfile.name, profileRevision: currentProfile.revision, assignmentRevision: currentAssignment } }) };
       },
       async reload(_kind: 'settings' | 'instructions' | 'inference') {

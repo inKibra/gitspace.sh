@@ -48,20 +48,21 @@ describe('durable inference selection intent', () => {
       get: async (key: string) => bodies.get(key),
       put: async (key: string, value: unknown) => { bodies.set(key, structuredClone(value)); },
       delete: async (key: string) => bodies.delete(key),
+      list: async ({ prefix }: { prefix: string }) => new Map([...bodies].filter(([key]) => key.startsWith(prefix))),
     } } as unknown as DurableObjectState;
     let profile: InferenceProfile = { version: 1, id: 'profile', name: 'Profile', revision: 1, settings: {}, createdAt: stamp, updatedAt: stamp };
     let assignmentRevision = 1;
     const vault = {
       resolveCloudInference: async () => ({ profile, assignmentRevision }),
-      cloudInferenceCatalog: async () => ({ profile, assignmentRevision, accounts: [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: null }] }),
+      cloudInferenceCatalog: async () => ({ profile, assignmentRevision, catalogJson: null, accounts: [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: null }] }),
       cloudCredentialAccounts: async () => [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, identity: 'test' }],
       cloudResolveCredential: async () => { throw new Error('Catalog/admission must not resolve provider credentials'); },
+      cloudProfileCatalog: async (_profileId: string, refresh: boolean) => { catalogReads.push(refresh); return '{}'; },
     };
+    /** Each read of the vault's catalog this object made, and whether it asked the vault to read providers again. */
+    const catalogReads: boolean[] = [];
     const environment = { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env;
-    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
-      expect(String(input)).toMatch(/^https:\/\/pi\.dev\/api\/models\/providers\/openai\?/u);
-      return Response.json([], { headers: { etag: 'catalog-1' } });
-    });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { throw new Error('A workspace runtime reads its models from the vault, never from the network'); });
     const identity = RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' });
     const runtime = await createCloudRuntimeInference(state, environment, identity, [], noImages);
     const catalog = await runtime.session.catalog();
@@ -88,12 +89,15 @@ describe('durable inference selection intent', () => {
     expect(await recovered.admitInference({ conversationId: 'conversation', requestId: 'first' })).toEqual(admitted);
     const recoveredCatalog = await recovered.session.catalog();
     expect('inference' in recoveredCatalog ? recoveredCatalog.inference?.profileRevision : undefined).toBe(2);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    now += 4 * 60 * 60 * 1000 + 1;
+    expect(fetcher).not.toHaveBeenCalled();
+    // Admissions read the vault's catalog as it stands; a passive catalog reads none; a reload asks it to read providers.
+    expect(catalogReads.length).toBeGreaterThan(0);
+    expect(catalogReads.every(refresh => !refresh)).toBe(true);
+    const reads = catalogReads.length;
     await recovered.session.catalog();
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(catalogReads.length).toBe(reads);
     await recovered.session.reload('inference');
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(catalogReads.at(-1)).toBe(true);
   });
   it('rejects an unsupported default instead of falling back to another authenticated provider, then admits the reselected OpenAI model', async () => {
     const bodies = new Map<string, unknown>();
@@ -101,15 +105,17 @@ describe('durable inference selection intent', () => {
       get: async (key: string) => bodies.get(key),
       put: async (key: string, value: unknown) => { bodies.set(key, structuredClone(value)); },
       delete: async (key: string) => bodies.delete(key),
+      list: async ({ prefix }: { prefix: string }) => new Map([...bodies].filter(([key]) => key.startsWith(prefix))),
     } } as unknown as DurableObjectState;
     let profile: InferenceProfile = { version: 1, id: 'profile', name: 'Profile', revision: 1, settings: { modelRoles: { default: 'openai-codex/retired' } }, createdAt: stamp, updatedAt: stamp };
     const accounts = [{ id: 'other', provider: 'anthropic', type: 'oauth', revision: 1, expiresAt: 1, identity: null }];
     const resolveCredential = vi.fn(async (): Promise<never> => { throw new Error('Admission must not resolve credentials'); });
     const vault = {
       resolveCloudInference: async () => ({ profile, assignmentRevision: 1 }),
-      cloudInferenceCatalog: async () => ({ profile, assignmentRevision: 1, accounts }),
+      cloudInferenceCatalog: async () => ({ profile, assignmentRevision: 1, catalogJson: null, accounts }),
       cloudCredentialAccounts: async () => accounts,
       cloudResolveCredential: resolveCredential,
+      cloudProfileCatalog: async () => '{}',
     };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json([]));
     const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], noImages);
@@ -128,7 +134,7 @@ describe('durable inference selection intent', () => {
 
   it('keeps passive catalogs read-only with unsupported legacy roles and preserves configured custom model metadata', async () => {
     const rejectMutation = vi.fn(async (): Promise<never> => { throw new Error('Passive read crossed a mutation or credential boundary'); });
-    const state = { storage: { get: async () => undefined, put: rejectMutation, delete: rejectMutation } } as unknown as DurableObjectState;
+    const state = { storage: { get: async () => undefined, put: rejectMutation, delete: rejectMutation, list: async () => new Map() } } as unknown as DurableObjectState;
     const profile: InferenceProfile = {
       version: 1, id: 'configured', name: 'Configured', revision: 3, createdAt: stamp, updatedAt: stamp,
       settings: {
@@ -142,7 +148,7 @@ describe('durable inference selection intent', () => {
     };
     let configured = true;
     const vault = {
-      cloudInferenceCatalog: async () => configured ? { profile, assignmentRevision: 4, accounts: [
+      cloudInferenceCatalog: async () => configured ? { profile, assignmentRevision: 4, catalogJson: null, accounts: [
         { id: 'key', provider: 'studio', type: 'api_key', revision: 1, expiresAt: null, identity: null },
         { id: 'legacy', provider: 'openai-codex', type: 'oauth', revision: 1, expiresAt: 1, identity: null },
       ] } : null,
@@ -153,7 +159,7 @@ describe('durable inference selection intent', () => {
     const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], noImages);
     const catalog = await runtime.session.catalog();
     expect(catalog).toEqual({
-      models: [{ provider: 'studio', id: 'custom-chat:0', name: 'Custom Chat', contextWindow: 32768 }],
+      models: [{ provider: 'studio', id: 'custom-chat:0', name: 'Custom Chat', contextWindow: 32768, unavailable: null }],
       roles: [{ id: 'custom', label: 'custom', provider: 'studio', model: 'custom-chat:0', thinking: 'high', current: false }],
       inference: { profileId: 'configured', profileName: 'Configured', profileRevision: 3, assignmentRevision: 4 },
     });
@@ -174,7 +180,7 @@ describe('durable inference selection intent', () => {
       cloudResolveCredential: rejectMutation, cloudCredentialFailure: rejectMutation,
     };
     const runtime = await createCloudRuntimeInference(
-      { storage: { get: async () => undefined, put: rejectMutation, delete: rejectMutation } } as unknown as DurableObjectState,
+      { storage: { get: async () => undefined, put: rejectMutation, delete: rejectMutation, list: async () => new Map() } } as unknown as DurableObjectState,
       { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env,
       RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }),
       [],
@@ -205,14 +211,16 @@ describe('durable inference selection intent', () => {
       get: async (key: string) => bodies.get(key),
       put: async (key: string, value: unknown) => { bodies.set(key, structuredClone(value)); },
       delete: async (key: string) => bodies.delete(key),
+      list: async ({ prefix }: { prefix: string }) => new Map([...bodies].filter(([key]) => key.startsWith(prefix))),
     } } as unknown as DurableObjectState;
     let profile: InferenceProfile = { version: 1, id: 'profile', name: 'Profile', revision: 1, settings: {}, createdAt: stamp, updatedAt: stamp };
     const accounts = vi.fn(async () => [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: 'test' }]);
     const vault = {
       resolveCloudInference: async () => ({ profile, assignmentRevision: 1 }),
-      cloudInferenceCatalog: async () => ({ profile, assignmentRevision: 1, accounts: [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: null }] }),
+      cloudInferenceCatalog: async () => ({ profile, assignmentRevision: 1, catalogJson: null, accounts: [{ id: 'key', provider: 'openai', type: 'api_key', revision: 1, expiresAt: null, identity: null }] }),
       cloudCredentialAccounts: accounts,
       cloudResolveCredential: async () => { throw new Error('Admission must not resolve provider credentials'); },
+      cloudProfileCatalog: async () => '{}',
     };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json([], { headers: { etag: 'catalog-1' } }));
     const runtime = await createCloudRuntimeInference(state, { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault } } as unknown as Env, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], noImages);

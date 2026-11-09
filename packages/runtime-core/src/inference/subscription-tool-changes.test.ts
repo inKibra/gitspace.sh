@@ -29,7 +29,7 @@ async function sent(credential: ResolvedCredential['credential']): Promise<{ too
   const models = await createVaultModels({
     profileId: 'profile', workspaceId: 'workspace', modelsStore: new InMemoryModelsStore(), providers: [provider],
     pins: { async read() { return null; }, async write() {} }, gate: createRequestGate(),
-    vault: { async list() { return [account]; }, async resolve() { return { id: 'account', provider: 'anthropic', revision: 1, credential }; }, async recordFailure() { return { label: 'account', until: 0 }; } },
+    vault: { async list() { return [account]; }, async resolve() { return { id: 'account', provider: 'anthropic', revision: 1, credential }; }, async recordFailure() { return { label: 'account', until: 0 }; }, async catalog() { return {}; } },
   });
   const model = models.getModel('anthropic', 'claude-opus-5-5');
   if (!model) throw new Error('claude-opus-5-5 missing from the catalog');

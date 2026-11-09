@@ -26,7 +26,7 @@ export const SessionPlanSchema = z.object({ status: z.enum(['proposed', 'approve
 export const SessionControlSchema = z.object({
   sessionId: z.string(), inference: z.object({ profileId: z.string(), profileName: z.string(), profileRevision: z.number(), assignmentRevision: z.number() }).optional(),
   role: z.string().nullable(), roleLabel: z.string().nullable(), roles: z.array(z.object({ id: z.string(), label: z.string(), provider: z.string(), model: z.string(), thinking: z.string().nullable(), current: z.boolean() })),
-  provider: z.string().nullable(), models: z.array(z.object({ provider: z.string(), id: z.string(), name: z.string(), contextWindow: z.number().nullable() })), model: z.string().nullable(), thinking: z.string().nullable(), fastMode: z.boolean(), planMode: z.boolean(),
+  provider: z.string().nullable(), models: z.array(z.object({ provider: z.string(), id: z.string(), name: z.string(), contextWindow: z.number().nullable(), unavailable: z.object({ until: z.string(), reason: z.string() }).nullable().default(null) })), model: z.string().nullable(), thinking: z.string().nullable(), fastMode: z.boolean(), planMode: z.boolean(),
   context: z.object({ tokens: z.number(), contextWindow: z.number(), percent: z.number() }).nullable(), cost: z.number(),
   /** `planStep`: the plan step a task completes; absent on tasks of the agent's own list and from older runtimes. */
   todos: z.array(z.object({ name: z.string(), tasks: z.array(z.object({ content: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'abandoned', 'blocked']), blocker: z.string().nullable(), planStep: z.string().optional() })) })),

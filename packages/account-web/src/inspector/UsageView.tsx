@@ -66,7 +66,7 @@ function FigureHeads() {
   return <>
     <TableHead className="text-right">Requests</TableHead>
     <TableHead className="text-right">Tokens</TableHead>
-    <TableHead className="text-right">Recorded cost</TableHead>
+    <TableHead className="text-right">API cost</TableHead>
   </>;
 }
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -86,12 +86,12 @@ function Report({ report }: { report: SessionUsageReport }) {
   const bucketTotal = totalsDeep.input + totalsDeep.output + totalsDeep.cacheRead + totalsDeep.cacheWrite;
   return <>
     <CardGroup columns={2} separated border="outlined">
-      <MetaCard label="Total recorded cost">{usd(totalsDeep.costUsd)}</MetaCard>
+      <MetaCard label="API cost">{usd(totalsDeep.costUsd)}</MetaCard>
       <MetaCard label="Total tokens">{tokens(totalsDeep.totalTokens)}</MetaCard>
       <MetaCard label="Child sessions">{report.childSessions}</MetaCard>
       <MetaCard label="Total requests">{requests(totalsDeep.requests)}</MetaCard>
     </CardGroup>
-    <p className="text-caption text-muted-foreground">Combined totals include this session, every recorded descendant, and direct model calls. SDK-recorded cost is an estimate, not account billing; zero can mean pricing was unavailable.</p>
+    <p className="text-caption text-muted-foreground">Combined totals include this session, every recorded descendant, and direct model calls. API cost counts responses on accounts billed per token, priced from the model catalog: an estimate, not your bill. A subscription's responses count their tokens only; its plan pays for them (before November 9, 2026 they were priced too).</p>
     <Section title="Session scope">
       <Table size="compact">
         <TableHeader><TableRow><TableHead>Scope</TableHead><FigureHeads /></TableRow></TableHeader>

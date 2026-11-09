@@ -12,8 +12,10 @@ import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspa
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation, type UsageObservation } from '@gitspace/provider-auth';
-import { describeCloudProviders, listCloudModels } from '@gitspace/runtime-core/inference';
-import type { AccountFailure, CredentialAccount, ResolvedCredential } from '@gitspace/runtime-core/inference';
+import { describeCloudProviders, listCloudModels, publishedProviderSource, withListedModels, createDurableModelsStore, noAmbientAuth } from '@gitspace/runtime-core/inference';
+import type { AccountFailure, CredentialAccount, ProfileCatalog, ResolvedCredential } from '@gitspace/runtime-core/inference';
+import { createModels, type AnyModel } from '@earendil-works/pi-ai';
+import { listAccountModels, accountModelSchema, ACCOUNT_MODEL_PROVIDERS, type AccountModel } from '@gitspace/provider-auth';
 import type { McpConnectionStatus, ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
 import { ProviderLoginEventCodec } from '@gitspace/protocol';
 import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js';
@@ -274,6 +276,10 @@ function accountLabel(id: string, account: SignedInAccount | null): string {
   return account?.email ?? account?.identity ?? (account?.type === 'api_key' ? 'API key' : `Account ${id}`);
 }
 
+/** How long an account's model list is used before it is read again; new models reach the picker within this. */
+const ACCOUNT_MODELS_TTL_MS = 6 * 3_600_000;
+/** How soon an account whose model list read failed is read again. */
+const ACCOUNT_MODELS_RETRY_MS = 5 * 60_000;
 type AccountHealthRow = { credential_id: string; cooldown_until: number; cooldown_reason: string | null; report_json: string | null };
 /** An account's latest usage observation, and until when inference skips it and why: the later of a failure's
  * cooldown and the reset of a usage window it has used up. */
@@ -344,6 +350,8 @@ interface InferenceProfileRow extends Record<string, SqlStorageValue> {
 export interface CloudInferenceCatalog {
   profile: InferenceProfile;
   assignmentRevision: number;
+  /** The profile's last built source models as JSON (`cloudProfileCatalog`); null before the first build. */
+  catalogJson: string | null;
   accounts: CredentialAccount[];
 }
 export type InferenceWriteResult =
@@ -1526,7 +1534,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return openVaultText(ciphertext, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['runtime-grant/v1', config.user_id, scope.projectId, scope.workspaceId, scope.attachmentId, scope.generation]));
   }
 
-  /** Passive runtime reads never initialize profiles, unseal credentials, or repair account health. */
+  /** Passive runtime reads never initialize profiles, unseal credentials, or read providers. */
   cloudInferenceCatalog(projectId: string): CloudInferenceCatalog | null {
     if (!this.config() || this.ctx.storage.sql.exec<{ version: number }>('SELECT version FROM inference_migration WHERE id = 1').one().version !== 1) return null;
     const assignment = this.ctx.storage.sql.exec<{ profile_id: string; revision: number }>('SELECT profile_id, revision FROM inference_assignments WHERE project_id = ?', projectId).toArray()[0];
@@ -1534,14 +1542,26 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const row = this.ctx.storage.sql.exec<InferenceProfileRow>('SELECT * FROM inference_profiles WHERE profile_id = ? AND deleted_at IS NULL', assignment.profile_id).toArray()[0];
     if (!row) return null;
     const accounts = this.ctx.storage.sql.exec<{ row_id: number; provider: string; revision: number; expires_at: number }>("SELECT rowid AS row_id, provider, revision, expires_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", assignment.profile_id).toArray();
+    // The profile's last built catalog and each account's stored list and health, read only where they were recorded:
+    // a passive read creates no table.
+    const recorded = new Set(this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('cloud_account_health', 'credential_models', 'profile_catalogs')").toArray().map(table => table.name));
+    const listed = recorded.has('credential_models') ? this.storedAccountModels(assignment.profile_id) : new Map<string, AccountModel[]>();
+    const stored = recorded.has('profile_catalogs') ? this.ctx.storage.sql.exec<{ rows_json: string }>('SELECT rows_json FROM profile_catalogs WHERE profile_id = ?', assignment.profile_id).toArray()[0] : undefined;
+    const now = Date.now();
     return {
       profile: JSON.parse(row.profile_json) as InferenceProfile,
       assignmentRevision: assignment.revision,
-      accounts: accounts.map(account => ({
-        id: String(account.row_id), provider: account.provider, revision: account.revision,
-        type: account.expires_at === 0 ? 'api_key' : 'oauth',
-        expiresAt: account.expires_at === 0 ? null : account.expires_at, identity: null,
-      })),
+      catalogJson: stored?.rows_json ?? null,
+      accounts: accounts.map(account => {
+        const { usage, out } = recorded.has('cloud_account_health') ? accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', assignment.profile_id, String(account.row_id)).toArray()[0], now) : { usage: undefined, out: null };
+        const models = listed.get(String(account.row_id))?.map(model => model.id);
+        return {
+          id: String(account.row_id), provider: account.provider, revision: account.revision,
+          type: account.expires_at === 0 ? 'api_key' : 'oauth',
+          expiresAt: account.expires_at === 0 ? null : account.expires_at, identity: null,
+          ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}), ...(models ? { models } : {}),
+        };
+      }),
     };
   }
 
@@ -1562,12 +1582,14 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
     this.ensureCloudAccountHealth();
+    const listed = this.storedAccountModels(profileId);
     const rows = this.ctx.storage.sql.exec<ProfileCredentialRow>("SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at FROM inference_credentials WHERE profile_id = ? AND state = 'active' ORDER BY rowid", profileId).toArray();
     const now = Date.now();
     const result = await Promise.all(rows.filter(row => provider === undefined || row.provider === provider).map(async row => {
       const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
       const { usage, out } = accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id)).toArray()[0], now);
-      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}) };
+      const models = listed.get(String(row.row_id))?.map(model => model.id);
+      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}), ...(models ? { models } : {}) };
     }));
     this.assertProfileAccess(profileId);
     return result;
@@ -1711,10 +1733,87 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     await this.putBrowserApiKey(input.profileId, descriptor.credentialProvider, input.key);
   }
 
+  /** The profile's models for a picker: those its accounts offer, each with when it is unavailable and why. */
   async cloudModels(profileId: string) {
+    const catalog = await this.profileCatalog(profileId);
     const accounts = await this.cloudCredentialAccounts(profileId);
-    const profile = this.requireInferenceProfile(profileId);
-    return listCloudModels(profile.settings, accounts.map(account => account.provider));
+    return listCloudModels(this.requireInferenceProfile(profileId).settings, catalog, accounts, Date.now());
+  }
+
+  /** pi.dev's published rows, by provider shard, shared by every profile of the account (pi keeps their 4-hour TTL). */
+  private readonly publishedRows = createDurableModelsStore({
+    read: name => this.ctx.storage.get<unknown>(`vault-catalog:${name}`),
+    write: (name, value) => this.ctx.storage.put(`vault-catalog:${name}`, value),
+    delete: async name => { await this.ctx.storage.delete(`vault-catalog:${name}`); },
+  });
+  private readonly catalogBuilds = new Map<string, Promise<ProfileCatalog>>();
+
+  /** A profile's source models by provider (`ProfileCatalog`) as JSON, for every provider it has an account for: pi-ai's
+   * rows, pi.dev's published rows over them, and the models its accounts list that neither has. `refresh` reads pi.dev
+   * and the accounts' lists past their caches. */
+  async cloudProfileCatalog(profileId: string, refresh = false): Promise<string> {
+    return JSON.stringify(await this.profileCatalog(profileId, refresh));
+  }
+
+  /** One build runs per profile at a time; callers share it. */
+  private profileCatalog(profileId: string, refresh = false): Promise<ProfileCatalog> {
+    const running = this.catalogBuilds.get(profileId);
+    if (running && !refresh) return running;
+    const build = this.buildProfileCatalog(profileId, refresh).finally(() => { if (this.catalogBuilds.get(profileId) === build) this.catalogBuilds.delete(profileId); });
+    this.catalogBuilds.set(profileId, build);
+    return build;
+  }
+
+  private async buildProfileCatalog(profileId: string, refresh: boolean): Promise<ProfileCatalog> {
+    const accounts = await this.cloudCredentialAccounts(profileId);
+    await Promise.all(accounts.filter(account => ACCOUNT_MODEL_PROVIDERS[account.provider] === true).map(account => this.readAccountModels(profileId, account.id, refresh)));
+    const enabled = [...new Set(accounts.map(account => account.provider))];
+    const sources = publishedProviderSource().filter(provider => enabled.includes(provider.id));
+    const registry = createModels({ authContext: noAmbientAuth, modelsStore: this.publishedRows });
+    for (const provider of sources) registry.setProvider({ ...provider, auth: { apiKey: { name: 'Public catalog', resolve: async () => ({ auth: { apiKey: 'catalog-only' }, source: 'Public catalog' }) } } });
+    // A failed publication read leaves a provider on pi-ai's pinned rows (and pi.dev's last stored ones).
+    await registry.refresh({ allowNetwork: true, force: refresh, providers: enabled });
+    const listed = this.storedAccountModels(profileId);
+    const catalog: Record<string, AnyModel[]> = {};
+    for (const provider of sources) {
+      const rows = provider.getAllModels?.() ?? provider.getModels();
+      const own = accounts.filter(account => account.provider === provider.id).flatMap(account => listed.get(account.id) ?? []);
+      catalog[provider.id] = own.length ? withListedModels(rows, own) : [...rows];
+    }
+    this.assertProfileAccess(profileId);
+    this.ctx.storage.sql.exec('INSERT INTO profile_catalogs(profile_id, built_at, rows_json) VALUES (?, ?, ?) ON CONFLICT(profile_id) DO UPDATE SET built_at = excluded.built_at, rows_json = excluded.rows_json', profileId, Date.now(), JSON.stringify(catalog));
+    return catalog;
+  }
+
+  /** Reads an account's own model list when its stored one is older than 6 hours (5 minutes after a failed read), or
+   * on `refresh`. A failed read keeps the last list and records why. */
+  private async readAccountModels(profileId: string, credentialId: string, refresh: boolean): Promise<void> {
+    const now = Date.now();
+    const cached = this.ctx.storage.sql.exec<{ observed_at: number; error: string | null }>('SELECT observed_at, error FROM credential_models WHERE profile_id = ? AND credential_id = ?', profileId, credentialId).toArray()[0];
+    if (!refresh && cached && now - cached.observed_at < (cached.error === null ? ACCOUNT_MODELS_TTL_MS : ACCOUNT_MODELS_RETRY_MS)) return;
+    try {
+      const resolved = await this.cloudResolveCredential({ profileId, credentialId });
+      const models = await listAccountModels(resolved.credential.type === 'api_key' ? { provider: resolved.provider, type: 'api_key', key: resolved.credential.key } : { provider: resolved.provider, type: 'oauth', access: resolved.credential.access });
+      this.ctx.storage.sql.exec('INSERT INTO credential_models(profile_id, credential_id, observed_at, models_json, error) VALUES (?, ?, ?, ?, NULL) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, models_json = excluded.models_json, error = NULL', profileId, credentialId, Date.now(), JSON.stringify(models));
+    } catch (error) {
+      const message = error instanceof ProviderRefreshError ? `The provider refused the model list (HTTP ${error.status ?? '?'}${error.reason ? `, ${error.reason}` : ''})` : error instanceof Error ? error.message : String(error);
+      this.ctx.storage.sql.exec('INSERT INTO credential_models(profile_id, credential_id, observed_at, models_json, error) VALUES (?, ?, ?, NULL, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, error = excluded.error', profileId, credentialId, Date.now(), message.slice(0, 500));
+    }
+  }
+
+  /** Each account's last read model list, by credential id; an account never read, or whose reads all failed, has none. */
+  private storedAccountModels(profileId: string): Map<string, AccountModel[]> {
+    this.ensureCredentialModels();
+    return new Map(this.ctx.storage.sql.exec<{ credential_id: string; models_json: string | null }>('SELECT credential_id, models_json FROM credential_models WHERE profile_id = ? AND models_json IS NOT NULL', profileId).toArray()
+      .map(row => [row.credential_id, z.array(accountModelSchema).parse(JSON.parse(row.models_json ?? '[]'))]));
+  }
+
+  private credentialModelsReady = false;
+  private ensureCredentialModels(): void {
+    if (this.credentialModelsReady) return;
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS credential_models(profile_id TEXT NOT NULL, credential_id TEXT NOT NULL, observed_at INTEGER NOT NULL, models_json TEXT, error TEXT, PRIMARY KEY(profile_id, credential_id))');
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS profile_catalogs(profile_id TEXT PRIMARY KEY, built_at INTEGER NOT NULL, rows_json TEXT NOT NULL)');
+    this.credentialModelsReady = true;
   }
 
   private ensureCloudLoginStorage(): void {
@@ -2030,6 +2129,8 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     this.ctx.storage.transactionSync(() => {
       const { row_id: rowId } = this.providerAccount(profileId, provider, credentialId);
       this.ctx.storage.sql.exec('DELETE FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
+      this.ensureCredentialModels();
+      this.ctx.storage.sql.exec('DELETE FROM credential_models WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
       this.ctx.storage.sql.exec('DELETE FROM inference_credentials WHERE profile_id = ? AND rowid = ?', profileId, rowId);
       // Account ids are rowids: never hand a removed account's id to a later upload.
       this.ctx.storage.sql.exec('INSERT INTO retired_credential_rowid(id, row_id) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET row_id = MAX(row_id, excluded.row_id)', rowId);

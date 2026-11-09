@@ -20,6 +20,7 @@ it('dispatches the signal-bound admission even when the picker changes the model
       list: async () => [{ id: 'key', provider: 'test', type: 'api_key', revision: 1, expiresAt: null, identity: 'test' }],
       resolve: async () => ({ id: 'key', provider: 'test', revision: 1, credential: { type: 'api_key', key: 'local-fake' } }),
       recordFailure: async () => { throw new Error('This request never fails'); },
+      catalog: async () => ({}),
     },
   });
   const first = new AbortController();

@@ -4,6 +4,7 @@ import { isModelType } from '@earendil-works/pi-ai';
 import type { Credential, ProviderResponse } from '@earendil-works/pi-ai';
 import { limitContextWindows } from './catalog.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
+import { withCatalogRows, type ProfileCatalog } from './account-models.js';
 import { contextWindowLimits } from './admission.js';
 import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRunner, type InferenceAttempt } from './attempts.js';
 import { fitRequestImages, imageLimits } from './image-limits.js';
@@ -22,6 +23,7 @@ export * from './vision.js';
 export * from './request-gate.js';
 export * from './image-requests.js';
 export * from './attempts.js';
+export * from './account-models.js';
 export { claudeCode, XxHash64, type ClaudeCodeTransport } from './claude-code-request.js';
 export { imageDimensions } from './image-limits.js';
 
@@ -67,19 +69,27 @@ function rejectOverrides(options: unknown): void {
 }
 
 /**
- * A Claude subscription request declares its whole current tool set up front instead of announcing mid-conversation
- * changes (`tool_addition`/`tool_removal` blocks, which pi-ai sends for models that support them). Every request
- * Anthropic refused as a third-party app's (billed to extra usage) carried 40 or more of those blocks, whatever its
- * size; Claude Code's own requests are not known to send them. A tool-set change then restarts the prompt cache.
+ * A subscription's request, as sent: its plan pays for it, so its usage records tokens and no cost (cost is what a
+ * per-token account is billed). A Claude subscription request also declares its whole current tool set up front
+ * instead of announcing mid-conversation changes (`tool_addition`/`tool_removal` blocks, which pi-ai sends for models
+ * that support them). Every request Anthropic refused as a third-party app's (billed to extra usage) carried 40 or more
+ * of those blocks, whatever its size; Claude Code's own requests are not known to send them. A tool-set change then
+ * restarts the prompt cache.
  */
 function subscriptionModel<T extends Api>(model: Model<T>): Model<T> {
-  if (model.api !== 'anthropic-messages' || !model.compat || !('supportsMidConvoToolChanges' in model.compat) || !model.compat.supportsMidConvoToolChanges) return model;
-  return { ...model, compat: { ...model.compat, supportsMidConvoToolChanges: false } };
+  const unpriced = { ...model, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  if (model.api !== 'anthropic-messages' || !model.compat || !('supportsMidConvoToolChanges' in model.compat) || !model.compat.supportsMidConvoToolChanges) return unpriced;
+  return { ...unpriced, compat: { ...model.compat, supportsMidConvoToolChanges: false } };
 }
+/** Sign-ins whose credential is billed per token (OpenRouter's sign-in issues a credit-funded API key): their requests
+ * keep their cost. */
+const PER_TOKEN_SIGN_INS: Readonly<Record<string, true>> = { openrouter: true };
 
 export async function createVaultModels(options: VaultModelsOptions): Promise<VaultModels> {
   const settings = options.settings ?? {};
-  const listed = profileProviders(settings, options.providers ?? inferenceProviderSource());
+  // The vault's catalog for this profile, by provider; until the first refresh, pi-ai's pinned rows.
+  let catalogRows: ProfileCatalog = {};
+  const listed = profileProviders(settings, (options.providers ?? inferenceProviderSource()).map(provider => withCatalogRows(provider, () => catalogRows[provider.id])));
   const run = options.run ?? createAttemptRunner({ providers: () => listed });
   const catalog = (list: readonly Provider[]) => {
     const models = createModels({ authContext: noAmbientAuth, modelsStore: options.modelsStore });
@@ -94,10 +104,10 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
   const providers = listed.map(provider => limitContextWindows(provider, limited));
   const registry = catalog(providers);
   const refresh: Models['refresh'] = async request => {
-    const enabled = [...new Set((await options.vault.list(options.profileId)).map(account => account.provider))];
-    const result = await registry.refresh({ ...request, providers: enabled.filter(id => !request?.providers || request.providers.includes(id)) });
+    try { catalogRows = await options.vault.catalog(options.profileId, request?.force === true); }
+    catch (error) { return { aborted: false, errors: new Map([['vault', error instanceof Error ? error : new Error(String(error))]]) }; }
     limit = limits(listed);
-    return result;
+    return { aborted: false, errors: new Map() };
   };
   const rowKey = (model: AnyModel) => `${model.type ?? 'chat'}:${model.id}`;
   const rows = (provider: Provider): readonly AnyModel[] => provider.getAllModels?.() ?? provider.getModels();
@@ -187,7 +197,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     }
     async function* streamAttempts(model: AnyModel, invoke: (credential: ResolvedCredential, attempt: Attempt, subscription: boolean) => AsyncIterable<AssistantMessageEvent>, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
       canonical(model);
-      const candidates = await orderedAccounts({ ...options, provider: model.provider });
+      const candidates = await orderedAccounts({ ...options, provider: model.provider, model: model.id });
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index]!;
         for (let refresh = 0; refresh < 2; refresh++) {
@@ -203,7 +213,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           let failure: Extract<AssistantMessageEvent, { type: 'error' }> | undefined;
           const deferred: AssistantMessageEvent[] = [];
           try {
-            for await (const event of invoke(credential, attempt, candidate.type === 'oauth')) {
+            for await (const event of invoke(credential, attempt, candidate.type === 'oauth' && PER_TOKEN_SIGN_INS[candidate.provider] !== true)) {
               if (event.type === 'error') { failure = event; break; }
               if (event.type === 'start') { deferred.push(event); continue; }
               if (!published) { for (const start of deferred) yield start; deferred.length = 0; published = true; }
@@ -229,7 +239,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     }
     async function resultAttempts<T extends AssistantImages | ClassifierResult>(model: AnyModel, invoke: (models: Models, attempt: Attempt) => Promise<T>, signal?: AbortSignal): Promise<T> {
       canonical(model);
-      const candidates = await orderedAccounts({ ...options, provider: model.provider });
+      const candidates = await orderedAccounts({ ...options, provider: model.provider, model: model.id });
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index]!;
         for (let refresh = 0; refresh < 2; refresh++) {
@@ -256,10 +266,14 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       throw new Error('Account retry invariant violated');
     }
     async function available(providerId?: string): Promise<AnyModel[]> {
+      const accounts = await options.vault.list(options.profileId, providerId);
       const kinds = new Map<string, Set<CredentialAccount['type']>>();
-      for (const account of await options.vault.list(options.profileId, providerId)) kinds.set(account.provider, (kinds.get(account.provider) ?? new Set()).add(account.type));
+      for (const account of accounts) kinds.set(account.provider, (kinds.get(account.provider) ?? new Set()).add(account.type));
+      // A model is available when one of the profile's accounts offers it: an account whose provider lists its models
+      // offers those only.
+      const offered = (model: AnyModel) => accounts.some(account => account.provider === model.provider && (!account.models || account.models.includes(model.id)));
       return list.filter(provider => kinds.has(provider.id) && (providerId === undefined || provider.id === providerId)).flatMap(provider => {
-        const models = provider.getAllModels?.() ?? provider.getModels();
+        const models = (provider.getAllModels?.() ?? provider.getModels()).filter(offered);
         // A provider narrows its models by the kind of credential (a ChatGPT sign-in reaches no OpenAI classifier): a
         // model is available when one of the profile's accounts for it can use it. The stand-in carries the kind only.
         const usable = [...kinds.get(provider.id) ?? []].map((kind): Credential => kind === 'oauth' ? { type: 'oauth', access: '', refresh: '', expires: 0 } : { type: 'api_key' });

@@ -157,16 +157,6 @@ export function describeCloudProviders(settings: InferenceProfile['settings'] = 
   }));
 }
 
-export function listCloudModels(settings: InferenceProfile['settings'], authenticatedProviderIds: readonly string[]) {
-  const authenticated = new Set(authenticatedProviderIds);
-  const providers = admitProfileProviders(settings, [...builtinProviders(), ...createLegacyCloudProviders()].map(applyProviderCatalog));
-  return providers.filter(provider => authenticated.has(provider.id)).flatMap(provider => {
-    const models = provider.getModels();
-    const visible = provider.filterModels?.(models, undefined) ?? models;
-    return visible.map(model => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, images: model.input.includes('image') }));
-  });
-}
-
 export type ResolvedProfileModel = { model: Model<Api>; thinking: ModelRoleSelector['thinking'] };
 
 /** Model patterns and `pi/role` aliases of one profile, resolved against the admitted registry only. */

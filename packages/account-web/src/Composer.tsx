@@ -413,7 +413,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         <Button variant="ghost" size="icon-compact" type="button" aria-label="Attach files" onClick={() => openFilePicker()}><Attachment01 width={16} height={16} strokeWidth={1.5} /></Button>
         {controls?.selectionReadOnly ? <span className="text-caption text-muted-foreground" title="This child’s admitted selection is read-only">{controls.value.roleLabel ?? controls.value.role ?? 'No role'} · {selectedModelKey} · {controls.value.thinking ?? 'auto'}</span> : controls ? <>
           <ModelCombobox size="compact" variant="borderless" side="top" icon={glyph(CpuChip01)} ariaLabel="Model" value={selectedModelKey}
-            options={[...(invalidModel ? [{ value: selectedModelKey, label: `${selectedModelKey} · unavailable` }] : []), ...modelOptions(controls.value.models)]}
+            options={[...(invalidModel ? [{ value: selectedModelKey, label: `${selectedModelKey} · unavailable` }] : []), ...modelOptions(controls.value.models, true)]}
             onValueChange={(value) => { const selected = controls.value.models.find((model) => `${model.provider}/${model.id}` === value); if (selected) runControl(controls.onSetModel(selected.provider, selected.id)); }} />
           <Select size="compact" value={controls.value.thinking ?? 'auto'} onValueChange={(value) => void controls.onSetThinking(value === 'auto' ? null : value)}>
             <SelectTrigger variant="borderless" aria-label="Thinking level" className="max-md:hidden" />

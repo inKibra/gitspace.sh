@@ -17,7 +17,8 @@ import {
 import { createVaultModels, type VaultModelsOptions } from './index';
 import { createRequestGate, type RequestGate } from './request-gate';
 import type { AccountFailure, CredentialAccount, CredentialPin, CredentialPins, VaultAccess } from './selection';
-import { describeCloudProviders, listCloudModels } from './admission';
+import { describeCloudProviders } from './admission';
+import { listCloudModels } from './account-models';
 
 const providerId = 'vault-test-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -84,6 +85,7 @@ async function fixture(options: {
       out.set(input.credentialId, until);
       return { label: input.credentialId, until };
     },
+    async catalog() { return {}; },
     async resolve(input) {
       if (input.profileId !== 'profile' || !pool.some(account => account.id === input.credentialId)) {
         throw new Error('Credential escaped the admitted profile');
@@ -202,7 +204,7 @@ describe('vault-bound provider dispatch', () => {
     const providers = describeCloudProviders(settings);
     expect(providers.find(provider => provider.id === 'openai-codex')).toBeUndefined();
     expect(providers.find(provider => provider.id === 'openai')).toMatchObject({ supportsOAuth: true, supportsApiKey: true });
-    expect(listCloudModels(settings, ['openai-codex'])).toEqual([]);
+    expect(listCloudModels(settings, {}, [{ id: 'codex', provider: 'openai-codex', type: 'oauth', revision: 1, expiresAt: null, identity: null }], Date.now())).toEqual([]);
   });
 
   it('uses each chat model with its roles\' lowest context limit, keeps unlimited models at their own window, and requests still pass', async () => {

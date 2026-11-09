@@ -4,3 +4,4 @@ export { refreshCredential, ProviderRefreshError } from './refresh';
 export { beginLogin, respondLogin, pollLogin, cancelLogin, publicLogin, ProviderLoginError } from './login';
 export { collectUsage, usageObservation, ProviderUsageError, providerUsageReportSchema, providerUsageLimitSchema, type ProviderUsageReport, type ProviderUsageLimit, type UsageObservation, type UsageWindowObservation } from './usage';
 export { CLAUDE_CODE_USER_AGENT, CLAUDE_CODE_VERSION } from './claude-code';
+export { listAccountModels, accountModelSchema, ACCOUNT_MODEL_PROVIDERS, type AccountModel, type ModelListCredential } from './models';

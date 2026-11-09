@@ -84,6 +84,9 @@ export type UsageObservation = UsageWindowObservation & {
   secondary?: UsageWindowObservation;
   /** A shared window is used up: the account cannot serve until `until`, the latest such window's reset. */
   exhausted?: { until: number; label: string };
+  /** Used-up limits of one model family (Anthropic's Fable allowance, Opus weekly), by lower-case scope: the account
+   * serves other models but not that family's until `until`. */
+  scoped?: Record<string, { until: number; label: string }>;
 };
 
 /** Only shared gates inform account selection; feature quotas and credit-funded plan caps do not. */
@@ -94,8 +97,15 @@ export function usageObservation(report: ProviderUsageReport): UsageObservation 
   let primary: UsageWindowObservation | undefined;
   let secondary: UsageWindowObservation | undefined;
   let exhausted: UsageObservation['exhausted'];
+  const scoped: Record<string, { until: number; label: string }> = {};
   for (const limit of report.limits) {
-    if (limit.scope !== 'account' || limit.status === 'credit-overage') continue;
+    if (limit.status === 'credit-overage') continue;
+    if (limit.scope !== 'account') {
+      const resets = limit.resetsAt === null ? Number.NaN : Date.parse(limit.resetsAt);
+      const key = limit.scope.toLowerCase();
+      if (limit.status === 'exhausted' && resets > observedAt && (scoped[key]?.until ?? 0) < resets) scoped[key] = { until: resets, label: limit.label };
+      continue;
+    }
     const resetsAt = limit.resetsAt === null ? undefined : Date.parse(limit.resetsAt);
     if (resetsAt !== undefined && (!Number.isFinite(resetsAt) || resetsAt <= observedAt)) continue;
     const fraction = limit.remainingFraction !== null ? 1 - limit.remainingFraction
@@ -107,5 +117,7 @@ export function usageObservation(report: ProviderUsageReport): UsageObservation 
     if ((report.provider === 'anthropic' && limit.id === 'five_hour') || (report.provider === 'openai-codex' && limit.id === '0:primary')) primary = window;
     if ((report.provider === 'anthropic' && limit.id === 'seven_day') || (report.provider === 'openai-codex' && limit.id === '0:secondary')) secondary = window;
   }
-  return observation ? { ...observation, ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}), ...(exhausted ? { exhausted } : {}) } : undefined;
+  const families = Object.keys(scoped).length ? { scoped } : undefined;
+  // An account whose only reading is a used-up family limit still reports it, with nothing used account-wide.
+  return observation ? { ...observation, ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}), ...(exhausted ? { exhausted } : {}), ...families } : families ? { usedFraction: 0, observedAt, ...families } : undefined;
 }

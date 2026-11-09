@@ -10,6 +10,7 @@ function vault(accounts: readonly CredentialAccount[]): VaultAccess {
     async list() { return accounts; },
     async resolve() { throw new Error('Selection must not resolve or refresh credentials'); },
     async recordFailure() { throw new Error('Selection must not record failures'); },
+    async catalog() { throw new Error('Selection must not read the catalog'); },
   };
 }
 async function order(accounts: readonly CredentialAccount[], workspaceId = 'workspace-a') {
