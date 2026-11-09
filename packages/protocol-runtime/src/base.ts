@@ -47,7 +47,8 @@ export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: 
 export type RuntimeQuestion = z.infer<typeof RuntimeQuestionSchema>;
 export const RuntimeSnapshotSchema = z.object({ version: z.literal(1), ...identity, cursor: z.number().int().nonnegative(), conversations: z.array(RuntimeConversationSchema), tasks: z.array(RuntimeTaskSchema), attachments: z.array(RuntimeAttachmentSchema), questions: z.array(RuntimeQuestionSchema), documents: z.record(z.string(), RuntimeJsonSchema) });
 export const RuntimeSnapshotInputSchema = RuntimeIdentitySchema;
-export const RuntimeSubmitInputSchema = z.object({ ...identity, conversationId: z.string().optional(), requestId: z.string().min(1), text: z.string().min(1), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional() });
+/** `whenBusy` while a turn runs: `followUp` (the default) waits for it to end; `steer` joins it at its next tool boundary. */
+export const RuntimeSubmitInputSchema = z.object({ ...identity, conversationId: z.string().optional(), requestId: z.string().min(1), text: z.string().min(1), whenBusy: z.enum(['steer', 'followUp']).optional(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional() });
 export const RuntimeCancelInputSchema = z.object({ ...identity, conversationId: z.string() });
 export const RuntimeAnswerInputSchema = z.object({ ...identity, questionId: z.string(), answer: RuntimeJsonSchema });
 /** The answer to an `approval` question (a proposed plan, a machine-attach request): the decision, and what the person

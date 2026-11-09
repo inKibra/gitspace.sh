@@ -760,7 +760,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             if (target.lifecycle !== 'active') throw new Error(`Workspace ${target.name} is ${target.lifecycle}; only an active workspace can be started`);
             // The attempt names the request, so a retried call delivers the instruction once; only the turn it starts reports.
             const accepted = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).runtimeStartFromProject({ projectId: identity.projectId, workspaceId: target.id }, {
-              name: target.name, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`, onDone: args.onDone,
+              name: target.name, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`, whenBusy: args.when === 'steer' ? 'steer' : 'followUp', onDone: args.onDone,
             });
             return completed(input, { workspaceId: target.id, name: target.name, ...accepted });
           }

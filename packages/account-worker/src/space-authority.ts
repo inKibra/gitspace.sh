@@ -183,11 +183,12 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return readWorkspaceReport(this.ctx.storage);
   }
 
-  /** The project agent's instruction to this workspace: the turn it starts reports once to the project conversation. */
-  async runtimeStartFromProject(raw: unknown, input: { name: string; requestId: string; text: string; onDone: 'quiet' | 'wake' }): Promise<RuntimeAccepted> {
+  /** The project agent's instruction to this workspace, queued or steering a running turn: the turn it starts or steers
+   * reports once to the project conversation. */
+  async runtimeStartFromProject(raw: unknown, input: { name: string; requestId: string; text: string; whenBusy: 'steer' | 'followUp'; onDone: 'quiet' | 'wake' }): Promise<RuntimeAccepted> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const runtime = await this.getRuntime(identity);
-    return startFromProject(this.ctx.storage, runtime, RuntimeSubmitInputSchema.parse({ ...identity, requestId: input.requestId, text: input.text }), { name: input.name, onDone: input.onDone });
+    return startFromProject(this.ctx.storage, runtime, RuntimeSubmitInputSchema.parse({ ...identity, requestId: input.requestId, text: input.text, whenBusy: input.whenBusy }), { name: input.name, onDone: input.onDone });
   }
 
   /** The turn the project agent started here, for the project agent; the runtime opens only while that turn runs. */

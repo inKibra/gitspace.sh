@@ -836,7 +836,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
         await runtime.configureModel(target.id, admitted);
         await applyInferenceThinking(target, admitted);
-        await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
+        await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: input.whenBusy ?? 'followUp' }, BACKGROUND_CONTEXT);
       });
       if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId, input.draftText); publish(); }
       await line;

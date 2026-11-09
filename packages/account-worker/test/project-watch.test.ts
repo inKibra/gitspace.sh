@@ -74,7 +74,7 @@ async function watchFixture(ctx: DurableObjectState) {
     while (waits.length) await Promise.all(waits.splice(0));
     if (failures.length) throw new AggregateError(failures, 'The runtime reported failures');
   };
-  const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}` }, { name: 'FEAT-33', onDone });
+  const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'followUp') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}`, whenBusy }, { name: 'FEAT-33', onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
   const automate = (requestId: string, text: string) => submitAutomationTurn(ctx.storage, runtime, { requestId, text });
   return { identity, runtime, root, reply, call, requests, reports, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
@@ -99,6 +99,25 @@ test('only the turn the project agent started reports, once; later turns, a pers
       await f.submit('machine', 'Sync finished on Darktop.');
       await f.settle();
       expect(f.reports).toHaveLength(1);
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a steered instruction reaches the running turn at its next model call, and that turn reports once', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    try {
+      const tool = Promise.withResolvers<void>();
+      const first = f.call('bash', { command: 'pnpm test' }, tool.promise);
+      f.reply('Tests pass, and the bucket is renamed.');
+      await f.submit('person', 'Run the tests.', 'device-1');
+      await first.requested.promise;
+      // The person's turn is mid-call: a queued instruction would wait for it to end, a steered one joins it.
+      await f.start('start:steer', 'Also rename the bucket.', 'quiet', 'steer');
+      tool.resolve();
+      await f.settle();
+      expect(f.requests).toEqual(['Run the tests.', 'Instruction from the project agent:\n\nAlso rename the bucket.']);
+      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:steer', outcome: 'finished', excerpt: 'Tests pass, and the bucket is renamed.' } }]);
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
