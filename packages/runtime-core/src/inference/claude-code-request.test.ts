@@ -233,20 +233,20 @@ it('sends a pi-ai Claude subscription request as the SDK serialized the shaped p
   const serialized: Record<string, unknown> = { ...Object.fromEntries(Object.entries(body)), stream: true };
   delete serialized.betas;
   expect(hashed).toBe(JSON.stringify(serialized));
-  expect(JSON.parse(hashed).system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.280\.938; cc_entrypoint=cli; cch=00000;$/);
+  expect(JSON.parse(hashed).system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.321\.40a; cc_entrypoint=cli; cch=00000;$/);
 });
 
 it('sends a Claude subscription request in Claude Code shape', async () => {
   const sent = network();
   await send(payload());
   const { headers, body } = sent[0]!;
-  expect(headers.get('user-agent')).toBe('claude-cli/2.1.280 (external, cli)');
+  expect(headers.get('user-agent')).toBe('claude-cli/2.1.321 (external, cli)');
   expect(headers.get('x-claude-code-session-id')).toMatch(/^[0-9a-f-]{36}$/);
-  expect(headers.get('x-stainless-package-version')).toBe('0.112.1');
+  expect(headers.get('x-stainless-package-version')).toBe('0.128.0');
   expect(headers.get('anthropic-beta')?.split(',')).toEqual(['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14', 'thinking-token-count-2026-05-13', 'context-management-2025-06-27', 'prompt-caching-scope-2026-01-05', 'mid-conversation-system-2026-04-07', 'fallback-credit-2026-06-01', 'effort-2025-11-24', 'thinking-binding-controls-2026-08-01']); // gitleaks:allow (public Anthropic beta names)
   const parsed = JSON.parse(body);
   // The fingerprint suffix comes from oh-my-pi's createClaudeBillingHeader for this first user message.
-  expect(parsed.system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.280\.938; cc_entrypoint=cli; cch=[0-9a-f]{5};$/);
+  expect(parsed.system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.321\.40a; cc_entrypoint=cli; cch=[0-9a-f]{5};$/);
   expect(parsed.system[1].text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
   expect(attested(body).valid).toBe(true);
   expect(JSON.parse(parsed.metadata.user_id)).toMatchObject({ device_id: expect.stringMatching(/^[0-9a-f]{64}$/) });

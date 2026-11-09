@@ -27,10 +27,10 @@ const CLAUDE_CODE_HEADERS: Record<string, string> = {
   'x-stainless-arch': 'x64',
   'x-stainless-lang': 'js',
   'x-stainless-os': 'Linux',
-  'x-stainless-package-version': '0.112.1',
+  'x-stainless-package-version': '0.128.0',
   'x-stainless-retry-count': '0',
   'x-stainless-runtime': 'node',
-  'x-stainless-runtime-version': 'v26.3.0',
+  'x-stainless-runtime-version': 'v26.12.1',
   'x-stainless-timeout': '600',
 };
 const NamedSchema = z.object({ name: z.string() }).loose();
@@ -205,12 +205,16 @@ function* ranges(body: string, digits: number): Generator<{ start: number; end: 
   }
 }
 
-/** Claude Code's headers on a pi-ai subscription request, all but its Content-Length. Throws when pi-ai's request does
- * not present the Claude Code release the shape is made for: it would be billed as a third-party request. */
+/** Claude Code's headers on a pi-ai subscription request, all but its Content-Length. pi-ai presents its own Claude Code
+ * release in its user agent; the shape here replaces that agent, the billing header and the SDK headers with
+ * `CLAUDE_CODE_VERSION`'s. Throws when pi-ai presents a newer release than that: its request may use what the
+ * presented release does not, and be billed as a third-party request. */
 function claudeCodeHeaders(incoming: Headers, identity: { sessionId: string }): Headers {
   const version = /^claude-cli\/([^\s(]+)/.exec(incoming.get('user-agent') ?? '')?.[1];
   if (!version) throw new Error('Claude subscription request has no claude-cli user agent; not sent as a third-party request');
-  if (version !== CLAUDE_CODE_VERSION) throw new Error(`pi-ai presents Claude Code ${version} but requests are shaped as ${CLAUDE_CODE_VERSION}; update CLAUDE_CODE_VERSION. Not sent as a third-party request`);
+  const [ours = [], theirs = []] = [CLAUDE_CODE_VERSION, version].map(release => release.split('.').map(Number));
+  const newer = theirs.findIndex((part, index) => part !== ours[index]);
+  if (newer !== -1 && (theirs[newer] ?? 0) > (ours[newer] ?? 0)) throw new Error(`pi-ai presents Claude Code ${version}, newer than the ${CLAUDE_CODE_VERSION} requests are shaped as; update CLAUDE_CODE_VERSION. Not sent as a third-party request`);
   const headers = new Headers(incoming);
   const betas = (incoming.get('anthropic-beta') ?? '').split(',').map(beta => beta.trim()).filter(Boolean);
   headers.set('anthropic-beta', [...new Set([...AGENT_BETAS, ...(betas.includes(EFFORT_BETA) ? [EFFORT_BETA] : []), ...betas])].join(','));

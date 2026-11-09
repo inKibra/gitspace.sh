@@ -3,6 +3,7 @@ import { beginLoginInputSchema, loginResponseSchema, type LoginState, type Login
 import { request, parseProvider, tokenSchema, jwt, ProviderRefreshError } from './refresh';
 import { oauthClient } from './catalog';
 import { discoverProject, pollProject } from './project';
+import { CLAUDE_CODE_VERSION } from './claude-code';
 
 /** Login errors share the sanitized provider failure contract. */
 export class ProviderLoginError extends Error {
@@ -59,7 +60,7 @@ async function exchange(state: LoginState, code: string, verifier: string, redir
   if (anthropic) {
     credential.accountId = token.account?.uuid; credential.email = token.account?.email_address; credential.orgId = token.organization?.uuid;
     if (!credential.accountId || !credential.orgId) {
-      const bootstrap = parseProvider(provider, z.object({ oauth_account: z.object({ account_uuid: z.string().min(1), account_email: z.string().optional(), organization_uuid: z.string().min(1) }) }), await request(provider, 'https://api.anthropic.com/api/claude_cli/bootstrap?entrypoint=cli&model=claude-opus-4-8', { headers: { Authorization: `Bearer ${credential.access}`, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/2.1.280' } }, fetcher));
+      const bootstrap = parseProvider(provider, z.object({ oauth_account: z.object({ account_uuid: z.string().min(1), account_email: z.string().optional(), organization_uuid: z.string().min(1) }) }), await request(provider, 'https://api.anthropic.com/api/claude_cli/bootstrap?entrypoint=cli&model=claude-opus-4-8', { headers: { Authorization: `Bearer ${credential.access}`, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': `claude-code/${CLAUDE_CODE_VERSION}` } }, fetcher));
       credential.accountId ??= bootstrap.oauth_account.account_uuid; credential.orgId ??= bootstrap.oauth_account.organization_uuid; credential.email ??= bootstrap.oauth_account.account_email;
     }
   } else if (provider === 'openai-codex') {
