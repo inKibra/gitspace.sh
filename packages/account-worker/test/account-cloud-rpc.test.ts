@@ -591,6 +591,31 @@ describe('account cloud RPC without machines', () => {
     expect(await change('providers.account.remove')).toMatchObject({ status: 'ok', value: { provider: { hasAuth: true, accounts: [{ id: second.id, disabled: false }] } } });
   });
 
+  it('answers the picker\'s models over RPC: what each account lists, Mythos built from its account\'s list', async () => {
+    const fixture = await account();
+    await fixture.vault.putCredential({ id: 'claude', credential: { provider: 'anthropic', email: 'claude@example.com', refresh: 'refresh-claude', access: 'access-claude', expires: Date.now() + 3_600_000 } });
+    const model = (id: string, line: string) => ({ type: 'model', id, display_name: id, line, max_input_tokens: 1_000_000, max_tokens: 128_000, capabilities: { image_input: { supported: true }, thinking: { supported: true, types: { adaptive: { supported: true }, disabled: { supported: false } } }, effort: { supported: true, high: { supported: true } } } });
+    network.use(
+      http.get('https://pi.dev/api/models/providers/:provider', () => HttpResponse.json([])),
+      http.get('https://api.anthropic.com/v1/models', () => HttpResponse.json({ data: [model('claude-mythos-5-2', 'mythos'), model('claude-fable-5-1', 'fable')], has_more: false, last_id: null })),
+    );
+    const response = await SELF.fetch(fixture.request(single('providers.models', { profileId: 'default' })));
+    const body = await response.text();
+    expect(response.status, body).toBe(200);
+    expect(parse(body)).toMatchObject({ status: 'ok', value: { models: [
+      { provider: 'anthropic', id: 'claude-fable-5-1', unavailable: null },
+      { provider: 'anthropic', id: 'claude-mythos-5-2', name: 'claude-mythos-5-2', contextWindow: 1_000_000, images: true, unavailable: null },
+    ] } });
+    // An account that is out makes its models unavailable until it serves again; the picker still lists them.
+    const [claude] = await fixture.vault.cloudCredentialAccounts('default', 'anthropic');
+    const out = await fixture.vault.cloudCredentialFailure({ profileId: 'default', credentialId: claude!.id, kind: 'rotate', until: Date.now() + 3_600_000, reason: 'usage limit' });
+    const later = await SELF.fetch(fixture.request(single('providers.models', { profileId: 'default' })));
+    const laterBody = await later.text();
+    expect(later.status, laterBody).toBe(200);
+    expect(parse(laterBody)).toMatchObject({ status: 'ok', value: { models: expect.arrayContaining([expect.objectContaining({ id: 'claude-mythos-5-2', unavailable: { until: new Date(out.until).toISOString(), reason: 'account out' } })]) } });
+  });
+
+
   it('manages inference profiles with typed conflicts and refuses account API clients provider/profile writes', async () => {
     const fixture = await account();
     const client = inspectorClient(fixture);
