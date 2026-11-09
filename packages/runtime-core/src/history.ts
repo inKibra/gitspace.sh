@@ -26,9 +26,16 @@ const SCAN_CHARACTERS = 4_000_000;
 const SNIPPET_BEFORE = 200;
 const SNIPPET_CHARACTERS = 800;
 
-/** Bounded newest-first scan of Pi transcripts; nothing is indexed or copied. */
+/** One match: where it is, a snippet, the `history_read` call for the whole event, and the judge's relevance (null when
+ * the judge could not answer). */
+type HistorySearchResult = { workspaceId: string; conversationId: string; ordinal: number; createdAt: string; snippet: string; content: { mode: 'content'; workspaceId: string; conversationId: string; ordinal: number; contentOffset: number }; relevance: number | null };
+/** Bounded newest-first scan of Pi transcripts; nothing is indexed or copied. A "quoted phrase" in the query must appear
+ * exactly (case aside); the other words rank matches. A judge then keeps the substantive matches; when it cannot answer
+ * (no classifier, a reply that is not JSON) the matches come back ranked by terms alone, with `judged: false` and why. */
 export async function searchHistory(query: string, source: HistorySearchSource, judge: HistoryJudge, cursor?: string, limit = 20) {
-  const terms = [...new Set((query.match(/[\p{L}\p{N}_]+/gu) ?? []).map(term => term.toLowerCase()))];
+  const phrases = [...query.matchAll(/["“”]([^"“”]+)["“”]/gu)].map(match => match[1]!.trim().toLowerCase()).filter(Boolean);
+  const words = query.replace(/["“”][^"“”]*["“”]/gu, ' ');
+  const terms = [...new Set([...(words.match(/[\p{L}\p{N}_]+/gu) ?? []), ...phrases.flatMap(phrase => phrase.match(/[\p{L}\p{N}_]+/gu) ?? [])].map(term => term.toLowerCase()))];
   if (!terms.length || !source.workspaceIds.length) return { results: [], cursor: null };
   const wanted = Math.min(100, Math.max(limit * 3, 30));
   const candidates: Candidate[] = [];
@@ -50,7 +57,8 @@ export async function searchHistory(query: string, source: HistorySearchSource, 
         const text = searchableText(event.payload);
         characters += text.length;
         const lower = text.toLowerCase();
-        let first = -1;
+        if (!phrases.every(phrase => lower.includes(phrase))) continue;
+        let first = phrases.length ? lower.indexOf(phrases[0]!) : -1;
         let matches = 0;
         for (const term of terms) {
           const at = lower.indexOf(term);
@@ -67,10 +75,16 @@ export async function searchHistory(query: string, source: HistorySearchSource, 
   const nextCursor = next ? JSON.stringify(next) : null;
   if (!candidates.length) return { results: [], cursor: nextCursor };
   candidates.sort((left, right) => right.matches - left.matches);
+  const result = (row: Candidate, relevance: number | null): HistorySearchResult => ({ workspaceId: row.workspaceId, conversationId: row.conversationId, ordinal: row.ordinal, createdAt: row.createdAt, snippet: row.text, content: { mode: 'content', workspaceId: row.workspaceId, conversationId: row.conversationId, ordinal: row.ordinal, contentOffset: 0 }, relevance });
   const state = JSON.stringify({ query, candidates: candidates.map((row, index) => ({ id: String(index), text: row.text })) });
   const questions = Object.fromEntries(candidates.map((_row, index) => [String(index), `Does candidate ${index} contain information substantively relevant to the user's history query, rather than an incidental token match?`]));
-  const scores = await judge(state, questions);
-  const results = candidates.flatMap((row, index) => (scores[String(index)] ?? 0) >= 0.7 ? [{ workspaceId: row.workspaceId, conversationId: row.conversationId, ordinal: row.ordinal, createdAt: row.createdAt, snippet: row.text, content: { mode: 'content' as const, workspaceId: row.workspaceId, conversationId: row.conversationId, ordinal: row.ordinal, contentOffset: 0 }, relevance: scores[String(index)] }] : []).slice(0, limit);
+  let scores: Record<string, number>;
+  try {
+    scores = await judge(state, questions);
+  } catch (error) {
+    return { results: candidates.slice(0, limit).map(row => result(row, null)), cursor: nextCursor, judged: false, judgeError: error instanceof Error ? error.message.slice(0, 300) : String(error) };
+  }
+  const results = candidates.flatMap((row, index) => (scores[String(index)] ?? 0) >= 0.7 ? [result(row, scores[String(index)] ?? null)] : []).slice(0, limit);
   return { results, cursor: nextCursor };
 }
 

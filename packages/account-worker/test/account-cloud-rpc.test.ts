@@ -96,9 +96,10 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 3 });
     await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }]));
     // A turn's end and its last message, sent a moment apart, arrive out of order: the older send is dropped.
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: 'Done.', cursor: 5 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 }, cursor: 5 });
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: 'Done.', cursor: 4 });
-    expect((await index.projectWorkspaceStatuses(projectId))[spaceId]?.status).toEqual(idle);
+    // The row keeps where the whole reply is, for the board's cut note.
+    expect((await index.projectWorkspaceStatuses(projectId))[spaceId]).toMatchObject({ status: idle, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 } });
     await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }, { type: 'status', projectId, workspaceId: spaceId, status: idle }]));
     socket.close();
   });

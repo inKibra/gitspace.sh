@@ -282,7 +282,7 @@ export class ResetMarksSmoke extends DurableObject {
       // A workspace report the conversation has not taken in: admission fails, then never answers while recovery delivers it.
       let admit = async (): Promise<never> => { throw new Error('Inference admission is unavailable'); };
       const runtime = await openSmokeRuntime(this.ctx, this.ctx.storage, operations, { admitInference: () => admit() });
-      await runtime.workspaceReport({ projectId: identity.projectId, workspaceId: 'feature', name: `Feature ${'x'.repeat(200_000)}`, requestId: 'report', outcome: 'finished', excerpt: null }, 'wake').catch(() => {});
+      await runtime.workspaceReport({ projectId: identity.projectId, workspaceId: 'feature', name: `Feature ${'x'.repeat(200_000)}`, requestId: 'report', outcome: 'finished', excerpt: null, source: null }, 'wake').catch(() => {});
       const admitting = Promise.withResolvers<void>();
       admit = () => { admitting.resolve(); return Promise.withResolvers<never>().promise; };
       void runtime.wake();

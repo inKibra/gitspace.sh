@@ -38,6 +38,7 @@ import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearch
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readProjectWorkspaces } from './workspace-board.js';
+import { cutForAgent } from '@gitspace/protocol-workspace';
 import { machineCapabilities } from './runtime-attachments.js';
 import { compareCloudHistory, readCloudBaseTip } from './cloud-stack-status.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
@@ -103,6 +104,8 @@ export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: s
 }
 /** QA events read per page; the project authority caps every entity page at this size. */
 const QA_EVENT_PAGE = 500;
+/** Characters of a workspace's latest reply `space_workspace list` and `status` show: all a report keeps. */
+const REPLY_SHOWN = 280;
 const QaEventPayloadSchema = z.object({ item: RuntimeQaItemSchema, workspaceId: z.string().optional() });
 /** A workspace's QA inbox: the items its own runtime and agents reported. */
 export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
@@ -714,7 +717,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           }
           // Every workspace with its status, from stored rows in one read: no workspace object is woken.
           case 'list': return completed(input, (await readProjectWorkspaces(env, identity.projectId)).map(({ definition, board }) => ({
-            ...definition, status: { activity: workspaceActivity(board), waitingOn: board.waitingOn, pullRequests: board.pullRequests, since: board.since, lastReply: board.lastReply, journal: board.journal },
+            ...definition, status: { activity: workspaceActivity(board), waitingOn: board.waitingOn, pullRequests: board.pullRequests, since: board.since, lastReply: board.lastReply === null ? null : cutForAgent(board.lastReply, REPLY_SHOWN, { workspaceId: definition.id, source: board.lastReplySource }), journal: board.journal },
           })));
           case 'board': return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: workspaceBoard(await boardRows(), new Date()) }] };
           case 'operations': return completed(input, await authority().listOperations());
@@ -722,7 +725,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             // The stored report only: no workspace runtime opens and no agent is woken to answer.
             const workspace = await authority().getWorkspace(args.workspaceId);
             if (!workspace || workspace.kind !== 'worktree' || workspace.lifecycle === 'deleting') throw new Error(`Workspace ${args.workspaceId} is not in this project`);
-            const row = { id: workspace.id, name: workspace.name, branch: workspace.branch, lifecycle: workspace.lifecycle, report: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.id}`).workspaceReport() };
+            const report = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.id}`).workspaceReport();
+            // A cut reply says how long it is and the history_read call for the whole.
+            const row = { id: workspace.id, name: workspace.name, branch: workspace.branch, lifecycle: workspace.lifecycle, report: report && { ...report, lastReply: report.lastReply === null ? null : cutForAgent(report.lastReply, REPLY_SHOWN, { workspaceId: workspace.id, source: report.lastReplySource }) } };
             // Its position against the project base, walked in cloud history.
             const project = await authority().getProject();
             const head = row.report?.code?.headCommit ?? null;
@@ -762,7 +767,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             const accepted = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).runtimeStartFromProject({ projectId: identity.projectId, workspaceId: target.id }, {
               name: target.name, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`, whenBusy: args.when === 'steer' ? 'steer' : 'followUp', onDone: args.onDone,
             });
-            return completed(input, { workspaceId: target.id, name: target.name, ...accepted });
+            // `historyFrom` reads the instruction and everything the workspace does after it: history_read { workspaceId, offset: historyFrom }.
+            return completed(input, { workspaceId: target.id, name: target.name, conversationId: accepted.conversationId ?? null, historyFrom: accepted.historyFrom ?? null });
           }
           case 'links': return completed(input, (await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).list(identity.projectId)).links);
           case 'link': {
@@ -839,7 +845,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if (input.tool === 'history_search' || input.tool === 'history_read') {
         const args = object.parse(input.args);
-        const transcript = async (workspaceId: string, conversationId: string, range: RuntimeTranscriptRange) => {
+        const transcript = async (workspaceId: string, conversationId: string | undefined, range: RuntimeTranscriptRange) => {
           if (workspaceId === identity.workspaceId) return options.runtime().transcript(conversationId, 'ndjson', range);
           const response = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeTranscript({ ...RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }), conversationId }, 'ndjson', range);
           return response;
@@ -848,12 +854,15 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           const request = RuntimeHistoryReadArgumentsSchema.parse(args);
           const workspaceId = request.workspaceId ?? identity.workspaceId;
           await requireProjectWorkspace(workspaceId);
-          // Ordinals are entryId*1024+n: the runtime reads only the requested entries.
-          const range = request.mode === 'content' ? { from: request.ordinal, before: request.ordinal + 1 } : { from: request.offset };
+          // Ordinals are entryId*1024+n: the runtime reads only the requested entries, newest first for `fromEnd`.
+          const range = request.mode === 'content' ? { from: request.ordinal, before: request.ordinal + 1 }
+            : request.fromEnd ? { newestFirst: true, ...(request.before === undefined ? {} : { before: request.before }) } : { from: request.offset };
           return completed(input, await readRuntimeHistory(await transcript(workspaceId, request.conversationId, range), request, workspaceId));
         }
         const request = RuntimeHistorySearchArgumentsSchema.parse(args);
-        const workspaceIds = request.scope === 'workspace' ? [identity.workspaceId]
+        if (request.workspaceId !== undefined) await requireProjectWorkspace(request.workspaceId);
+        const workspaceIds = request.workspaceId !== undefined ? [request.workspaceId]
+          : request.scope === 'workspace' ? [identity.workspaceId]
           : [...new Set([identity.projectId, ...(await authority().listWorkspaces()).map(workspace => workspace.id)])];
         return completed(input, await searchHistory(request.query, {
           workspaceIds,

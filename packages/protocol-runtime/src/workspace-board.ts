@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { WorkspacePhase, WorkspaceReport, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { cutForAgent, type TextSource, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** One workspace as the project agent's board shows it, from stored rows only: the project's definition, the account's
  * status row and the project's pull-request links. No workspace object is read. */
@@ -19,6 +19,8 @@ export type WorkspaceBoardRow = {
   since: string | null;
   /** Its main agent's latest message, as the workspace last reported it. */
   lastReply: string | null;
+  /** Where the whole of `lastReply` is; null when the row predates sources. */
+  lastReplySource: TextSource | null;
   /** Its journal's newest entries, newest first, as the workspace last reported them. */
   journal: WorkspaceJournalLine[];
 };
@@ -39,8 +41,9 @@ const PROMPT_CHARACTERS = 120;
 /** Characters of the latest message a board line carries. */
 const REPLY_CHARACTERS = 200;
 
-/** What the workspace's agents are doing: working, waiting on a person (and on what), idle or failed. */
-export function workspaceActivity(row: Pick<WorkspaceBoardRow, 'status' | 'waitingOn'>): string {
+/** What the workspace's agents are doing: working, waiting on a person (and on what), idle or failed. A cut question
+ * says how long it is and that `space_workspace questions` reads it whole. */
+export function workspaceActivity(row: Pick<WorkspaceBoardRow, 'status' | 'waitingOn' | 'workspaceId'>): string {
   if (!row.status) return 'no status yet';
   switch (row.status.primaryColor) {
     case 'red': return 'failed';
@@ -48,8 +51,11 @@ export function workspaceActivity(row: Pick<WorkspaceBoardRow, 'status' | 'waiti
     case 'orange': {
       if (row.waitingOn) {
         const prompt = row.waitingOn.prompt.replace(/\s+/gu, ' ').trim();
-        const cut = prompt.length > PROMPT_CHARACTERS ? `${prompt.slice(0, PROMPT_CHARACTERS)}…` : prompt;
-        return `waiting on a person ${row.waitingOn.kind === 'approval' ? 'to approve' : 'to answer'} "${cut}"`;
+        const whole = row.waitingOn.characters ?? prompt.length;
+        const cut = prompt.length > PROMPT_CHARACTERS || whole > prompt.length
+          ? `"${prompt.slice(0, PROMPT_CHARACTERS)}…" (${Math.min(PROMPT_CHARACTERS, prompt.length)} of ${whole.toLocaleString('en-US')} characters; whole: space_workspace questions { workspaceId: "${row.workspaceId}" })`
+          : `"${prompt}"`;
+        return `waiting on a person ${row.waitingOn.kind === 'approval' ? 'to approve' : 'to answer'} ${cut}`;
       }
       return row.status.sync.conflicts > 0 ? 'waiting on a person to resolve sync conflicts' : 'waiting on a person';
     }
@@ -92,9 +98,8 @@ export function workspaceBoardLine(row: WorkspaceBoardRow, at: Date): string {
     `${row.name} (${row.workspaceId})`, row.phase ?? 'no phase', ...(row.lifecycle === 'active' ? [] : [row.lifecycle]), workspaceActivity(row),
     ...pulls.map(pullRequestWords), ...(row.since === null ? [] : [`since ${clock(new Date(row.since), at)}`]),
   ].join(' · ');
-  const reply = row.lastReply?.replace(/\s+/gu, ' ').trim();
   const lines = [head];
-  if (reply) lines.push(`  last message: "${reply.length > REPLY_CHARACTERS ? `${reply.slice(0, REPLY_CHARACTERS)}…` : reply}"`);
+  if (row.lastReply?.trim()) lines.push(`  last message: ${cutForAgent(row.lastReply, REPLY_CHARACTERS, { workspaceId: row.workspaceId, source: row.lastReplySource })}`);
   if (row.journal.length) lines.push(`  journal: ${row.journal.map(entry => `${entry.kind} "${entry.title}" (${clock(new Date(entry.at), at)})`).join(' · ')}`);
   return lines.join('\n');
 }

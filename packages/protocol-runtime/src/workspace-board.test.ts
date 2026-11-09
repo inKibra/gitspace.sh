@@ -5,7 +5,7 @@ import { workspaceBoard, workspaceBoardChanges, workspaceBoardLine, type BoardPu
 const colored = (primaryColor: WorkspaceStatusSummary['primaryColor'], conflicts = 0): WorkspaceStatusSummary => ({ ...emptyWorkspaceStatus, primaryColor, sync: { conflicts, problems: 0 } });
 const at = new Date('2026-11-08T18:46:05Z');
 const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardRow>): WorkspaceBoardRow => ({
-  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: '2026-11-08T17:02:00Z', lastReply: null, journal: [], ...changes,
+  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: '2026-11-08T17:02:00Z', lastReply: null, lastReplySource: null, journal: [], ...changes,
 });
 const rows = [
   row('billing', 'Billing export', { status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket should\nexports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: '2026-11-08T18:31:00Z' }),
@@ -25,8 +25,9 @@ test('a board line shows each workspace\'s phase, what it is doing and on what i
     '- Sync repair (sync) · code · waiting on a person to resolve sync conflicts',
     '- Importer (import) · code · provisioning · no status yet',
   ].join('\n'));
-  const approval = workspaceBoard([row('plan', 'Planner', { status: colored('orange'), waitingOn: { kind: 'approval', prompt: 'x'.repeat(300) } }), row('broken', 'Broken', { status: colored('red') })], at);
-  expect(approval).toContain(`Planner (plan) · code · waiting on a person to approve "${'x'.repeat(120)}…"`);
+  const approval = workspaceBoard([row('plan', 'Planner', { status: colored('orange'), waitingOn: { kind: 'approval', prompt: 'x'.repeat(200), characters: 640 } }), row('broken', 'Broken', { status: colored('red') })], at);
+  // A cut question says how long it is and where the whole is.
+  expect(approval).toContain(`Planner (plan) · code · waiting on a person to approve "${'x'.repeat(120)}…" (120 of 640 characters; whole: space_workspace questions { workspaceId: "plan" })`);
   expect(approval).toContain('Broken (broken) · code · failed');
   expect(workspaceBoard([rows[5]!], at)).toBe('Workspace board, 2026-11-08 18:46:05 UTC: no workspaces.');
 });
@@ -45,18 +46,22 @@ test('a workspace\'s pull requests show their state and checks, open and draft o
   expect(workspaceBoardChanges([pulls], [merged], at, at)).toContain('PR #18 (draft, checks running) · PR #21 (open) · PR #12 (merged) · PR #15 (merged)');
 });
 
-test('a board line carries the workspace\'s latest message, cut and on one line, and its newest journal entries', () => {
+test('a board line carries the workspace\'s latest message on one line, cut with how much it is and where the whole is, and its newest journal entries', () => {
+  const whole = `Exports now land in\n\nthe archive bucket. ${'y'.repeat(4_000)}`;
   const reported = row('billing', 'Billing export', {
-    lastReply: `Exports now land in\n\nthe archive bucket. ${'y'.repeat(250)}`,
+    lastReply: whole.slice(0, 280), lastReplySource: { conversationId: '1', ordinal: 13_498_368, characters: whole.length },
     journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: '2026-11-08T18:40:00Z' }, { kind: 'finding', title: 'Old bucket is read-only', at: '2026-11-07T09:15:00Z' }],
   });
   const reply = `Exports now land in the archive bucket. ${'y'.repeat(250)}`.slice(0, 200);
   expect(workspaceBoardLine(reported, at)).toBe([
     'Billing export (billing) · code · idle · since 17:02',
-    `  last message: "${reply}…"`,
+    `  last message: "${reply}…" (200 of 4,041 characters; whole: history_read { workspaceId: "billing", conversationId: "1", offset: 13498368, limit: 1, textOnly: true })`,
     '  journal: decision "Exports go to the archive bucket" (18:40) · finding "Old bucket is read-only" (11-07 09:15)',
   ].join('\n'));
-  expect(workspaceBoardChanges([rows[0]!], [{ ...rows[0]!, lastReply: 'Done.' }], at, at)).toContain('  last message: "Done."');
+  // A row from before sources: the cut points at the workspace's latest reply.
+  expect(workspaceBoardLine({ ...reported, lastReplySource: null, journal: [] }, at)).toContain('(the first 200 characters; whole: history_read { workspaceId: "billing", fromEnd: true, role: "assistant", textOnly: true, limit: 1 })');
+  // Whole text is shown as it is, with nothing added.
+  expect(workspaceBoardChanges([rows[0]!], [{ ...rows[0]!, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 2048, characters: 5 } }], at, at)?.endsWith('  last message: "Done."')).toBe(true);
 });
 
 test('the changes between two reads name only the workspaces whose line changed, new ones and those that left', () => {

@@ -14,7 +14,7 @@ const reply = (content: AssistantMessage['content'], stopReason: AssistantMessag
 /** Today at 17:00 UTC: a board line shows a time of the day it is read without its date. */
 const today = `${new Date().toISOString().slice(0, 10)}T17:00:00Z`;
 const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardRow> = {}): WorkspaceBoardRow => ({
-  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: today, lastReply: null, journal: [], ...changes,
+  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: today, lastReply: null, lastReplySource: null, journal: [], ...changes,
 });
 const text = (message: Message | undefined) => typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content);
 /** The instructions a request carries: pi sends them as system messages in the conversation. */

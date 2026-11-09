@@ -14,10 +14,10 @@ export const PROJECT_BOARD_INSTRUCTION = 'Workspace board: your turns carry this
 /** What a conversation was last told: the rows of its last board read and when it was read, the first line of its last
  * full board (null: the next turn gets a full one), the characters of changes since that board, and the run that read it.
  * Rows of an earlier version lack fields the current line reads (version 1 `lastReply` and `journal`, version 2 every
- * pull request with its state, `pullRequests`); they were only the baseline of the next changes, so an earlier state
- * becomes the initial one and the next turn gets a full board. */
+ * pull request with its state, `pullRequests`, version 3 `lastReplySource`); they were only the baseline of the next
+ * changes, so an earlier state becomes the initial one and the next turn gets a full board. */
 const initialBoard = () => ({ rows: [], at: 0, full: null, changes: 0, turn: null });
-export const ProjectBoardDoc = defineDoc<{ rows: WorkspaceBoardRow[]; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 3, scope: 'conversation', history: 'latest', fork: 'current', initial: initialBoard, migrate: initialBoard });
+export const ProjectBoardDoc = defineDoc<{ rows: WorkspaceBoardRow[]; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 4, scope: 'conversation', history: 'latest', fork: 'current', initial: initialBoard, migrate: initialBoard });
 
 /**
  * The board message a turn of the project agent starts with, read once per turn (`turn`, its run) and appended to the

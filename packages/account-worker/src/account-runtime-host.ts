@@ -153,11 +153,11 @@ export async function createAccountWorkspaceRuntime(
       // message), sent when one of them changed. Sends run in the background and can arrive out of order (a turn's last
       // message, then its end, a moment apart), so each carries the snapshot's cursor and the account keeps the newest.
       const previous = readWorkspaceReport(ctx.storage);
-      const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply;
+      const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply || JSON.stringify(previous?.lastReplySource ?? null) !== JSON.stringify(report.lastReplySource);
       const statusChanged = storeWorkspaceStatus(ctx.storage, status);
       if (statusChanged || reportChanged || !statusSent) {
         statusSent = true;
-        waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status, waitingOn: report.waitingOn, lastReply: report.lastReply, cursor: snapshot.cursor }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+        waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status, waitingOn: report.waitingOn, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
       }
       storeWorkspaceReport(ctx.storage, report);
       watch.published(report);

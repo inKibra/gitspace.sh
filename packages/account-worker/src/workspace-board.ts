@@ -24,7 +24,7 @@ export async function readProjectWorkspaces(env: Env, projectId: string): Promis
       workspaceId: definition.id, name: definition.name, phase: definition.phase ?? null, lifecycle: definition.lifecycle,
       status: stored?.status ?? null, waitingOn: stored?.waitingOn ?? null, since: stored?.since ?? null,
       pullRequests: links.filter(link => link.workspaceId === definition.id).map(link => ({ number: link.number, state: link.state?.state ?? null, checks: link.state?.checks ?? null })),
-      lastReply: stored?.lastReply ?? null, journal: journals[definition.id] ?? [],
+      lastReply: stored?.lastReply ?? null, lastReplySource: stored?.lastReplySource ?? null, journal: journals[definition.id] ?? [],
     } };
   });
 }

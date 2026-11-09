@@ -431,7 +431,7 @@ it('holds the nested reading anchor while a remounted execution fetches its firs
 it('draws workspace reports as one-line rows that stack tightly, link to their workspace and unfold their excerpt on click', async () => {
   const report = (index: number, outcome: 'finished' | 'failed', excerpt: string): TranscriptRow => ({
     id: `report-${index}`, ordinal: index, turnId: 'project-turn', turnStatus: 'done', truncated: false, contentBytes: 200,
-    item: { id: `report-${index}`, type: 'workspace-report', projectId: 'project-a', workspaceId: `space-${index}`, name: `FEAT-${index}`, requestId: `start:${index}`, outcome, excerpt },
+    item: { id: `report-${index}`, type: 'workspace-report', projectId: 'project-a', workspaceId: `space-${index}`, name: `FEAT-${index}`, requestId: `start:${index}`, outcome, excerpt, source: null },
   });
   const answer: TranscriptRow = { id: 'answer', ordinal: 3, turnId: 'project-turn', turnStatus: 'done', truncated: false, contentBytes: 100, item: { id: 'answer', type: 'message', role: 'assistant', text: 'Both reported back.' } };
   await render(historyFor([report(1, 'finished', 'Plan drafted for the bucket move.'), report(2, 'failed', 'Model request failed'), answer]));

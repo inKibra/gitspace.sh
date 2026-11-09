@@ -161,6 +161,9 @@ export const workspaceTurnReportSchema = z.object({
   outcome: z.enum(['finished', 'failed', 'asked', 'approval']),
   /** The reply, the failure or the question, at most 280 characters. */
   excerpt: z.string().nullable(),
+  /** Where the whole reply is (its conversation, history ordinal and length): `@gitspace/protocol-workspace`'s
+   * `TextSource`. Null for a failure or a question, and in reports stored before it. */
+  source: z.object({ conversationId: z.string().min(1), ordinal: z.number().int().nonnegative(), characters: z.number().int().nonnegative() }).nullable().default(null),
 });
 /** One compact row in the project conversation: the report of a turn the project agent started. */
 export const workspaceReportBlockSchema = base.extend({ type: z.literal('workspace-report'), ...workspaceTurnReportSchema.shape, at });

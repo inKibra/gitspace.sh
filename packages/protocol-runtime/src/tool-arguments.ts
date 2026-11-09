@@ -125,12 +125,23 @@ export const RuntimeSyncRequestResultSchema = z.discriminatedUnion('method', [
 ]);
 export type RuntimeSyncRequestInput = z.infer<typeof RuntimeSyncRequestInputSchema>;
 export type RuntimeSyncRequestResult = z.infer<typeof RuntimeSyncRequestResultSchema>;
+/** `page` reads from `offset` forward, or with `fromEnd` the newest events first, before `before` (the previous page's
+ * `nextBefore`). `role` keeps only messages of that role; `textOnly` keeps only their text (no thinking, tool calls or
+ * tool results), so the latest reply of a workspace is `{ workspaceId, fromEnd: true, role: 'assistant', textOnly: true,
+ * limit: 1 }`. `conversationId` defaults to the workspace's main conversation. */
 export const RuntimeHistoryReadArgumentsSchema = z.union([
-  z.object({ mode: z.literal('page').default('page'), workspaceId: path.optional(), conversationId: path, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(200).default(50) }),
-  z.object({ mode: z.literal('content'), workspaceId: path.optional(), conversationId: path, ordinal: z.number().int().nonnegative(), contentOffset: z.number().int().nonnegative().default(0), contentLimit: z.number().int().min(1).max(65_536).default(16_384) }),
+  z.object({
+    mode: z.literal('page').default('page'), workspaceId: path.optional(), conversationId: path.optional(),
+    offset: z.number().int().nonnegative().default(0), fromEnd: z.boolean().default(false), before: z.number().int().positive().optional(),
+    role: z.enum(['user', 'assistant', 'toolResult', 'custom']).optional(), textOnly: z.boolean().default(false),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  z.object({ mode: z.literal('content'), workspaceId: path.optional(), conversationId: path.optional(), ordinal: z.number().int().nonnegative(), contentOffset: z.number().int().nonnegative().default(0), contentLimit: z.number().int().min(1).max(65_536).default(16_384) }),
 ]);
 export type RuntimeHistoryReadArguments = z.infer<typeof RuntimeHistoryReadArgumentsSchema>;
-export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path, scope: z.enum(['workspace', 'project']).default('workspace'), cursor: z.string().max(512).optional() });
+/** `query`: words, all of which rank a match higher, and "quoted phrases", each of which a match must contain exactly.
+ * `workspaceId` searches that one workspace of the project; `scope: 'project'` every workspace. */
+export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path, scope: z.enum(['workspace', 'project']).default('workspace'), workspaceId: path.optional(), cursor: z.string().max(512).optional() });
 export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(1).max(2048) });
 export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384), tool: z.string().max(160).optional(), model: z.string().max(256).optional(), reference: z.string().max(2048).optional() });
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string() });

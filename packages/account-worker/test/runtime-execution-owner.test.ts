@@ -598,7 +598,8 @@ test('space_workspace list and board give every workspace\'s status in one read 
   await authority.putWorkspace({ ...workspace, id: 'billing', name: 'Billing export', branch: 'billing', phase: 'code' });
   await authority.putWorkspace({ ...workspace, id: 'search', name: 'Search index', branch: 'search', phase: 'plan' });
   const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, lastReply: 'Exports are ready;\nwhich bucket?', cursor: 1 });
+  // The stored reply is the first characters of a 900-character one; the row says where the whole is.
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, lastReply: 'Exports are ready;\nwhich bucket?', lastReplySource: { conversationId: '1', ordinal: 7168, characters: 900 }, cursor: 1 });
   await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null, lastReply: null, cursor: 1 });
   // A journal entry reaches the account index from the journal's own object, after its write.
   await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, 'billing'])).appendJournalEntry({
@@ -616,12 +617,12 @@ test('space_workspace list and board give every workspace\'s status in one read 
       const listed = z.array(z.object({ id: z.string(), name: z.string(), status: z.unknown() })).parse(JSON.parse(text(await invoke('space_workspace', { method: 'list' }))));
       expect(listed.find(item => item.id === 'billing')?.status).toEqual({
         activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: expect.any(String),
-        lastReply: 'Exports are ready;\nwhich bucket?', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
+        lastReply: '"Exports are ready; which bucket?…" (32 of 900 characters; whole: history_read { workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true })', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
       });
       expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequests: [] });
       const board = text(await invoke('space_workspace', { method: 'board' }));
       expect(board).toMatch(/^Workspace board, .+ UTC \(2 workspaces\):\n/u);
-      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n {2}last message: "Exports are ready; which bucket\?"\n {2}journal: decision "Exports go to the archive bucket" \(\d\d:\d\d\)\n/u);
+      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n {2}last message: "Exports are ready; which bucket\?…" \(32 of 900 characters; whole: history_read \{ workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true \}\)\n {2}journal: decision "Exports go to the archive bucket" \(\d\d:\d\d\)\n/u);
       expect(board).toMatch(/\n- Search index \(search\) · plan · working · since \d\d:\d\d$/u);
       // The project agent's turns read the same rows.
       expect((await services.tools.projectBoard?.())?.map(row => row.name)).toEqual(['Billing export', 'Search index']);

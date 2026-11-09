@@ -11,6 +11,9 @@ import { projectProgress, projectWatchHooks, startFromProject } from '../src/pro
 import { createWorkspaceMetadataTables } from '../src/workspace-metadata.js';
 import { automationTurnHooks, submitAutomationTurn } from '../src/automation-turns.js';
 import type { AutomationTurnReport } from '../src/project-automations.js';
+import { readRuntimeHistory, type RuntimeHistoryReadResult } from '../src/runtime-transcript-reader.js';
+import { RuntimeHistoryReadArgumentsSchema } from '@gitspace/protocol-runtime';
+import type { WorkspaceReport } from '@gitspace/protocol-workspace';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -51,6 +54,8 @@ async function watchFixture(ctx: DurableObjectState) {
   const automationReports: AutomationTurnReport[] = [];
   const automationTurns = automationTurnHooks(ctx.storage, identity, async report => { automationReports.push(report); }, (_label, promise) => { waits.push(promise); });
   const checkpoint = RuntimeGitCheckpointSchema.parse({ checkpointRef: 'refs/gitspace/checkpoints', headCommit: 'a'.repeat(40), branch: 'main', indexCommit: 'b'.repeat(40), trackedWorktreeCommit: 'c'.repeat(40), worktreeCommit: 'c'.repeat(40), indexTree: 'd'.repeat(40), worktreeTree: 'e'.repeat(40) });
+  /** Every report the runtime published, oldest first. */
+  const published: WorkspaceReport[] = [];
   const runtime: WorkspaceRuntime = await createWorkspaceRuntime({
     storage: ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
     tools: { images: { store: async image => image, load: async image => image }, invoke: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool} ran` }] }), prepareBrowser: unsupported, takeoverTab: unsupported, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {} },
@@ -63,7 +68,7 @@ async function watchFixture(ctx: DurableObjectState) {
     session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },
     onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async timestamp => { wakes.push(timestamp); },
-    published: (_snapshot, report) => { hooks.published(report); automationTurns.published(report); },
+    published: (_snapshot, report) => { published.push(report); hooks.published(report); automationTurns.published(report); },
     turnChanged: (requestId, turn) => { hooks.turnChanged(requestId, turn); automationTurns.turnChanged(requestId, turn); },
     personPrompted: hooks.personPrompted,
   });
@@ -77,7 +82,7 @@ async function watchFixture(ctx: DurableObjectState) {
   const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'followUp') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}`, whenBusy }, { name: 'FEAT-33', onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
   const automate = (requestId: string, text: string) => submitAutomationTurn(ctx.storage, runtime, { requestId, text });
-  return { identity, runtime, root, reply, call, requests, reports, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
+  return { identity, runtime, root, reply, call, requests, reports, published, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
 }
 
 const room = () => env.SPACE_AUTHORITY.getByName(`project-watch:${crypto.randomUUID()}`);
@@ -89,7 +94,7 @@ test('only the turn the project agent started reports, once; later turns, a pers
       f.reply('Plan drafted.');
       await f.start('start:one', 'Draft the plan.');
       await f.settle();
-      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:one', outcome: 'finished', excerpt: 'Plan drafted.' } }]);
+      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:one', outcome: 'finished', excerpt: 'Plan drafted.', source: { conversationId: expect.any(String), ordinal: expect.any(Number), characters: 13 } } }]);
       // The watch is gone with its report: the project agent sees no watched turn.
       expect((await f.progress()).turn).toBeNull();
       f.reply('Done with your edit.');
@@ -117,7 +122,49 @@ test('a steered instruction reaches the running turn at its next model call, and
       tool.resolve();
       await f.settle();
       expect(f.requests).toEqual(['Run the tests.', 'Instruction from the project agent:\n\nAlso rename the bucket.']);
-      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:steer', outcome: 'finished', excerpt: 'Tests pass, and the bucket is renamed.' } }]);
+      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:steer', outcome: 'finished', excerpt: 'Tests pass, and the bucket is renamed.', source: { conversationId: expect.any(String), ordinal: expect.any(Number), characters: 38 } } }]);
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a workspace\'s latest reply is one history read, older ones page back from it, and everything since a start reads from its historyFrom', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    /** A history_read as the tool runs it: the range it asks the runtime for, then the reader. */
+    const read = async (args: Record<string, unknown>): Promise<Extract<RuntimeHistoryReadResult, { mode: 'page' }>> => {
+      const request = RuntimeHistoryReadArgumentsSchema.parse(args);
+      if (request.mode !== 'page') throw new Error('Expected a page read');
+      const range = request.fromEnd ? { newestFirst: true, ...(request.before === undefined ? {} : { before: request.before }) } : { from: request.offset };
+      const page = await readRuntimeHistory(await f.runtime.transcript(undefined, 'ndjson', range), request, 'watch-workspace');
+      if (page.mode !== 'page') throw new Error('Expected a page');
+      return page;
+    };
+    const texts = (page: Extract<RuntimeHistoryReadResult, { mode: 'page' }>) => page.items.map(item => item.type === 'event' ? item.event.payload.message : null);
+    try {
+      f.reply('First answer.');
+      await f.submit('person', 'Hello.', 'device-1');
+      await f.settle();
+      const report = `Second answer: ${'x'.repeat(500)}`;
+      f.call('bash', { command: 'pnpm test' });
+      f.reply(report);
+      const accepted = await f.start('start:two', 'Run the tests and report.');
+      await f.settle();
+
+      const latest = await read({ fromEnd: true, role: 'assistant', textOnly: true, limit: 1 });
+      expect(texts(latest)).toEqual([{ role: 'assistant', content: report }]);
+      expect(latest.nextBefore).toEqual(expect.any(Number));
+      // The page before it skips the tool call (no text) and finds the first answer.
+      expect(texts(await read({ fromEnd: true, before: latest.nextBefore, role: 'assistant', textOnly: true, limit: 1 }))).toEqual([{ role: 'assistant', content: 'First answer.' }]);
+      // From the instruction on: the instruction, then everything the turn did; nothing from before it.
+      const since = await read({ offset: accepted.historyFrom, textOnly: true });
+      expect(texts(since)).toEqual([{ role: 'user', content: 'Instruction from the project agent:\n\nRun the tests and report.' }, { role: 'assistant', content: report }]);
+      // The report's source is the reply's own ordinal, so the call a cut note gives reads the whole reply.
+      const replyOrdinal = latest.items[0]?.type === 'event' ? latest.items[0].event.ordinal : null;
+      const source = f.reports[0]?.report.source;
+      expect(source).toMatchObject({ ordinal: replyOrdinal, characters: report.length });
+      expect(texts(await read({ offset: source?.ordinal, limit: 1, textOnly: true }))).toEqual([{ role: 'assistant', content: report }]);
+      // So is the source the workspace publishes with its latest reply, which the board and status cut.
+      expect(f.published.at(-1)?.lastReplySource).toMatchObject({ ordinal: replyOrdinal, characters: report.length });
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
@@ -296,19 +343,22 @@ test('a wake report starts the project agent\'s turn with a workspace event from
   await runInDurableObject(room(), async (_instance, ctx) => {
     const f = await watchFixture(ctx);
     try {
-      const report: WorkspaceTurnReport = { projectId: 'watch-project', workspaceId: 'feat-33', name: 'FEAT-33', requestId: 'start:a', outcome: 'finished', excerpt: 'Plan drafted.' };
+      const report: WorkspaceTurnReport = { projectId: 'watch-project', workspaceId: 'feat-33', name: 'FEAT-33', requestId: 'start:a', outcome: 'finished', excerpt: 'Plan drafted.', source: { conversationId: '1', ordinal: 2048, characters: 13 } };
       await f.runtime.workspaceReport(report, 'quiet');
       // A question names the workspace's id, which the project agent's questions and answer take.
-      await f.runtime.workspaceReport({ ...report, requestId: 'start:asked', outcome: 'asked', excerpt: 'Which bucket?' }, 'quiet');
+      await f.runtime.workspaceReport({ ...report, requestId: 'start:asked', outcome: 'asked', excerpt: 'Which bucket?', source: null }, 'quiet');
+      // A reply longer than the report keeps says how long it is and where the whole is, even when its kept part fits.
+      await f.runtime.workspaceReport({ ...report, requestId: 'start:long', excerpt: 'r'.repeat(280), source: { conversationId: '1', ordinal: 13_498_368, characters: 4_000 } }, 'quiet');
       await f.settle();
       expect(f.requests).toEqual([]);
       const context = (await f.root.context(BACKGROUND_CONTEXT)).messages.map(message => message.role === 'user' ? message.content : null);
-      expect(context).toContain('Workspace FEAT-33 finished: Plan drafted.');
-      expect(context).toContain('Workspace FEAT-33 asked: Which bucket? (space_workspace questions, workspaceId feat-33, lists it.)');
+      expect(context).toContain('Workspace FEAT-33 finished: "Plan drafted."');
+      expect(context).toContain('Workspace FEAT-33 asked: "Which bucket?" (space_workspace questions, workspaceId feat-33, lists it.)');
+      expect(context).toContain(`Workspace FEAT-33 finished: "${'r'.repeat(280)}…" (280 of 4,000 characters; whole: history_read { workspaceId: "feat-33", conversationId: "1", offset: 13498368, limit: 1, textOnly: true })`);
 
       const answered = f.reply('I will review FEAT-33 next.');
       const before = Date.now();
-      await f.runtime.workspaceReport({ ...report, requestId: 'start:b', outcome: 'failed', excerpt: 'Model request failed' }, 'wake');
+      await f.runtime.workspaceReport({ ...report, requestId: 'start:b', outcome: 'failed', excerpt: 'Model request failed', source: null }, 'wake');
       await f.settle();
       // The report call starts no turn: it asks the object's alarm for one now, which starts it in a request of its own.
       expect(f.requests).toEqual([]);
@@ -316,7 +366,7 @@ test('a wake report starts the project agent\'s turn with a workspace event from
       await f.runtime.wake();
       await answered.requested.promise;
       await f.settle();
-      expect(f.requests).toEqual(['<gitspace-event kind="workspace" source="FEAT-33">\nWorkspace FEAT-33 failed: Model request failed\n</gitspace-event>']);
+      expect(f.requests).toEqual(['<gitspace-event kind="workspace" source="FEAT-33">\nWorkspace FEAT-33 failed: "Model request failed"\n</gitspace-event>']);
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

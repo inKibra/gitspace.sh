@@ -44,22 +44,22 @@ export async function startFromProject(storage: DurableObjectStorage, runtime: W
  * Every other turn, a person's or one that started before the instruction, is not watched.
  */
 export function projectWatchHooks(storage: DurableObjectStorage, identity: RuntimeIdentity, send: (report: WorkspaceTurnReport, onDone: ProjectWatch['onDone']) => void): ProjectWatchHooks {
-  const end = (watch: ProjectWatch, outcome: WorkspaceTurnReport['outcome'], excerpt: string | null) => {
+  const end = (watch: ProjectWatch, outcome: WorkspaceTurnReport['outcome'], excerpt: string | null, source: WorkspaceTurnReport['source']) => {
     deleteProjectWatch(storage);
-    send({ projectId: identity.projectId, workspaceId: identity.workspaceId, name: watch.name, requestId: watch.requestId, outcome, excerpt }, watch.onDone);
+    send({ projectId: identity.projectId, workspaceId: identity.workspaceId, name: watch.name, requestId: watch.requestId, outcome, excerpt, source }, watch.onDone);
   };
   return {
     turnChanged: (requestId, turn) => {
       const watch = readProjectWatch(storage);
       if (watch?.requestId !== requestId) return;
       if (turn.state === 'running' && watch.startedAt === null) writeProjectWatch(storage, { ...watch, startedAt: Date.now() });
-      else if (turn.state === 'ended') end(watch, turn.outcome, turn.text);
+      else if (turn.state === 'ended') end(watch, turn.outcome, turn.text, turn.source);
     },
     // A question only counts once the watched turn runs: one still pending from an earlier turn is not this turn's.
     published: report => {
       const watch = readProjectWatch(storage);
       if (!watch || watch.startedAt === null || !report.waitingOn) return;
-      end(watch, report.waitingOn.kind === 'approval' ? 'approval' : 'asked', report.waitingOn.prompt);
+      end(watch, report.waitingOn.kind === 'approval' ? 'approval' : 'asked', report.waitingOn.prompt, null);
     },
     personPrompted: () => { deleteProjectWatch(storage); },
   };

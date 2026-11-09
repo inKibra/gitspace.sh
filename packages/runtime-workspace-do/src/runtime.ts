@@ -23,7 +23,7 @@ import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/pro
 import { CloudFileStore } from './cloud-files.js';
 import { CodeSearchIndex, type CodeSearchSource } from './cloud-search-index.js';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
-import type { GitLfsConfirmedObject, GitLfsStore, WorkspaceReport, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { cutForAgent, type GitLfsConfirmedObject, type GitLfsStore, type TextSource, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat, type TranscriptImageUrl, type WithdrawnNotices } from './transcript.js';
 import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
@@ -39,10 +39,11 @@ import { createMessageDecisions, type SentDecisions } from './message-decisions.
 export type { SentDecisions } from './message-decisions.js';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools' | 'contextRead'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** The decisions a person's prompt carried, once the prompt is placed in its conversation; called again (on the next submission change or wake) until it resolves, so it must accept the same message twice. */ recordMessageDecisions?(sent: SentDecisions): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl; /** What the host keeps in memory for this runtime, by holder name, for the memory estimate line. */ memoryHolders?(): Promise<Record<string, unknown>>; /** The release this code is, recorded at each open so the next one can tell a code update from a restart. */ version?: string };
 /** The main conversation's turn for an input submitted with a request id. */
-export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null };
+export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null; source: TextSource | null };
 /** One message of a turn, its text cut short. */
 export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: string };
-export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string };
+/** `historyFrom`: for a submission, the history ordinal from which its input and everything after it are read. */
+export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string; historyFrom?: number };
 /** A pending question as the project agent sees it. `kind` tells a plan approval (`propose_plan`) from a tool action's
  * approval; `why` says why a person decides it, null for a plain ask the project agent may answer. */
 export type ProjectQuestion = { id: string; conversation: string; kind: ProjectQuestionKind; prompt: string; choices: string[]; answerable: boolean; why: string | null };
@@ -544,12 +545,16 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const [agent, controls] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT)]);
     // An ask_takeover card left open after its call stopped waiting no longer holds the agent.
     const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && item.answer === null && (item.kind !== 'takeover' || item.takeover?.waiting === true));
-    const reply = root?.messages.findLast(message => message.role === 'assistant' && message.content.length > 0)?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') ?? null;
+    const replied = root?.messages.findLast(message => message.role === 'assistant' && message.content.length > 0);
+    const reply = replied?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') ?? null;
+    // A view message's id is `entryId:index`, the history ordinal `entryId * 1024 + index`.
+    const [replyEntry, replyIndex] = replied?.id.split(':').map(Number) ?? [];
     options.published?.(next, {
       summary: status.summary, phase: workspace?.phase ?? null,
-      waitingOn: waiting ? { kind: waiting.kind === 'approval' || waiting.kind === 'lifecycle-approval' ? 'approval' : 'ask', prompt: waiting.prompt.slice(0, 200) } : null,
+      waitingOn: waiting ? { kind: waiting.kind === 'approval' || waiting.kind === 'lifecycle-approval' ? 'approval' : 'ask', prompt: waiting.prompt.slice(0, 200), characters: waiting.prompt.length } : null,
       failure: root?.failure ?? null,
       lastReply: reply ? reply.slice(0, 280) : null,
+      lastReplySource: reply && replyEntry !== undefined && replyIndex !== undefined ? { conversationId: rootId, ordinal: replyEntry * 1024 + replyIndex, characters: reply.length } : null,
       lastActivityAt: views.flatMap(view => view.messages.map(message => message.createdAt)).sort().at(-1) ?? null,
       model: agent.model ? { role: controls?.role ?? null, provider: agent.model.provider, id: agent.model.modelId } : null,
       code: committedCode ? { branch: committedCode.branch ?? null, headCommit: committedCode.headCommit ?? null, uncommitted: committedCode.worktreeCommit !== committedCode.headCommit } : null,
@@ -613,11 +618,13 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     if (record.status === 'placed') return { state: 'running' };
     if (record.status === 'done') {
       const answer = (await storage.entry(runtime.root.id, record.answer, BACKGROUND_CONTEXT))?.entry;
-      const reply = (answer?.model ?? []).flatMap(message => message.role === 'assistant' ? [textParts(message.content)] : []).join('\n').trim();
-      return { state: 'ended', outcome: 'finished', text: reply ? reply.slice(0, REPORT_CHARACTERS) : null };
+      const replies = (answer?.model ?? []).flatMap((message, index) => message.role === 'assistant' ? [{ index, text: textParts(message.content) }] : []);
+      const reply = replies.map(item => item.text).join('\n').trim();
+      const first = replies.find(item => item.text.trim());
+      return { state: 'ended', outcome: 'finished', text: reply ? reply.slice(0, REPORT_CHARACTERS) : null, source: reply && first ? { conversationId: String(runtime.root.id), ordinal: Number(record.answer) * 1024 + first.index, characters: reply.length } : null };
     }
     const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED[record.reason] ?? record.reason;
-    return { state: 'ended', outcome: 'failed', text: why.slice(0, REPORT_CHARACTERS) };
+    return { state: 'ended', outcome: 'failed', text: why.slice(0, REPORT_CHARACTERS), source: null };
   }
   /** pi settles a run's inputs as the run ends, so a submission names exactly the turn it started. */
   function turnChanged(record: SubmissionRecord) {
@@ -737,7 +744,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     },
     async workspaceReport(report, onDone) {
       // An ask names the workspace's id, which the project agent's `questions` and `answer` take.
-      const text = `Workspace ${report.name} ${REPORT_VERB[report.outcome]}${report.excerpt ? `: ${report.excerpt}` : '.'}${report.outcome === 'asked' ? ` (space_workspace questions, workspaceId ${report.workspaceId}, lists it.)` : ''}`;
+      // A cut reply says how long it is and the history_read call for the whole; a question names where it is listed.
+      const text = `Workspace ${report.name} ${REPORT_VERB[report.outcome]}${report.excerpt ? `: ${cutForAgent(report.excerpt, REPORT_CHARACTERS, { workspaceId: report.workspaceId, source: report.source })}` : '.'}${report.outcome === 'asked' ? ` (space_workspace questions, workspaceId ${report.workspaceId}, lists it.)` : ''}`;
       const event = { requestId: `workspace:${report.workspaceId}:${report.requestId}`, sender: { id: report.workspaceId, name: report.name }, text, payload: report };
       // The report arrives inside the reporting workspace's request. Started here, the project agent's turn would run one
       // level deeper than that workspace, which the project agent started one level deeper than itself: a project agent
@@ -831,6 +839,11 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       const target = await conversation(input.conversationId);
       if ((await harness.snapshot(AgentDefinitionContextDoc, target.id, BACKGROUND_CONTEXT))?.child) throw new Error('User messages must target the workspace main conversation');
       await controls.loadDefinitions(target);
+      // Where this input's entry lands in history: its own entry when a retry finds it placed, else after the
+      // conversation's newest entry now (a queued input lands later still), so reading from here finds it and what follows.
+      const placed = await storage.submissionByRequest(target.id, input.requestId, BACKGROUND_CONTEXT);
+      const newest = placed?.type === 'input' && placed.entry !== undefined ? undefined : (await target.entries({}, 1, undefined, BACKGROUND_CONTEXT)).items[0];
+      const historyFrom = placed?.type === 'input' && placed.entry !== undefined ? Number(placed.entry) * 1024 : newest === undefined ? 0 : (Number(newest.id) + 1) * 1024;
       await runtime.lifecycle.userInput(String(target.id), async () => {
         const selection = (await harness.snapshot(SessionControlsDoc, target.id, BACKGROUND_CONTEXT))?.selection ?? { kind: 'default' as const };
         const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
@@ -840,7 +853,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       });
       if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId, input.draftText); publish(); }
       await line;
-      return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id) };
+      return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id), historyFrom };
     },
     async cancel(input: RuntimeCancelInput) { await runtime.lifecycle.stop(String((await conversation(input.conversationId)).id)); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
     async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }) {
