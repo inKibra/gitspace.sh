@@ -161,7 +161,10 @@ const stackedProject: SidebarProject = {
       'bakery-admin': { dependsOn: ['bakery-core'], stackedOn: 'bakery-core' },
       'bakery-payments': { dependsOn: ['bakery-stock'], stackedOn: null },
     },
-    pullRequests: { 'bakery-payments': { number: 42, title: 'Card payments at checkout', url: null } },
+    pullRequests: { 'bakery-payments': [
+      { number: 42, title: 'Card payments at checkout', url: null, state: 'open', checks: 'failing' },
+      { number: 40, title: 'Card payments, first try', url: null, state: 'merged', checks: 'passing' },
+    ] },
   },
 };
 
@@ -175,7 +178,10 @@ describe('AppSidebar stacks', () => {
     expect(html).toContain('title="Stacked on bakery-api: it merges after it"');
     expect(html).toContain('blocked by bakery-stock');
     expect(html).toContain('blocking bakery-payments');
-    expect(html).toContain('#42');
+    // Its open pull request with failing checks first, the merged one counted after it.
+    expect(html).toMatch(/data-pr-state="open"[^>]*>#42<svg[^>]*aria-label="checks fail"/u);
+    expect(html).toContain('+1');
+    expect(html).not.toContain('#40');
   });
 
   it('says blocked by and blocking only while the dependency has not shipped', () => {

@@ -8,7 +8,7 @@ import {
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
-import type { AutomationWatchOn } from '@gitspace/protocol/automations-contract';
+import type { AutomationWatchOn, PullRequestState } from '@gitspace/protocol/automations-contract';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
@@ -27,6 +27,8 @@ const TOKEN_REUSE_MARGIN_MS = 5 * 60_000;
 const KEPT_DELIVERIES = 500;
 /** A pull request's changed files are read up to GitHub's own limit for the endpoint. */
 const PULL_REQUEST_FILE_PAGES = 30;
+/** Check run conclusions that fail a pull request's checks; neutral and skipped ones pass. */
+const FAILED_CONCLUSIONS: Record<string, true> = { failure: true, timed_out: true, cancelled: true, action_required: true, startup_failure: true, stale: true };
 const LISTED_DELIVERIES = 50;
 const REPOSITORY_PAGE_SIZE = 100;
 const REPOSITORY_PAGES = 100;
@@ -705,6 +707,26 @@ export class GitHubAppDO extends BudgetedDurableObject {
       if (files.length < REPOSITORY_PAGE_SIZE) break;
     }
     return paths;
+  }
+
+  /** A pull request's state, title and link, and its head commit's check runs and commit statuses together (see
+   * `PullRequestState`), read through the installation covering its repository. */
+  async pullRequestState(repository: string, number: number): Promise<PullRequestState & { title: string; url: string }> {
+    const token = (await this.installationToken(repository, { pull_requests: 'read', checks: 'read', statuses: 'read', metadata: 'read' }, `Reading ${repository} pull request #${number}`)).token;
+    const pull = await githubRequest(`/repos/${repository}/pulls/${number}`, { token, schema: z.object({ state: z.enum(['open', 'closed']), draft: z.boolean().optional(), merged: z.boolean(), title: z.string(), html_url: z.string(), head: z.object({ sha: z.string() }) }) });
+    const [runs, statuses] = await Promise.all([
+      githubRequest(`/repos/${repository}/commits/${pull.head.sha}/check-runs?per_page=100`, { token, schema: z.object({ check_runs: z.array(z.object({ status: z.string(), conclusion: z.string().nullable() })) }) }),
+      githubRequest(`/repos/${repository}/commits/${pull.head.sha}/status`, { token, schema: z.object({ statuses: z.array(z.object({ state: z.string() })) }) }),
+    ]);
+    const outcomes = [
+      ...runs.check_runs.map(run => run.status !== 'completed' ? 'pending' : Object.hasOwn(FAILED_CONCLUSIONS, run.conclusion ?? '') ? 'failing' : 'passing'),
+      ...statuses.statuses.map(status => status.state === 'pending' ? 'pending' : status.state === 'success' ? 'passing' : 'failing'),
+    ];
+    return {
+      state: pull.merged ? 'merged' : pull.state === 'closed' ? 'closed' : pull.draft ? 'draft' : 'open',
+      checks: outcomes.includes('failing') ? 'failing' : outcomes.includes('pending') ? 'pending' : outcomes.length ? 'passing' : 'none',
+      readAt: new Date().toISOString(), title: pull.title, url: pull.html_url,
+    };
   }
 
   /**

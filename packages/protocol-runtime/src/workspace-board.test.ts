@@ -1,14 +1,14 @@
 import { expect, test } from 'bun:test';
 import { emptyWorkspaceStatus, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
-import { workspaceBoard, workspaceBoardChanges, workspaceBoardLine, type WorkspaceBoardRow } from './workspace-board.js';
+import { workspaceBoard, workspaceBoardChanges, workspaceBoardLine, type BoardPullRequest, type WorkspaceBoardRow } from './workspace-board.js';
 
 const colored = (primaryColor: WorkspaceStatusSummary['primaryColor'], conflicts = 0): WorkspaceStatusSummary => ({ ...emptyWorkspaceStatus, primaryColor, sync: { conflicts, problems: 0 } });
 const at = new Date('2026-11-08T18:46:05Z');
 const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardRow>): WorkspaceBoardRow => ({
-  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequest: null, since: '2026-11-08T17:02:00Z', lastReply: null, journal: [], ...changes,
+  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: '2026-11-08T17:02:00Z', lastReply: null, journal: [], ...changes,
 });
 const rows = [
-  row('billing', 'Billing export', { status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket should\nexports go to?' }, pullRequest: 42, since: '2026-11-08T18:31:00Z' }),
+  row('billing', 'Billing export', { status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket should\nexports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: '2026-11-08T18:31:00Z' }),
   row('search', 'Search index', { phase: 'plan', status: colored('green'), since: '2026-11-07T23:10:00Z' }),
   row('docs', 'Docs refresh', { phase: 'review' }),
   row('sync', 'Sync repair', { status: colored('orange', 2), since: null }),
@@ -31,6 +31,20 @@ test('a board line shows each workspace\'s phase, what it is doing and on what i
   expect(workspaceBoard([rows[5]!], at)).toBe('Workspace board, 2026-11-08 18:46:05 UTC: no workspaces.');
 });
 
+test('a workspace\'s pull requests show their state and checks, open and draft ones before merged and closed ones', () => {
+  const pulls = row('billing', 'Billing export', { pullRequests: [
+    { number: 12, state: 'merged', checks: 'passing' },
+    { number: 15, state: 'open', checks: 'failing' },
+    { number: 9, state: 'closed', checks: 'none' },
+    { number: 18, state: 'draft', checks: 'pending' },
+    { number: 21, state: 'open', checks: 'none' },
+  ] });
+  expect(workspaceBoardLine(pulls, at)).toBe('Billing export (billing) · code · idle · PR #15 (open, checks fail) · PR #18 (draft, checks running) · PR #21 (open) · PR #12 (merged) · PR #9 (closed) · since 17:02');
+  // A pull request merging is a change of its workspace's line.
+  const merged: WorkspaceBoardRow = { ...pulls, pullRequests: pulls.pullRequests.map((pull): BoardPullRequest => pull.number === 15 ? { ...pull, state: 'merged' } : pull) };
+  expect(workspaceBoardChanges([pulls], [merged], at, at)).toContain('PR #18 (draft, checks running) · PR #21 (open) · PR #12 (merged) · PR #15 (merged)');
+});
+
 test('a board line carries the workspace\'s latest message, cut and on one line, and its newest journal entries', () => {
   const reported = row('billing', 'Billing export', {
     lastReply: `Exports now land in\n\nthe archive bucket. ${'y'.repeat(250)}`,
@@ -48,7 +62,7 @@ test('a board line carries the workspace\'s latest message, cut and on one line,
 test('the changes between two reads name only the workspaces whose line changed, new ones and those that left', () => {
   const later = new Date('2026-11-08T19:05:00Z');
   const current = [
-    row('billing', 'Billing export', { status: colored('green'), pullRequest: 42, since: '2026-11-08T18:50:00Z' }),
+    row('billing', 'Billing export', { status: colored('green'), pullRequests: [{ number: 42, state: null, checks: null }], since: '2026-11-08T18:50:00Z' }),
     rows[1]!,
     row('docs', 'Docs refresh', { phase: 'review', lifecycle: 'archived' }),
     rows[3]!,

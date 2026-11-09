@@ -436,6 +436,36 @@ describe('automations on GitHub events', () => {
     expect((await automations.list(projectId)).links.find(link => link.subject.number === 14)).toMatchObject({ workspaceId: reviewId, source: 'person', detail: 'Brad' });
   });
 
+  it('keeps a linked pull request\'s state and checks current: read when it is linked, again on its check suites\' and its own deliveries', async () => {
+    const { projectId, searchId, automations, send } = await installed(['bradleat']);
+    const head = commit('7');
+    const onGitHub: { state: 'open' | 'closed'; merged: boolean; runs: Array<{ status: string; conclusion: string | null }>; statuses: Array<{ state: string }> } = {
+      state: 'open', merged: false, runs: [{ status: 'completed', conclusion: 'failure' }, { status: 'in_progress', conclusion: null }], statuses: [{ state: 'success' }],
+    };
+    network.use(
+      http.get(`${API}/repos/inKibra/pantry/pulls/14`, () => HttpResponse.json({ state: onGitHub.state, draft: false, merged: onGitHub.merged, title: 'Search ranking', html_url: 'https://github.com/inKibra/pantry/pull/14', head: { sha: head } })),
+      http.get(`${API}/repos/inKibra/pantry/commits/${head}/check-runs`, () => HttpResponse.json({ check_runs: onGitHub.runs })),
+      http.get(`${API}/repos/inKibra/pantry/commits/${head}/status`, () => HttpResponse.json({ statuses: onGitHub.statuses })),
+    );
+    const linked = async () => (await automations.list(projectId)).links.find(link => link.subject.number === 14);
+    automationValue(await automations.link({ projectId, subject: { kind: 'pullRequest', number: 14 }, workspaceId: searchId, source: 'person', detail: 'Brad' }));
+    expect(await linked()).toMatchObject({ subject: { title: 'Search ranking' }, pullRequest: { state: 'open', checks: 'failing' } });
+    // A rerun is under way, then passes: each check suite's delivery reads the checks again.
+    onGitHub.runs = [{ status: 'completed', conclusion: 'success' }, { status: 'in_progress', conclusion: null }];
+    const suite = { action: 'completed', sender: { login: 'github' }, check_suite: { conclusion: 'success', head_branch: 'feature/search', head_sha: head, pull_requests: [{ number: 14, head: { ref: 'feature/search' }, base: { ref: 'main' } }] } };
+    await send('check_suite', suite);
+    await vi.waitFor(async () => expect((await linked())?.pullRequest).toMatchObject({ state: 'open', checks: 'pending' }));
+    onGitHub.runs = [{ status: 'completed', conclusion: 'success' }, { status: 'completed', conclusion: 'skipped' }];
+    await send('check_suite', suite);
+    await vi.waitFor(async () => expect((await linked())?.pullRequest).toMatchObject({ state: 'open', checks: 'passing' }));
+    // It merges: its own delivery reads it merged, and the board says so.
+    onGitHub.state = 'closed';
+    onGitHub.merged = true;
+    await send('pull_request', { action: 'closed', sender: { login: 'bradleat' }, pull_request: { ...pull(14, { author: 'bradleat', head: 'feature/search' }), state: 'closed', merged: true } });
+    await vi.waitFor(async () => expect((await linked())?.pullRequest).toMatchObject({ state: 'merged' }));
+    expect(await automations.pullRequestLinks(projectId)).toEqual([{ workspaceId: searchId, number: 14, state: expect.objectContaining({ state: 'merged', checks: 'passing' }) }]);
+  });
+
   it('gives a project the App covered before the defaults existed its defaults once, on the automations overview', async () => {
     const { projectId: installedId } = await installed([]);
     await vi.waitFor(async () => expect(await defaultsOf(installedId)).toEqual(DEFAULT_NAMES));

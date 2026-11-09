@@ -20,7 +20,7 @@ import { RequirementsSection } from '../goal/RequirementsSection.js';
 import type { StepCommentHandlers } from '../goal/StepComments.js';
 import type { GoalAutomations } from '../goal/useWorkspaceAutomations.js';
 import { automationsUrl, navigateProductUrl } from '../routes.js';
-import { PrChip } from '../sidebar/parts.js';
+import { PrChips } from '../sidebar/parts.js';
 import { ProjectGraphsContext } from '../sidebar/project-graph.js';
 import type { InspectorProps } from './Inspector.js';
 import { ic, settle, formatDate, Tone, Kicker, Heading, SectionTitle, Padded } from './inspector-shared.js';
@@ -71,7 +71,7 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
   const workspace = scope?.kind === 'workspace' ? scope : null;
   const phase = workspace?.phase ?? goal?.phase ?? null;
   const graphs = useContext(ProjectGraphsContext);
-  const pullRequest = workspace ? graphs[workspace.projectId]?.pullRequests[workspace.id] : undefined;
+  const pullRequests = workspace ? graphs[workspace.projectId]?.pullRequests[workspace.id] ?? [] : [];
   const staging = useComposerStaging();
   const blockActions = useMemo(() => workspaceBlockActions({ staging, setAcceptance: onSetAcceptance, openGuideSection: onOpenGuideSection }), [staging, onSetAcceptance, onOpenGuideSection]);
   const plan = controls?.plan ?? null;
@@ -98,7 +98,7 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
         <span className="text-caption font-semibold tabular-nums text-muted-foreground">1</span>
         <h3 className="text-body font-semibold text-foreground">Where we are</h3>
         {phase ? <Badge variant="dot" size="compact" color={phase === 'ship' ? 'green' : 'blue'}>{MODE_LABEL[phase]}</Badge> : null}
-        {pullRequest ? <PrChip pr={pullRequest} full /> : workspace ? <span className="text-caption text-muted-foreground">no PR</span> : null}
+        {pullRequests.length ? <PrChips pulls={pullRequests} full /> : workspace ? <span className="text-caption text-muted-foreground">no PR</span> : null}
       </div>
       {done.length ? <p className="text-body text-foreground">Done: {done.join(', ')}.</p> : null}
       <p className="text-body text-foreground"><span className="font-medium">Needs you:</span> {needsYou.length ? needsYou.join(' · ') : 'nothing right now'}</p>

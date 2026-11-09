@@ -474,6 +474,17 @@ export function automationSubjectName(subject: AutomationSubjectRef | Automation
 export const AutomationLinkSourceCodec = wire.enum(['person', 'agent', 'started', 'branch', 'closes']);
 export type AutomationLinkSource = InputOf<typeof AutomationLinkSourceCodec>;
 
+/** A linked pull request on GitHub as last read: open, draft, merged or closed, and its head commit's checks and
+ * statuses together: failing when any failed, pending while any still runs, passing when all passed, none when there
+ * are none. Read when the link is made and again on each of its pull request and check suite deliveries. */
+export const PullRequestStateSchema = z.object({
+  state: z.enum(['open', 'draft', 'merged', 'closed']),
+  checks: z.enum(['passing', 'failing', 'pending', 'none']),
+  readAt: z.string().datetime(),
+}).strict();
+export type PullRequestState = z.infer<typeof PullRequestStateSchema>;
+export const PullRequestStateCodec = wire.serializable((value): value is PullRequestState => PullRequestStateSchema.safeParse(value).success, { id: 'gitspace/pull-request-state/v1', jsonSchema: PullRequestStateSchema });
+
 export const AutomationLinkViewCodec = wire.object({
   subject: AutomationSubjectCodec,
   workspaceId: wire.string,
@@ -482,6 +493,8 @@ export const AutomationLinkViewCodec = wire.object({
   detail: wire.string,
   linkedAt: wire.date,
   lastActivity: wire.nullable(wire.object({ at: wire.date, label: wire.string })),
+  /** A pull request's state, once read; null for an issue or branch, and for a pull request not read yet. */
+  pullRequest: wire.nullable(PullRequestStateCodec),
 });
 export type AutomationLinkView = InputOf<typeof AutomationLinkViewCodec>;
 

@@ -22,7 +22,8 @@ export async function readProjectWorkspaces(env: Env, projectId: string): Promis
     const stored = statuses[definition.id];
     return { definition, board: {
       workspaceId: definition.id, name: definition.name, phase: definition.phase ?? null, lifecycle: definition.lifecycle,
-      status: stored?.status ?? null, waitingOn: stored?.waitingOn ?? null, pullRequest: links.find(link => link.workspaceId === definition.id)?.number ?? null, since: stored?.since ?? null,
+      status: stored?.status ?? null, waitingOn: stored?.waitingOn ?? null, since: stored?.since ?? null,
+      pullRequests: links.filter(link => link.workspaceId === definition.id).map(link => ({ number: link.number, state: link.state?.state ?? null, checks: link.state?.checks ?? null })),
       lastReply: stored?.lastReply ?? null, journal: journals[definition.id] ?? [],
     } };
   });

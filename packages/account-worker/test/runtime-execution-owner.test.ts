@@ -615,10 +615,10 @@ test('space_workspace list and board give every workspace\'s status in one read 
     try {
       const listed = z.array(z.object({ id: z.string(), name: z.string(), status: z.unknown() })).parse(JSON.parse(text(await invoke('space_workspace', { method: 'list' }))));
       expect(listed.find(item => item.id === 'billing')?.status).toEqual({
-        activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequest: 42, since: expect.any(String),
+        activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: expect.any(String),
         lastReply: 'Exports are ready;\nwhich bucket?', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
       });
-      expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequest: null });
+      expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequests: [] });
       const board = text(await invoke('space_workspace', { method: 'board' }));
       expect(board).toMatch(/^Workspace board, .+ UTC \(2 workspaces\):\n/u);
       expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n {2}last message: "Exports are ready; which bucket\?"\n {2}journal: decision "Exports go to the archive bucket" \(\d\d:\d\d\)\n/u);

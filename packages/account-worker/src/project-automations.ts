@@ -42,6 +42,8 @@ import {
   type AutomationTrigger,
   type AutomationView,
   automationMessage,
+  PullRequestStateSchema,
+  type PullRequestState,
 } from '@gitspace/protocol/automations-contract';
 import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { BUILT_IN_MODEL_ROLES, MODEL_ROLE_LABELS } from '@gitspace/protocol/inference';
@@ -404,6 +406,7 @@ interface LinkRow extends Record<string, SqlStorageValue> {
   linked_at: number;
   activity_label: string | null;
   activity_at: number | null;
+  pull_request_json: string | null;
 }
 
 interface ExceptionRow extends Record<string, SqlStorageValue> {
@@ -549,7 +552,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           detail TEXT NOT NULL,
           linked_at INTEGER NOT NULL,
           activity_label TEXT,
-          activity_at INTEGER
+          activity_at INTEGER,
+          pull_request_json TEXT
         );
         CREATE TABLE IF NOT EXISTS automation_watches(
           automation_id TEXT PRIMARY KEY,
@@ -629,6 +633,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER']]) {
       if (recorded.length > 0 && !recorded.includes(column)) sql.exec(`ALTER TABLE automation_runs ADD COLUMN ${column} ${type}`);
     }
+    const links = columns('automation_links');
+    if (links.length > 0 && !links.includes('pull_request_json')) sql.exec('ALTER TABLE automation_links ADD COLUMN pull_request_json TEXT');
   }
 
   /** The project's automations, the limits and trust list they run under, its subject links, and the model roles a
@@ -643,10 +649,11 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     };
   }
 
-  /** Each pull request linked to a workspace, the newest link first: the project agent's workspace board shows them. */
-  pullRequestLinks(projectIdInput: string): Array<{ workspaceId: string; number: number }> {
+  /** Each pull request linked to a workspace with its state as last read, the newest link first: the project agent's
+   * workspace board shows them. */
+  pullRequestLinks(projectIdInput: string): Array<{ workspaceId: string; number: number; state: PullRequestState | null }> {
     this.ensureProject(projectIdInput);
-    return this.rows<LinkRow>("SELECT * FROM automation_links WHERE subject_key LIKE 'pr:%' ORDER BY linked_at DESC, subject_key").map(row => ({ workspaceId: row.workspace_id, number: Number(row.subject_key.slice('pr:'.length)) }));
+    return this.rows<LinkRow>("SELECT * FROM automation_links WHERE subject_key LIKE 'pr:%' ORDER BY linked_at DESC, subject_key").map(row => ({ workspaceId: row.workspace_id, number: Number(row.subject_key.slice('pr:'.length)), state: row.pull_request_json === null ? null : PullRequestStateSchema.parse(JSON.parse(row.pull_request_json)) }));
   }
 
   /** A person's automation: it takes effect at once. */
@@ -962,6 +969,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const subject: AutomationSubject = known ? AutomationSubjectSchema.parse(JSON.parse(known.subject_json))
         : { kind: input.subject.kind, number: input.subject.kind === 'branch' ? null : input.subject.number, branch: input.subject.kind === 'branch' ? input.subject.branch : null, title: '', url: null };
       this.putLink(subject, workspace.id, input.source, input.detail, Date.now());
+      if (subject.kind === 'pullRequest' && subject.number !== null) await this.readPullRequest(projectId, null, subject.number);
       await this.changed(projectId);
       const row = this.linkRow(key);
       if (!row) throw new Error(`The link for ${key} was not stored`);
@@ -1237,6 +1245,36 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const stored = AutomationSubjectSchema.parse(JSON.parse(row.subject_json));
       const updated = { ...stored, title: subject.title || stored.title, url: subject.url ?? stored.url };
       this.ctx.storage.sql.exec('UPDATE automation_links SET subject_json=?, activity_label=?, activity_at=? WHERE subject_key=?', JSON.stringify(updated), activity, now, row.subject_key);
+    }
+    // A pull request's state and checks change with its own deliveries and its check suites'.
+    if (event.event !== 'pull_request' && event.event !== 'check_suite') return;
+    let read = false;
+    for (const subject of event.subjects) {
+      if (subject.kind === 'pullRequest' && subject.number !== null && this.linkRow(automationSubjectKey(subject))) read = await this.readPullRequest(projectId, event.repository, subject.number) || read;
+    }
+    if (read) await this.changed(projectId);
+  }
+
+  /** Reads a linked pull request's state, title and link from GitHub into its link; true when what is stored changed.
+   * A failed read is logged and keeps the state last read. */
+  private async readPullRequest(projectId: string, repository: string | null, number: number): Promise<boolean> {
+    const key = automationSubjectKey({ kind: 'pullRequest', number });
+    const row = this.linkRow(key);
+    const named = repository ?? await this.repository(projectId);
+    if (!row || named === null) return false;
+    try {
+      const result = await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).pullRequestState(named, number);
+      // An RPC result holds its call's resources until disposed: keep a plain copy and free them now.
+      const read = structuredClone(result);
+      result[Symbol.dispose]();
+      const state: PullRequestState = { state: read.state, checks: read.checks, readAt: read.readAt };
+      const stored = AutomationSubjectSchema.parse(JSON.parse(row.subject_json));
+      const before = row.pull_request_json === null ? null : PullRequestStateSchema.parse(JSON.parse(row.pull_request_json));
+      this.ctx.storage.sql.exec('UPDATE automation_links SET subject_json=?, pull_request_json=? WHERE subject_key=?', JSON.stringify({ ...stored, title: read.title, url: read.url }), JSON.stringify(state), key);
+      return before?.state !== state.state || before.checks !== state.checks || stored.title !== read.title;
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'pull_request_read_failed', projectId, repository: named, number, error: errorMessage(error) }));
+      return false;
     }
   }
 
@@ -1845,6 +1883,7 @@ function linkView(row: LinkRow): AutomationLinkView {
     detail: row.detail,
     linkedAt: new Date(row.linked_at),
     lastActivity: row.activity_at === null || row.activity_label === null ? null : { at: new Date(row.activity_at), label: row.activity_label },
+    pullRequest: row.pull_request_json === null ? null : PullRequestStateSchema.parse(JSON.parse(row.pull_request_json)),
   };
 }
 

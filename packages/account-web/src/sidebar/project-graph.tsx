@@ -1,4 +1,5 @@
 import type { StackStatus } from '@gitspace/protocol';
+import type { PullRequestState } from '@gitspace/protocol/automations-contract';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useResultQuery } from 'result-rpc/react';
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -8,15 +9,25 @@ import { rpcErrorMessage } from '../rpc-error-message.js';
 import { useEventRefresh, useProjectChanges } from '../SynchronizationProvider.js';
 import { useRetainedQueryValue } from '../useRetainedRead.js';
 
-/** A pull request linked to a workspace: the one its branch opened, or one a person or agent linked. */
-export interface LinkedPullRequest { number: number; title: string; url: string | null }
+/** Pull request states that are over: their chips come after the open and draft ones. */
+const DONE_STATES: Record<string, true> = { merged: true, closed: true };
+
+/** A pull request linked to a workspace (the one its branch opened, or one a person or agent linked), with its state
+ * and checks as last read from GitHub; null until first read. */
+export interface LinkedPullRequest {
+  number: number;
+  title: string;
+  url: string | null;
+  state: PullRequestState['state'] | null;
+  checks: PullRequestState['checks'] | null;
+}
 
 /** What the sidebar and the workspace header know of a project beyond its directory: each workspace's relations and the
- * pull request linked to it. */
+ * pull requests linked to it, open and draft ones first, then merged and closed ones, each group newest link first. */
 export interface ProjectGraph {
   baseBranch: string;
   relations: Readonly<Record<string, { dependsOn: readonly string[]; stackedOn: string | null }>>;
-  pullRequests: Readonly<Record<string, LinkedPullRequest>>;
+  pullRequests: Readonly<Record<string, readonly LinkedPullRequest[]>>;
 }
 
 /** Project graphs by project id; empty outside the account frame. */
@@ -34,10 +45,11 @@ function ProjectGraphReader({ projectId, onRead }: { projectId: string; onRead(p
   report.current = onRead;
   const graph = useMemo((): ProjectGraph | null => {
     if (!viewValue) return null;
-    const pullRequests: Record<string, LinkedPullRequest> = {};
-    // The newest link of a workspace wins.
-    for (const link of [...links ?? []].sort((a, b) => a.linkedAt.getTime() - b.linkedAt.getTime())) {
-      if (link.subject.kind === 'pullRequest' && link.subject.number !== null) pullRequests[link.workspaceId] = { number: link.subject.number, title: link.subject.title, url: link.subject.url };
+    const pullRequests: Record<string, LinkedPullRequest[]> = {};
+    const ordered = [...links ?? []].sort((a, b) => Number(Object.hasOwn(DONE_STATES, a.pullRequest?.state ?? '')) - Number(Object.hasOwn(DONE_STATES, b.pullRequest?.state ?? '')) || b.linkedAt.getTime() - a.linkedAt.getTime());
+    for (const link of ordered) {
+      if (link.subject.kind !== 'pullRequest' || link.subject.number === null) continue;
+      (pullRequests[link.workspaceId] ??= []).push({ number: link.subject.number, title: link.subject.title, url: link.subject.url, state: link.pullRequest?.state ?? null, checks: link.pullRequest?.checks ?? null });
     }
     return {
       baseBranch: viewValue.project.baseBranch,

@@ -37,7 +37,7 @@ import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.
 import { operationActive } from './OperationProgress.js';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
 import { blocks, lit, relation, stackTree, waitsOn, type Lit, type Relation } from './sidebar/graph.js';
-import { DependencyText, DOWNSTREAM_TONE, GroupHeading, PhaseTag, PrChip, StackCaption, UPSTREAM_TONE } from './sidebar/parts.js';
+import { DependencyText, DOWNSTREAM_TONE, GroupHeading, PhaseTag, PrChips, StackCaption, UPSTREAM_TONE } from './sidebar/parts.js';
 import type { ProjectGraph } from './sidebar/project-graph.js';
 import { stackPosition, type ChainWorkspace } from './sidebar/StackChain.js';
 
@@ -388,12 +388,12 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
    * blocks. A dependency blocks while it is open and not in Ship, as the server's `blockedBy` reads it; an archived one
    * is not listed here, and one of unknown phase says nothing. */
   const markers = (item: RowItem) => {
-    const pr = graph?.pullRequests[item.id];
+    const pulls = graph?.pullRequests[item.id] ?? [];
     const holds = (id: string) => {
       const phase = byId.get(id)?.phase;
       return !!phase && phase !== 'ship';
     };
-    return <>{pr ? <PrChip pr={pr} /> : null}<DependencyText blockedBy={waitsOn(item).filter(holds).flatMap((id) => names.get(id) ?? [])} blocking={holds(item.id) ? blocks(items, item.id).flatMap((id) => names.get(id) ?? []) : []} /></>;
+    return <><PrChips pulls={pulls} /><DependencyText blockedBy={waitsOn(item).filter(holds).flatMap((id) => names.get(id) ?? [])} blocking={holds(item.id) ? blocks(items, item.id).flatMap((id) => names.get(id) ?? []) : []} /></>;
   };
   const tree = () => {
     // One run per first-level row and its stack; a run shows whole while any of it matches the filter, its other rows dimmed.

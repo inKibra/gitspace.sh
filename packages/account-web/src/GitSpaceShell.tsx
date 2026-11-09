@@ -49,7 +49,7 @@ import { glyph } from './glyph.js';
 import { ResourceLink, ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 import { ResourceFiles, type ResourceFile } from './resource-files.js';
 import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
-import { PrChip, StatusBadge } from './sidebar/parts.js';
+import { PrChips, StatusBadge } from './sidebar/parts.js';
 import { ProjectGraphsContext } from './sidebar/project-graph.js';
 import { GuideSectionNavigation } from './chat/staging.js';
 
@@ -684,7 +684,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     return [...byProject.values()];
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
   const projectGraph = useContext(ProjectGraphsContext)[workspace.projectId];
-  const pullRequest = workspace.kind === 'workspace' ? projectGraph?.pullRequests[workspace.id] : undefined;
+  const pullRequests = workspace.kind === 'workspace' ? projectGraph?.pullRequests[workspace.id] ?? [] : [];
   const [phaseRefusal, setPhaseRefusal] = useState<{ workspaceId: string; message: string } | null>(null);
   const recovering = selectedSummary.detail === 'Agent is recovering';
   const inferenceState = useInference()?.state;
@@ -716,7 +716,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-xl:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
           {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-xl:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
           <span className="max-md:hidden"><StatusBadge color={workspaceStatusColor(selectedSummary)} label={recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)} /></span>
-          {workspace.kind === 'workspace' && projectGraph ? pullRequest ? <PrChip pr={pullRequest} full /> : <span className="shrink-0 text-caption text-muted-foreground max-lg:hidden">no PR</span> : null}
+          {workspace.kind === 'workspace' && projectGraph ? pullRequests.length ? <PrChips pulls={pullRequests} full /> : <span className="shrink-0 text-caption text-muted-foreground max-lg:hidden">no PR</span> : null}
         </nav>
         <div className="flex items-center gap-1">
             {renderEnvironmentStatus?.(openEnvironment, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}

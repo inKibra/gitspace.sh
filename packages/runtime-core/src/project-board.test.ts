@@ -11,8 +11,10 @@ const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0
 const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
 const colored = (primaryColor: NonNullable<WorkspaceBoardRow['status']>['primaryColor']): WorkspaceBoardRow['status'] => ({ primaryColor, agents: { green: 0, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } });
 const reply = (content: AssistantMessage['content'], stopReason: AssistantMessage['stopReason']): AssistantMessage => ({ role: 'assistant', content, api: model.api, provider: model.provider, model: model.id, stopReason, timestamp: Date.now(), usage });
+/** Today at 17:00 UTC: a board line shows a time of the day it is read without its date. */
+const today = `${new Date().toISOString().slice(0, 10)}T17:00:00Z`;
 const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardRow> = {}): WorkspaceBoardRow => ({
-  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequest: null, since: '2026-11-08T17:00:00Z', lastReply: null, journal: [], ...changes,
+  workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: today, lastReply: null, journal: [], ...changes,
 });
 const text = (message: Message | undefined) => typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content);
 /** The instructions a request carries: pi sends them as system messages in the conversation. */
@@ -68,7 +70,7 @@ test('the first turn carries the full board, a later one only what changed, and 
     expect(text(first!.messages.at(-1))).toMatch(/^Workspace board, \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC \(2 workspaces\):\n- Billing export \(billing\) · code · idle · since 17:00\n- Search index \(search\) · code · working · since 17:00$/u);
     expect(instructions(first)).toContain(JSON.stringify(PROJECT_BOARD_INSTRUCTION).slice(1, -1));
 
-    f.board.rows = [row('billing', 'Billing export', { phase: 'plan', status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket?' }, since: '2026-11-08T18:50:00Z' }), f.board.rows[1]!, row('onboarding', 'Onboarding')];
+    f.board.rows = [row('billing', 'Billing export', { phase: 'plan', status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket?' }, since: today.replace('T17:00', 'T18:50') }), f.board.rows[1]!, row('onboarding', 'Onboarding')];
     const [second] = await f.turn('And now?');
     // Everything the first turn sent is sent again unchanged; the change comes after it.
     expect(second!.messages.slice(0, first!.messages.length)).toEqual(first!.messages);
@@ -86,18 +88,19 @@ test('the first turn carries the full board, a later one only what changed, and 
   } finally { await f.harness.close(context); }
 }, 20_000);
 
-test('a board stored before rows carried a last message and journal gives the next turn a full board, not a failed read', async () => {
+test('a board stored by an earlier release, its rows without every pull request\'s state, gives the next turn a full board, not a failed read', async () => {
   const f = await fixture();
   try {
-    // The state the release before left: version 1 rows, and a full board the conversation shows.
+    // The state the release before left: version 2 rows with one pull request number, and a full board the
+    // conversation shows.
     const full = 'Workspace board, 2026-11-08 17:00:00 UTC (1 workspace):';
-    const BoardVersion1 = defineDoc<{ rows: Array<Omit<WorkspaceBoardRow, 'lastReply' | 'journal'>>; at: number; full: string | null; changes: number; turn: string | null }>({
-      kind: 'gitspace.project-board', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ rows: [], at: 0, full: null, changes: 0, turn: null }),
+    const BoardVersion2 = defineDoc<{ rows: Array<Omit<WorkspaceBoardRow, 'pullRequests'> & { pullRequest: number | null }>; at: number; full: string | null; changes: number; turn: string | null }>({
+      kind: 'gitspace.project-board', version: 2, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ rows: [], at: 0, full: null, changes: 0, turn: null }),
     });
     await f.root.commit(async tx => {
-      await tx.appendEntry(UserEntry, f.root.id, { model: [{ role: 'user', content: `${full}\n- Billing export (billing) · code · idle · since 17:00`, timestamp: 1 }] });
-      const { lastReply: _reply, journal: _journal, ...earlier } = row('billing', 'Billing export');
-      Object.assign(await tx.doc(BoardVersion1, f.root.id), { rows: [earlier], at: Date.parse('2026-11-08T17:00:00Z'), full, changes: 0, turn: null });
+      await tx.appendEntry(UserEntry, f.root.id, { model: [{ role: 'user', content: `${full}\n- Billing export (billing) · code · idle · PR #42 · since 17:00`, timestamp: 1 }] });
+      const { pullRequests: _pulls, ...earlier } = row('billing', 'Billing export');
+      Object.assign(await tx.doc(BoardVersion2, f.root.id), { rows: [{ ...earlier, pullRequest: 42 }], at: Date.parse('2026-11-08T17:00:00Z'), full, changes: 0, turn: null });
     }, context);
     const [first] = await f.turn('Which workspaces need me?');
     expect(text(first!.messages.at(-1))).toMatch(/^Workspace board, \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC \(2 workspaces\):\n- Billing export \(billing\)/u);

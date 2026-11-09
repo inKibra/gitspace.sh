@@ -1,7 +1,7 @@
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
-import { Tooltip } from '@gitspace/ui';
-import { ArrowNarrowDown, ArrowNarrowUp, CornerDownRight } from '@untitledui/icons';
-import type { ReactNode } from 'react';
+import { Tooltip, badgeColors } from '@gitspace/ui';
+import { ArrowNarrowDown, ArrowNarrowUp, Check, CornerDownRight, XClose } from '@untitledui/icons';
+import type { CSSProperties, ReactNode } from 'react';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, type WorkspaceView } from '../GitSpaceShell.js';
 import type { LinkedPullRequest } from './project-graph.js';
 import type { StackPosition } from './StackChain.js';
@@ -18,12 +18,43 @@ export function StatusBadge({ color, label }: { color: WorkspaceStatusColor; lab
   </span>;
 }
 
-/** `#42`, or `#42 · open` in the header: the pull request linked to the workspace, its title on hover. */
+/** A pull request's checks as its chip marks them; none and not yet read are unmarked. */
+const CHECKS: Record<NonNullable<LinkedPullRequest['checks']>, { label: string; mark: ReactNode }> = {
+  passing: { label: 'checks pass', mark: <Check width={11} height={11} strokeWidth={2.25} style={{ color: badgeColors.green }} aria-label="checks pass" /> },
+  failing: { label: 'checks fail', mark: <XClose width={11} height={11} strokeWidth={2.25} style={{ color: badgeColors.red }} aria-label="checks fail" /> },
+  pending: { label: 'checks running', mark: <span className="size-1.5 animate-pulse rounded-full" style={{ background: badgeColors.amber }} aria-label="checks running" /> },
+  none: { label: 'no checks', mark: null },
+};
+
+/** `#42 · open ✓`: a pull request linked to the workspace, its title on hover. Merged is tinted, a draft dashed, a
+ * closed one faded; checks show on open and draft ones. `full` (the header) adds the state to an open one and its
+ * title. */
 export function PrChip({ pr, full = false }: { pr: LinkedPullRequest; full?: boolean }) {
-  const chip = <span className="inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full px-1.5 font-mono text-[10.5px] tabular-nums text-foreground/80" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
-    #{pr.number}{full ? <span className="max-w-64 truncate font-sans text-muted-foreground">· {pr.title}</span> : null}
+  const live = pr.state === 'open' || pr.state === 'draft';
+  const checks = live && pr.checks ? CHECKS[pr.checks] : null;
+  const style: CSSProperties = pr.state === 'merged'
+    ? { color: badgeColors.violet, boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${badgeColors.violet} 35%, transparent)` }
+    : pr.state === 'draft' ? {} : { boxShadow: 'inset 0 0 0 1px var(--border)' };
+  const chip = <span data-pr-state={pr.state ?? 'unknown'} className={`inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full px-1.5 font-mono text-[10.5px] tabular-nums ${pr.state === 'draft' ? 'border border-dashed border-border text-muted-foreground' : pr.state === 'closed' ? 'text-muted-foreground opacity-70' : 'text-foreground/80'}`} style={style}>
+    #{pr.number}
+    {pr.state && (full || pr.state !== 'open') ? <span className="text-muted-foreground">· {pr.state}</span> : null}
+    {checks?.mark ?? null}
+    {full ? <span className="max-w-64 truncate font-sans text-muted-foreground">· {pr.title}</span> : null}
   </span>;
-  return <Tooltip content={`#${pr.number} ${pr.title}`} side="bottom">{pr.url ? <a href={pr.url} target="_blank" rel="noreferrer" className="inline-flex shrink-0" onClick={event => event.stopPropagation()}>{chip}</a> : chip}</Tooltip>;
+  const tip = [`#${pr.number} ${pr.title}`, pr.state, checks?.label].filter(Boolean).join(' · ');
+  return <Tooltip content={tip} side="bottom">{pr.url ? <a href={pr.url} target="_blank" rel="noreferrer" className="inline-flex shrink-0" onClick={event => event.stopPropagation()}>{chip}</a> : chip}</Tooltip>;
+}
+
+/** A workspace's pull requests, open and draft ones first. `full` (the header, the Goal view) shows each, the first
+ * with its title; otherwise (a sidebar row) the first and how many more. */
+export function PrChips({ pulls, full = false }: { pulls: readonly LinkedPullRequest[]; full?: boolean }) {
+  const [first, ...rest] = pulls;
+  if (!first) return null;
+  if (full) return <span className="inline-flex min-w-0 flex-wrap items-center gap-1">{pulls.map((pr, index) => <PrChip key={pr.number} pr={pr} full={index === 0} />)}</span>;
+  return <span className="inline-flex shrink-0 items-center gap-1">
+    <PrChip pr={first} />
+    {rest.length ? <Tooltip content={rest.map(pr => `#${pr.number}${pr.state ? ` ${pr.state}` : ''}`).join(', ')} side="bottom"><span className="font-mono text-[10.5px] tabular-nums text-muted-foreground">+{rest.length}</span></Tooltip> : null}
+  </span>;
 }
 
 /** Four pips (plan, code, review, ship) filled up to the phase, then its name. */

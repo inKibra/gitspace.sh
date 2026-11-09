@@ -714,7 +714,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           }
           // Every workspace with its status, from stored rows in one read: no workspace object is woken.
           case 'list': return completed(input, (await readProjectWorkspaces(env, identity.projectId)).map(({ definition, board }) => ({
-            ...definition, status: { activity: workspaceActivity(board), waitingOn: board.waitingOn, pullRequest: board.pullRequest, since: board.since, lastReply: board.lastReply, journal: board.journal },
+            ...definition, status: { activity: workspaceActivity(board), waitingOn: board.waitingOn, pullRequests: board.pullRequests, since: board.since, lastReply: board.lastReply, journal: board.journal },
           })));
           case 'board': return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: workspaceBoard(await boardRows(), new Date()) }] };
           case 'operations': return completed(input, await authority().listOperations());

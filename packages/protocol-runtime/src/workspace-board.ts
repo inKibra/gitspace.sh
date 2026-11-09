@@ -13,13 +13,20 @@ export type WorkspaceBoardRow = {
   status: WorkspaceStatusSummary | null;
   /** The main conversation's oldest unanswered question or approval. */
   waitingOn: WorkspaceReport['waitingOn'];
-  pullRequest: number | null;
+  /** Every pull request linked to it, newest link first (see `BoardPullRequest`). */
+  pullRequests: BoardPullRequest[];
   /** When its activity (working, waiting on a person, idle, failed) or what it waits on last changed. */
   since: string | null;
   /** Its main agent's latest message, as the workspace last reported it. */
   lastReply: string | null;
   /** Its journal's newest entries, newest first, as the workspace last reported them. */
   journal: WorkspaceJournalLine[];
+};
+/** A pull request linked to a workspace, with its state and checks as last read from GitHub (null until first read). */
+export type BoardPullRequest = {
+  number: number;
+  state: 'open' | 'draft' | 'merged' | 'closed' | null;
+  checks: 'passing' | 'failing' | 'pending' | 'none' | null;
 };
 /** Journal entries an index row keeps, and a board line names. */
 export const BOARD_JOURNAL_ENTRIES = 3;
@@ -65,12 +72,25 @@ function onBoard(row: WorkspaceBoardRow): boolean {
   return row.lifecycle !== 'archived' && row.lifecycle !== 'deleting';
 }
 
-/** `Name (id) · phase · activity · PR #n · since HH:MM`, the lifecycle only when the workspace is not active; then its
- * latest message and its newest journal entries, each on its own indented line when it has them. */
+/** Checks as a board line says them; none is left unsaid. */
+const CHECKS_WORDS: Record<NonNullable<BoardPullRequest['checks']>, string | null> = { passing: 'checks pass', failing: 'checks fail', pending: 'checks running', none: null };
+
+/** `PR #15 (open, checks fail)`: a merged or closed pull request without its checks, one not read yet as its number. */
+function pullRequestWords(pull: BoardPullRequest): string {
+  if (pull.state === null) return `PR #${pull.number}`;
+  const checks = pull.state === 'open' || pull.state === 'draft' ? CHECKS_WORDS[pull.checks ?? 'none'] : null;
+  return `PR #${pull.number} (${pull.state}${checks ? `, ${checks}` : ''})`;
+}
+
+/** `Name (id) · phase · activity · PR #n (state) · since HH:MM`, the lifecycle only when the workspace is not active;
+ * its pull requests open and draft first, then merged and closed, each in the order it was linked. Then its latest
+ * message and its newest journal entries, each on its own indented line when it has them. */
 export function workspaceBoardLine(row: WorkspaceBoardRow, at: Date): string {
+  // A stable sort: merged and closed after the rest, each group in the order it was linked.
+  const pulls = [...row.pullRequests].sort((left, right) => Number(left.state === 'merged' || left.state === 'closed') - Number(right.state === 'merged' || right.state === 'closed'));
   const head = [
     `${row.name} (${row.workspaceId})`, row.phase ?? 'no phase', ...(row.lifecycle === 'active' ? [] : [row.lifecycle]), workspaceActivity(row),
-    ...(row.pullRequest === null ? [] : [`PR #${row.pullRequest}`]), ...(row.since === null ? [] : [`since ${clock(new Date(row.since), at)}`]),
+    ...pulls.map(pullRequestWords), ...(row.since === null ? [] : [`since ${clock(new Date(row.since), at)}`]),
   ].join(' · ');
   const reply = row.lastReply?.replace(/\s+/gu, ' ').trim();
   const lines = [head];
