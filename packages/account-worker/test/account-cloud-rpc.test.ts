@@ -79,7 +79,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
     const index = env.USER_PROJECTS.getByName(fixture.userId);
     const idle = { primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: null });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: null, cursor: 1 });
     const path = '/v1/directory/events';
     const auth = signRpcRequest({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, method: 'GET', path, body: new Uint8Array() });
     const response = await SELF.fetch(new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } }));
@@ -92,9 +92,14 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     socket.accept();
     await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle }]) }]));
     const working = { ...idle, primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 } };
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null });
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 2 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 3 });
     await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }]));
+    // A turn's end and its last message, sent a moment apart, arrive out of order: the older send is dropped.
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: 'Done.', cursor: 5 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: 'Done.', cursor: 4 });
+    expect((await index.projectWorkspaceStatuses(projectId))[spaceId]?.status).toEqual(idle);
+    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }, { type: 'status', projectId, workspaceId: spaceId, status: idle }]));
     socket.close();
   });
 

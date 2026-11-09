@@ -394,7 +394,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
-      for (const column of ['waiting_json TEXT', 'since TEXT', 'last_reply TEXT']) {
+      for (const column of ['waiting_json TEXT', 'since TEXT', 'last_reply TEXT', 'status_cursor INTEGER']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE workspace_statuses ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
@@ -410,17 +410,23 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
 
   /** A workspace's status, what its main conversation waits on, or its main agent's latest message changed: keep its one
    * row, and send a changed status to every open tab. `since` moves only when its activity (the status color) or what it
-   * waits on changes, not its machine or sync counts or its latest message. */
-  setWorkspaceStatus(row: WorkspaceStatusRow & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply'] }): void {
+   * waits on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out of order;
+   * one older than the row (by its snapshot `cursor`, which only grows) is dropped. */
+  setWorkspaceStatus(row: WorkspaceStatusRow & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply']; cursor: number }): void {
     const { projectId, workspaceId, status } = workspaceStatusRowSchema.parse(row);
+    const cursor = z.number().int().nonnegative().parse(row.cursor);
     const summary = JSON.stringify(status);
     const waiting = JSON.stringify(WorkspaceReportSchema.shape.waitingOn.parse(row.waitingOn));
     const lastReply = WorkspaceReportSchema.shape.lastReply.parse(row.lastReply);
-    const stored = this.ctx.storage.sql.exec<{ summary: string; waiting_json: string | null; since: string | null; last_reply: string | null }>('SELECT summary,waiting_json,since,last_reply FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
-    if (stored?.summary === summary && (stored.waiting_json ?? 'null') === waiting && stored.last_reply === lastReply) return;
+    const stored = this.ctx.storage.sql.exec<{ summary: string; waiting_json: string | null; since: string | null; last_reply: string | null; status_cursor: number | null }>('SELECT summary,waiting_json,since,last_reply,status_cursor FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
+    if (stored?.status_cursor != null && cursor < stored.status_cursor) return;
+    if (stored?.summary === summary && (stored.waiting_json ?? 'null') === waiting && stored.last_reply === lastReply) {
+      this.ctx.storage.sql.exec('UPDATE workspace_statuses SET status_cursor=? WHERE workspace_id=?', cursor, workspaceId);
+      return;
+    }
     const activityChanged = !stored || (stored.waiting_json ?? 'null') !== waiting || workspaceStatusRowSchema.shape.status.parse(JSON.parse(stored.summary)).primaryColor !== status.primaryColor;
     const since = activityChanged ? new Date().toISOString() : stored?.since ?? null;
-    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary,waiting_json,since,last_reply) VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary,waiting_json=excluded.waiting_json,since=excluded.since,last_reply=excluded.last_reply', workspaceId, projectId, summary, waiting, since, lastReply);
+    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary,waiting_json,since,last_reply,status_cursor) VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary,waiting_json=excluded.waiting_json,since=excluded.since,last_reply=excluded.last_reply,status_cursor=excluded.status_cursor', workspaceId, projectId, summary, waiting, since, lastReply, cursor);
     if (stored?.summary === summary) return;
     const message = JSON.stringify({ type: 'status', projectId, workspaceId, status });
     for (const socket of this.ctx.getWebSockets()) {

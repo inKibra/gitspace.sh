@@ -123,6 +123,9 @@ export async function createAccountWorkspaceRuntime(
   const qa = createRuntimeQaServices(env, identity);
   const watch = projectWatchHooks(ctx.storage, identity, (report, onDone) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: identity.projectId }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, error }))));
   const automationTurns = automationTurnHooks(ctx.storage, identity, report => env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runTurnChanged(report), waitUntil);
+  // A send lost before this instance (cut off by a reset or a restart) left the object's own copy ahead of the account's:
+  // this instance's first publication is sent whatever its copy says.
+  let statusSent = false;
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
@@ -147,10 +150,15 @@ export async function createAccountWorkspaceRuntime(
     published: (snapshot, report) => {
       const status = report.summary;
       // The account's row: the sidebar's status and the project agent's board (what it waits on, its main agent's latest
-      // message), sent only when one of them changed. The latest message changes once per finished message.
+      // message), sent when one of them changed. Sends run in the background and can arrive out of order (a turn's last
+      // message, then its end, a moment apart), so each carries the snapshot's cursor and the account keeps the newest.
       const previous = readWorkspaceReport(ctx.storage);
       const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply;
-      if (storeWorkspaceStatus(ctx.storage, status) || reportChanged) waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status, waitingOn: report.waitingOn, lastReply: report.lastReply }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+      const statusChanged = storeWorkspaceStatus(ctx.storage, status);
+      if (statusChanged || reportChanged || !statusSent) {
+        statusSent = true;
+        waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status, waitingOn: report.waitingOn, lastReply: report.lastReply, cursor: snapshot.cursor }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+      }
       storeWorkspaceReport(ctx.storage, report);
       watch.published(report);
       automationTurns.published(report);

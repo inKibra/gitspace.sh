@@ -598,8 +598,8 @@ test('space_workspace list and board give every workspace\'s status in one read 
   await authority.putWorkspace({ ...workspace, id: 'billing', name: 'Billing export', branch: 'billing', phase: 'code' });
   await authority.putWorkspace({ ...workspace, id: 'search', name: 'Search index', branch: 'search', phase: 'plan' });
   const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, lastReply: 'Exports are ready;\nwhich bucket?' });
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null, lastReply: null });
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, lastReply: 'Exports are ready;\nwhich bucket?', cursor: 1 });
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null, lastReply: null, cursor: 1 });
   // A journal entry reaches the account index from the journal's own object, after its write.
   await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, 'billing'])).appendJournalEntry({
     projectId, spaceId: 'billing', id: 'bucket', kind: 'decision', phase: 'code', title: 'Exports go to the archive bucket', body: '', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a',
