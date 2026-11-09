@@ -528,3 +528,27 @@ test('a released checkout whose workspace is still active stays on disk', () => 
   expect(existsSync(join(checkout, 'tracked.txt'))).toBe(true);
   expect(runtime.journal.attachments().map(local => local.attachment.state)).toEqual(['detached']);
 }), 20_000);
+
+/** A commit on a new local branch `side`, off HEAD; HEAD and the files stay as synced. */
+async function sideBranch(checkout: string) {
+  const commit = await git(checkout, 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'side work');
+  await git(checkout, 'update-ref', 'refs/heads/side', commit);
+  return commit;
+}
+
+test('a released checkout with a local branch never pushed stays on disk when its workspace is archived', () => watcherProof(async ({ checkout, release }) => {
+  const kept = Promise.withResolvers<void>();
+  const warn = spyOn(console, 'warn').mockImplementation((tag: unknown) => { if (tag === '[runtime-retire]') kept.resolve(); });
+  try {
+    await sideBranch(checkout);
+    await release(true);
+    await kept.promise;
+    expect(await git(checkout, 'rev-parse', '--verify', 'refs/heads/side')).toMatch(/^[0-9a-f]{40}$/u);
+  } finally { warn.mockRestore(); }
+}), 20_000);
+
+test('a released checkout whose extra local branch is pushed is removed when its workspace is archived', () => watcherProof(async ({ checkout, release }) => {
+  await git(checkout, 'update-ref', 'refs/remotes/origin/side', await sideBranch(checkout));
+  await release(true);
+  await eventually(() => !existsSync(checkout));
+}), 20_000);

@@ -252,22 +252,34 @@ export async function deleteGitRef(repositoryPath: string, ref: string): Promise
   await runGit(repositoryPath, ['update-ref', '-d', ref]);
 }
 
-/** Local branches, tags and the stash holding commits `head` does not contain: work a checkout's sync never sends. A
- * commit the shallow history cannot place counts as not contained. */
+/** Local branches holding commits that neither `head` nor the remote branch of the same name contains, and the stash:
+ * work a checkout's sync never sends. A commit the shallow history cannot place counts as not contained. Tags are not
+ * read: those fetched from an origin cannot be placed in shallow history, and one made here on unsent commits is on
+ * `head` too. */
 export async function gitRefsBeyond(repositoryPath: string, head: string | null): Promise<string[]> {
-  const refs = (await runGit(repositoryPath, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags', 'refs/stash'])).stdout.split('\n').filter(Boolean);
+  const format = '--format=%(refname) %(objectname)';
+  const remotes = (await runGit(repositoryPath, ['for-each-ref', format, 'refs/remotes'])).stdout.split('\n').filter(Boolean).map(line => line.split(' '));
+  const local = (await runGit(repositoryPath, ['for-each-ref', format, 'refs/heads', 'refs/stash'])).stdout.split('\n').filter(Boolean).map(line => line.split(' '));
   const beyond: string[] = [];
-  for (const line of refs) {
-    const [ref = line, commit = ''] = line.split(' ');
-    if (head !== null && (await runGit(repositoryPath, ['merge-base', '--is-ancestor', commit, head], { allowMissingRef: true })).exitCode === 0) continue;
-    beyond.push(ref);
+  for (const [ref = '', commit = ''] of local) {
+    const name = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : null;
+    // A remote branch `refs/remotes/<remote>/<name>` is the same branch pushed.
+    const tips = [...(head === null ? [] : [head]), ...remotes.flatMap(([remote = '', tip = '']) => name !== null && remote.split('/').slice(3).join('/') === name ? [tip] : [])];
+    let contained = false;
+    for (const tip of tips) {
+      if ((await runGit(repositoryPath, ['merge-base', '--is-ancestor', commit, tip], { allowMissingRef: true })).exitCode !== 0) continue;
+      contained = true;
+      break;
+    }
+    if (!contained) beyond.push(ref);
   }
   return beyond;
 }
 
-/** The working copy exactly as a snapshot would send it, without publishing anything. */
-export async function readGitWorktreeSnapshot(repositoryPath: string, spaceId: string): Promise<GitIntermediateCheckpoint> {
-  const scratch = await createGitIntermediateCheckpoint({ repositoryPath, spaceId, captureId: `status-${crypto.randomUUID()}`, revision: Date.now() });
+/** The working copy exactly as a snapshot would send it, without publishing anything. `committedLfs`, the last synced
+ * snapshot's LFS objects, are taken as placed; any other LFS object in the history needs the store, which this has not. */
+export async function readGitWorktreeSnapshot(repositoryPath: string, spaceId: string, committedLfs?: GitIntermediateCheckpoint['lfs']): Promise<GitIntermediateCheckpoint> {
+  const scratch = await createGitIntermediateCheckpoint({ repositoryPath, spaceId, captureId: `status-${crypto.randomUUID()}`, revision: Date.now(), committedLfs });
   await runGit(repositoryPath, ['update-ref', '-d', scratch.checkpointRef]);
   return scratch;
 }

@@ -388,7 +388,7 @@ export async function createMachineExecutor(options: {
     if (args.op === 'status' || args.op === 'diff') {
       const base = committedOf(key);
       const pending = Boolean(snapshotRow(key)?.pending);
-      const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId);
+      const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId, base?.lfs);
       const { changes, truncated } = await gitTreeChanges(local.rootPath, base?.worktreeTree ?? emptyTree, current.worktreeTree, 500);
       if (args.op === 'diff') {
         const patch = args.path ? await gitTreePatch(local.rootPath, base?.worktreeTree ?? emptyTree, current.worktreeTree, args.path) : null;
@@ -404,7 +404,7 @@ export async function createMachineExecutor(options: {
       try {
         await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.checkpointRef, commit: args.commit });
         await options.gitRemote.fetchCheckpoint({ binding, repositoryPath: local.rootPath, checkpointRef: args.baseRef, commit: args.base });
-        const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId);
+        const current = await readGitWorktreeSnapshot(local.rootPath, local.attachment.workspaceId, base?.lfs);
         const merged = await mergeGitBackupIntoWorktree({ repositoryPath: local.rootPath, current, base: args.base, backup: args.commit });
         const accepted = await capture(local);
         return reply(RuntimeSyncMachineRestoreSchema.parse({ restored: merged.changes, mergeConflicts: merged.conflicts, version: accepted?.worktreeCommit ?? null, conflicts: accepted?.conflicts ?? [] }));
@@ -563,8 +563,9 @@ export async function createMachineExecutor(options: {
     journal.installAttachment({ ...current, attachment: { ...current.attachment, state: 'detached', updatedAt: new Date().toISOString() } });
   };
   /** Why a released checkout stays on disk, or null when everything in it reached the cloud: its HEAD, branch, index and
-   * files equal its last synced version, no capture of it is unconfirmed, and no other local branch, tag or stash holds
-   * commits. `workspace/dematerialize` runs only while a workspace is active, so a checkout declaring it is kept. */
+   * files equal its last synced version, no capture of it is unconfirmed, no stash exists, and every local branch is
+   * contained in HEAD or in its pushed remote branch (`gitRefsBeyond`). `workspace/dematerialize` runs only while a
+   * workspace is active, so a checkout declaring it is kept. */
   const keepReason = async (local: LocalAttachment): Promise<string | null> => {
     const root = local.rootPath;
     const [own, parent] = await Promise.all([stat(root), stat(dirname(root))]);
@@ -574,7 +575,7 @@ export async function createMachineExecutor(options: {
     if (snapshotRow(key)?.pending) return 'a capture of it was never confirmed';
     const base = committedOf(key);
     if (!base) return 'nothing in it ever synced';
-    const current = await readGitWorktreeSnapshot(root, local.attachment.workspaceId);
+    const current = await readGitWorktreeSnapshot(root, local.attachment.workspaceId, base.lfs);
     if (current.headCommit !== base.headCommit || current.branch !== base.branch) return 'its HEAD differs from its last synced version';
     if (current.indexTree !== base.indexTree || current.worktreeTree !== base.worktreeTree) return 'it has changes that never synced';
     const refs = await gitRefsBeyond(root, base.headCommit);
