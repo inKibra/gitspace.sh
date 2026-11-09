@@ -161,13 +161,17 @@ if (process.env.GITSPACE_MACHINE_PID_PATH) await atomicJson(process.env.GITSPACE
 console.log(
   `GitSpace host ready pid=${process.pid} rpc=${environment.options.rpcHost}:${environment.options.rpcPort} control=${environment.hostUrl} release=${environment.status().machineReleaseSha ?? 'channel'}`,
 );
-/** The host prunes what releases and earlier versions left on disk at start and once a day after. */
+/** The host prunes what releases and earlier versions left on disk once the update that started it, if any, has
+ * committed (`machine-update.json` stays until then, and pruning never runs during an update), and once a day after. */
 const PRUNE_EVERY_MS = 24 * 60 * 60_000;
+let pruning: Promise<void> | null = null;
 const prune = () => {
-  const pidPath = process.env.GITSPACE_MACHINE_PID_PATH;
-  void environment.prune({ configRoot: pidPath ? dirname(pidPath) : null, cacheRoot: join(homedir(), '.cache', 'gitspace'), temporaryRoot: tmpdir() })
-    .then(removed => { if (removed.length) console.log(`[gitspace-host] pruned ${removed.length} paths: ${removed.join(' ')}`); })
-    .catch((error: unknown) => console.error('[gitspace-host] pruning failed', error));
+  pruning ??= (async () => {
+    while (existsSync(join(environmentRoot, 'machine-update.json'))) await Bun.sleep(5_000);
+    const pidPath = process.env.GITSPACE_MACHINE_PID_PATH;
+    const removed = await environment.prune({ configRoot: pidPath ? dirname(pidPath) : null, cacheRoot: join(homedir(), '.cache', 'gitspace'), temporaryRoot: tmpdir() });
+    console.log(`[gitspace-host] pruned ${removed.length} paths${removed.length ? `: ${removed.join(' ')}` : ''}`);
+  })().catch((error: unknown) => console.error('[gitspace-host] pruning failed', error)).finally(() => { pruning = null; });
 };
 prune();
 setInterval(prune, PRUNE_EVERY_MS).unref();
