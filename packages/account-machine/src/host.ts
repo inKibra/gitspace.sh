@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
 import { ReplacementEnvironment } from './replacement-environment.js';
 import { signedCredentialAuthorityGrantSchema } from '@gitspace/protocol/credential-vault';
 import { MachineRelayConnector } from './relay-connector.js';
@@ -160,4 +161,14 @@ if (process.env.GITSPACE_MACHINE_PID_PATH) await atomicJson(process.env.GITSPACE
 console.log(
   `GitSpace host ready pid=${process.pid} rpc=${environment.options.rpcHost}:${environment.options.rpcPort} control=${environment.hostUrl} release=${environment.status().machineReleaseSha ?? 'channel'}`,
 );
+/** The host prunes what releases and earlier versions left on disk at start and once a day after. */
+const PRUNE_EVERY_MS = 24 * 60 * 60_000;
+const prune = () => {
+  const pidPath = process.env.GITSPACE_MACHINE_PID_PATH;
+  void environment.prune({ configRoot: pidPath ? dirname(pidPath) : null, cacheRoot: join(homedir(), '.cache', 'gitspace'), temporaryRoot: tmpdir() })
+    .then(removed => { if (removed.length) console.log(`[gitspace-host] pruned ${removed.length} paths: ${removed.join(' ')}`); })
+    .catch((error: unknown) => console.error('[gitspace-host] pruning failed', error));
+};
+prune();
+setInterval(prune, PRUNE_EVERY_MS).unref();
 await Promise.withResolvers<never>().promise;

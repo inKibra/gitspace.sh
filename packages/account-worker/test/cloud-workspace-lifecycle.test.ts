@@ -398,17 +398,23 @@ describe('cloud workspace lifecycle with no machines', () => {
     const archive = () => run(client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null }));
     expect(await archive()).toMatchObject({ kind: 'workspace.archive', workspaceId, state: 'succeeded' });
     expect(await current()).toMatchObject({ lifecycle: 'archived' });
+    // A machine's released checkout of it is no longer needed; a workspace the project never held is not answered for.
+    expect(await authority.retiredWorkspaces([workspaceId, 'never-held'])).toEqual([workspaceId]);
     expect(await space.runtimeAttachmentRecords(identity)).toMatchObject([{ attachmentId: 'cache-a', state: 'detached' }]);
     expect(await client.space.view({ projectId: project.id, workspaceId })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, closedAt: expect.any(Date) }] } });
 
     expect(await client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 3 })).toMatchObject({ status: 'error' });
     expect(await run(client.workspace.restore({ spaceId: workspaceId, expectedGeneration: 0 }))).toMatchObject({ kind: 'workspace.restore', state: 'succeeded' });
     expect(await current()).toMatchObject({ lifecycle: 'active', archivedAt: null });
+    expect(await authority.retiredWorkspaces([workspaceId])).toEqual([]);
     expect(await client.workspace.delete({ workspaceId: project.id })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('base workspace') } } });
 
     expect(await archive()).toMatchObject({ state: 'succeeded' });
     expect(await run(client.workspace.delete({ workspaceId }))).toMatchObject({ kind: 'workspace.delete', state: 'succeeded' });
     expect((await authority.listWorkspaces()).some(workspace => workspace.id === workspaceId)).toBe(false);
+    expect(await authority.retiredWorkspaces([workspaceId])).toEqual([workspaceId]);
+    // A project this account no longer has retires every checkout of it.
+    expect(await env.PROJECT_AUTHORITY.getByName(`${userId}:gone-project`).retiredWorkspaces([workspaceId])).toEqual([workspaceId]);
     expect(await index.locateWorkspace(workspaceId)).toBeNull();
     expect(artifacts.deleted).toEqual([`workspace-${workspaceId}`]);
     expect(await space.hasCloudRuntime()).toBe(false);

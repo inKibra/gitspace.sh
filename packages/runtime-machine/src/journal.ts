@@ -50,6 +50,11 @@ export class ExecutorJournal {
     }
     this.database.query('INSERT INTO executor_attachments(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(record.attachment.attachmentId, JSON.stringify(record));
   }
+  /** Forgets a checkout removed from disk, with its kept command results. */
+  removeAttachment(id: string): void {
+    this.database.query('DELETE FROM executor_attachments WHERE id=?').run(id);
+    this.database.query('DELETE FROM executor_results WHERE attachment_id=?').run(id);
+  }
   proposal(id: string): unknown | null {
     const row = this.database.query('SELECT payload FROM executor_proposals WHERE id=?').get(id);
     return row === null ? null : JSON.parse(RowSchema.parse(row).payload);

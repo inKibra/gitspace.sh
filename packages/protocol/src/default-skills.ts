@@ -102,7 +102,7 @@ Split effects by lifetime:
 - cloud/provision: create or adopt workspace-owned remote resources once per durable workspace identity.
 - machine/prepare: prepare tools for this account, project, machine, profile, and approved content.
 - workspace/materialize: recreate checkout-local dependencies, generated configuration, and caches on each arrival.
-- workspace/dematerialize: flush local state and release local leases before a checkpoint and checkout removal. Never destroy remote resources here.
+- workspace/dematerialize: flush local state and release local leases before a checkpoint and checkout removal. Never destroy remote resources here. GitSpace does not run it yet: when a workspace is archived or deleted, a machine keeps a checkout that declares it.
 - cloud/destroy: delete only the resources this workspace recorded as its own (its bindings), when the user retires them. Never the project's base workspace resources.
 - checks: verify prerequisites through bundle checks; it is not a lifecycle directory.
 

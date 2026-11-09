@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { SignedControlRequest } from '@gitspace/protocol/credential-vault';
 import { RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeProcessExitedInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
+import { RuntimeAssignmentsInputSchema, RuntimeAttachmentReadyInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeRetiredCheckoutsInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentLeaseSchema, RuntimeGitHubTokenInputSchema, RuntimeRepositoryCredentialsInputSchema, type RuntimeRepositoryCredentialsInput } from '@gitspace/protocol-runtime/machine-controls';
 import { githubRepositoryOf, type GitHubRepositoryToken, type MachineOriginAccess } from '@gitspace/protocol/github';
@@ -114,6 +114,14 @@ async function dispatchMachineControl(env: Env, request: SignedControlRequest): 
       assignments: results.flatMap(result => result.assignments ?? []),
       unavailable: results.flatMap(result => result.assignments ? [] : [result.workspace.workspaceId]),
     };
+  }
+  if (operation === 'runtime.checkouts.retired') {
+    const input = RuntimeRetiredCheckoutsInputSchema.parse(payload);
+    if (input.machineId !== machine) throw new Error('Checkout owner does not match the authenticated machine');
+    const byProject = new Map<string, string[]>();
+    for (const { projectId, workspaceId } of input.checkouts) byProject.set(projectId, [...byProject.get(projectId) ?? [], workspaceId]);
+    const retired = await Promise.all([...byProject].map(([projectId, workspaceIds]) => env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`).retiredWorkspaces(workspaceIds)));
+    return { retired: retired.flat() };
   }
   if (operation === 'runtime.repository.credentials') {
     const input = RuntimeRepositoryCredentialsInputSchema.parse(payload);

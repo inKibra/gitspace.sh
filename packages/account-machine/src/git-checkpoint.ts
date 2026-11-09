@@ -252,6 +252,19 @@ export async function deleteGitRef(repositoryPath: string, ref: string): Promise
   await runGit(repositoryPath, ['update-ref', '-d', ref]);
 }
 
+/** Local branches, tags and the stash holding commits `head` does not contain: work a checkout's sync never sends. A
+ * commit the shallow history cannot place counts as not contained. */
+export async function gitRefsBeyond(repositoryPath: string, head: string | null): Promise<string[]> {
+  const refs = (await runGit(repositoryPath, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags', 'refs/stash'])).stdout.split('\n').filter(Boolean);
+  const beyond: string[] = [];
+  for (const line of refs) {
+    const [ref = line, commit = ''] = line.split(' ');
+    if (head !== null && (await runGit(repositoryPath, ['merge-base', '--is-ancestor', commit, head], { allowMissingRef: true })).exitCode === 0) continue;
+    beyond.push(ref);
+  }
+  return beyond;
+}
+
 /** The working copy exactly as a snapshot would send it, without publishing anything. */
 export async function readGitWorktreeSnapshot(repositoryPath: string, spaceId: string): Promise<GitIntermediateCheckpoint> {
   const scratch = await createGitIntermediateCheckpoint({ repositoryPath, spaceId, captureId: `status-${crypto.randomUUID()}`, revision: Date.now() });

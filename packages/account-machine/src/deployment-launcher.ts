@@ -147,8 +147,23 @@ export class DeploymentLauncher {
   private active: Promise<ReleaseRecord> | null = null;
   private progress: LaunchProgress | null = null;
   private reporting: Promise<void> = Promise.resolve();
+  /** The build root emptied of what earlier launches left; every launch waits for it. */
+  private readonly cleared: Promise<void>;
 
-  constructor(private readonly options: DeploymentLauncherOptions) {}
+  constructor(private readonly options: DeploymentLauncherOptions) {
+    this.cleared = this.clearLeftovers().catch((error: unknown) => console.error('[gitspace-deploy] build leftovers were not removed', error));
+  }
+
+  /** Removes what earlier launches left in the build root: a launch that replaced this machine's daemon ended with that
+   * daemon, before its own cleanup ran, leaving its build and source worktree. Only `canonical.git`, the fetched
+   * source, stays, without the commits earlier launches fetched (no ref holds them). */
+  private async clearLeftovers(): Promise<void> {
+    const entries = await readdir(this.options.buildRoot).catch((): string[] => []);
+    await Promise.all(entries.filter(name => name !== 'canonical.git').map(name => rm(join(this.options.buildRoot, name), { recursive: true, force: true })));
+    if (!entries.includes('canonical.git')) return;
+    await git(join(this.options.buildRoot, 'canonical.git'), ['worktree', 'prune']);
+    await git(join(this.options.buildRoot, 'canonical.git'), ['gc', '--prune=now', '--quiet']);
+  }
 
   /** Reports in order without blocking the build; a lost report is logged and the next one carries newer state. */
   private report(progress: LaunchProgress): void {
@@ -245,6 +260,7 @@ export class DeploymentLauncher {
     let prepared: PreparedSource | null = null;
     let buildRoot: string | null = null;
     try {
+      await this.cleared;
       if (build.kind === 'canonical') progress('checkout', `fetching ${build.branch} @ ${build.commit.slice(0, 12)} from ${build.repository}`);
       prepared = build.kind === 'workspace' ? await this.workspaceSource(build.workspace) : await this.canonicalSource(build);
       const { root, environment } = prepared;

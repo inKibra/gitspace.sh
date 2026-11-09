@@ -1,14 +1,14 @@
 import { timeoutSignal } from './timeout-signal.js';
-import { mkdir, chmod } from 'node:fs/promises';
-import { join, relative, resolve, isAbsolute } from 'node:path';
+import { mkdir, chmod, rm, rmdir, stat } from 'node:fs/promises';
+import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ExecutorJournal, MachineExecutor, MachineBrowser, runSupervisorCommand, prepareMachineAttachment, type MachineBrowserOptions, type MachineExecutorOptions } from '@gitspace/runtime-machine';
-import { RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, RuntimeJsonSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema, type RuntimeToolDispatch, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeCacheObservation } from '@gitspace/protocol-runtime';
+import { RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignmentsResultSchema, RuntimeAttachmentReadyResultSchema, RuntimeHeartbeatInputSchema, RuntimeBrowserPublicKeySchema, RuntimeCacheObservationSchema, RuntimeJsonSchema, RuntimeRetiredCheckoutsResultSchema, browserUnbase64, verifyRuntimeBrowserAuthorization, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema, type RuntimeToolDispatch, type RuntimeAttachment, type RuntimeAttachmentFailure, type RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitRefsBeyond, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint } from './git-checkpoint.js';
 import { artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
@@ -50,6 +50,9 @@ const SYNC_RETRY_MAX_MS = 300_000;
 const SYNC_RETRY_ATTEMPTS = 8;
 /** Checkout states no retry can change; sync waits for the edit (or explicit sync) that repairs them. */
 const PERMANENT_SYNC_FAILURES = [/\bunmerged\b/u, /ref HEAD is not a symbolic ref/u, /HEAD must name a branch/u];
+/** How long a released checkout that stayed (its workspace still active, or work in it unsent) goes before the machine
+ * asks about it again. */
+const RETIRE_RECHECK_MS = 60 * 60_000;
 
 /** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, every
  * `assignments` notice) and `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
@@ -547,7 +550,8 @@ export async function createMachineExecutor(options: {
   const clearMaterializeFailure = (attachment: RuntimeAttachment) => {
     if (journal.attachment(attachment.attachmentId)?.attachment.failure?.operation === 'materialize') clearFailure(attachment);
   };
-  /** Stops sync and commands for an attachment the cloud released. The checkout stays on disk. */
+  /** Stops sync and commands for an attachment the cloud released. The checkout stays on disk until its workspace is
+   * archived or deleted (`retireCheckouts`). */
   const release = async (local: LocalAttachment) => {
     stopFollowing(local);
     const key = keyOf(local.attachment);
@@ -558,6 +562,73 @@ export async function createMachineExecutor(options: {
     const current = journal.attachment(local.attachment.attachmentId) ?? local;
     journal.installAttachment({ ...current, attachment: { ...current.attachment, state: 'detached', updatedAt: new Date().toISOString() } });
   };
+  /** Why a released checkout stays on disk, or null when everything in it reached the cloud: its HEAD, branch, index and
+   * files equal its last synced version, no capture of it is unconfirmed, and no other local branch, tag or stash holds
+   * commits. `workspace/dematerialize` runs only while a workspace is active, so a checkout declaring it is kept. */
+  const keepReason = async (local: LocalAttachment): Promise<string | null> => {
+    const root = local.rootPath;
+    const [own, parent] = await Promise.all([stat(root), stat(dirname(root))]);
+    if (own.dev !== parent.dev) return 'it is a mounted filesystem';
+    if (await stat(join(root, '.gitspace', 'lifecycle', 'workspace', 'dematerialize')).then(() => true, () => false)) return 'it declares workspace/dematerialize scripts';
+    const key = keyOf(local.attachment);
+    if (snapshotRow(key)?.pending) return 'a capture of it was never confirmed';
+    const base = committedOf(key);
+    if (!base) return 'nothing in it ever synced';
+    const current = await readGitWorktreeSnapshot(root, local.attachment.workspaceId);
+    if (current.headCommit !== base.headCommit || current.branch !== base.branch) return 'its HEAD differs from its last synced version';
+    if (current.indexTree !== base.indexTree || current.worktreeTree !== base.worktreeTree) return 'it has changes that never synced';
+    const refs = await gitRefsBeyond(root, base.headCommit);
+    return refs.length ? `${refs.join(', ')} hold commits that never synced` : null;
+  };
+  /** When each released checkout was last asked about: one the cloud keeps (its workspace active elsewhere) or this
+   * machine keeps (`keepReason`) is asked about again after RETIRE_RECHECK_MS. */
+  const retireAskedAt = new Map<string, number>();
+  /** Checkouts being removed; an assignment for one waits for its removal before preparing it again. */
+  const removals = new Map<string, Promise<void>>();
+  /** Removes the checkouts this machine was released from whose workspaces are archived or deleted, each only when
+   * nothing in it is unsent. Runs after each assignments read; the first after start covers checkouts released earlier. */
+  const retireCheckouts = coalesced(async () => {
+    const newest = new Map<string, LocalAttachment>();
+    const live = new Set<string>();
+    for (const local of journal.attachments()) {
+      if (local.attachment.state !== 'detached') live.add(local.rootPath);
+      else if ((newest.get(local.rootPath)?.attachment.generation ?? -1) < local.attachment.generation) newest.set(local.rootPath, local);
+    }
+    const now = Date.now();
+    const held: LocalAttachment[] = [];
+    for (const [root, local] of newest) {
+      if (live.has(root) || lanes.has(root) || now - (retireAskedAt.get(root) ?? 0) < RETIRE_RECHECK_MS) continue;
+      if (await stat(root).then(() => true, () => false)) held.push(local);
+    }
+    if (!held.length) return;
+    const { retired } = await options.cloud.call('runtime.checkouts.retired', {
+      machineId: options.machineId, checkouts: held.map(({ attachment }) => ({ projectId: attachment.projectId, workspaceId: attachment.workspaceId })),
+    }, RuntimeRetiredCheckoutsResultSchema, stopping.signal);
+    for (const local of held) retireAskedAt.set(local.rootPath, now);
+    for (const local of held) {
+      if (!retired.includes(local.attachment.workspaceId)) continue;
+      const root = local.rootPath;
+      const reason = await keepReason(local).catch((error: unknown) => `it could not be checked: ${message(error)}`);
+      if (reason) { console.warn('[runtime-retire]', `kept ${root}: ${reason}`); continue; }
+      // An assignment for this checkout may have arrived while it was checked.
+      if (lanes.has(root) || journal.attachments().some(other => other.rootPath === root && other.attachment.state !== 'detached')) continue;
+      const removal = (async () => {
+        await rm(root, { recursive: true, force: true });
+        await rmdir(dirname(root)).catch(() => undefined);
+        for (const other of journal.attachments()) {
+          if (other.rootPath !== root) continue;
+          const key = keyOf(other.attachment);
+          snapshots.query('DELETE FROM snapshots WHERE attachment=?').run(key);
+          resetSyncFailures(key);
+          journal.removeAttachment(other.attachment.attachmentId);
+        }
+        retireAskedAt.delete(root);
+        console.log('[runtime-retire]', `removed ${root}`);
+      })();
+      removals.set(root, removal);
+      await removal.finally(() => removals.delete(root));
+    }
+  });
   const canonicalPathOf = (attachment: RuntimeAttachment) => join(options.managedSpaceRoot ?? join(options.environmentRoot, 'spaces'), attachment.projectId, attachment.workspaceId);
   const announceReady = async (local: LocalAttachment, commit: string, signal: AbortSignal) => {
     const { attachment } = local;
@@ -723,6 +794,7 @@ export async function createMachineExecutor(options: {
     lanes.set(root, lane);
     lane.idle = (async () => {
       try {
+        await removals.get(root);
         while (lane.pending.size && !stopped) {
           const batch = [...lane.pending.values()];
           lane.pending.clear();
@@ -751,6 +823,7 @@ export async function createMachineExecutor(options: {
     reading = read;
     const work = await read;
     await Promise.all(work.filter(item => workspaceId === undefined || item.workspaceId === workspaceId).map(item => item.idle));
+    void retireCheckouts().catch(error => console.error('[runtime-retire]', message(error)));
   };
   /** Waits for in-flight work on one workspace's checkout, never for another workspace's long setup. */
   const settled = async (workspaceId: string) => {

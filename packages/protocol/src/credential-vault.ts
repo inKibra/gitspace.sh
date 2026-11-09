@@ -110,6 +110,7 @@ export const controlOperationSchema = z.enum([
   'runtime.session',
   'runtime.snapshot.commit',
   'runtime.assignments',
+  'runtime.checkouts.retired',
   'runtime.attachment.cache.request',
   'runtime.attachment.ready',
   'runtime.process.exited',

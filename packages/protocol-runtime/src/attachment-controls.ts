@@ -17,6 +17,10 @@ export const RuntimeAssignmentSchema = z.object({
 });
 /** `unavailable` names workspaces whose assignments could not be read; a machine keeps its local attachments there. */
 export const RuntimeAssignmentsResultSchema = z.object({ assignments: z.array(RuntimeAssignmentSchema), unavailable: z.array(z.string()).default([]) });
+/** Checkouts a machine still holds on disk for attachments the cloud released. */
+export const RuntimeRetiredCheckoutsInputSchema = z.object({ machineId: RuntimeMachineIdSchema, checkouts: z.array(RuntimeIdentitySchema).max(1000) });
+/** The workspaces among them that are archived or deleted, or whose project is: their checkouts are no longer needed. */
+export const RuntimeRetiredCheckoutsResultSchema = z.object({ retired: z.array(z.string()) });
 export const RuntimeAttachmentReadyInputSchema = RuntimeIdentitySchema.extend({
   machineId: RuntimeMachineIdSchema, attachmentId: z.string().min(1), generation: z.number().int().nonnegative(),
   commit, prerequisitesComplete: z.literal(true), capabilities: z.array(z.string()),

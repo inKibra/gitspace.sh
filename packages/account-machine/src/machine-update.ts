@@ -331,7 +331,6 @@ async function snapshot(root: string, checkpoint: string): Promise<void> {
   }
   for (const file of [
     'machine-selection.json',
-    'omp-selection.json',
     'frontend-selection.json',
     'frontend-channel.json',
   ]) {
@@ -341,7 +340,6 @@ async function snapshot(root: string, checkpoint: string): Promise<void> {
     'gitspace.db',
     'deployment.db',
     'machine-selection.json',
-    'omp-selection.json',
     'frontend-selection.json',
     'frontend-channel.json',
   ]) {
@@ -369,7 +367,6 @@ async function restore(root: string, checkpoint: string): Promise<void> {
     'deployment.db-wal',
     'deployment.db-shm',
     'machine-selection.json',
-    'omp-selection.json',
     'frontend-selection.json',
     'frontend-channel.json',
   ]) {

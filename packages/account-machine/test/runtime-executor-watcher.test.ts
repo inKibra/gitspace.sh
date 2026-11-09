@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +39,11 @@ async function watcherProof(run: (proof: {
   reattach(count: number): void;
   /** The attachment's state as the cloud holds it. */
   attachmentState(): string;
+  /** The cloud releases the checkout (omits it from the assignments) and answers that its workspace is archived or
+   * deleted (`retired`) or still active elsewhere. */
+  release(retired: boolean): Promise<void>;
+  /** The workspaces of each retired-checkouts question the machine asked. */
+  retiredAsked(): string[][];
 }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'gitspace-watcher-proof-'));
   const checkout = join(root, 'spaces', 'project', 'workspace');
@@ -56,7 +62,8 @@ async function watcherProof(run: (proof: {
     let attachment = RuntimeAttachmentSchema.parse({ projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'watch-cache', generation: 0, checkout: { kind: 'shared', branch: 'main' }, state: 'attaching', capabilities: ['read', 'write', 'edit', 'checkpoint'], updatedAt: new Date().toISOString() });
     let checkpoint: RuntimeSnapshotCommitInput['checkpoint'] | null = null;
     let captureAction: (() => Promise<void>) | undefined;
-    let refusals = 0, refusal = '', readyRefusals = 0;
+    let refusals = 0, refusal = '', readyRefusals = 0, listed = true, retired = false;
+    const retiredAsked: string[][] = [];
     const attempts: number[] = [];
     const uploads: string[][] = [], publications: string[][] = [];
     const final = Promise.withResolvers<void>();
@@ -67,7 +74,12 @@ async function watcherProof(run: (proof: {
     class LocalCloud extends CloudRuntimeClient {
       override async call<S extends z.ZodType>(operation: ControlOperation, payload: Record<string, unknown>, schema: S, signal?: AbortSignal): Promise<z.output<S>> {
         if (operation === 'runtime.assignments') {
-          return schema.parse({ assignments: [{ grant: { attachment, executionSecret: 'proof-secret' }, source: null, checkpoint }] });
+          return schema.parse({ assignments: listed ? [{ grant: { attachment, executionSecret: 'proof-secret' }, source: null, checkpoint }] : [] });
+        }
+        if (operation === 'runtime.checkouts.retired') {
+          const asked = z.object({ checkouts: z.array(z.object({ workspaceId: z.string() })) }).parse(payload).checkouts.map(item => item.workspaceId);
+          retiredAsked.push(asked);
+          return schema.parse({ retired: retired ? asked : [] });
         }
         if (operation === 'runtime.attachment.cache.request') {
           attachment = { ...attachment, state: 'attaching' };
@@ -116,7 +128,11 @@ async function watcherProof(run: (proof: {
     runtime = await start();
     await clock.until(runtime.sync());
     uploads.length = 0; publications.length = 0; attempts.length = 0;
-    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: (count, reason = 'internal error; reference = proof') => { refusals = count; refusal = reason; }, commitTimes: () => attempts, reattach: count => { readyRefusals = count; attachment = { ...attachment, state: 'attaching' }; }, attachmentState: () => attachment.state, waitForFinal: async () => {
+    await run({ root, checkout, uploads, publications, runtime, clock, watcherCount: () => watchers, event: path => event(path), duringCapture: action => { captureAction = action; }, failCommits: (count, reason = 'internal error; reference = proof') => { refusals = count; refusal = reason; }, commitTimes: () => attempts, reattach: count => { readyRefusals = count; attachment = { ...attachment, state: 'attaching' }; }, attachmentState: () => attachment.state, retiredAsked: () => retiredAsked, release: async archived => {
+      listed = false; retired = archived;
+      if (!runtime) throw new Error('The executor is not running');
+      await clock.until(runtime.sync());
+    }, waitForFinal: async () => {
       await clock.until(final.promise);
     }, restart: async () => {
       await runtime?.close();
@@ -477,3 +493,38 @@ test('a restart continues the attempt count of a failing sync instead of startin
     expect(commitTimes()).toHaveLength(8);
   });
 }, 30_000);
+
+/** Waits (real time) for a condition the executor reaches in the background. */
+async function eventually(condition: () => boolean) {
+  for (let tries = 0; tries < 200 && !condition(); tries++) await Bun.sleep(25);
+  expect(condition()).toBe(true);
+}
+
+test('a released checkout of an archived or deleted workspace is removed once everything in it has synced', () => watcherProof(async ({ root, checkout, runtime, release, retiredAsked }) => {
+  await release(true);
+  await eventually(() => !existsSync(checkout));
+  expect(retiredAsked()).toEqual([['workspace']]);
+  expect(existsSync(join(root, 'spaces', 'project'))).toBe(false);
+  expect(runtime.journal.attachments()).toEqual([]);
+}), 20_000);
+
+test('a released checkout holding unsent work stays on disk when its workspace is archived', () => watcherProof(async ({ checkout, release, retiredAsked }) => {
+  const kept = Promise.withResolvers<void>();
+  const warn = spyOn(console, 'warn').mockImplementation((tag: unknown) => { if (tag === '[runtime-retire]') kept.resolve(); });
+  try {
+    // Written after the last sync, with no capture: the cloud never received it.
+    await writeFile(join(checkout, 'notes.txt'), 'never synced\n');
+    await release(true);
+    await kept.promise;
+    expect(retiredAsked()).toEqual([['workspace']]);
+    expect(await Bun.file(join(checkout, 'notes.txt')).text()).toBe('never synced\n');
+  } finally { warn.mockRestore(); }
+}), 20_000);
+
+test('a released checkout whose workspace is still active stays on disk', () => watcherProof(async ({ checkout, runtime, release, retiredAsked }) => {
+  await release(false);
+  await eventually(() => retiredAsked().length === 1);
+  await Bun.sleep(50);
+  expect(existsSync(join(checkout, 'tracked.txt'))).toBe(true);
+  expect(runtime.journal.attachments().map(local => local.attachment.state)).toEqual(['detached']);
+}), 20_000);

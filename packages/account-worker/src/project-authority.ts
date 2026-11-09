@@ -52,6 +52,8 @@ const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
 const RemoteHeadsSchema = z.array(z.object({ branch: z.string().min(1).max(512), head: remoteBranchStateSchema.shape.head })).max(1_000);
 /** Origin-tracking columns on `project`, `workspaces` and `user_projects`; null until the branch is first checked. */
 const REMOTE_COLUMNS: Record<string, string> = { remote_head: 'TEXT', remote_checked_at: 'TEXT', remote_behind: 'INTEGER' };
+/** Lifecycles after which a workspace's (or a project's) machine checkouts are no longer needed. */
+const RETIRED_LIFECYCLES: Record<Extract<ProjectLifecycle, 'archived' | 'deleting'>, true> = { archived: true, deleting: true };
 
 /** One-time: adds the origin-tracking columns a table created before tracking lacks. */
 function addRemoteColumns(storage: DurableObjectStorage, table: 'project' | 'workspaces' | 'user_projects'): void {
@@ -1616,6 +1618,18 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
     await this.clearHostedPointers(workspaceId);
     return removed;
+  }
+
+  /** Which of these workspaces are archived, deleted or being deleted; all of them when the project is archived, being
+   * deleted or gone. A workspace this project never held is not retired. */
+  retiredWorkspaces(workspaceIds: readonly string[]): string[] {
+    const project = this.getProject();
+    if (!project || Object.hasOwn(RETIRED_LIFECYCLES, project.lifecycle)) return [...workspaceIds];
+    return workspaceIds.filter(id => {
+      const workspace = this.getWorkspace(id);
+      if (workspace) return Object.hasOwn(RETIRED_LIFECYCLES, workspace.lifecycle);
+      return this.ctx.storage.sql.exec('SELECT workspace_id FROM deleted_workspaces WHERE workspace_id=?', id).toArray().length > 0;
+    });
   }
 
   /** The one read a workspace object seeds its local metadata from. A base workspace's definition is created on first use. */

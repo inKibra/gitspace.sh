@@ -22,6 +22,7 @@ import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deplo
 import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/deployment/manifest';
 import { atomicJson, readJson, requestMachineUpdate } from './machine-update.js';
 import type { MachineSelection } from './machine-update.js';
+import { pruneEnvironment, type EnvironmentPruneInput } from './environment-prune.js';
 
 /** Forwarded RPCs slower than this are logged even when they succeed. */
 const HOST_PROXY_SLOW_MS = 5_000;
@@ -711,6 +712,14 @@ export class ReplacementEnvironment {
   /** Plan and execute a replacement for the artifacts whose hash differs from what is running; serialized. */
   deploy(input: EnvironmentDeployment): Promise<EnvironmentDeploymentResult> {
     const run = this.queue.then(() => this.replace(input));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Removes what releases and earlier versions left on disk (`pruneEnvironment`), between deployments: never while one
+   * runs, since a deployment stages its generation before any pointer names it. */
+  prune(input: Omit<EnvironmentPruneInput, 'root' | 'now'>): Promise<string[]> {
+    const run = this.queue.then(() => pruneEnvironment({ ...input, root: this.options.root, now: Date.now() }));
     this.queue = run.catch(() => undefined);
     return run;
   }
