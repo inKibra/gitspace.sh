@@ -4,6 +4,13 @@ import { z } from 'zod';
 import { cloudControlOptions, type CloudControlOptions, type SignedCloudRequestOptions } from './cloud-space-authority.js';
 
 const EnvelopeSchema = z.discriminatedUnion('status', [z.object({ status: z.literal('ok'), value: z.unknown() }), z.object({ status: z.literal('error'), error: z.object({ message: z.string(), code: z.string().optional() }).passthrough() })]);
+/** A control request the account refused; `code` names why when the account says. */
+export class CloudControlError extends Error {
+  constructor(message: string, readonly code: string | null) {
+    super(message);
+    this.name = 'CloudControlError';
+  }
+}
 export class CloudRuntimeClient {
   private readonly options: CloudControlOptions;
   constructor(options: SignedCloudRequestOptions) {
@@ -15,7 +22,7 @@ export class CloudRuntimeClient {
       return (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(signed), signal });
     });
     const body = EnvelopeSchema.parse(await response.json());
-    if (body.status === 'error') throw new Error(body.error.message);
+    if (body.status === 'error') throw new CloudControlError(body.error.message, body.error.code ?? null);
     if (!response.ok) throw new Error(`Cloud runtime returned HTTP ${response.status}`);
     return schema.parse(body.value);
   }

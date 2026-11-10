@@ -8,7 +8,7 @@ import type { StreamEvent } from '@gitspace/protocol-sync';
 import { accountLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { machineLiveResource, terminalLiveResource, terminalStreamResource, type ProtectedTerminalBatch, type ProtectedTerminalStep } from '@gitspace/protocol/rpc-contract';
 import { useSynchronizedResource } from './SynchronizationProvider.js';
-import { liveSource, liveTicks } from './live-notices.js';
+import { liveNotices, liveSource, liveTicks } from './live-notices.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type WorkspaceTerminalKind = 'user' | 'agent' | 'lifecycle' | 'service';
@@ -44,6 +44,10 @@ export interface WorkspaceTerminalMachine {
 }
 
 type ProtectedTerminalRead = Promise<{ status: 'ok'; value: ProtectedTerminalBatch } | { status: 'error'; error: Error }>;
+/** A protected terminal is read again after these waits without a notice: a lost notice of its state or output then
+ * delays the pane by seconds instead of leaving it connecting or silent. */
+const PROTECTED_CONNECTING_READ_MS = 1_000;
+const PROTECTED_CONNECTED_READ_MS = 10_000;
 
 /** Terminals run only on the machine the user picks; there is no implicit default machine. */
 export interface WorkspaceTerminalsProps {
@@ -483,7 +487,7 @@ function ProtectedTerminal({ spaceId, machineId, name, running, live, onData, on
       // Null attaches without earlier output; each notice burst then reads once after the cursor.
       let cursor: number | null = null;
       try {
-        for await (const _tick of liveTicks(keys, signal)) {
+        for await (const _tick of liveTicks(keys, signal, liveNotices, () => inputEnabledRef.current ? PROTECTED_CONNECTED_READ_MS : PROTECTED_CONNECTING_READ_MS)) {
           const result = await liveRef.current(name, cursor, signal);
           if (signal.aborted) return;
           if (result.status === 'error') break;

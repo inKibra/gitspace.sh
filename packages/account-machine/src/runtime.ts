@@ -19,7 +19,7 @@ import { createServiceAccessClient } from './service-forward.js';
 import { WorkspaceEnvironmentManager } from './workspace-environment.js';
 import { createServerClock, credentialProtocolBase64, machineLiveNoticeSchema, machineLiveResource, relayNoticeSchema, type MachineLiveNotice, type RelayNoticeTopic } from '@gitspace/protocol';
 import { coalesced } from './coalesced.js';
-import { receiveMachineNotices, type MachineNoticeTargets } from './machine-notices.js';
+import { createNoticeRetries, receiveMachineNotices, type MachineNoticeTargets } from './machine-notices.js';
 import { appendFileSync, existsSync } from 'node:fs';
 import { DeviceRegistry } from './device-registry.js';
 import { createSignedRpcHandler } from './signed-rpc.js';
@@ -229,9 +229,9 @@ export async function startMachineRuntime() {
     onError: (error) => console.error('[gitspace-devices]', error),
   });
   // A read a notice asked for that fails is asked for again with backoff until it succeeds; a healthy machine reads only
-  // when notified. A failed workspace read retries as an assignments read, which applies every ready checkout's version.
-  const noticeFailures = new Map<RelayNoticeTopic, number>();
-  const settled = async (topic: RelayNoticeTopic, read: Promise<void>) => { await read; noticeFailures.delete(topic); };
+  // when notified.
+  const noticeRetries = createNoticeRetries(topic => receiveMachineNotices([{ topics: [topic] }], noticeTargets));
+  const settled = async (topic: RelayNoticeTopic, read: Promise<void>) => { await read; noticeRetries.settled(topic); };
   const noticeTargets: MachineNoticeTargets = {
     assignments: () => settled('assignments', (async () => { await executorRuntime?.sync(); })()),
     snapshot: async (workspaceId) => { await executorRuntime?.refreshWorkspace(workspaceId); },
@@ -241,10 +241,7 @@ export async function startMachineRuntime() {
     environment: (workspaceId) => { void environments.environmentChanged(workspaceId).catch((error: unknown) => noticeTargets.failed('environment', error)); },
     failed: (topic, error) => {
       console.error('[gitspace-notice]', topic, error);
-      const retry = topic === 'workspace.snapshot' ? 'assignments' : topic;
-      const attempt = (noticeFailures.get(retry) ?? 0) + 1;
-      noticeFailures.set(retry, attempt);
-      setTimeout(() => receiveMachineNotices([{ topics: [retry] }], noticeTargets), Math.min(60_000, 1000 * 2 ** attempt));
+      noticeRetries.failed(topic);
     },
   };
   // A launch this machine was building in an earlier process has no builder now: report this process's start so the

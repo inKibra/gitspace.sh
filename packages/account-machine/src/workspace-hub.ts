@@ -91,9 +91,12 @@ interface HubScope {
 /** An observer runs from a tab's first read until the relay reports nobody watches it; `lastRead` is the cursor a read
  * last returned. */
 interface TerminalObserver { spaceId: string; controller: AbortController; ready: Promise<void>; failure: Error | null; lastRead: number }
-interface ProtectedObserver { spaceId: string; controller: AbortController; tail: ProtectedTerminalTail; ended: boolean; failure: Error | null; lastRead: number }
+/** `opened` settles at the attachment's first event, its failure or its end. */
+interface ProtectedObserver { spaceId: string; controller: AbortController; tail: ProtectedTerminalTail; ended: boolean; failure: Error | null; lastRead: number; opened: Promise<void> }
 /** Ended protected attachments kept for tabs still to read their completion; older ones are dropped. */
 const RETAINED_ENDED_PROTECTED = 8;
+/** How long the read that attaches waits for the run's state, so the tab connects without waiting for a notice. */
+const PROTECTED_STATE_WAIT_MS = 2_000;
 /** Announces that a resource this machine observes changed, for the relay to tell the tabs watching it. */
 export type TerminalLiveNotify = (notice: MachineLiveNotice) => void;
 
@@ -546,6 +549,12 @@ export class WorkspaceHubTerminalCoordinator {
       const path = spec.envNames.includes(PROTECTED_LIFECYCLE_SOCKET) ? this.protectedSockets.get(name) : undefined;
       if (!path) throw new Error('Protected live stream is unavailable; its owning lifecycle coordinator must still be running');
       observer = this.protectedObservers.get(resource) ?? this.attachProtected(spaceId, resource, path);
+      // The state arrives just after attaching: answered here, the tab connects even if the notice of it is lost.
+      await Promise.race([observer.opened, Bun.sleep(PROTECTED_STATE_WAIT_MS)]);
+      if (observer.failure) {
+        this.protectedObservers.delete(resource);
+        throw observer.failure;
+      }
     }
     observer.lastRead = observer.tail.head;
     return observer.tail.read(after);
@@ -553,16 +562,21 @@ export class WorkspaceHubTerminalCoordinator {
 
   private attachProtected(spaceId: string, resource: string, path: string): ProtectedObserver {
     const controller = new AbortController();
-    const observer: ProtectedObserver = { spaceId, controller, tail: new ProtectedTerminalTail(() => ++this.protectedRevision, this.protectedRevision), ended: false, failure: null, lastRead: 0 };
+    const opened = Promise.withResolvers<void>();
+    const observer: ProtectedObserver = { spaceId, controller, tail: new ProtectedTerminalTail(() => ++this.protectedRevision, this.protectedRevision), ended: false, failure: null, lastRead: 0, opened: opened.promise };
     this.protectedObservers.set(resource, observer);
     void (async () => {
-      for await (const event of protectedLifecycleLive(path, controller.signal)) this.notify?.({ workspace: spaceId, resource, cursor: observer.tail.append(event) });
+      for await (const event of protectedLifecycleLive(path, controller.signal)) {
+        this.notify?.({ workspace: spaceId, resource, cursor: observer.tail.append(event) });
+        opened.resolve();
+      }
     })().catch((error: unknown) => {
       if (controller.signal.aborted) return;
       observer.failure = error instanceof Error ? error : new Error(String(error));
       // Watching tabs read again and see the failure; their next read attaches again.
       this.notify?.({ workspace: spaceId, resource, cursor: observer.tail.head });
     }).finally(() => {
+      opened.resolve();
       if (controller.signal.aborted) return;
       observer.ended = true;
       // An ended attachment holds only its bounded tail, for tabs still to read its completion; keep the latest few.

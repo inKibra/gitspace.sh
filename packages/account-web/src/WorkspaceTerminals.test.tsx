@@ -122,14 +122,13 @@ function output() {
   return container.querySelector('[aria-label="Terminal output"]')?.textContent;
 }
 
-it('reads again only on a notice, once, after the current cursor, appending only newer output', async () => {
+it('reads again on a notice, once, after the current cursor, appending only newer output; connected, it reads without one only after ten seconds', async () => {
   const stream = channel();
   await render(props(stream.live));
   expect(stream.live).toHaveBeenCalledTimes(1);
   expect(stream.live).toHaveBeenLastCalledWith('machine', 'environment', null, expect.any(AbortSignal));
   await stream.answer(3, [{ type: 'state', steps: [] }]);
-  // No notice, no read.
-  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
   expect(stream.live).toHaveBeenCalledTimes(1);
   await notice();
   expect(stream.live).toHaveBeenCalledTimes(2);
@@ -141,6 +140,17 @@ it('reads again only on a notice, once, after the current cursor, appending only
   await stream.answer(6, [{ type: 'output', data: 'second' }]);
   expect(output()).toBe('first second');
   expect(stream.live).toHaveBeenCalledTimes(3);
+});
+
+it('reads again a second later when its first read brings no state, so a lost notice does not leave it connecting', async () => {
+  const stream = channel();
+  await render(props(stream.live));
+  await stream.answer(1, []);
+  await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+  expect(stream.live).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(stream.live).toHaveBeenCalledTimes(2);
+  expect(stream.live).toHaveBeenLastCalledWith('machine', 'environment', 1, expect.any(AbortSignal));
 });
 
 it('reads once more after a burst of notices that arrives while a read is in flight', async () => {

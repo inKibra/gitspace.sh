@@ -3,11 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { RELAY_NOTICE_TOPICS, type ControlOperation, type DeploymentStatus, type RelayNotice } from '@gitspace/protocol';
+import { RELAY_NOTICE_TOPICS, type ControlOperation, type DeploymentStatus, type RelayNotice, type RelayNoticeTopic } from '@gitspace/protocol';
 import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
-import { receiveMachineNotices, type MachineNoticeTargets } from '../src/machine-notices.js';
+import { createNoticeRetries, receiveMachineNotices, type MachineNoticeTargets } from '../src/machine-notices.js';
 import { ReleaseFollower } from '../src/release-follower.js';
 
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -130,4 +130,40 @@ test('a release notice nudges the follower to read deployment status once; nothi
   jest.advanceTimersByTime(IDLE_MS);
   await settle();
   expect(statuses).toHaveLength(2);
+});
+
+test('a read that keeps failing has one retry waiting at a time, however many notices fail meanwhile', () => {
+  const timers: Array<{ run: () => void; delayMs: number }> = [];
+  const reads: RelayNoticeTopic[] = [];
+  const retries = createNoticeRetries(topic => { reads.push(topic); }, (run, delayMs) => { timers.push({ run, delayMs }); });
+  const next = () => {
+    const timer = timers.at(-1);
+    if (!timer) throw new Error('No retry is waiting');
+    timer.run();
+  };
+  // Three notices fail while the first retry waits: one retry, at the first failure's wait.
+  retries.failed('settings');
+  retries.failed('settings');
+  retries.failed('settings');
+  expect(timers.map(timer => timer.delayMs)).toEqual([2_000]);
+  next();
+  expect(reads).toEqual(['settings']);
+  // Each failure since lengthens the wait, up to a minute.
+  retries.failed('settings');
+  expect(timers.at(-1)?.delayMs).toBe(16_000);
+  for (let attempt = 0; attempt < 3; attempt++) { next(); retries.failed('settings'); }
+  expect(timers.at(-1)?.delayMs).toBe(60_000);
+  expect(timers).toHaveLength(5);
+  // A read that succeeds starts the waits over.
+  retries.settled('settings');
+  next();
+  retries.failed('settings');
+  expect(timers.at(-1)?.delayMs).toBe(2_000);
+  // A failed workspace read waits as the assignments read that replaces it.
+  next();
+  retries.failed('workspace.snapshot');
+  retries.failed('assignments');
+  next();
+  expect(reads.at(-1)).toBe('assignments');
+  expect(timers).toHaveLength(7);
 });

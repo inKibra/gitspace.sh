@@ -11,12 +11,22 @@ export const STORAGE_BREAKER_WINDOW_MS = 10 * 60_000;
 const MINUTE_MS = 60_000;
 const FLAG_TABLE = '_storage_quarantine';
 
+const QUARANTINED_PREFIX = 'Storage quarantined since ';
+
 export class StorageQuarantinedError extends Error {
   constructor(readonly reason: string, readonly since: string) {
-    super(`Storage quarantined since ${since}: ${reason}. Resume it to continue.`);
+    super(`${QUARANTINED_PREFIX}${since}: ${reason}. Resume it to continue.`);
     this.name = 'StorageQuarantinedError';
   }
 }
+
+/** The refusal of a quarantined object, also after Durable Object RPC carried it, which may keep only its message. */
+export function isStorageQuarantined(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'StorageQuarantinedError' || error.message.startsWith(QUARANTINED_PREFIX));
+}
+
+/** The control error code a machine receives for a request a paused workspace refused. */
+export const WORKSPACE_PAUSED_CODE = 'WORKSPACE_PAUSED';
 
 export interface StorageBreakerStatus {
   quarantined: boolean;

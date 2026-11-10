@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { accountLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import type { StreamEvent } from '@gitspace/protocol-sync';
-import { LiveNotices, liveSource } from './live-notices.js';
+import { LiveNotices, liveSource, liveTicks } from './live-notices.js';
 import { SynchronizationOwner } from './synchronization.js';
 
 const key = workspaceLiveKey('workspace', 'environment');
@@ -76,4 +76,33 @@ it('reports the channel open after a reconnect read finds nothing new', async ()
   reads[1]!.resolve([]);
   await settle();
   expect(channel.snapshot()).toMatchObject({ cursor: 1, value: 'first', connection: 'open', transportError: null });
+});
+
+it('reads again after its fallback wait when no notice comes; without one it waits for a notice', async () => {
+  vi.useFakeTimers();
+  try {
+    const notices = new LiveNotices();
+    const fallback = new AbortController();
+    const ticks = liveTicks([key], fallback.signal, notices, () => 20);
+    await ticks.next();
+    let read = false;
+    void ticks.next().then(() => { read = true; });
+    vi.advanceTimersByTime(19);
+    await settle();
+    expect(read).toBe(false);
+    vi.advanceTimersByTime(1);
+    await settle();
+    expect(read).toBe(true);
+    fallback.abort();
+
+    const quiet = new AbortController();
+    const notified = liveTicks([key], quiet.signal, notices);
+    await notified.next();
+    let quietRead = false;
+    void notified.next().then(() => { quietRead = true; });
+    vi.advanceTimersByTime(3_600_000);
+    await settle();
+    expect(quietRead).toBe(false);
+    quiet.abort();
+  } finally { vi.useRealTimers(); }
 });

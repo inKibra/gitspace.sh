@@ -54,9 +54,10 @@ export class LiveNotices {
 
 export const liveNotices = new LiveNotices();
 
-/** Yields once now, then once per burst of notices for `keys` or socket reopen. Notices arriving while the consumer works
- * between yields queue exactly one more yield: one refetch in flight plus at most one more. */
-export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, notices: LiveNotices = liveNotices): AsyncGenerator<void> {
+/** Yields once now, then once per burst of notices for `keys` or socket reopen, and once after `fallbackMs` passes
+ * without either when it names a wait: a reader that must not stall on one lost notice. Notices arriving while the
+ * consumer works between yields queue exactly one more yield: one refetch in flight plus at most one more. */
+export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, notices: LiveNotices = liveNotices, fallbackMs: () => number | null = () => null): AsyncGenerator<void> {
   let pending = true;
   let wake: (() => void) | null = null;
   const notify = () => { pending = true; wake?.(); };
@@ -67,7 +68,10 @@ export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, 
       if (!pending) {
         const ready = Promise.withResolvers<void>();
         wake = ready.resolve;
+        const wait = fallbackMs();
+        const fallback = wait === null ? undefined : setTimeout(notify, wait);
         await ready.promise;
+        clearTimeout(fallback);
         wake = null;
         continue;
       }

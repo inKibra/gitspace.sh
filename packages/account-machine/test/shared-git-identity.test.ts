@@ -8,6 +8,7 @@ import { RuntimeAttachmentSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { SharedGitIdentityCoordinator, type GitIdentityCloud } from '../src/shared-git-identity.js';
 import { createGitHubCredentialHelper, type GitHubCheckoutAccess } from '../src/github-credential-helper.js';
+import { CloudControlError } from '../src/cloud-runtime-client.js';
 
 const roots: string[] = [];
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -179,6 +180,7 @@ async function coveredFixture() {
     async call<S extends z.ZodType>(operation: ControlOperation, payload: Record<string, unknown>, schema: S): Promise<z.output<S>> {
       requests.push({ operation, payload });
       if (operation === 'runtime.repository.originAccess' && payload.workspaceId === 'unreachable') throw new Error('The control request failed; try again');
+      if (operation === 'runtime.repository.originAccess' && payload.workspaceId === 'paused') throw new CloudControlError('Storage quarantined since 2026-11-10T07:07:29.294Z: Runaway writes. Resume it to continue.', 'WORKSPACE_PAUSED');
       if (operation === 'runtime.repository.originAccess') return schema.parse(state.covered ? { kind: 'github-app', repository: 'Owner/Repo' } : { kind: 'ssh' });
       if (operation === 'runtime.repository.githubToken') return schema.parse({ token: TOKEN, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
       throw new Error(`Unexpected control operation ${operation}`);
@@ -249,6 +251,17 @@ describe('checkout origin routes', () => {
     f.state.held = [checkout(unreachable, 'ready', 3, 'unreachable'), ...f.state.held];
     await expect(f.coordinator.apply(settings)).rejects.toThrow(`Git identity was not applied to 1 of 2 checkouts: ${unreachable}: The control request failed; try again`);
     expect(await f.local('remote.origin.url')).toEqual(['https://github.com/Owner/Repo.git']);
+    expect(await f.local('user.email')).toEqual(['brad@example.com']);
+  });
+
+  it('applies to every other checkout and succeeds when one checkout belongs to a paused workspace', async () => {
+    const f = await coveredFixture();
+    const paused = join(f.root, 'paused');
+    mkdirSync(paused);
+    await f.run(paused, ['init', '-q']);
+    f.state.held = [checkout(paused, 'ready', 3, 'paused'), ...f.state.held];
+    // Nothing to retry: the paused workspace refuses until it is resumed.
+    await f.coordinator.apply(settings);
     expect(await f.local('user.email')).toEqual(['brad@example.com']);
   });
 

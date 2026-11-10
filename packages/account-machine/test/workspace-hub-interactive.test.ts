@@ -218,6 +218,19 @@ describe('protected interactive lifecycle terminals', () => {
     await expect(coordinator.send('workspace-a', 'life-protected-cancel', 'echo bypass\n')).rejects.toThrow();
   }, 25_000);
 
+  it('answers the read that attaches with the run\'s state, so a tab connects without the notice of it', async () => {
+    const { coordinator } = fixture();
+    const started = Promise.withResolvers<void>();
+    const execution = coordinator.runLifecyclePlan('workspace-a', 'workspace/materialize', [{
+      id: 'login', kind: 'script', command: '/approved/login.sh', content: 'printf "MFA code: "\nread -r code',
+    }], { PATH: process.env.PATH ?? '' }, { interactive: true, runId: 'protected-first-read', deadlineAt: new Date(Date.now() + 15_000).toISOString(), onStarted: async () => started.resolve() });
+    await Promise.race([started.promise, execution.then(() => { throw new Error('Runner exited before attach'); })]);
+    const first = await coordinator.live('workspace-a', 'life-protected-first-read', null);
+    expect(first.events[0]).toMatchObject({ type: 'state', steps: [{ id: 'login' }] });
+    await coordinator.send('workspace-a', 'life-protected-first-read', '123456\n');
+    expect((await execution).exitCode).toBe(0);
+  }, 25_000);
+
   it('expires an unattached terminal without executing the script', async () => {
     const { coordinator, workspace } = fixture();
     const result = await coordinator.runLifecyclePlan('workspace-a', 'workspace/materialize', [{

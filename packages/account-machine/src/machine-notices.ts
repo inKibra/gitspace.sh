@@ -30,3 +30,32 @@ export function receiveMachineNotices(notices: readonly RelayNotice[], targets: 
   if (environments.has(null)) targets.environment(null);
   else for (const workspaceId of environments) if (workspaceId !== null) targets.environment(workspaceId);
 }
+
+/** The longest wait between two retries of a failed read. */
+const NOTICE_RETRY_MAX_MS = 60_000;
+
+export interface NoticeRetries {
+  /** A read a notice asked for failed: it is asked for again with backoff, 1 s doubling to a minute. */
+  failed(topic: RelayNoticeTopic): void;
+  /** The topic's read succeeded: the next failure starts again from the shortest wait. */
+  settled(topic: RelayNoticeTopic): void;
+}
+
+/** Retries failed notice reads until they succeed. One retry per topic waits at a time: a failure while it waits, of
+ * the retry chain or of a read a new notice asked for, only lengthens the next wait, so chains never multiply. A
+ * failed workspace read retries as an assignments read, which applies every ready checkout's version. */
+export function createNoticeRetries(read: (topic: RelayNoticeTopic) => void, schedule: (run: () => void, delayMs: number) => void = (run, delayMs) => { setTimeout(run, delayMs); }): NoticeRetries {
+  const attempts = new Map<RelayNoticeTopic, number>();
+  const waiting = new Set<RelayNoticeTopic>();
+  return {
+    failed(topic) {
+      const retry = topic === 'workspace.snapshot' ? 'assignments' : topic;
+      const attempt = (attempts.get(retry) ?? 0) + 1;
+      attempts.set(retry, attempt);
+      if (waiting.has(retry)) return;
+      waiting.add(retry);
+      schedule(() => { waiting.delete(retry); read(retry); }, Math.min(NOTICE_RETRY_MAX_MS, 1000 * 2 ** attempt));
+    },
+    settled(topic) { attempts.delete(topic); },
+  };
+}

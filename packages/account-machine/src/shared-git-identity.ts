@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import type { GitIdentityDocument, UserSettings } from '@gitspace/protocol';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
+import { CloudControlError } from './cloud-runtime-client.js';
+import { WORKSPACE_PAUSED_CODE } from '@gitspace/protocol/storage-breaker';
 import type { GitHubCheckoutAccess } from './github-credential-helper.js';
 import { forEachConcurrent } from './release-objects.js';
 
@@ -187,7 +189,8 @@ export class SharedGitIdentityCoordinator {
     return run;
   }
 
-  /** `APPLY_CONCURRENCY` checkouts at a time; one that fails does not stop the others. */
+  /** `APPLY_CONCURRENCY` checkouts at a time; one that fails does not stop the others. A checkout of a paused workspace
+   *  is skipped: it refuses every request until an administrator resumes it, so it is no failure to retry. */
   private async applyNow(settings: UserSettings, checkouts: readonly LocalAttachment[]): Promise<void> {
     if (!this.identity) throw new Error('Shared Git identity is not initialized');
     const sshCommand = this.sshCommand();
@@ -199,6 +202,7 @@ export class SharedGitIdentityCoordinator {
         if (settings.git.authorName) await setConfig(repository, 'user.name', settings.git.authorName);
         if (settings.git.authorEmail) await setConfig(repository, 'user.email', settings.git.authorEmail);
       } catch (error) {
+        if (error instanceof CloudControlError && error.code === WORKSPACE_PAUSED_CODE) return;
         failures.push(`${repository}: ${error instanceof Error ? error.message : String(error)}`);
       }
     });

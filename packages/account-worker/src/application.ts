@@ -160,6 +160,7 @@ import {
   type LaunchResult,
 } from './tenant-releases.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
+import { isStorageQuarantined, WORKSPACE_PAUSED_CODE } from '@gitspace/protocol/storage-breaker';
 
 // Pi's variable-specifier Bedrock import cannot run inside a Worker bundle.
 setBedrockProviderModule(bedrockProviderModule);
@@ -4241,6 +4242,10 @@ const worker = {
         }
         if (error instanceof McpConnectionValidationError) {
           return Response.json({ status: 'error', error: { code: 'MCP_INVALID', message: error.message, field: error.field } }, { status: 400 });
+        }
+        // A paused workspace refuses every request until an administrator resumes it: the machine stops asking for it.
+        if (isStorageQuarantined(error)) {
+          return Response.json({ status: 'error', error: { code: WORKSPACE_PAUSED_CODE, message: error instanceof Error ? error.message : String(error) } }, { status: 423 });
         }
         // The Workers runtime marks Durable Object failures it caused (reset, overload, broken connection) with
         // `retryable` or `overloaded`; the request itself was valid, so the caller may repeat it.

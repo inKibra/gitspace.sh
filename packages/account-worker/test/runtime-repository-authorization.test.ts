@@ -211,6 +211,13 @@ describe('signed checkout origin access', () => {
     expect(f.tokens).not.toHaveBeenCalled();
   });
 
+  it('answers a checkout of a paused workspace with its own refusal, which a machine does not retry', async () => {
+    const f = await originFixture('git@github.com:owner/repo.git');
+    await f.authority.pauseStorage('Runaway writes');
+    const refused = await f.origin();
+    expect({ status: refused.status, body: await refused.json() }).toMatchObject({ status: 423, body: { status: 'error', error: { code: 'WORKSPACE_PAUSED', message: expect.stringContaining('Runaway writes') } } });
+  });
+
   it('issues tokens only to this machine\'s current checkout, and push tokens only once it is ready', async () => {
     const f = await originFixture('https://github.com/Owner/Repo');
     const read = await f.token('read');
