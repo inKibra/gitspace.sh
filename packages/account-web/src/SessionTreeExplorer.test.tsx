@@ -20,7 +20,7 @@ function controls(onReadHistory?: SessionControlsProps['onReadHistory'], history
   const operation = async () => undefined;
   return {
     value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId },
-    onCycleRole: operation, onSetModel: operation, onSetThinking: operation, onSetFast: operation, onSetGoal: operation, onCompact: operation, onClearQueue: operation, onRemoveQueuedMessage: operation, onPromoteQueuedMessage: operation, onAnswerAsk: operation, onStop: operation, onNavigateTree: operation, onReadHistory,
+    onCycleRole: operation, onSetModel: operation, onSetThinking: operation, onSetFast: operation, onSetGoal: operation, onCompact: operation, onClearQueue: operation, onRemoveQueuedMessage: operation, onPromoteQueuedMessage: operation, onDismissAutomationRun: operation, onAnswerAsk: operation, onStop: operation, onNavigateTree: operation, onReadHistory,
   };
 }
 

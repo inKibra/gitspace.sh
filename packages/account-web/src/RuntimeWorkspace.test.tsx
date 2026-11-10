@@ -3,19 +3,20 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import type { RuntimeSessionResult, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { InspectorView } from '@gitspace/protocol';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
 
-const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; shell: GitSpaceShellProps | null; saved: unknown; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), shell: null, saved: null, access: undefined, failed: false, pending: false }));
+const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: unknown; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
 const copyCalls = vi.hoisted(() => ({ seed: vi.fn(async (_input: { projectId: string; machineId: string }) => ({ status: 'ok' as const, value: { baseBranch: 'main', commit: 'c'.repeat(40) } })), attach: vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })) }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } } } }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } }, automations: { cancelRun: mocks.cancelRun } } }));
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
-vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: null, run: vi.fn(), error: null }) }));
+vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: mocks.session.result, run: mocks.session.run, error: null }) }));
 vi.mock('./useTranscriptHistory.js', () => ({ useTranscriptHistory: () => ({ refresh: vi.fn() }) }));
 vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}{props.accessBanner}{props.access?.card(inspectEnvironment)}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
 const stamp = '2026-10-03T00:00:00.000Z';
@@ -41,7 +42,8 @@ let container: HTMLDivElement;
 const render = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={workspace.id} snapshot={snapshot} inspection={inspection} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-  mocks.setRelations.mockReset(); mocks.refresh.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined;
+  mocks.setRelations.mockReset(); mocks.refresh.mockReset(); mocks.cancelRun.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined;
+  mocks.session = { result: null, run: vi.fn() };
   snapshot.documents = {};
   snapshot.conversations = [];
   snapshot.attachments = [];
@@ -178,5 +180,26 @@ it('copies a refused repository in through the chosen online machine, then attac
   expect(copyCalls.seed).toHaveBeenCalledWith({ projectId: project.id, machineId: 'machine-on' });
   expect(copyCalls.attach).toHaveBeenCalledWith({ projectId: project.id, workspaceId: project.id, machineId: 'machine-on' });
   expect(mocks.refresh).toHaveBeenCalled();
+});
+
+it('rereads the queue only once a dismissed automation run is cancelled, and not when the cancel is refused', async () => {
+  const control: SessionControlView = { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null };
+  mocks.session = { result: { control }, run: vi.fn(async () => ({ control })) };
+  const cancel = Promise.withResolvers<{ status: 'ok'; value: object }>();
+  mocks.cancelRun.mockReturnValueOnce(cancel.promise);
+  await act(() => render());
+
+  const dismissed = mocks.shell?.sessionControls?.onDismissAutomationRun('run-41');
+  expect(mocks.cancelRun).toHaveBeenCalledExactlyOnceWith({ projectId: project.id, runId: 'run-41' });
+  expect(mocks.session.run).not.toHaveBeenCalled();
+  cancel.resolve({ status: 'ok', value: {} });
+  await dismissed;
+  expect(mocks.session.run).toHaveBeenCalledExactlyOnceWith({ type: 'control' });
+
+  mocks.session.run.mockClear();
+  const refused = new Error('This run has ended');
+  mocks.cancelRun.mockResolvedValueOnce({ status: 'error', error: refused });
+  await expect(mocks.shell?.sessionControls?.onDismissAutomationRun('run-42')).rejects.toBe(refused);
+  expect(mocks.session.run).not.toHaveBeenCalled();
 });
 

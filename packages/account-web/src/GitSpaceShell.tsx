@@ -132,6 +132,8 @@ export interface SessionControlsProps {
   onClearQueue(): Promise<void>;
   onRemoveQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>;
   onPromoteQueuedMessage(index: number): Promise<void>;
+  /** Cancels an automation run waiting in this conversation's queue, then rereads the queue it left. */
+  onDismissAutomationRun(runId: string): Promise<void>;
   onAnswerAsk(id: string, answers: PendingAskAnswer[]): Promise<void>;
   onStop(): Promise<void>;
   onNavigateTree(entryId: string): Promise<void>;

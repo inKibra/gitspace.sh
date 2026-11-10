@@ -12,8 +12,6 @@ import type { GitSpaceShellProps, SessionControlsProps } from './GitSpaceShell.j
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
 
 vi.mock('./device-session.js', () => ({ currentDevice: vi.fn(), deviceRejected: vi.fn() }));
-const automations = vi.hoisted(() => ({ cancelRun: vi.fn() }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { automations } }));
 
 let root: Root;
 let container: HTMLDivElement;
@@ -225,14 +223,14 @@ const reviewEvents: AutomationMessageEvent[] = [
 const waitingRun = automationMessage({ run: 'run-41', name: 'Review feedback', source: 'github', subject: 'PR #1434', instruction: 'Address the review.', events: reviewEvents });
 
 it('shows an automation run waiting in the queue as its run, apart from the person’s queued messages, and acts on its run', async () => {
-  automations.cancelRun.mockResolvedValue({ status: 'ok', value: {} });
   const done = async (): Promise<void> => undefined;
+  const dismissRun = vi.fn<SessionControlsProps['onDismissAutomationRun']>(done);
   const promote = vi.fn<SessionControlsProps['onPromoteQueuedMessage']>(done);
   const remove = vi.fn<SessionControlsProps['onRemoveQueuedMessage']>(done);
   const controls: SessionControlsProps = {
     value: { ...control, queue: { steering: [], followUp: ['Also update the docs', waitingRun] } },
     onCycleRole: done, onSetModel: done, onSetThinking: done, onSetFast: done, onSetGoal: done, onCompact: done, onClearQueue: done, onAnswerAsk: done, onStop: done, onNavigateTree: done,
-    onRemoveQueuedMessage: remove, onPromoteQueuedMessage: promote,
+    onRemoveQueuedMessage: remove, onPromoteQueuedMessage: promote, onDismissAutomationRun: dismissRun,
   };
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} controls={controls} running pending={false} onSend={vi.fn()} />));
 
@@ -245,7 +243,7 @@ it('shows an automation run waiting in the queue as its run, apart from the pers
   await act(async () => deliver!.click());
   expect(promote).toHaveBeenCalledExactlyOnceWith(1);
   await act(async () => dismiss!.click());
-  expect(automations.cancelRun).toHaveBeenCalledExactlyOnceWith({ projectId: verticalSliceFixture.workspace.projectId, runId: 'run-41' });
+  expect(dismissRun).toHaveBeenCalledExactlyOnceWith('run-41');
   await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Remove queued message: Also update the docs"]')!.click());
   expect(remove).toHaveBeenCalledExactlyOnceWith('followUp', 0);
 });

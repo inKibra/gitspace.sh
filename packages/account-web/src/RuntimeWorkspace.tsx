@@ -176,6 +176,12 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     onClearQueue: async () => { await run({ type: 'clearQueue' }); },
     onRemoveQueuedMessage: async (kind, index) => { await run({ type: 'removeQueuedMessage', kind, index }); },
     onPromoteQueuedMessage: async index => { await run({ type: 'promoteQueuedMessage', index }); },
+    onDismissAutomationRun: async runId => {
+      const response = await rpcClient.automations.cancelRun({ projectId: identity.projectId, runId });
+      if (response.status === 'error') throw response.error;
+      // The withdrawn message leaves the agent's queue without changing anything the controls reread on.
+      await run({ type: 'control' });
+    },
     onAnswerAsk: async (id, answers) => {
       if (value.pendingAsk?.id === id || question?.id !== id) { await run({ type: 'answerAsk', id, answers }); return; }
       let answer: RuntimeAnswerInput['answer'];

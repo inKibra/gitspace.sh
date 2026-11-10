@@ -10,8 +10,6 @@ import { CaptureChip } from './capture-chip.js';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-import { rpcClient } from './rpc-client.js';
-import { settle } from './automations/automation-formatters.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
 import { ModelCombobox, modelOptions } from './ModelCombobox.js';
 import { automationsUrl, navigateProductUrl, setProductRoute } from './routes.js';
@@ -318,9 +316,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   };
   const [dismissing, setDismissing] = useState<string | null>(null);
   const dismissRun = (runId: string): void => {
+    if (!controls) return;
     setSubmitError(null);
     setDismissing(runId);
-    void settle(rpcClient.automations.cancelRun({ projectId: workspace.projectId, runId }))
+    void controls.onDismissAutomationRun(runId)
       .catch((failure: unknown) => setSubmitError(rpcErrorMessage(failure, 'Dismiss automation run')))
       .finally(() => setDismissing(null));
   };
