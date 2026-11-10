@@ -1,4 +1,4 @@
-import { CompactionEntry, ToolTask, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
+import { CompactionEntry, ToolTask, type Conversation, type ConversationId, type ConversationRecord, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { TranscriptProjector, WORKSPACE_REPORT_ENTRY, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
@@ -14,13 +14,21 @@ const ctx = BACKGROUND_CONTEXT;
 /** Event and row ordinals are `entryId * 1024 + n`; ordinals of one entry never collide with the next. */
 const ENTRY_ORDINALS = 1024;
 const SCAN_ENTRIES = 64;
-/** A page window holds at least this many entries before it extends back to a turn start. */
+/** Transcript generation; v2 names every turn by the input that opened it, so a row's ID is the same in every window
+ * (v1 named a turn after the first entry a window happened to start with). */
+const GENERATION = 'pi-transcript-v2';
+/** Entries one window projects; a window inside a turn is told the turn's name, so it needs no more. */
 const WINDOW_ENTRIES = 32;
-/** Hard bounds on one request: a window never reads more entries, a lookup never visits more windows. */
-const WINDOW_LIMIT = 512;
+/** Entries a window reads past its own so the tool calls it makes show their results. */
+const FORWARD_ENTRIES = 64;
 const FORWARD_IDS = 256;
-const FORWARD_STEPS = 16;
-const SEARCH_WINDOWS = 16;
+/** A page reads earlier (or later) windows until it has this many rows, visiting at most `PAGE_WINDOWS`; a page of one
+ * execution's rows, which may be sparse, stops at its first window that has any within `SCOPED_WINDOWS`. */
+const PAGE_FILL_ROWS = 24;
+const PAGE_WINDOWS = 8;
+const SCOPED_WINDOWS = 128;
+/** Entries a lookup by a tool row's ID scans for its call, when the request does not give the row's ordinal. */
+const SEARCH_ENTRIES = 4096;
 const LIVE_STATUSES = ['pending', 'running', 'waiting', 'completing'] as const;
 /** States of a tool task that has started executing and has no result yet. */
 const EXECUTING_STATUSES: readonly NonNullable<TaskQuery['status']>[] = ['running', 'waiting'];
@@ -39,8 +47,43 @@ const MACHINE_NOTICE = 'gitspace.machine-notice';
 const COMPACTION = CompactionEntry.kind;
 /** The project agent's workspace board reaches it as context but shows as one quiet row, the board under a fold. */
 const WORKSPACE_BOARD = 'gitspace.workspace-board';
-/** A workspace's turn report reaches the project agent as context (quiet) but shows as one compact row. */
-const opensTurn = (entry: EntryRecord) => entry.kind !== MACHINE_NOTICE && entry.kind !== WORKSPACE_BOARD && entry.kind !== COMPACTION && entry.kind !== WORKSPACE_REPORT_ENTRY && entry.model?.[0]?.role === 'user';
+/** Titles of user-role entries no input placed (a retained rule's instruction, a rewind's report, a restore notice):
+ * they belong to the turn they land in and show there as notices. */
+const IN_TURN_TITLE: Readonly<Record<string, string>> = { 'pi.user': 'Instruction', 'gitspace.rewind': 'Context rewound', 'gitspace.lfs-restored': 'Files restored' };
+
+/** `event` as part of the turn it lands in: a user message no input placed shows as a notice instead of opening a turn. */
+function inTurn(event: TranscriptEvent, entry: EntryRecord): TranscriptEvent {
+  const message = event.payload.message;
+  if (event.kind !== 'message_end' || typeof message !== 'object' || message === null || !('role' in message) || message.role !== 'user') return event;
+  const content = 'content' in message ? message.content : '';
+  return { ...event, payload: { ...event.payload, message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title: IN_TURN_TITLE[entry.kind] ?? 'Note', content } } };
+}
+
+/** The entries that open the conversation's turns (where its inputs were placed), ascending, and the same as a set. */
+type Openers = { readonly ids: readonly number[]; readonly set: ReadonlySet<number> };
+
+/** The newest opener at or below `entry`; undefined before the first. */
+function openerAt(openers: readonly number[], entry: number): number | undefined {
+  let low = 0;
+  let high = openers.length - 1;
+  let found: number | undefined;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const value = openers[middle];
+    if (value === undefined) break;
+    if (value <= entry) { found = value; low = middle + 1; }
+    else high = middle - 1;
+  }
+  return found;
+}
+
+/** The position a turn row's ID names: the event it came from, or its turn's input for the turn's user message. */
+function positionOf(rowId: string): number | undefined {
+  const event = /^pi:\d+:turn:\d+:[a-z-]+:(\d+)/u.exec(rowId);
+  if (event) return Number(event[1]);
+  const user = /^pi:\d+:turn:(\d+):user$/u.exec(rowId);
+  return user ? Number(user[1]) : undefined;
+}
 
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
 export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices): TranscriptEvent[] {
@@ -159,8 +202,10 @@ export async function transcriptResponse(storage: Storage, target: Conversation,
 
 type ProjectedRow = { item: TranscriptItem; turn: string; ordinal: number; revision: number };
 type Projection = { rows: Map<string, ProjectedRow>; turns: Map<string, TranscriptRow['turnStatus']>; hidden: Set<string>; executions: Map<string, Set<string>> };
-/** A turn-aligned run of entries: `entries[0]` opens a turn unless `complete` is false at the start. */
-type Window = { entries: EntryRecord[]; hasOlder: boolean; newest: boolean; nextTurn?: EntryRecord };
+/** Entries projected together, oldest first: the window's own (`first` through `last`), then any read past them so
+ * the tool calls they make show their results. `older` and `newer`: the conversation has entries before `first` and
+ * after `last`. */
+type Window = { entries: EntryRecord[]; first: number; last: number; older: boolean; newer: boolean };
 
 /** A browser-loadable URL for a stored image a transcript row names (`gs-image:…;<mimeType>`); the same for the same
  * image within its validity window, so content read in parts stays one text. */
@@ -174,8 +219,8 @@ function withImageUrls<T>(item: T, imageUrl: TranscriptImageUrl | undefined): T 
   return JSON.parse(text, (key, value: unknown) => key === 'url' && typeof value === 'string' && value.startsWith('gs-image:v1:') ? imageUrl(value) : value);
 }
 
-/** Transcript pages are projected per request from a bounded, turn-aligned window of Pi entries.
- * Nothing is persisted: Pi's entries are the only transcript storage. */
+/** Transcript pages are projected per request from small windows of Pi entries, each told the name of the turn it
+ * starts in. Nothing is persisted: Pi's entries and submissions are the only transcript storage. */
 export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl) {
   async function live(conversationId: ConversationId): Promise<boolean> {
     for (const status of LIVE_STATUSES) {
@@ -209,30 +254,92 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     return events;
   }
 
-  /** Entries at or below `maxEntry`, extended back to the turn that contains them and forward to that turn's end. */
-  async function window(conversationId: ConversationId, maxEntry: number | null, highWater: number): Promise<Window> {
-    const entries: EntryRecord[] = [];
-    let hasOlder = false;
-    for await (const entry of entriesBackward(storage, conversationId, maxEntry)) {
-      if (entries.length >= WINDOW_LIMIT || (entries.length >= WINDOW_ENTRIES && opensTurn(entries.at(-1)!))) { hasOlder = true; break; }
-      entries.push(entry);
+  /** At most `limit` of the conversation's entries, newest first, below `below` (all of them when null). */
+  async function entriesBelow(conversationId: ConversationId, below: number | null, limit: number): Promise<EntryRecord[]> {
+    const found: EntryRecord[] = [];
+    let cursor: Cursor | undefined = below === null ? undefined : { after: below };
+    while (found.length < limit) {
+      const page = await storage.scanEntries({ conversationId }, Math.min(SCAN_ENTRIES, limit - found.length), cursor, ctx);
+      found.push(...page.items);
+      if (!page.next) break;
+      cursor = page.next;
     }
-    entries.reverse();
-    let newest = maxEntry === null || maxEntry >= highWater;
-    let nextTurn: EntryRecord | undefined;
-    const last = entries.at(-1);
-    if (!newest && last) {
-      // Finish the turn so its calls show their results and its status is final.
-      for await (const entry of entriesForward(storage, conversationId, last, highWater, FORWARD_STEPS)) {
-        if (opensTurn(entry)) { nextTurn = entry; break; }
-        entries.push(entry);
-      }
-      if (!nextTurn && Number(entries.at(-1)!.id) >= highWater) newest = true;
-    }
-    return { entries, hasOlder, newest, nextTurn };
+    return found;
   }
 
-  async function project(conversationId: ConversationId, view: Window): Promise<Projection> {
+  /** At most `limit` of the conversation's entries, oldest first, from `from` on. */
+  async function entriesFrom(conversationId: ConversationId, from: number, limit: number): Promise<EntryRecord[]> {
+    const found: EntryRecord[] = [];
+    let cursor: Cursor | undefined = { after: from - 1, order: 'ascending' };
+    while (found.length < limit) {
+      const page = await storage.scanEntries({ conversationId, order: 'ascending' }, Math.min(SCAN_ENTRIES, limit - found.length), cursor, ctx);
+      found.push(...page.items);
+      if (!page.next) break;
+      cursor = page.next;
+    }
+    return found;
+  }
+
+  /** Where each of the conversation's turns opens: the entries its inputs were placed at, and its fork ancestors'
+   * through the fork. */
+  async function openersOf(conversationId: ConversationId): Promise<Openers> {
+    const ids: number[] = [];
+    let current: ConversationId | undefined = conversationId;
+    let through = Number.POSITIVE_INFINITY;
+    while (current !== undefined) {
+      let cursor: Cursor | undefined;
+      do {
+        const page = await storage.scanSubmissions({ conversationId: current }, SCAN_ENTRIES, cursor, ctx);
+        for (const record of page.items) if (record.type === 'input' && record.entry !== undefined && Number(record.entry) <= through) ids.push(Number(record.entry));
+        cursor = page.next;
+      } while (cursor);
+      const parent: ConversationRecord['parent'] = (await storage.conversation(current, ctx))?.parent;
+      if (!parent) break;
+      through = Math.min(through, Number(parent.at));
+      current = parent.conversationId;
+    }
+    ids.sort((left, right) => left - right);
+    return { ids, set: new Set(ids) };
+  }
+
+  /** `own` (oldest first) as a window, with the entries past it its tool calls need for their results. */
+  async function windowOf(conversationId: ConversationId, own: EntryRecord[], older: boolean, highWater: number): Promise<Window> {
+    const head = own[0];
+    const tail = own.at(-1);
+    if (!head || !tail) return { entries: [], first: 0, last: -1, older: false, newer: false };
+    const last = Number(tail.id);
+    const entries = [...own];
+    const pending = new Set<string>();
+    for (const entry of own) for (const message of entry.model ?? []) {
+      if (message.role === 'assistant') for (const part of message.content) if (part.type === 'toolCall') pending.add(part.id);
+      if (message.role === 'toolResult') pending.delete(message.toolCallId);
+    }
+    if (pending.size && last < highWater) {
+      for (const entry of await entriesFrom(conversationId, last + 1, FORWARD_ENTRIES)) {
+        entries.push(entry);
+        for (const message of entry.model ?? []) if (message.role === 'toolResult') pending.delete(message.toolCallId);
+        if (!pending.size) break;
+      }
+    }
+    return { entries, first: Number(head.id), last, older, newer: last < highWater };
+  }
+
+  /** The window whose own entries end at `maxEntry` (the newest when null). */
+  async function windowEnding(conversationId: ConversationId, maxEntry: number | null, highWater: number): Promise<Window> {
+    const found = await entriesBelow(conversationId, maxEntry === null ? null : maxEntry + 1, WINDOW_ENTRIES + 1);
+    return windowOf(conversationId, found.slice(0, WINDOW_ENTRIES).reverse(), found.length > WINDOW_ENTRIES, highWater);
+  }
+
+  /** The window whose own entries start at `from`. */
+  async function windowStarting(conversationId: ConversationId, from: number, highWater: number): Promise<Window> {
+    const own = await entriesFrom(conversationId, from, WINDOW_ENTRIES);
+    const head = own[0];
+    const older = head !== undefined && (await entriesBelow(conversationId, Number(head.id), 1)).length > 0;
+    return windowOf(conversationId, own, older, highWater);
+  }
+
+  /** Projects `view`; `running`: the conversation is working, so its newest input's turn runs. */
+  async function project(conversationId: ConversationId, view: Window, openers: Openers, running: boolean): Promise<Projection> {
     const sessionId = `pi:${conversationId}`;
     const projection: Projection = { rows: new Map(), turns: new Map(), hidden: new Set(), executions: new Map() };
     const bindings = new Map<string, string>();
@@ -260,18 +367,26 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       },
       bindExecutionRun(identity, execution) { bindings.set(identity, execution); },
     });
+    // A window inside a turn names it as a window starting at its input would, so a row has one ID in every window.
+    const opener = openerAt(openers.ids, view.first);
+    if (opener !== undefined && opener !== view.first) projector.apply({ sessionId, ordinal: opener * ENTRY_ORDINALS, kind: 'turn_start', payload: {} });
     for (const entry of view.entries) {
       entryId = Number(entry.id);
       written = 0;
-      for (const event of entryEvents(entry, executorResult, withdrawn)) projector.apply({ ...event, sessionId });
+      const opens = openers.set.has(entryId);
+      if (opens) projector.apply({ sessionId, ordinal: entryId * ENTRY_ORDINALS, kind: 'turn_start', payload: {} });
+      for (const event of entryEvents(entry, executorResult, withdrawn)) projector.apply({ ...(opens ? event : inTurn(event, entry)), sessionId });
       const notice = noticeEvent(entry);
       if (notice) projector.apply({ ...notice, sessionId });
     }
-    if (view.newest) for (const event of await executing(conversationId, sessionId, view.entries)) projector.apply(event);
+    if (!view.newer) for (const event of await executing(conversationId, sessionId, view.entries)) projector.apply(event);
     projector.flush();
+    // Only the newest input's turn can be running; a turn a later input followed is done.
     const lastTurn = [...projection.turns.keys()].at(-1);
-    const running = view.newest && await live(conversationId);
-    if (lastTurn !== undefined && projection.turns.get(lastTurn) !== 'error') projection.turns.set(lastTurn, running ? 'running' : 'done');
+    const newest = openers.ids.at(-1);
+    if (lastTurn !== undefined && projection.turns.get(lastTurn) !== 'error') {
+      projection.turns.set(lastTurn, running && newest !== undefined && lastTurn === `${sessionId}:turn:${newest * ENTRY_ORDINALS}` ? 'running' : 'done');
+    }
     return projection;
   }
 
@@ -280,94 +395,115 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     return [...projection.rows].filter(([id]) => members ? members.has(id) : !projection.hidden.has(id)).sort((left, right) => left[1].ordinal - right[1].ordinal);
   }
 
+  /** The window's rows that start in its own entries; rows its read-ahead starts belong to the next window. */
+  function own(projection: Projection, view: Window, executionId: string | null | undefined): [string, ProjectedRow][] {
+    return scoped(projection, executionId).filter(([, value]) => entryOf(value.ordinal) >= view.first && entryOf(value.ordinal) <= view.last);
+  }
+
   function row(projection: Projection, id: string, value: ProjectedRow): TranscriptRow {
     return { id, ordinal: value.ordinal, turnId: value.turn, turnStatus: projection.turns.get(value.turn) ?? 'done', contentRevision: value.revision, ...previewTranscriptItem(withImageUrls(value.item, imageUrl)) };
   }
 
-  /** Newest windows first until `found` matches; bounded by SEARCH_WINDOWS. */
-  async function locate(conversationId: ConversationId, highWater: number, rowId: string): Promise<{ projection: Projection; view: Window } | undefined> {
-    // Turn-owned rows name their turn's first ordinal; jump straight to it.
-    const turn = /^pi:\d+:turn:(\d+):/u.exec(rowId);
-    let maxEntry: number | null = turn ? entryOf(Number(turn[1])) : null;
-    for (let visited = 0; visited < SEARCH_WINDOWS; visited++) {
-      const view = await window(conversationId, maxEntry, highWater);
-      if (!view.entries.length) return undefined;
-      const projection = await project(conversationId, view);
-      if (projection.rows.has(rowId)) return { projection, view };
-      if (turn || !view.hasOlder) return undefined;
-      maxEntry = Number(view.entries[0]!.id) - 1;
+  /** The leading rows of `rows` that fit one page. */
+  function fit(rows: readonly TranscriptRow[]): TranscriptRow[] {
+    const kept: TranscriptRow[] = [];
+    let bytes = 2;
+    for (const next of rows) {
+      const size = new TextEncoder().encode(JSON.stringify(next)).byteLength + 1;
+      if (kept.length >= TRANSCRIPT_PAGE_ROWS || bytes + size > TRANSCRIPT_PAGE_BYTES) break;
+      kept.push(next);
+      bytes += size;
+    }
+    return kept;
+  }
+
+  /** Where the call a tool row's ID names was made, scanning back from the newest entry. */
+  async function callPosition(conversationId: ConversationId, rowId: string): Promise<number | undefined> {
+    const call = /^pi:\d+:[a-z-]+:(.+)$/u.exec(rowId)?.[1];
+    if (!call) return undefined;
+    let cursor: Cursor | undefined;
+    for (let seen = 0; seen < SEARCH_ENTRIES;) {
+      const page = await storage.scanEntries({ conversationId }, SCAN_ENTRIES, cursor, ctx);
+      for (const entry of page.items) for (const message of entry.model ?? []) {
+        if (message.role === 'assistant' && message.content.some(part => part.type === 'toolCall' && part.id === call)) return Number(entry.id) * ENTRY_ORDINALS;
+      }
+      seen += page.items.length;
+      if (!page.next) return undefined;
+      cursor = page.next;
     }
     return undefined;
   }
 
-  function fit(selected: [string, ProjectedRow][], projection: Projection): TranscriptRow[] {
-    const rows: TranscriptRow[] = [];
-    let bytes = 2;
-    for (const [id, value] of selected) {
-      const next = row(projection, id, value);
-      const size = new TextEncoder().encode(JSON.stringify(next)).byteLength + 1;
-      if (rows.length >= TRANSCRIPT_PAGE_ROWS || bytes + size > TRANSCRIPT_PAGE_BYTES) break;
-      rows.push(next);
-      bytes += size;
-    }
-    return rows;
+  /** The row `rowId` and the projection of the window it starts in: read at its ordinal when the reader gives it, else
+   * at the position its ID names (a turn's rows name their entry), else where its tool call was made. */
+  async function find(conversationId: ConversationId, rowId: string, ordinal: number | undefined, openers: Openers, running: boolean, highWater: number): Promise<{ projection: Projection; value: ProjectedRow }> {
+    const at = ordinal ?? positionOf(rowId) ?? await callPosition(conversationId, rowId);
+    if (at === undefined) throw new Error('Transcript row not found');
+    const projection = await project(conversationId, await windowStarting(conversationId, entryOf(at), highWater), openers, running);
+    const value = projection.rows.get(rowId);
+    if (!value) throw new Error('Transcript row not found');
+    return { projection, value };
   }
 
   return {
     async page(conversationId: ConversationId, raw: TranscriptPageRequest): Promise<TranscriptPage> {
       let request = transcriptPageRequestSchema.parse(raw);
-      const generation = `pi-transcript-v1:${conversationId}`;
+      const generation = `${GENERATION}:${conversationId}`;
       if (request.generation !== null && request.generation !== generation) request = { generation: null, before: null, after: null, around: null, executionId: request.executionId };
       const newest = await newestEntry(storage, conversationId);
       if (!newest) return { generation, revision: 0, rows: [], total: 0, hasBefore: false, hasAfter: false };
       const highWater = Number(newest.id);
       // Monotonic activity counters: the newest entry only ever grows within a generation.
       const envelope = { generation, revision: highWater, total: highWater + 1 };
-      if (request.around !== null || request.after !== null) {
-        let projection: Projection, view: Window, start: number;
-        if (request.around !== null) {
-          const found = await locate(conversationId, highWater, request.around);
-          if (!found) throw new Error('Transcript row not found');
-          ({ projection, view } = found);
-          start = projection.rows.get(request.around)!.ordinal;
-        } else {
-          start = request.after! + 1;
-          view = await window(conversationId, entryOf(start), highWater);
-          projection = await project(conversationId, view);
+      const openers = await openersOf(conversationId);
+      const running = await live(conversationId);
+      const windows = request.executionId ? SCOPED_WINDOWS : PAGE_WINDOWS;
+      const enough = request.executionId ? 1 : PAGE_FILL_ROWS;
+      const start = request.around !== null ? (await find(conversationId, request.around, request.aroundOrdinal, openers, running, highWater)).value.ordinal
+        : request.after === null ? null : request.after + 1;
+      if (start !== null) {
+        // Ascending: from the row asked around (or after), reading later windows until the page is full.
+        const rows: TranscriptRow[] = [];
+        let hasBefore = false;
+        let newer = false;
+        let from = entryOf(start);
+        for (let visited = 0; visited < windows; visited++) {
+          const view = await windowStarting(conversationId, from, highWater);
+          if (!view.entries.length) break;
+          const projection = await project(conversationId, view, openers, running);
+          const rowsOf = own(projection, view, request.executionId);
+          if (visited === 0) hasBefore = view.older || rowsOf.some(([, value]) => value.ordinal < start);
+          rows.push(...rowsOf.filter(([, value]) => value.ordinal >= start).map(([id, value]) => row(projection, id, value)));
+          newer = view.newer;
+          if (rows.length >= enough || !view.newer) break;
+          from = view.last + 1;
         }
-        let selected = scoped(projection, request.executionId).filter(([, value]) => value.ordinal >= start);
-        // Ascending reads continue into the next turn when this one has nothing newer.
-        if (!selected.length && view.nextTurn) {
-          const next = await window(conversationId, Number(view.nextTurn.id), highWater);
-          view = { ...next, hasOlder: true };
-          projection = await project(conversationId, next);
-          selected = scoped(projection, request.executionId).filter(([, value]) => value.ordinal >= start);
-        }
-        const rows = fit(selected, projection);
-        return { ...envelope, rows, hasBefore: view.hasOlder || scoped(projection, request.executionId).some(([, value]) => value.ordinal < start), hasAfter: rows.length < selected.length || !view.newest };
+        const fitted = fit(rows);
+        return { ...envelope, rows: fitted, hasBefore, hasAfter: fitted.length < rows.length || newer };
       }
-      let maxEntry = request.before === null ? null : request.before === 0 ? -1 : entryOf(request.before - 1);
-      for (let visited = 0; visited < SEARCH_WINDOWS && maxEntry !== -1; visited++) {
-        const view = await window(conversationId, maxEntry, highWater);
-        if (!view.entries.length) break;
-        const projection = await project(conversationId, view);
-        const selected = scoped(projection, request.executionId).filter(([, value]) => request.before === null || value.ordinal < request.before).reverse();
-        // Execution scopes may be sparse; skip older windows that hold none of their rows.
-        if (selected.length || !view.hasOlder) {
-          const rows = fit(selected, projection).reverse();
-          return { ...envelope, rows, hasBefore: rows.length < selected.length || view.hasOlder, hasAfter: request.before !== null };
-        }
-        maxEntry = Number(view.entries[0]!.id) - 1;
+      // Descending: the latest rows, or those before `before`, reading earlier windows until the page is full.
+      const before = request.before;
+      const collected: TranscriptRow[] = [];
+      let older = false;
+      let maxEntry = before === null ? null : before === 0 ? -1 : entryOf(before - 1);
+      for (let visited = 0; visited < windows && maxEntry !== -1; visited++) {
+        const view = await windowEnding(conversationId, maxEntry, highWater);
+        if (!view.entries.length) { older = false; break; }
+        const projection = await project(conversationId, view, openers, running);
+        collected.unshift(...own(projection, view, request.executionId).filter(([, value]) => before === null || value.ordinal < before).map(([id, value]) => row(projection, id, value)));
+        older = view.older;
+        if (collected.length >= enough || !view.older) break;
+        maxEntry = view.first - 1;
       }
-      return { ...envelope, rows: [], hasBefore: maxEntry !== -1, hasAfter: request.before !== null };
+      const fitted = fit([...collected].reverse()).reverse();
+      return { ...envelope, rows: fitted, hasBefore: fitted.length < collected.length || older, hasAfter: before !== null && entryOf(before - 1) < highWater };
     },
     async content(conversationId: ConversationId, raw: TranscriptContentRequest): Promise<TranscriptContentPage> {
       const request = transcriptContentRequestSchema.parse(raw);
-      if (request.generation !== `pi-transcript-v1:${conversationId}`) throw new Error('Transcript generation changed');
+      if (request.generation !== `${GENERATION}:${conversationId}`) throw new Error('Transcript generation changed');
       const newest = await newestEntry(storage, conversationId);
-      const found = newest ? await locate(conversationId, Number(newest.id), request.rowId) : undefined;
-      const value = found?.projection.rows.get(request.rowId);
-      if (!value) throw new Error('Transcript row not found');
+      if (!newest) throw new Error('Transcript row not found');
+      const { value } = await find(conversationId, request.rowId, request.ordinal, await openersOf(conversationId), false, Number(newest.id));
       const text = JSON.stringify(withImageUrls(value.item, imageUrl));
       if (request.offset > text.length) throw new Error('Transcript content offset is out of range');
       const end = Math.min(text.length, request.offset + TRANSCRIPT_CONTENT_CHARACTERS);

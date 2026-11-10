@@ -168,35 +168,20 @@ it('retains usable rows after a failed refresh and permits an empty transcript o
   expect(history.error).toBeNull();
 });
 
-it('refreshes the history the reader sees by position and keeps appended activity available without jumping to it', async () => {
+it('refreshes the visible history anchor and keeps appended activity available without jumping to it', async () => {
   const original = controlledPage(page([row(10), row(20), row(30)], { total: 3 }));
-  const updated = controlledPage(page([row(10), row(20, 'Updated old row'), row(30)], { revision: 1, hasAfter: true, total: 5 }));
+  const updated = controlledPage(page([row(10), row(20, 'Updated old row')], { revision: 1, hasAfter: true, total: 5 }));
   const { source, requests } = sourceFor('running:workspace-a:session-a', original, updated);
   await act(() => root.render(<Probe source={source} />));
   await act(() => original.finish());
   history.setViewport('row-20', 'row-30', false);
   await act(() => root.render(<Probe source={{ ...source, revision: 1 }} />));
-  expect(requests[1]).toEqual({ generation: 'generation-a', before: 31, after: null, around: null });
+  expect(requests[1]).toEqual({ generation: 'generation-a', around: 'row-20', aroundOrdinal: 20, before: null, after: null });
   await act(() => updated.finish());
   expect(history.rows.map(({ id }) => id)).toEqual(['row-10', 'row-20', 'row-30']);
   expect(container.textContent).toContain('Updated old row');
   expect(history.hasAfter).toBe(true);
   expect(history.total).toBe(5);
-});
-
-it('keeps each visible row once when a refresh returns the same positions under new IDs', async () => {
-  const original = controlledPage(page([row(10), row(20), row(30)], { total: 3 }));
-  // A long turn read through another window: the tool row keeps its ID, the turn's rows come back renamed.
-  const renamed = controlledPage(page([row(10), { ...row(20), id: 'renamed-20' }, { ...row(30, 'Renamed reply'), id: 'renamed-30' }], { revision: 1, total: 3 }));
-  const { source } = sourceFor('running:workspace-a:session-a', original, renamed);
-  await act(() => root.render(<Probe source={source} />));
-  await act(() => original.finish());
-  history.setViewport('row-20', 'row-30', false);
-  await act(() => root.render(<Probe source={{ ...source, revision: 1 }} />));
-  await act(() => renamed.finish());
-  expect(history.rows.map(({ id, ordinal }) => `${ordinal}:${id}`)).toEqual(['10:row-10', '20:renamed-20', '30:renamed-30']);
-  expect(container.textContent).toBe('Message 10|Message 20|Renamed reply');
-  expect(history.error).toBeNull();
 });
 
 it('refreshes an offscreen tool when it becomes visible after source updates have stopped', async () => {
@@ -219,12 +204,12 @@ it('refreshes an offscreen tool when it becomes visible after source updates hav
   await act(() => tail.finish());
   expect(history.rows.find(({ id }) => id === 'row-1')?.item).toMatchObject({ status: 'running' });
   // No further metadata invalidation: entering the stale cached row must be
-  // enough to discover the final tool state through a bounded read by position.
+  // enough to discover the final tool state through a bounded around read.
   await act(() => {
     history.setViewport('row-1', 'row-2', false);
     history.setViewport('row-1', 'row-2', false);
   });
-  expect(requests[2]).toEqual({ generation: 'generation-a', before: 3, after: null, around: null });
+  expect(requests[2]).toEqual({ generation: 'generation-a', before: null, after: null, around: 'row-1', aroundOrdinal: 1 });
   expect(signals[2]?.aborted).toBe(false);
   await act(() => older.finish());
   expect(history.rows.find(({ id }) => id === 'row-1')?.item).toMatchObject({ status: 'done' });
@@ -243,7 +228,7 @@ it('keeps a newly visible reading anchor when an already requested latest page a
   history.setViewport('row-10', 'row-20', false);
   await act(() => distant.finish());
   expect(history.rows.map(({ ordinal }) => ordinal)).toEqual([10, 20]);
-  expect(requests[2]?.before).toBe(21);
+  expect(requests[2]).toMatchObject({ around: 'row-10', aroundOrdinal: 10 });
   await act(() => visible.finish());
   expect(container.textContent).toBe('Message 10|Updated visible row');
   expect(history.hasAfter).toBe(true);

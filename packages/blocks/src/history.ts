@@ -67,6 +67,9 @@ export const transcriptPageRequestSchema = z.object({
   before: position.nullable().default(null),
   after: position.nullable().default(null),
   around: z.string().min(1).nullable().default(null),
+  /** The `around` row's ordinal, when the reader has it: the server reads that row's window at once instead of
+   * searching for the ID. */
+  aroundOrdinal: position.optional(),
   executionId: z.string().min(1).nullable().optional(),
 }).refine((request) => Number(request.before !== null) + Number(request.after !== null) + Number(request.around !== null) <= 1,
   'Only one transcript page selector is allowed');
@@ -85,6 +88,8 @@ export type TranscriptPage = z.infer<typeof transcriptPageSchema>;
 export const transcriptContentRequestSchema = z.object({
   generation: z.string().min(1),
   rowId: z.string().min(1),
+  /** The row's ordinal, when the reader has it: the server reads that row's window at once. */
+  ordinal: position.optional(),
   offset: position,
 });
 export type TranscriptContentRequest = z.infer<typeof transcriptContentRequestSchema>;

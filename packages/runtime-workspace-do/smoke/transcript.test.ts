@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { Harness, MemoryStorage, ToolTask, createRegistry, defineExtension, defineTool, type Conversation } from '@earendil-works/pi-durable';
+import { Harness, MemoryStorage, ToolTask, createRegistry, defineExtension, defineTool, type Conversation, type EntryDraft, type Tx } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Type, createModels, type AssistantMessage } from '@earendil-works/pi-ai';
 import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
@@ -17,10 +17,16 @@ async function fixture(run: (harness: Harness, storage: MemoryStorage, root: Con
   const harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, context);
   try { await run(harness, storage, await harness.root(context)); } finally { await harness.close(context); }
 }
+/** A person's input as pi places it: its user entry, and the placed submission that makes it open a turn. */
+async function input(tx: Tx, conversation: Conversation, model: EntryDraft['model']) {
+  const entry = await tx.appendEntry(conversation.id, { kind: 'pi.user', model });
+  await tx.createSubmission({ conversationId: conversation.id, type: 'input', status: 'placed', entry: entry.id });
+  return entry;
+}
 /** One user turn that calls `calls` tools, each answered by its own result entry. */
 async function turn(root: Conversation, index: number, calls: number) {
   await root.commit(async tx => {
-    await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: `prompt ${index}`, timestamp: index }] });
+    await input(tx, root, [{ role: 'user', content: `prompt ${index}`, timestamp: index }]);
     for (let call = 0; call < calls; call++) {
       const id = `call-${index}-${call}`;
       await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'toolCall', id, name: 'read', arguments: { path: `file-${call}` } }], index)] });
@@ -49,9 +55,10 @@ test('transcript streams read bounded ordinal ranges of a fork-aware Pi view wit
   });
 });
 
-test('transcript pages project bounded turn-aligned windows that page back losslessly', async () => {
+test('transcript pages page back losslessly through a long turn, a row has one ID in every window, and no page reads far', async () => {
   await fixture(async (_harness, storage, root) => {
-    for (let index = 0; index < 12; index++) await turn(root, index, index === 6 ? 70 : 2);
+    // Turn 6 makes 300 calls: about 600 entries, longer than any one window of the reader.
+    for (let index = 0; index < 12; index++) await turn(root, index, index === 6 ? 300 : 2);
     let scanned = 0;
     const scan = storage.scanEntries.bind(storage);
     storage.scanEntries = async (query, limit, cursor, ctx) => { const page = await scan(query, limit, cursor, ctx); scanned += page.items.length; return page; };
@@ -61,19 +68,24 @@ test('transcript pages project bounded turn-aligned windows that page back lossl
     expect(scanned).toBeLessThan(600);
     const generation = page.generation;
     const rows: TranscriptRow[] = [...page.rows];
+    let widest = 0;
     for (let pages = 0; page.hasBefore; pages++) {
-      expect(pages).toBeLessThan(20);
+      expect(pages).toBeLessThan(30);
       expect(page.rows.length).toBeGreaterThan(0);
+      scanned = 0;
       page = await reader.page(root.id, { ...request, generation, before: page.rows[0]!.ordinal });
+      widest = Math.max(widest, scanned);
       expect(page.rows.at(-1)!.ordinal).toBeLessThan(rows[0]!.ordinal);
       rows.unshift(...page.rows);
     }
+    // A page inside the long turn reads a few small windows, never back to the turn's start or forward to its end.
+    expect(widest).toBeLessThan(200);
     expect(new Set(rows.map(row => row.id)).size).toBe(rows.length);
     const users = rows.filter(row => row.item.type === 'message' && row.item.role === 'user');
     expect(users.map(row => row.item.type === 'message' ? row.item.text : '')).toEqual(Array.from({ length: 12 }, (_value, index) => `prompt ${index}`));
-    // Every call completed, including calls on pages cut inside the 70-call turn; turn identity never splits.
+    // Every call completed, including calls on pages cut inside the long turn; turn identity never splits.
     const tools = rows.filter(row => row.item.type === 'tool-call');
-    expect(tools).toHaveLength(92);
+    expect(tools).toHaveLength(322);
     expect(tools.every(row => row.item.type === 'tool-call' && row.item.status === 'done')).toBe(true);
     expect(new Set(rows.map(row => row.turnId)).size).toBe(12);
     expect(rows.every(row => row.turnStatus === 'done')).toBe(true);
@@ -85,6 +97,13 @@ test('transcript pages project bounded turn-aligned windows that page back lossl
     const after = await reader.page(root.id, { ...request, generation, after: around.rows.at(-1)!.ordinal });
     expect(after.rows[0]!.ordinal).toBeGreaterThan(around.rows.at(-1)!.ordinal);
     expect(rows.findIndex(row => row.id === after.rows[0]!.id)).toBe(rows.findIndex(row => row.id === around.rows.at(-1)!.id) + 1);
+    // Every row of the long turn is found again by its ID, at its ordinal or from its ID alone, under that same ID.
+    const long = rows.filter(row => row.turnId === users[6]!.turnId);
+    for (const row of long.filter((_row, index) => index % 7 === 0)) {
+      expect((await reader.page(root.id, { ...request, generation, around: row.id, aroundOrdinal: row.ordinal })).rows[0]!.id).toBe(row.id);
+      expect((await reader.page(root.id, { ...request, generation, around: row.id })).rows[0]!.id).toBe(row.id);
+      expect(JSON.parse((await reader.content(root.id, { generation, rowId: row.id, ordinal: row.ordinal, offset: 0 })).text)).toMatchObject({ id: row.id });
+    }
   });
 });
 
@@ -109,7 +128,7 @@ test('the project agent\'s workspace board shows as a notice inside the person\'
   await fixture(async (_harness, storage, root) => {
     const board = 'Workspace board, 2026-11-08 21:57:04 UTC (1 workspace):\n- Billing export (billing) · code · working · since 21:50';
     await root.commit(async tx => {
-      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'What is waiting on me?', timestamp: 1 }] });
+      await input(tx, root, [{ role: 'user', content: 'What is waiting on me?', timestamp: 1 }]);
       await tx.appendEntry(root.id, { kind: 'gitspace.workspace-board', data: {}, model: [{ role: 'user', content: board, timestamp: 2 }] });
       await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Billing export is working.' }], 3)] });
     }, context);
@@ -117,6 +136,25 @@ test('the project agent\'s workspace board shows as a notice inside the person\'
     expect(rows.map(row => row.item.type === 'message' ? `${row.item.role}: ${row.item.text}` : row.item.type === 'interruption' ? `${row.item.title}: ${row.item.detail}` : row.item.type))
       .toEqual(['user: What is waiting on me?', 'Workspace board: Workspace board, 2026-11-08 21:57:04 UTC (1 workspace)', 'assistant: Billing export is working.']);
     expect(new Set(rows.map(row => row.turnId)).size).toBe(1);
+  });
+});
+
+test('a retained rule\'s instruction and a rewind report land inside the running turn as notices; only an input opens a turn', async () => {
+  await fixture(async (_harness, storage, root) => {
+    await root.commit(async tx => {
+      await input(tx, root, [{ role: 'user', content: 'Rename the bucket.', timestamp: 1 }]);
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Renaming.' }], 2)] });
+      // Appended by the runtime mid-run, with no submission: pi.user (a rule's instruction) and a rewind's report.
+      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'Never touch the prod bucket.', timestamp: 3 }] });
+      await tx.appendEntry(root.id, { kind: 'gitspace.rewind', model: [{ role: 'user', content: 'Rewound to the checkpoint.', timestamp: 4 }] });
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Renamed the staging bucket.' }], 5)] });
+      await input(tx, root, [{ role: 'user', content: 'Thanks.', timestamp: 6 }]);
+    }, context);
+    const { rows } = await createTranscriptReader(storage, none).page(root.id, { generation: null, before: null, after: null, around: null });
+    expect(rows.map(row => row.item.type === 'message' ? `${row.item.role}: ${row.item.text}` : row.item.type === 'interruption' ? `${row.item.title}: ${row.item.detail}` : row.item.type))
+      .toEqual(['user: Rename the bucket.', 'assistant: Renaming.', 'Instruction: Never touch the prod bucket.', 'Context rewound: Rewound to the checkpoint.', 'assistant: Renamed the staging bucket.', 'user: Thanks.']);
+    expect(rows.map(row => row.turnId)).toEqual([...Array<string>(5).fill(rows[0]!.turnId), rows[5]!.turnId]);
+    expect(rows[5]!.turnId).not.toBe(rows[0]!.turnId);
   });
 });
 
@@ -131,7 +169,7 @@ test('workspace turn reports show as compact rows, never as the user\'s messages
     const wake = report('start:b', 'failed', 'Model request failed', 'Workspace FEAT-33 failed: Model request failed');
     await root.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.workspace', data: wake }), context);
     await root.commit(async tx => {
-      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: formatConversationEvents([{ kind: 'workspace', source: 'FEAT-33', text: wake.text }]), timestamp: 3 }] });
+      await input(tx, root, [{ role: 'user', content: formatConversationEvents([{ kind: 'workspace', source: 'FEAT-33', text: wake.text }]), timestamp: 3 }]);
       await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Retrying FEAT-33.' }], 3)] });
     }, context);
     const { rows } = await createTranscriptReader(storage, none).page(root.id, { generation: null, before: null, after: null, around: null });
@@ -147,7 +185,7 @@ test('stored images show by the URL the workspace resolves, in rows and in full 
   await fixture(async (_harness, storage, root) => {
     const stored = `gs-image:v1:ws-1:6:1x1:${'a'.repeat(64)}`;
     await root.commit(async tx => {
-      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', mimeType: 'image/png', data: stored }, { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' }], timestamp: 1 }] });
+      await input(tx, root, [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', mimeType: 'image/png', data: stored }, { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' }], timestamp: 1 }]);
       await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'toolCall', id: 'shot', name: 'read', arguments: { path: 'shot.png' } }], 2)] });
       await tx.appendEntry(root.id, { kind: 'pi.tool-result', model: [{ role: 'toolResult', toolCallId: 'shot', toolName: 'read', content: [{ type: 'image', mimeType: 'image/webp', data: stored }], isError: false, timestamp: 3 }] });
     }, context);
@@ -181,7 +219,7 @@ test('a call shows when it started executing while it runs, and once finished sp
     const root = await harness.root(context, { agent: { model: { provider: 'openai', modelId: 'fixture' }, tools: [wait] } });
     const before = Date.now();
     await root.commit(async tx => {
-      await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'wait for it', timestamp: before }] });
+      await input(tx, root, [{ role: 'user', content: 'wait for it', timestamp: before }]);
       const call = await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'toolCall', id: 'slow', name: 'wait', arguments: {} }], before)] });
       await tx.createTask(ToolTask, { kind: 'model', assistant: call.id, callId: 'slow' }, { conversationId: root.id, ownership: { kind: 'conversation' } });
     }, context);
