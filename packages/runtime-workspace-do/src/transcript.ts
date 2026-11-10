@@ -97,6 +97,9 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
     if (entry.kind === WORKSPACE_BOARD) return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: WORKSPACE_BOARD, display: true, title: 'Workspace board', content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === WORKSPACE_REPORT_ENTRY) return { ordinal: base + index, kind: 'message_end', payload: { message: workspaceReportMessage(entry), entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: { entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
+    // A failed model attempt (pi retries it, or the turn ends with its error) shows as one notice: its partial reply was
+    // never answered and its tool calls never ran, so they would otherwise show as running for good.
+    if (source.role === 'assistant' && source.stopReason === 'error') return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title: 'Model request failed', content: source.errorMessage ?? 'The model request ended with an error' }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     let message = source;
     if (source.role === 'toolResult' && source.details && typeof source.details === 'object' && 'executorResultReference' in source.details) {
       const reference = source.details.executorResultReference;

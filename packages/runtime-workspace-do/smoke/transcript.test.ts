@@ -158,6 +158,20 @@ test('a retained rule\'s instruction and a rewind report land inside the running
   });
 });
 
+test('a failed model attempt shows as one notice, not as its partial reply with calls that never ran', async () => {
+  await fixture(async (_harness, storage, root) => {
+    await root.commit(async tx => {
+      await input(tx, root, [{ role: 'user', content: 'Write the concept page.', timestamp: 1 }]);
+      const failed: AssistantMessage = { ...assistant([{ type: 'thinking', thinking: 'Planning the page.' }, { type: 'toolCall', id: 'write-1', name: 'write', arguments: { path: 'concept.html' } }], 2), stopReason: 'error', errorMessage: 'Network connection lost.' };
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [failed] });
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: 'Wrote the concept page.' }], 3)] });
+    }, context);
+    const { rows } = await createTranscriptReader(storage, none).page(root.id, { generation: null, before: null, after: null, around: null });
+    expect(rows.map(row => row.item.type === 'message' ? `${row.item.role}: ${row.item.text}` : row.item.type === 'interruption' ? `${row.item.title}: ${row.item.detail}` : row.item.type))
+      .toEqual(['user: Write the concept page.', 'Model request failed: Network connection lost.', 'assistant: Wrote the concept page.']);
+  });
+});
+
 test('workspace turn reports show as compact rows, never as the user\'s messages or as event notices', async () => {
   await fixture(async (_harness, storage, root) => {
     await turn(root, 0, 0);
