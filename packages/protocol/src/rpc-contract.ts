@@ -1073,6 +1073,34 @@ export const storageIncidentsResumeContract = gitspaceRpc
   .output(wire.object({ resumed: wire.boolean }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** Pauses an object now (its storage refuses all work until resumed) and lists it as quarantined. Requires account
+ * administration. */
+export const storageIncidentsPauseContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ objectId: wire.string, reason: wire.string }))
+  .output(wire.object({ quarantined: wire.boolean }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+/** What one object stores, read without running its code, paused or not: each table's row count, largest first, and
+ * the newest rows of the largest tables with every value cut short. */
+export const StorageInspectionCodec = wire.object({
+  objectId: wire.string,
+  className: wire.string,
+  name: wire.nullable(wire.string),
+  databaseBytes: wire.number,
+  quarantined: wire.boolean,
+  reason: wire.nullable(wire.string),
+  tables: wire.array(wire.object({ name: wire.string, rows: wire.number })),
+  newest: wire.array(wire.object({ table: wire.string, rows: wire.array(wire.record(wire.string)) })),
+});
+export type StorageInspectionView = InputOf<typeof StorageInspectionCodec>;
+/** Reads one object's storage for analysis (`StorageInspectionCodec`). Requires account administration. */
+export const storageIncidentsInspectContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ objectId: wire.string }))
+  .output(StorageInspectionCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
 
 /** The tenant's GitHub App, its installations and its latest webhook deliveries. */
 export const githubStateContract = gitspaceRpc
@@ -2523,7 +2551,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     cancelRun: cancelWorkspaceEnvironmentRunContract,
     runLog: getWorkspaceEnvironmentRunLogContract,
   },
-  storageIncidents: { list: storageIncidentsListContract, resume: storageIncidentsResumeContract },
+  storageIncidents: { list: storageIncidentsListContract, resume: storageIncidentsResumeContract, pause: storageIncidentsPauseContract, inspect: storageIncidentsInspectContract },
   github: {
     state: githubStateContract,
     app: { start: githubAppStartContract, rotateKey: githubAppRotateKeyContract },

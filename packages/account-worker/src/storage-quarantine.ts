@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import { installDurableObjectBreaker, type StorageBreaker, type StorageBreakerStatus } from '@gitspace/protocol/storage-breaker';
 import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
-import { storageIncidentsListContract, storageIncidentsResumeContract } from '@gitspace/protocol/rpc-contract';
+import { storageIncidentsInspectContract, storageIncidentsListContract, storageIncidentsPauseContract, storageIncidentsResumeContract, type StorageInspectionView } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 
@@ -21,26 +21,80 @@ export type StorageIncidentReport = z.infer<typeof StorageIncidentReportSchema>;
 export const StorageIncidentSchema = StorageIncidentReportSchema.extend({ resolvedAt: z.string().nullable().default(null) });
 export type StorageIncident = z.infer<typeof StorageIncidentSchema>;
 
+/** Tables an inspection shows the newest rows of (the largest), and how many rows of each; values are cut to `INSPECT_VALUE_CHARACTERS`. */
+const INSPECT_TABLES = 8;
+const INSPECT_ROWS = 20;
+const INSPECT_VALUE_CHARACTERS = 300;
+
+/** A stored value as inspection text: long text cut short, binary as its size. */
+function inspectValue(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (value instanceof ArrayBuffer) return `<${value.byteLength} bytes>`;
+  const text = String(value);
+  return text.length > INSPECT_VALUE_CHARACTERS ? `${text.slice(0, INSPECT_VALUE_CHARACTERS)}… (${text.length} characters)` : text;
+}
+
 /** Every Durable Object class of the account. The storage breaker is installed before the class touches its storage;
  * the object can be inspected, quarantined and resumed by its id. */
 export abstract class BudgetedDurableObject extends DurableObject<Env> {
   readonly #breaker: StorageBreaker;
+  readonly #identity: { objectId: string; className: string; name: string | null };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const object = { objectId: ctx.id.toString(), className: new.target.name, name: ctx.id.name ?? null };
+    this.#identity = object;
     this.#breaker = installDurableObjectBreaker(ctx, {
       onTrip: status => {
         console.error(JSON.stringify({ event: 'storage_quarantined', ...object, ...status }));
-        ctx.waitUntil(env.ACCOUNT_STATE.getByName('account').recordStorageIncident({ ...object, kind: 'quarantine', reason: status.reason ?? '', at: status.since ?? new Date().toISOString() })
-          .catch((error: unknown) => console.error(JSON.stringify({ event: 'storage_incident_unrecorded', ...object, error: error instanceof Error ? error.message : String(error) }))));
+        this.#recordQuarantine(status);
       },
     });
+  }
+
+  #recordQuarantine(status: StorageBreakerStatus): void {
+    const object = this.#identity;
+    this.ctx.waitUntil(this.env.ACCOUNT_STATE.getByName('account').recordStorageIncident({ ...object, kind: 'quarantine', reason: status.reason ?? '', at: status.since ?? new Date().toISOString() })
+      .catch((error: unknown) => console.error(JSON.stringify({ event: 'storage_incident_unrecorded', ...object, error: error instanceof Error ? error.message : String(error) }))));
   }
 
   storageBreakerStatus(): StorageBreakerStatus { return this.#breaker.status(); }
   quarantineStorage(reason: string): StorageBreakerStatus { return this.#breaker.quarantine(reason); }
   resumeStorage(): StorageBreakerStatus { return this.#breaker.resume(); }
+
+  /** Pauses this object and lists it on the account's Monitoring page: the object's own decision, or an operator's. */
+  pauseStorage(reason: string): StorageBreakerStatus {
+    const already = this.#breaker.status().quarantined;
+    const status = this.#breaker.quarantine(reason);
+    if (!already) {
+      console.error(JSON.stringify({ event: 'storage_paused', ...this.#identity, reason }));
+      this.#recordQuarantine(status);
+    }
+    return status;
+  }
+
+  /** A few synchronous reads or writes a paused object still needs (an archive's own rows). */
+  protected unguardedStorage<T>(work: () => T): T { return this.#breaker.unguarded(work); }
+
+  /** What this object stores, read even while it is paused and without running any of its own code: each table's row
+   * count (largest first), and the newest rows of the largest tables with every value cut short. */
+  inspectStorage(): StorageInspectionView {
+    return this.#breaker.unguarded(() => {
+      const sql = this.ctx.storage.sql;
+      const quoted = (name: string) => `"${name.replaceAll('"', '""')}"`;
+      const names = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'").toArray().map(row => row.name);
+      const tables = names.map(name => ({ name, rows: sql.exec<{ count: number }>(`SELECT COUNT(*) AS count FROM ${quoted(name)}`).one().count })).sort((left, right) => right.rows - left.rows);
+      const newest = tables.slice(0, INSPECT_TABLES).filter(table => table.rows > 0).map(table => {
+        // A table without a rowid keeps no insertion order: its first rows stand in for its newest.
+        let rows: Record<string, SqlStorageValue>[];
+        try { rows = sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${quoted(table.name)} ORDER BY rowid DESC LIMIT ${INSPECT_ROWS}`).toArray(); }
+        catch { rows = sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${quoted(table.name)} LIMIT ${INSPECT_ROWS}`).toArray(); }
+        return { table: table.name, rows: rows.map(row => Object.fromEntries(Object.entries(row).map(([column, value]) => [column, inspectValue(value)]))) };
+      });
+      const status = this.#breaker.status();
+      return { ...this.#identity, databaseBytes: sql.databaseSize, quarantined: status.quarantined, reason: status.reason, tables, newest };
+    });
+  }
 }
 
 /** The stub of the object `objectId` names, in whichever of the account's namespaces issued it. */
@@ -100,7 +154,7 @@ export async function platformStorageControl(request: Request, env: Env): Promis
   }
 }
 
-/** The account's storage incidents, and resuming a quarantined object (account administration). */
+/** The account's storage incidents, and pausing, inspecting and resuming an object (account administration). */
 export function storageIncidentProcedures(env: Env, requireAdministration: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const account = env.ACCOUNT_STATE.getByName('account');
@@ -117,5 +171,21 @@ export function storageIncidentProcedures(env: Env, requireAdministration: () =>
       return ok({ resumed });
     } catch (error) { return err(errors.OperationFailed({ operation: 'resume storage', message: error instanceof Error ? error.message : String(error) })); }
   });
-  return { list, resume };
+  const pause = server.implement(storageIncidentsPauseContract).handler(async ({ input, errors }) => {
+    try {
+      await requireAdministration();
+      const object = budgetedObject(env, input.objectId);
+      if (!object) throw new Error('No Durable Object of this account has that id');
+      return ok({ quarantined: (await object.pauseStorage(input.reason)).quarantined });
+    } catch (error) { return err(errors.OperationFailed({ operation: 'pause storage', message: error instanceof Error ? error.message : String(error) })); }
+  });
+  const inspect = server.implement(storageIncidentsInspectContract).handler(async ({ input, errors }) => {
+    try {
+      await requireAdministration();
+      const object = budgetedObject(env, input.objectId);
+      if (!object) throw new Error('No Durable Object of this account has that id');
+      return ok(await object.inspectStorage());
+    } catch (error) { return err(errors.OperationFailed({ operation: 'inspect storage', message: error instanceof Error ? error.message : String(error) })); }
+  });
+  return { list, resume, pause, inspect };
 }

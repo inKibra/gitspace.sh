@@ -112,6 +112,8 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'mcp.composio.disconnect': 'cloud',
   'storageIncidents.list': 'cloud',
   'storageIncidents.resume': 'cloud',
+  'storageIncidents.pause': 'cloud',
+  'storageIncidents.inspect': 'cloud',
   'github.state': 'cloud',
   'github.app.start': 'cloud',
   'github.app.rotateKey': 'cloud',

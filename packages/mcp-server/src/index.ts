@@ -40,7 +40,7 @@ const excluded = (path: string) => path.startsWith('providers.login.') || [
   'inspector.guide.setApproval', 'inspector.requirement.setAcceptance', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
   'github.request.cancel', 'github.request.record', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
   'github.person.set',
-  'storageIncidents.list', 'storageIncidents.resume',
+  'storageIncidents.list', 'storageIncidents.resume', 'storageIncidents.pause', 'storageIncidents.inspect',
 ].includes(path);
 const agentSessionCommands = [
   'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'persist', 'handoff', 'resume', 'stop',

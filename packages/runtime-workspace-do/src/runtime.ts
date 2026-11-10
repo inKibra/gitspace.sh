@@ -25,7 +25,7 @@ import { CodeSearchIndex, type CodeSearchSource } from './cloud-search-index.js'
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
 import { cutForAgent, type GitLfsConfirmedObject, type GitLfsStore, type TextSource, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
-import { transcriptResponse, type RuntimeTranscriptFormat, type TranscriptImageUrl, type WithdrawnNotices } from './transcript.js';
+import { transcriptResponse, type RuntimeTranscriptFormat, type TranscriptImageUrl } from './transcript.js';
 import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
 import { createRequestLoad, estimateMemory } from './memory-estimate.js';
 import { createStorageReads, type StorageReads } from './storage-reads.js';
@@ -164,30 +164,6 @@ function turnItem(message: ModelMessage): RuntimeTurnItem[] {
   }
   return [{ role: 'assistant', text: cut(parts.join('\n')) }];
 }
-/** One-time: a sync failure was announced on every retry while each error carried a fresh reference, about 250 notices
- * in a few hours per workspace, all in the agent's context. They are withdrawn from the chat and the model's context. */
-async function withdrawSyncFailureNotices(storage: SqliteStorage, harness: Harness, root: Conversation, withdrawn: WithdrawnNotices, sql: SqlStorage): Promise<void> {
-  sql.exec('CREATE TABLE IF NOT EXISTS runtime_one_time_steps(name TEXT PRIMARY KEY)');
-  if (sql.exec("SELECT 1 FROM runtime_one_time_steps WHERE name='withdraw-sync-failure-notices'").toArray().length) return;
-  const notices: EntryRecord[] = [];
-  let cursor: Cursor | undefined;
-  do {
-    const page = await storage.scanEntries({ conversationId: root.id }, 128, cursor, BACKGROUND_CONTEXT);
-    for (const entry of page.items) {
-      const message = entry.kind === 'gitspace.machine-notice' ? entry.model?.[0] : undefined;
-      // Stored content is a string or text blocks, depending on the storage.
-      const text = message?.role !== 'user' ? '' : typeof message.content === 'string' ? message.content : message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
-      if (/^Sync with .+ failed: /u.test(text)) notices.push(entry);
-    }
-    cursor = page.next;
-  } while (cursor);
-  if (notices.length) {
-    await harness.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.notices-withdrawn', edits: notices.map(entry => ({ target: entry.id, action: 'omit' })) }), BACKGROUND_CONTEXT);
-    withdrawn.add(notices.map(entry => String(entry.id)));
-  }
-  sql.exec("INSERT INTO runtime_one_time_steps(name) VALUES('withdraw-sync-failure-notices')");
-  console.info(JSON.stringify({ event: 'sync_failure_notices_withdrawn', conversationId: String(root.id), count: notices.length }));
-}
 /**
  * How long work in progress (a model request, a merge, a machine command) may go without an event to the object. Pending
  * fetches, RPCs and timers keep a Durable Object in memory for up to 15 minutes each; this alarm covers longer ones,
@@ -244,8 +220,6 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   } });
   const { harness } = runtime;
   const withdrawn = createWithdrawnNotices(options.storage.sql);
-  opening.update('withdrawing sync failure notices');
-  await withdrawSyncFailureNotices(storage, harness, runtime.root, withdrawn, options.storage.sql);
   const attachments = new AttachmentStore(options.storage, { ...options.attachments, dispatch: input => { heartbeat(); return options.attachments.dispatch(input); } });
   // Sync merges and cloud writes build snapshots in memory: each is marked while it runs.
   const code: Pick<WorkspaceRuntimeOptions['code'], 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> = {

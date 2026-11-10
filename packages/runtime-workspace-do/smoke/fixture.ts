@@ -221,18 +221,6 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         }
         return Response.json({ conversationId: String(root.id), ids: ids.map(String), pivot: String(pivot), branches });
       }
-      if (url.pathname === '/sync-notices-seed') {
-        // Notices as the flood left them, in a runtime from before their withdrawal ran: more than a snapshot window of
-        // them after the last other entry.
-        const root = await runtime.harness.root(BACKGROUND_CONTEXT);
-        await root.commit(async tx => {
-          for (const text of ['Machine Darktop went offline.', ...Array.from({ length: 300 }, (_, index) => `Sync with Darktop failed: internal error; reference = ${index}`)]) {
-            await tx.appendEntry(root.id, { kind: 'gitspace.machine-notice', data: { source: 'Machine' }, model: [{ role: 'user', content: text, timestamp: Date.now() }] });
-          }
-        }, BACKGROUND_CONTEXT);
-        this.ctx.storage.sql.exec("DELETE FROM runtime_one_time_steps WHERE name='withdraw-sync-failure-notices'");
-        return Response.json({ conversationId: String(root.id) });
-      }
       if (url.pathname === '/transcript') return runtime.transcript();
       return Response.json(await runtime.snapshot());
     } catch (error) { return Response.json({ error: String(error) }, { status: 500 }); }

@@ -46,6 +46,11 @@ export interface StorageBreaker {
   quarantine(reason: string): StorageBreakerStatus;
   /** Lifts a quarantine and starts a fresh window. */
   resume(): StorageBreakerStatus;
+  /**
+   * Runs `work` with a quarantine set aside: an operator's read of a paused object, or the few rows an archive writes.
+   * Synchronous only, so no other event of the object can run inside it; its writes still count.
+   */
+  unguarded<T>(work: () => T): T;
 }
 
 interface BreakerCursor { readonly rowsWritten: number; toArray(): unknown[] }
@@ -132,8 +137,9 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
       })();
     }, 0);
   };
+  let bypassing = false;
   // A write statement has run in full when `exec` returns, so its cursor's `rowsWritten` is final.
-  const guard = () => { if (held && !options.exempt?.()) throw new StorageQuarantinedError(held.reason, held.since); };
+  const guard = () => { if (held && !bypassing && !options.exempt?.()) throw new StorageQuarantinedError(held.reason, held.since); };
   const count = (rows: number) => {
     if (rows <= 0) return;
     const minute = Math.floor(now() / MINUTE_MS);
@@ -203,6 +209,14 @@ export function installStorageBreaker(storage: BreakerStorage, options: StorageB
       writeFlag();
       if (alarm !== null) void rawSetAlarm(Math.max(alarm, now())).catch(() => {});
       return status();
+    },
+    unguarded(work) {
+      bypassing = true;
+      try {
+        const result = work();
+        if (result instanceof Promise) throw new TypeError('An unguarded storage section must be synchronous');
+        return result;
+      } finally { bypassing = false; }
     },
   };
 }

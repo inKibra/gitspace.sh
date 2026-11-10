@@ -45,6 +45,7 @@ import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type
 import { forwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
+import { createRuntimeStarts, RuntimeStartWaiting, START_SETTLE_MS, type RuntimeStarts } from './runtime-starts.js';
 import { WORKER_VERSION } from './tenant-releases.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
@@ -80,6 +81,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   private readonly environment: SpaceEnvironmentStore;
   private directory: DirectoryPublisher;
   private runtime: Promise<WorkspaceRuntime> | undefined;
+  private readonly starts: RuntimeStarts;
   /** Loaded before any request; set once the space has cloud runtime state (see `hasCloudRuntime`). */
   private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
   private cloudRuntimePublished = false;
@@ -94,6 +96,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     this.changes = new LiveChanges(ctx.storage, this.liveNotify);
     this.environment = new SpaceEnvironmentStore(ctx.storage, this.changes);
     this.createTables();
+    this.starts = createRuntimeStarts(ctx.storage.sql);
     this.directory = new DirectoryPublisher(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       const state = this.get();
@@ -163,14 +166,18 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     if (wake && wake.timestamp <= Date.now()) {
       await this.scheduleAlarm('runtime', null);
       const identity = await this.ctx.storage.get<Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>>('runtime.identity');
-      if (identity) await (await this.getRuntime(identity)).wake();
+      // A start waiting out an earlier failure has moved this wake to its retry time.
+      if (identity) await this.getRuntime(identity).then(runtime => runtime.wake(), (error: unknown) => { if (!(error instanceof RuntimeStartWaiting)) throw error; });
     }
   }
-
 
   /** Attachment records read without starting the runtime, so legacy spaces never gain runtime state. */
   private async storedAttachments(): Promise<RuntimeAttachment[]> {
     if (await this.ctx.storage.get('runtime.identity') === undefined) return [];
+    return this.attachmentRows();
+  }
+
+  private attachmentRows(): RuntimeAttachment[] {
     if (!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_attachments'").toArray().length) return [];
     return this.ctx.storage.sql.exec<{ record: string }>('SELECT record FROM runtime_attachments').toArray().map(row => RuntimeAttachmentSchema.parse(JSON.parse(row.record)));
   }
@@ -289,7 +296,16 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
    * the runtime opens is applied with the others. */
   private async applyPresence(): Promise<void> {
     const identity = await this.ctx.storage.get('runtime.identity');
-    const runtime = identity === undefined ? null : await this.getRuntime(identity);
+    let runtime: WorkspaceRuntime | null = null;
+    if (identity !== undefined) {
+      try { runtime = await this.getRuntime(identity); }
+      catch (error) {
+        if (!(error instanceof RuntimeStartWaiting)) throw error;
+        // A start waiting out an earlier failure keeps the reports for when it may start: the relay does not repeat them.
+        await this.scheduleAlarm('presence', error.retryAt);
+        return;
+      }
+    }
     const pending = PendingPresenceSchema.catch({}).parse(await this.ctx.storage.get('presence.pending') ?? {});
     await this.ctx.storage.delete('presence.pending');
     await this.scheduleAlarm('presence', null);
@@ -381,20 +397,43 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     } else await this.ctx.storage.put('runtime.identity', identity);
     this.publishCloudRuntime(identity);
     if (!this.runtime) {
-      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed.
-      const openStartedAt = Date.now();
-      const runtime = this.openRuntime(identity);
+      const startedAt = Date.now();
+      const gate = this.starts.gate(startedAt);
+      if (gate.status === 'pause') {
+        // A resume starts the count over.
+        this.starts.settled();
+        const reason = `The workspace failed to start ${gate.failures} times in a row (last: ${gate.lastFailure})`;
+        this.pauseStorage(reason);
+        throw new Error(`${reason}; it is paused until an account administrator resumes it`);
+      }
+      if (gate.status === 'waiting') {
+        void this.scheduleAlarm('runtime', gate.retryAt);
+        throw new RuntimeStartWaiting(gate.failures, gate.lastFailure, gate.retryAt);
+      }
+      this.starts.begin(startedAt);
+      // The start is on disk before the open's heavy work, so a reset during it is counted by the next instance.
+      const runtime = this.ctx.storage.sync().then(() => this.openRuntime(identity));
       this.runtime = runtime;
-      // Diagnostic for idle wakes (2026-10-22): remove once diagnosed. A failed open is reported by the chain below.
       runtime.then(() => {
-        const durationMs = Date.now() - openStartedAt;
+        // Diagnostic for idle wakes (2026-10-22): remove once diagnosed.
+        const durationMs = Date.now() - startedAt;
         if (durationMs >= 5_000) console.warn(JSON.stringify({ event: 'runtime_cold_open', workspaceId: identity.workspaceId, durationMs }));
-      }, () => {});
+        setTimeout(() => {
+          if (this.runtime !== runtime) return;
+          // Paused meanwhile: the start stays counted as running, and the next instance counts it as one failure.
+          try { this.starts.settled(); } catch { /* storage is paused */ }
+        }, START_SETTLE_MS);
+      }, (error: unknown) => {
+        try { this.starts.failed(error instanceof Error ? error.message : String(error)); } catch { /* storage is paused */ }
+      });
       // A storage error ends the session for good: forget it so the next call opens a fresh one from what was committed.
       runtime.then(opened => opened.harness.closed.then(end => {
         if (end.reason !== 'failed' || this.runtime !== runtime) return;
         this.runtime = undefined;
-        console.error(JSON.stringify({ event: 'runtime_session_failed', workspaceId: identity.workspaceId, error: end.error instanceof Error ? end.error.message : String(end.error) }));
+        const error = end.error instanceof Error ? end.error.message : String(end.error);
+        console.error(JSON.stringify({ event: 'runtime_session_failed', workspaceId: identity.workspaceId, error }));
+        // Counted here with its cause: the next open of this instance would otherwise find the start still running.
+        try { this.starts.failed(`session failed: ${error}`); } catch { /* storage is paused */ }
       }), () => { if (this.runtime === runtime) this.runtime = undefined; });
     }
     return this.runtime;
@@ -423,8 +462,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const restartWhenIdle = async (): Promise<boolean> => {
       if (await this.running()) return false;
       console.info(JSON.stringify({ event: 'release_restart', workspaceId: this.get()?.spaceId ?? this.cloudRuntime?.workspaceId ?? null, from: WORKER_VERSION, to: restart.version, waitedMs: Date.now() - restart.since }));
+      // A restart on purpose is no failed start. The abort waits for the write to be stored: one right after it loses it.
+      try { this.starts.ended(); } catch { /* storage is paused */ }
       // After this call has answered, so the release sees the outcome.
-      setTimeout(() => this.ctx.abort(`Restarting on release ${restart.version}`), 0);
+      setTimeout(() => { void this.ctx.storage.sync().catch(() => {}).then(() => this.ctx.abort(`Restarting on release ${restart.version}`)); }, 0);
       return true;
     };
     if (await restartWhenIdle()) return 'restarting';
@@ -700,30 +741,50 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
    * creation the project finished after this workspace last looked starts from that definition. */
   private async worktree(definition: CloudWorkspaceDefinition): Promise<WorkspaceMetadata> {
     await this.metadata(RuntimeIdentitySchema.parse({ projectId: definition.projectId, workspaceId: definition.id }));
+    return this.adoptWorktree(definition);
+  }
+
+  private adoptWorktree(definition: CloudWorkspaceDefinition): WorkspaceMetadata {
     const current = this.adopt(definition);
     if (current.kind !== 'worktree') throw new Error('The project base workspace is archived, restored and deleted only with its project');
     if (current.projectLifecycle === 'archived' || current.projectLifecycle === 'deleting') throw new Error(`Cannot write workspace for ${current.projectLifecycle} project`);
     return current;
   }
 
-  /** The project records a lifecycle this workspace has already applied to itself. */
-  private async recordLifecycle(applied: WorkspaceMetadata, lifecycle: WorkspaceLifecycle): Promise<CloudWorkspaceDefinition> {
+  /** The project records a lifecycle this workspace has already applied to itself; `write` runs the local adoption. */
+  private async recordLifecycle(applied: WorkspaceMetadata, lifecycle: WorkspaceLifecycle, write: <T>(work: () => T) => T = work => work()): Promise<CloudWorkspaceDefinition> {
     const result = await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${applied.projectId}`).commitWorkspaceLifecycle(applied.workspaceId, lifecycle);
     // An RPC result holds its call's resources until disposed: this keeps a plain copy and frees them now, so the
     // caller never receives a result it would have to dispose.
     const recorded = structuredClone(result);
     result[Symbol.dispose]();
-    this.adopt(recorded);
+    write(() => this.adopt(recorded));
     return recorded;
+  }
+
+  /** This workspace's own record of its archive. */
+  private writeArchived(current: WorkspaceMetadata, name: string): WorkspaceMetadata {
+    if (current.lifecycle !== 'active' && current.lifecycle !== 'failed' && current.lifecycle !== 'archived') throw new Error(`Workspace ${name} is ${current.lifecycle}; retry or delete its creation instead`);
+    return writeWorkspaceMetadata(this.ctx.storage, { ...current, lifecycle: 'archived' });
   }
 
   /** Archives this workspace: it turns read-only and stops its runtime before the project records it archived. */
   async archiveWorkspace(definition: CloudWorkspaceDefinition): Promise<CloudWorkspaceDefinition> {
-    const current = await this.worktree(definition);
-    if (current.lifecycle !== 'active' && current.lifecycle !== 'failed' && current.lifecycle !== 'archived') throw new Error(`Workspace ${definition.name} is ${current.lifecycle}; retry or delete its creation instead`);
-    const archived = writeWorkspaceMetadata(this.ctx.storage, { ...current, lifecycle: 'archived' });
+    if (this.storageBreakerStatus().quarantined) return this.archivePaused(definition);
+    const archived = this.writeArchived(await this.worktree(definition), definition.name);
     await this.stopRuntime({ projectId: archived.projectId, workspaceId: archived.workspaceId });
     return this.recordLifecycle(archived, 'archived');
+  }
+
+  /** A paused workspace is archived without starting it, its stored data kept: it records the archive in its own
+   * rows and detaches its machines, which stop syncing it, before the project records it archived. */
+  private async archivePaused(definition: CloudWorkspaceDefinition): Promise<CloudWorkspaceDefinition> {
+    const { archived, machineIds } = this.unguardedStorage(() => ({
+      archived: this.writeArchived(this.adoptWorktree(definition), definition.name),
+      machineIds: this.attachmentRows().filter(attachment => attachment.state !== 'detached').map(attachment => attachment.machineId),
+    }));
+    await this.releaseMachines(archived.workspaceId, machineIds);
+    return this.recordLifecycle(archived, 'archived', work => this.unguardedStorage(work));
   }
 
   /** Returns this archived workspace to active use before the project records it; its runtime reopens on first use. */

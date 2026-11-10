@@ -15,6 +15,7 @@ import { readCloudSpaceView } from '../src/cloud-project.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { GitHubAppDO } from '../src/github-app.js';
 import { UserProjectIndexDO } from '../src/project-authority.js';
+import { FleetCatalogDO } from '../src/fleet-catalog.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PlanDoc, QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 import { network } from './network.js';
@@ -83,13 +84,13 @@ function coveredRepositories() {
   return vi.spyOn(GitHubAppDO.prototype, 'repositoryToken').mockImplementation(async (repository, access) => ({ token: `ghs_${access}_${repository}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }));
 }
 
-async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write']) {
+async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write'], kind: 'browser' | 'client' = 'browser') {
   const userId = env.ACCOUNT_ID;
   const vault = env.CREDENTIALS.getByName(userId);
   await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(71)) });
   await env.USER_SETTINGS.getByName(userId).setHandle('bootstrap', 0, env.TENANT_ID);
   const browserKey = crypto.getRandomValues(new Uint8Array(32));
-  const invite = signDeviceInvite({ version: 1, userId, inviteId: crypto.randomUUID(), kind: 'browser', label: null, scope: { kind: 'user' }, capabilities, canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'https://api.gitspace.sh' }, tenantRootPrivateKey);
+  const invite = signDeviceInvite({ version: 1, userId, inviteId: crypto.randomUUID(), kind, label: null, scope: { kind: 'user' }, capabilities, canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'https://api.gitspace.sh' }, tenantRootPrivateKey);
   const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(browserKey)), label: 'Browser', boundAt: Date.now(), signingPrivateKey: browserKey });
   const enrolled = await vault.enrollDevice({ invite, binding });
   if (enrolled.status !== 'ok') throw new Error(enrolled.error.message);
@@ -102,9 +103,9 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
 
 type CallResult<T> = { status: 'ok'; value: T } | { status: 'error'; error: unknown };
 
-async function cloudProject(name: string, repositoryUrl: string | null = null) {
+async function cloudProject(name: string, repositoryUrl: string | null = null, capabilities?: DeviceCapability[]) {
   const artifacts = cloudArtifacts();
-  const { userId, client } = await account();
+  const { userId, client } = await account(capabilities);
   const created = await client.project.create({ name, baseBranch: repositoryUrl ? 'main' : null, repositoryUrl });
   if (created.status === 'error') throw created.error;
   const project = created.value.project;
@@ -419,6 +420,111 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(artifacts.deleted).toEqual([`workspace-${workspaceId}`]);
     expect(await space.hasCloudRuntime()).toBe(false);
     expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
+  });
+
+  it('a workspace whose starts keep failing refuses callers until a growing delay passes, then pauses itself', async () => {
+    const { userId, client, project, ready } = await cloudProject('Failed starts');
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Crashing', branch: 'crashing', sourceKind: 'base', sourceRef: '' }));
+    const identity = { projectId: project.id, workspaceId: created.workspace.id };
+    // A fresh stub per call: one bound to a reset instance stays broken.
+    const space = () => env.SPACE_AUTHORITY.getByName(`${userId}:${created.workspace.id}`);
+    const failure = (work: () => Promise<unknown>) => work().then(() => 'opened', (error: unknown) => error instanceof Error ? error.message : String(error));
+    // The instance is reset while its runtime opens: the start never settles, and the step it reached stays marked.
+    const reset = async (failures: number, startedAt: number) => {
+      await runInDurableObject(space(), (_instance, state) => {
+        state.storage.sql.exec("INSERT OR REPLACE INTO runtime_running(id,step,detail,started_at) VALUES('open','runtime open','rebuilding the snapshot',?)", startedAt);
+        state.storage.sql.exec('UPDATE runtime_starts SET failures=?, running_since=?, last_started_at=?', failures, startedAt, startedAt);
+      });
+      await failure(() => runInDurableObject(space(), (_instance, state) => { state.abort('reset'); }));
+    };
+    await space().runtimeSnapshot(identity);
+    const firstAt = Date.now();
+    await reset(0, firstAt);
+    expect(await failure(() => space().runtimeSnapshot(identity))).toBe(`This workspace failed to start 1 time in a row (last: reset while runtime open: rebuilding the snapshot); it tries again at ${new Date(firstAt + 5_000).toISOString()}`);
+    // Its wake moves to the retry: an alarm due meanwhile neither opens it nor fails.
+    await runInDurableObject(space(), async (_instance, state) => {
+      expect(state.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").one().timestamp).toBe(firstAt + 5_000);
+      state.storage.sql.exec("UPDATE runtime_alarms SET timestamp=? WHERE owner='runtime'", Date.now() - 1);
+    });
+    expect(await runDurableObjectAlarm(space())).toBe(true);
+    await runInDurableObject(space(), (_instance, state) => {
+      expect(state.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").one().timestamp).toBe(firstAt + 5_000);
+      // The delay has passed.
+      state.storage.sql.exec('UPDATE runtime_starts SET last_started_at=?', Date.now() - 5_001);
+    });
+    expect(await failure(() => space().runtimeSnapshot(identity))).toBe('opened');
+
+    const secondAt = Date.now();
+    await reset(1, secondAt);
+    expect(await failure(() => space().runtimeSnapshot(identity))).toContain(`failed to start 2 times in a row (last: reset while runtime open: rebuilding the snapshot); it tries again at ${new Date(secondAt + 30_000).toISOString()}`);
+    // From the fifth failure on, each retry waits an hour.
+    await reset(6, secondAt);
+    expect(await failure(() => space().runtimeSnapshot(identity))).toContain(`failed to start 7 times in a row (last: reset while runtime open: rebuilding the snapshot); it tries again at ${new Date(secondAt + 3_600_000).toISOString()}`);
+
+    await reset(14, secondAt);
+    expect(await failure(() => space().runtimeSnapshot(identity))).toBe('The workspace failed to start 15 times in a row (last: reset while runtime open: rebuilding the snapshot); it is paused until an account administrator resumes it');
+    expect(await space().storageBreakerStatus()).toMatchObject({ quarantined: true });
+    expect(await env.ACCOUNT_STATE.getByName('account').listStorageIncidents()).toContainEqual(expect.objectContaining({ objectId: space().id.toString(), kind: 'quarantine', reason: expect.stringContaining('failed to start 15 times') }));
+    // A resume starts the count over: the next start runs at once.
+    expect(await space().resumeStorage()).toMatchObject({ quarantined: false });
+    expect(await failure(() => space().runtimeSnapshot(identity))).toBe('opened');
+  }, 30_000);
+
+  it('an administrator pauses a workspace, reads its storage without starting it, archives it with its data kept, and resumes it', async () => {
+    const { userId, client, project, authority, ready, run } = await cloudProject('Paused', null, ['rpc.read', 'rpc.write', 'account.admin']);
+    const created = await ready(client.workspace.create({ projectId: project.id, name: 'Runaway', branch: 'runaway', sourceKind: 'base', sourceRef: '' }));
+    const workspaceId = created.workspace.id;
+    const identity = { projectId: project.id, workspaceId };
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`);
+    const objectId = space.id.toString();
+    await space.runtimeSnapshot(identity);
+    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'cache-a', machineId: 'syncing-machine', generation: 1, role: 'cache', state: 'ready',
+      checkout: { kind: 'shared', branch: 'runaway' }, capabilities: [], updatedAt: new Date().toISOString(), online: true });
+    await runInDurableObject(space, (_instance, state) => {
+      state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');
+      // What a runaway leaves: one table far larger than the others.
+      state.storage.sql.exec('CREATE TABLE flood(i INTEGER, text TEXT)');
+      state.storage.sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000) INSERT INTO flood SELECT i, '${'x'.repeat(1000)}' FROM n`);
+    });
+    const detached = vi.spyOn(FleetCatalogDO.prototype, 'detachMachineWorkspace');
+
+    expect(await client.storageIncidents.pause({ objectId, reason: 'Paused by an administrator' })).toMatchObject({ status: 'ok', value: { quarantined: true } });
+    expect(await client.storageIncidents.list({})).toMatchObject({ status: 'ok', value: expect.arrayContaining([expect.objectContaining({ objectId, kind: 'quarantine', reason: 'Paused by an administrator', resolvedAt: null })]) });
+    // Caught on the call itself: `expect(...).rejects` leaves the RPC promise's rejection reported as unhandled.
+    expect(String(await space.runtimeSnapshot(identity).catch((error: unknown) => error))).toMatch(/quarantined/u);
+
+    const inspected = await client.storageIncidents.inspect({ objectId });
+    if (inspected.status === 'error') throw inspected.error;
+    expect(inspected.value).toMatchObject({ objectId, className: 'SpaceAuthorityDO', quarantined: true, reason: 'Paused by an administrator' });
+    expect(inspected.value.tables).toContainEqual({ name: 'runtime_attachments', rows: 1 });
+    expect(inspected.value.tables.map(table => table.rows)).toEqual(inspected.value.tables.map(table => table.rows).sort((left, right) => right - left));
+    // The largest table's newest 20 rows, newest first, each value cut short.
+    expect(inspected.value.newest[0]?.table).toBe('flood');
+    expect(inspected.value.newest[0]?.rows.map(row => row.i)).toEqual(Array.from({ length: 20 }, (_, index) => String(1000 - index)));
+    expect(inspected.value.newest[0]?.rows[0]?.text).toBe(`${'x'.repeat(300)}… (1000 characters)`);
+
+    expect(await run(client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null }))).toMatchObject({ kind: 'workspace.archive', state: 'succeeded' });
+    expect((await authority.listWorkspaces()).find(workspace => workspace.id === workspaceId)).toMatchObject({ lifecycle: 'archived' });
+    // The machine syncing it is let go; the workspace stays paused, its rows kept.
+    expect(detached).toHaveBeenCalledWith('syncing-machine', workspaceId);
+    expect(await space.storageBreakerStatus()).toMatchObject({ quarantined: true });
+    const kept = await client.storageIncidents.inspect({ objectId });
+    if (kept.status === 'error') throw kept.error;
+    expect(kept.value.tables).toContainEqual({ name: 'runtime_attachments', rows: 1 });
+
+    expect(await client.storageIncidents.resume({ objectId })).toMatchObject({ status: 'ok', value: { resumed: true } });
+    expect(await space.storageBreakerStatus()).toMatchObject({ quarantined: false });
+    await runInDurableObject(space, (_instance, state) => {
+      expect(state.storage.sql.exec<{ record: string }>('SELECT record FROM workspace_metadata').one().record).toContain('"lifecycle":"archived"');
+    });
+  });
+
+  it('refuses to pause or inspect an object for a device without account administration', async () => {
+    const { client } = await account(['rpc.read', 'rpc.write'], 'client');
+    const objectId = env.SPACE_AUTHORITY.getByName(crypto.randomUUID()).id.toString();
+    expect(await client.storageIncidents.pause({ objectId, reason: 'no' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('account.admin') } } });
+    expect(await client.storageIncidents.inspect({ objectId })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('account.admin') } } });
+    expect(await env.SPACE_AUTHORITY.get(env.SPACE_AUTHORITY.idFromString(objectId)).storageBreakerStatus()).toMatchObject({ quarantined: false });
   });
 
   it('deletes a workspace in any state: an active one and a creation that never finished', async () => {

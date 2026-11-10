@@ -213,7 +213,7 @@ describe('signed checkout origin access', () => {
 
   it('answers a checkout of a paused workspace with its own refusal, which a machine does not retry', async () => {
     const f = await originFixture('git@github.com:owner/repo.git');
-    await f.authority.quarantineStorage('Runaway writes');
+    await f.authority.pauseStorage('Runaway writes');
     const refused = await f.origin();
     expect({ status: refused.status, body: await refused.json() }).toMatchObject({ status: 423, body: { status: 'error', error: { code: 'WORKSPACE_PAUSED', message: expect.stringContaining('Runaway writes') } } });
   });

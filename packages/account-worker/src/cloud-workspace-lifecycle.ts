@@ -393,15 +393,17 @@ export async function archiveCloudWorkspace(env: Env, userId: string, input: { p
   const definition = await authority.getWorkspace(input.spaceId);
   if (!definition || definition.projectId !== input.projectId || definition.kind !== 'worktree' || definition.lifecycle === 'deleting') throw new CloudLifecycleTargetMissing('workspace', input.spaceId);
   if (definition.lifecycle !== 'active' && definition.lifecycle !== 'failed' && definition.lifecycle !== 'archived') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; retry or delete its creation instead`);
-  await requireReleasedPlacement(env, userId, definition.id, input.expectedGeneration, null);
+  // A paused workspace refuses every read, its placement too; it is archived without starting (`archivePaused`).
+  if (!(await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).storageBreakerStatus()).quarantined) await requireReleasedPlacement(env, userId, definition.id, input.expectedGeneration, null);
   return queueOperation(authority, { projectId: input.projectId, workspaceId: definition.id, kind: 'workspace.archive', steps: labelled(['Stop workspace runtime and archive workspace']), summary: definition.name });
 }
 
 async function runWorkspaceArchive({ env, userId, authority, operation }: QueuedRun): Promise<void> {
   const definition = await operationWorkspace(authority, operation);
   if (definition.lifecycle === 'archived') return;
-  await requireCloudPlacement(env, userId, definition.id);
-  await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).archiveWorkspace(definition);
+  const space = env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`);
+  if (!(await space.storageBreakerStatus()).quarantined) await requireCloudPlacement(env, userId, definition.id);
+  await space.archiveWorkspace(definition);
 }
 
 /** Queues returning an archived workspace to active use: the workspace object accepts writes again, then tells its
