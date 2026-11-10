@@ -73,6 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await act(() => root.unmount());
   container.remove();
   if (!animationDescriptor) Reflect.deleteProperty(Element.prototype, 'getAnimations');
@@ -100,6 +101,30 @@ it('finishes in-flight pages under repeated invalidation and publishes updated r
   expect(history.loading).toBe(false);
   expect(history.error).toBeNull();
   expect(signals).toHaveLength(2);
+});
+
+it('reloads for activity at most once a second with one final reload, while a reader’s retry loads at once', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const initial = controlledPage(page([row(10)]));
+  const first = controlledPage(page([row(10), row(20)], { revision: 1 }));
+  const retried = controlledPage(page([row(10), row(20)], { revision: 2 }));
+  const last = controlledPage(page([row(10), row(20), row(30)], { revision: 5 }));
+  const { source, requests } = sourceFor('running:workspace-a:session-a', initial, first, retried, last);
+  await act(() => root.render(<Probe source={source} />));
+  await act(() => initial.finish());
+  for (let revision = 1; revision <= 5; revision++) await act(() => root.render(<Probe source={{ ...source, revision }} />));
+  // The first change loads at once; the four after it wait for the interval.
+  expect(requests).toHaveLength(2);
+  await act(() => first.finish());
+  await act(() => history.refresh());
+  expect(requests).toHaveLength(3);
+  await act(() => retried.finish());
+  await act(() => vi.advanceTimersByTime(999));
+  expect(requests).toHaveLength(3);
+  await act(() => vi.advanceTimersByTime(1));
+  expect(requests).toHaveLength(4);
+  await act(() => last.finish());
+  expect(container.textContent).toBe('Message 10|Message 20|Message 30');
 });
 
 it('hides changed workspace/session sources immediately and ignores late completions even when cancellation is ignored', async () => {

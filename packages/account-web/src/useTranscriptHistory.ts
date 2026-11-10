@@ -44,10 +44,16 @@ export interface TranscriptHistory {
   executionPage(executionId: string, request: TranscriptPageRequest, signal: AbortSignal): Promise<TranscriptPage>;
 }
 
+/** The source's revision moves on every commit in the workspace (several a second while an agent writes); it reloads
+ * the transcript at most this often. What the reader asks for (older or newer rows, the latest, a retry) loads at once. */
+const ACTIVITY_RELOAD_MS = 1000;
+
 type Navigation = 'older' | 'newer' | 'latest' | { rowId: string };
 interface HistorySession {
   identity: { key: string | null };
   refresh(): void;
+  /** The source changed: reloads now, or once at the end of the current throttle interval. */
+  activity(): void;
   navigate(destination: Navigation): void;
   setViewport(firstId: string | null, lastId: string | null, following: boolean): void;
   content(rowId: string, offset: number, signal: AbortSignal): Promise<TranscriptContentPage>;
@@ -111,6 +117,8 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
     let navigation: TranscriptHistory['navigation'] = null;
     let viewportRefreshRequested = false;
     let lastViewportRefresh: { generation: string | null; revision: number; before: number } | null = null;
+    let activityPending = false;
+    let lastActivityLoad = Number.NEGATIVE_INFINITY;
 
     const load = async (request: TranscriptPageRequest, replace: boolean): Promise<void> => {
       const currentSource = sourceRef.current;
@@ -160,6 +168,22 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       const bottom = viewport.following ? undefined : cache.rows.find((row) => row.id === viewport.lastId) ?? cache.rows.find((row) => row.id === viewport.firstId) ?? cache.rows[0];
       void load({ generation: cache.generation, before: bottom ? bottom.ordinal + 1 : null, after: null, around: null }, false);
     };
+    const activity = (): void => {
+      if (activityPending) return;
+      const wait = lastActivityLoad + ACTIVITY_RELOAD_MS - Date.now();
+      if (wait <= 0) {
+        lastActivityLoad = Date.now();
+        invalidate();
+        return;
+      }
+      activityPending = true;
+      setTimeout(() => {
+        activityPending = false;
+        if (!active) return;
+        lastActivityLoad = Date.now();
+        invalidate();
+      }, wait);
+    };
     const refreshStaleViewport = (): void => {
       const first = cache.rows.findIndex((row) => row.id === viewport.firstId);
       const last = cache.rows.findIndex((row) => row.id === viewport.lastId);
@@ -207,6 +231,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
     const currentSession: HistorySession = {
       identity,
       refresh: invalidate,
+      activity,
       navigate,
       setViewport(firstId, lastId, following) {
         if (pendingNavigation === 'latest' || typeof pendingNavigation === 'object' && pendingNavigation !== null) return;
@@ -272,8 +297,8 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
   useEffect(() => {
     const previous = previousRevision.current;
     previousRevision.current = { identity, revision };
-    if (previous.identity === identity && !Object.is(previous.revision, revision)) refresh();
-  }, [identity, revision, refresh]);
+    if (previous.identity === identity && !Object.is(previous.revision, revision) && session.current?.identity === identity) session.current.activity();
+  }, [identity, revision]);
 
   // Hide a replaced source synchronously, before cleanup or late completions.
   const current = state.identity === identity ? state : { cache: EMPTY_TRANSCRIPT_CACHE, navigation: null, loading: source !== null, hasSnapshot: false, error: null };

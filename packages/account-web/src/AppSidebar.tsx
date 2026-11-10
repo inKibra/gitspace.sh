@@ -412,7 +412,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
       : [...[...PHASES].reverse().map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, items: shown.filter((item) => item.phase === phase) })), { key: 'unknown', label: 'Phase unknown', tone: undefined, items: shown.filter((item) => item.phase === null) }];
     return groups.filter((group) => group.items.length).map((group) => <Fragment key={group.key}>
       <li className="list-none"><GroupHeading tone={group.tone} count={group.items.length}>{group.label}</GroupHeading></li>
-      {group.items.map((item) => row(item, INSET.grouped, [], <>{caption(item)}{by === 'state' ? <PhaseTag phase={item.phase} /> : <span className="shrink-0">{STATE_LABEL[item.state]}</span>}{markers(item)}</>, false))}
+      {group.items.map((item) => row(item, INSET.grouped, [], <>{caption(item)}<PhaseTag phase={item.phase} />{markers(item)}</>, false))}
     </Fragment>);
   };
   return <SidebarMenuItem>

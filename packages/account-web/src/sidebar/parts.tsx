@@ -57,12 +57,12 @@ export function PrChips({ pulls, full = false }: { pulls: readonly LinkedPullReq
   </span>;
 }
 
-/** Four pips (plan, code, review, ship) filled up to the phase, then its name. */
-export function PhaseTag({ phase, label = true }: { phase: WorkspaceView['phase'] | null; label?: boolean }) {
+/** Four pips (plan, code, review, ship) filled up to the phase; the phase's name is its title and accessible name. */
+export function PhaseTag({ phase }: { phase: WorkspaceView['phase'] | null }) {
   const reached = phase === null ? -1 : PHASES.indexOf(phase);
-  return <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground" title={phase === null ? 'Phase unknown' : `Phase: ${PHASE_LABEL[phase]}`}>
-    <span className="inline-flex gap-[2px]" aria-hidden>{PHASES.map((step, index) => <span key={step} className="h-[5px] w-[3px] rounded-[1px]" style={{ background: index <= reached ? 'var(--foreground)' : 'color-mix(in oklab, var(--foreground) 18%, transparent)', opacity: index <= reached ? 0.55 : 1 }} />)}</span>
-    {label && phase !== null ? PHASE_LABEL[phase] : null}
+  const name = phase === null ? 'Phase unknown' : `Phase: ${PHASE_LABEL[phase]}`;
+  return <span role="img" aria-label={name} title={name} className="inline-flex shrink-0 gap-[2px]">
+    {PHASES.map((step, index) => <span key={step} className="h-[5px] w-[3px] rounded-[1px]" style={{ background: index <= reached ? 'var(--foreground)' : 'color-mix(in oklab, var(--foreground) 18%, transparent)', opacity: index <= reached ? 0.55 : 1 }} />)}
   </span>;
 }
 
