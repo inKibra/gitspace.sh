@@ -110,7 +110,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
     let pendingNavigation: Navigation | null = null;
     let navigation: TranscriptHistory['navigation'] = null;
     let viewportRefreshRequested = false;
-    let lastViewportRefresh: { generation: string | null; revision: number; anchor: string } | null = null;
+    let lastViewportRefresh: { generation: string | null; revision: number; before: number } | null = null;
 
     const load = async (request: TranscriptPageRequest, replace: boolean): Promise<void> => {
       const currentSource = sourceRef.current;
@@ -151,12 +151,14 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
         refreshStaleViewport();
       }
     };
+    // Reloads ask by position (`before` the bottom row the reader sees), never `around` a row ID: the server can give one
+    // row different IDs in different windows of a long turn, and a reload by an ID it no longer gives fails.
     const invalidate = (): void => {
       requested = true;
       if (controller) return;
       requested = false;
-      const anchor = viewport.firstId ?? cache.rows[0]?.id ?? null;
-      void load({ generation: cache.generation, before: null, after: null, around: viewport.following ? null : anchor }, false);
+      const bottom = viewport.following ? undefined : cache.rows.find((row) => row.id === viewport.lastId) ?? cache.rows.find((row) => row.id === viewport.firstId) ?? cache.rows[0];
+      void load({ generation: cache.generation, before: bottom ? bottom.ordinal + 1 : null, after: null, around: null }, false);
     };
     const refreshStaleViewport = (): void => {
       const first = cache.rows.findIndex((row) => row.id === viewport.firstId);
@@ -164,20 +166,18 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       if (first < 0 && last < 0) return;
       const start = first < 0 ? last : last < 0 ? first : Math.min(first, last);
       const end = Math.max(first, last);
-      for (let index = start; index <= end; index++) {
-        if (cache.rowRevisions[index]! >= cache.revision) continue;
-        const anchor = cache.rows[index]!.id;
-        // Repeated measurements must not duplicate a pending read or retry a
-        // failed read forever at the same source revision and visible anchor.
-        if (lastViewportRefresh?.generation === cache.generation && lastViewportRefresh.revision === cache.revision && lastViewportRefresh.anchor === anchor) return;
-        if (controller) {
-          viewportRefreshRequested = true;
-          return;
-        }
-        lastViewportRefresh = { generation: cache.generation, revision: cache.revision, anchor };
-        void load({ generation: cache.generation, before: null, after: null, around: anchor }, false);
+      const bottom = cache.rows[end];
+      if (!bottom || !cache.rowRevisions.slice(start, end + 1).some((revision) => revision < cache.revision)) return;
+      const before = bottom.ordinal + 1;
+      // Repeated measurements must not duplicate a pending read or retry a
+      // failed read forever at the same source revision and visible range.
+      if (lastViewportRefresh?.generation === cache.generation && lastViewportRefresh.revision === cache.revision && lastViewportRefresh.before === before) return;
+      if (controller) {
+        viewportRefreshRequested = true;
         return;
       }
+      lastViewportRefresh = { generation: cache.generation, revision: cache.revision, before };
+      void load({ generation: cache.generation, before, after: null, around: null }, false);
     };
     const navigate = (destination: Navigation): void => {
       const first = cache.rows[0];
