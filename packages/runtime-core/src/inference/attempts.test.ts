@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createAssistantMessageEventStream, InMemoryModelsStore, type Api, type AssistantMessage, type Context, type Model, type Provider, type StreamOptions, type TranscriptContext } from '@earendil-works/pi-ai';
+import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createRequestGate } from './request-gate';
 import { createVaultModels } from './index';
 import { attemptEvents, attemptEventStream, createAttemptRunner, restoreStandIns, type AttemptRunner } from './attempts';
@@ -92,4 +93,35 @@ it('gives a Bedrock request base64 stand-ins that become references again in its
   expect(btoa(atob(standIn))).toBe(standIn);
   expect(seen[0]!.standInRestored).toBe(JSON.stringify({ bytes: reference }));
   expect(restoreStandIns(JSON.stringify({ bytes: standIn }))).toBe(JSON.stringify({ bytes: standIn }));
+});
+
+it('streams a long tool call across the attempt boundary in bytes linear in its arguments, every delta still carrying the message so far', async () => {
+  const anthropic = builtinProviders().find(candidate => candidate.id === 'anthropic');
+  const model = anthropic?.getModels().find(candidate => candidate.id === 'claude-opus-5-5');
+  if (!anthropic || !model) throw new Error('Anthropic catalog missing');
+  // A 40 KB file written in 4,000 deltas, as a model writes a large mock in one call.
+  const piece = 'x'.repeat(10);
+  const events = [
+    { type: 'message_start', message: { id: 'm', type: 'message', role: 'assistant', model: model.id, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'write', input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"mock.html","content":"' } },
+    ...Array.from({ length: 4_000 }, () => ({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: piece } })),
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"}' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 4_000 } },
+    { type: 'message_stop' },
+  ];
+  globalThis.fetch = vi.fn(async () => new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } }));
+  const attempt = { method: 'streamSimple' as const, model, context: { messages: [{ role: 'user' as const, content: 'write it', timestamp: 1 }] }, options: {}, credential: { id: 'key', provider: 'anthropic', revision: 1, credential: { type: 'api_key' as const, key: 'sk-ant-api03-test' } }, settings: {}, fastMode: false, claude: { profileId: 'profile', sessionId: 'session' } };
+  let bytes = 0;
+  const counted = attemptEventStream(signal => createAttemptRunner({ providers: () => [anthropic] })(attempt, signal)).pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, controller) { bytes += chunk.byteLength; controller.enqueue(chunk); } }));
+  const received = [];
+  for await (const event of attemptEvents(counted)) received.push(event);
+  // Each delta resending the whole message so far made this 163 MB.
+  expect(bytes).toBeLessThan(2_000_000);
+  const deltas = received.filter(event => event.type === 'toolcall_delta');
+  expect(deltas).toHaveLength(4_002);
+  expect(deltas.every(event => event.type === 'toolcall_delta' && event.partial.content[0]?.type === 'toolCall')).toBe(true);
+  const done = received.find(event => event.type === 'done');
+  expect(done?.type === 'done' && done.message.content[0]).toMatchObject({ type: 'toolCall', name: 'write', arguments: { path: 'mock.html', content: piece.repeat(4_000) } });
 });

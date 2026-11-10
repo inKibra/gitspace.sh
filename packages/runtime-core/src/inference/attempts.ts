@@ -4,7 +4,7 @@
  * pi-ai and streams pi's events back (`docs/INFERENCE-WORKER-DESIGN.md`). Images in an attempt's context are stored
  * references; only a runner given `images` can send them, writing each image in as the request streams out.
  */
-import { createModels, InMemoryModelsStore, type Api, type AssistantMessageEvent, type AuthResult, type Context, type ImageContent, type Message, type Model, type Provider, type TextContent } from '@earendil-works/pi-ai';
+import { createModels, InMemoryModelsStore, type Api, type AssistantMessage, type AssistantMessageEvent, type AuthResult, type Context, type ImageContent, type Message, type Model, type Provider, type TextContent } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { z } from 'zod';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
@@ -175,15 +175,30 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
 }
 
 const encoder = new TextEncoder();
-/** An attempt's events as newline-delimited JSON, for an RPC answer. Cancelling the stream aborts the attempt. */
+/** How often a delta event carries `partial` across an attempt's stream: a live reply still updates four times a second. */
+const PARTIAL_EVERY_MS = 250;
+/** Delta events, whose `partial` (the whole message so far) only a live view reads. */
+const DELTAS: Readonly<Record<string, true>> = { text_delta: true, thinking_delta: true, toolcall_delta: true };
+/**
+ * An attempt's events as newline-delimited JSON, for an RPC answer. Cancelling the stream aborts the attempt. A delta
+ * event carries `partial` at most every `PARTIAL_EVERY_MS`, every other event always: sent with every delta, a long
+ * tool call's arguments crossed the stream once per delta, quadratic in their length (a 40 KB file written in 4,000
+ * deltas was 163 MB, and a larger one broke the stream: "Network connection lost"). `attemptEvents` gives a delta
+ * without one the last it received.
+ */
 export function attemptEventStream(run: (signal: AbortSignal) => AsyncIterable<AttemptEvent>): ReadableStream<Uint8Array> {
   const abort = new AbortController();
   const events = run(abort.signal)[Symbol.asyncIterator]();
+  let partialSentAt = Number.NEGATIVE_INFINITY;
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       const next = await events.next();
       if (next.done) return controller.close();
-      controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
+      const event = next.value;
+      const now = Date.now();
+      const thin = DELTAS[event.type] === true && now - partialSentAt < PARTIAL_EVERY_MS;
+      if (!thin && 'partial' in event) partialSentAt = now;
+      controller.enqueue(encoder.encode(`${JSON.stringify(thin ? { ...event, partial: undefined } : event)}\n`));
     },
     async cancel(reason) {
       abort.abort(reason instanceof Error ? reason : new Error('The attempt was cancelled'));
@@ -199,6 +214,7 @@ export async function* attemptEvents(stream: ReadableStream<Uint8Array>, signal?
   const cancel = () => { void reader.cancel(signal?.reason).catch(() => undefined); };
   signal?.addEventListener('abort', cancel, { once: true });
   let finished = false;
+  let partial: AssistantMessage | undefined;
   try {
     let buffer = '';
     for (;;) {
@@ -206,8 +222,12 @@ export async function* attemptEvents(stream: ReadableStream<Uint8Array>, signal?
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       for (let end = buffer.indexOf('\n'); end !== -1; end = buffer.indexOf('\n')) {
-        yield JSON.parse(buffer.slice(0, end));
+        const event: AttemptEvent = JSON.parse(buffer.slice(0, end));
         buffer = buffer.slice(end + 1);
+        // A delta the sender sent without `partial` (`attemptEventStream`) gets the last one received.
+        if ((event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') && partial) event.partial ??= partial;
+        if ('partial' in event) partial = event.partial;
+        yield event;
       }
     }
     finished = true;
