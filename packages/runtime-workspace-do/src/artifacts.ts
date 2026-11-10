@@ -538,30 +538,37 @@ export class ArtifactsCodeStore {
 
   async credentials(repository: string, scope: 'read' | 'write', ttlSeconds = 900) {
     if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600) throw new Error('Invalid repository token lifetime');
-    const repo = await this.binding.get(repositorySchema.parse(repository));
+    const repo = await this.open(repository);
     try {
       const [info, token] = await Promise.all([repo.info(), repo.createToken(scope, ttlSeconds)]);
       return { remote: info.remote, plaintext: token.plaintext, expiresAt: token.expiresAt };
     } finally { await disposeArtifactsRepository(repo); }
   }
 
+  /** A read's repository handle. Artifacts fails some lookups under load as it fails reads ("An internal error
+   * occurred."), so the lookup is retried like a read and a failure that stands names it. */
+  private open(repository: string): Promise<ArtifactsRepo> {
+    const name = repositorySchema.parse(repository);
+    return attemptRead('open', name, () => this.binding.get(name));
+  }
+
   async readFile(repository: string, commit: string, path: string): Promise<Blob | null> {
     commitSchema.parse(commit);
     validateSnapshotPath(path);
-    const repo = await this.binding.get(repositorySchema.parse(repository));
+    const repo = await this.open(repository);
     try { return await attemptRead('readFile', `${commit}:${path}`, async () => loadedBlob(await repo.readFile({ ref: commit, path }))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
   /** Raw Git blob bytes, including LFS pointers; never implies LFS payload hydration. */
   async readBlob(repository: string, oid: string): Promise<Blob | null> {
-    const repo = await this.binding.get(repositorySchema.parse(repository));
+    const repo = await this.open(repository);
     try { return await attemptRead('readBlob', oid, async () => loadedBlob(await repo.readBlob(commitSchema.parse(oid)))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
   async readCommit(repository: string, commit: string) {
-    const repo = await this.binding.get(repositorySchema.parse(repository));
+    const repo = await this.open(repository);
     try { return await attemptRead('readCommit', commit, () => repo.readCommit(commitSchema.parse(commit))); }
     finally { await disposeArtifactsRepository(repo); }
   }
@@ -572,21 +579,21 @@ export class ArtifactsCodeStore {
     if (/^[0-9a-f]{40}$/u.test(ref)) return (await this.readCommit(repository, ref))?.hash ?? null;
     const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
     if (ref !== 'HEAD' && !isSupportedBranchName(branch)) throw new Error('Unsupported committed source ref');
-    const repo = await this.binding.get(repositorySchema.parse(repository));
+    const repo = await this.open(repository);
     // Every repository credential request resolves the project's base branch: one Artifacts error must not fail a sync.
     try { return (await attemptRead('resolveRef', `${repository} ${ref}`, () => repo.log(ref === 'HEAD' ? { limit: 1 } : { ref: branch, limit: 1 })))[0]?.hash ?? null; }
     finally { await disposeArtifactsRepository(repo); }
   }
 
   async readTree(repository: string, tree: string) {
-    const repo = await this.binding.get(repositorySchema.parse(repository));
+    const repo = await this.open(repository);
     try { return await attemptRead('readTree', tree, () => repo.readTree(commitSchema.parse(tree))); }
     finally { await disposeArtifactsRepository(repo); }
   }
 
   async log(repository: string, commit: string, limit = 50) {
-    const repo = await this.binding.get(repositorySchema.parse(repository));
-    try { return await repo.log({ ref: commitSchema.parse(commit), limit }); }
+    const repo = await this.open(repository);
+    try { return await attemptRead('log', commit, () => repo.log({ ref: commitSchema.parse(commit), limit })); }
     finally { await disposeArtifactsRepository(repo); }
   }
 

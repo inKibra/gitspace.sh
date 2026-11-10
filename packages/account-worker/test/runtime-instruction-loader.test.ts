@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
-import { createRuntimeInstructionLoader } from '../src/runtime-instruction-loader.js';
+import { createRuntimeInstructionLoader, type InstructionsState } from '../src/runtime-instruction-loader.js';
 import { loadRuntimeRules } from '../src/runtime-instructions.js';
 
 function fixture() {
@@ -85,5 +85,68 @@ describe('committed project skills', () => {
     expect(await loader.read('skill://frontend')).toContain('Use the design system.');
     expect(await loader.read('skill://frontend/references/tokens.md')).toBe('Spacing tokens');
     await expect(loader.read('skill://escape')).rejects.toThrow('Skill not found');
+  });
+});
+
+describe('instructions each generation reads', () => {
+  function workspace() {
+    const code: ArtifactsCodeStore = Object.create(ArtifactsCodeStore.prototype);
+    const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
+    const state = { commit: 'commit-a', failing: false, reads: 0, agents: 'Use the design system.' };
+    vi.spyOn(code, 'resolveRef').mockImplementation(async () => {
+      if (state.failing) throw new Error('resolveRef workspace main: An internal error occurred.');
+      return state.commit;
+    });
+    vi.spyOn(code, 'readCommit').mockResolvedValue({ hash: 'commit', treeHash: 'root', message: '', author: identity, committer: identity, parents: [], authoredAt: 0, committedAt: 0 });
+    vi.spyOn(code, 'readTree').mockResolvedValue([]);
+    vi.spyOn(code, 'readFile').mockImplementation(async (_repository, _commit, path) => {
+      state.reads++;
+      return path === 'AGENTS.md' ? new Blob([state.agents]) : null;
+    });
+    const changes: InstructionsState[] = [];
+    let clock = 0;
+    const loader = createRuntimeInstructionLoader({ code, repository: 'workspace', ref: async () => 'refs/heads/main', onState: change => { changes.push(change); }, now: () => clock });
+    return { state, changes, loader, advance: (milliseconds: number) => { clock += milliseconds; } };
+  }
+
+  it('reads the files again only when the branch names another commit', async () => {
+    const f = workspace();
+    expect(await f.loader.loadInstructions()).toBe('Use the design system.');
+    const reads = f.state.reads;
+    await f.loader.loadInstructions();
+    expect(f.state.reads).toBe(reads);
+    f.state.commit = 'commit-b';
+    f.state.agents = 'Use the new design system.';
+    expect(await f.loader.loadInstructions()).toBe('Use the new design system.');
+    expect(f.state.reads).toBe(reads * 2);
+  });
+
+  it('keeps the last copy while the repository cannot be read, telling once when it starts and once when it ends', async () => {
+    const f = workspace();
+    await f.loader.loadInstructions();
+    f.state.failing = true;
+    for (let generation = 0; generation < 3; generation++) expect(await f.loader.loadInstructions()).toBe('Use the design system.');
+    expect(f.changes).toEqual([{ state: 'degraded', failure: 'resolveRef workspace main: An internal error occurred.', commit: 'commit-a', loadedAt: 0, notify: true }]);
+    f.advance(60_000);
+    f.state.failing = false;
+    await f.loader.loadInstructions();
+    expect(f.changes.at(-1)).toEqual({ state: 'recovered', failures: 3, degradedMs: 60_000, notify: true });
+    // A second incident within the hour is reported, but not told in the chat; one an hour later is.
+    f.state.failing = true;
+    await f.loader.loadInstructions();
+    f.state.failing = false;
+    await f.loader.loadInstructions();
+    expect(f.changes.slice(-2).map(change => [change.state, change.notify])).toEqual([['degraded', false], ['recovered', false]]);
+    f.advance(3_600_000);
+    f.state.failing = true;
+    await f.loader.loadInstructions();
+    expect(f.changes.at(-1)).toMatchObject({ state: 'degraded', notify: true });
+  });
+
+  it('fails the generation naming the step when no copy was loaded yet', async () => {
+    const f = workspace();
+    f.state.failing = true;
+    await expect(f.loader.loadInstructions()).rejects.toThrow('Loading instructions from the repository: resolveRef workspace main: An internal error occurred.');
+    expect(f.changes).toEqual([]);
   });
 });

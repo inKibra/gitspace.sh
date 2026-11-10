@@ -3,6 +3,14 @@ import { parse as parseYaml } from 'yaml';
 import { loadRuntimeRules } from './runtime-instructions.js';
 export type RuntimeInstructionLoader = { loadInstructions(): Promise<string>; read(uri: string): Promise<string> };
 
+/** A change of whether the instructions a generation gets are the repository's current ones. `notify` is true for at
+ * most one degraded change an hour, and for the recovery that ends it, so a flapping repository cannot fill the chat. */
+export type InstructionsState =
+  | { state: 'degraded'; failure: string; commit: string; loadedAt: number; notify: boolean }
+  | { state: 'recovered'; failures: number; degradedMs: number; notify: boolean };
+/** The least time between two degraded notices. */
+const DEGRADED_NOTICE_INTERVAL_MS = 3_600_000;
+
 /** `link` resolved against the repository directory `directory`, as a checkout resolves a relative symlink; null when it
  * is absolute or leaves the repository. */
 function resolveLink(directory: string, link: string): string | null {
@@ -16,7 +24,14 @@ function resolveLink(directory: string, link: string): string | null {
   return parts.length ? parts.join('/') : null;
 }
 
-export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeStore; repository: string; ref(): Promise<string | null> }): RuntimeInstructionLoader {
+/** Every generation's instructions come from here. The branch's commit is resolved each time; the files are read again
+ * only when it changed. A read that fails while an earlier copy exists keeps that copy (the instructions are degraded
+ * until a read succeeds), so one Artifacts error never fails a turn; without a copy the error names the step. */
+export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeStore; repository: string; ref(): Promise<string | null>; onState?(change: InstructionsState): void; now?(): number }): RuntimeInstructionLoader {
+  const now = options.now ?? Date.now;
+  let loaded: { commit: string; text: string; at: number } | null = null;
+  let degraded: { since: number; failures: number; noticed: boolean } | null = null;
+  let lastNoticeAt = -Infinity;
   async function snapshot() { const ref = await options.ref(); return ref ? options.code.resolveRef(options.repository, ref) : null; }
   async function file(commit: string, path: string) { const blob = await options.code.readFile(options.repository, commit, path); if (!blob) return null; if (blob.size > 262144) throw new Error(`Instruction exceeds 256 KiB: ${path}`); return blob.text(); }
   async function skills(commit: string) {
@@ -54,12 +69,33 @@ export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeSto
     }
     return result.sort((a, b) => a.path.localeCompare(b.path)).filter((item, index, all) => all.findIndex(other => other.name === item.name) === index);
   }
+  async function compose(commit: string): Promise<string> {
+    const instructions = await Promise.all(['AGENTS.md', '.agents/instructions.md', '.omp/instructions.md'].map(path => file(commit, path)));
+    const available = await skills(commit);
+    return [...instructions.filter((value): value is string => value !== null), available.length ? `Available project skills (read skill://NAME before using):\n${available.map(skill => `- ${skill.name}: ${skill.description}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
+  }
   return {
     async loadInstructions() {
-      const commit = await snapshot(); if (!commit) return '';
-      const instructions = await Promise.all(['AGENTS.md', '.agents/instructions.md', '.omp/instructions.md'].map(path => file(commit, path)));
-      const available = await skills(commit);
-      return [...instructions.filter((value): value is string => value !== null), available.length ? `Available project skills (read skill://NAME before using):\n${available.map(skill => `- ${skill.name}: ${skill.description}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
+      try {
+        const commit = await snapshot(); if (!commit) return '';
+        if (loaded?.commit !== commit) loaded = { commit, text: await compose(commit), at: now() };
+        if (degraded) {
+          options.onState?.({ state: 'recovered', failures: degraded.failures, degradedMs: now() - degraded.since, notify: degraded.noticed });
+          degraded = null;
+        }
+        return loaded.text;
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error);
+        if (!loaded) throw new Error(`Loading instructions from the repository: ${failure}`, { cause: error });
+        if (degraded) degraded.failures++;
+        else {
+          const notify = now() - lastNoticeAt >= DEGRADED_NOTICE_INTERVAL_MS;
+          if (notify) lastNoticeAt = now();
+          degraded = { since: now(), failures: 1, noticed: notify };
+          options.onState?.({ state: 'degraded', failure, commit: loaded.commit, loadedAt: loaded.at, notify });
+        }
+        return loaded.text;
+      }
     },
     async read(uri: string) {
       const match = /^(skill|rule):\/\/([A-Za-z0-9._-]+)(?:\/(.*))?$/u.exec(uri);

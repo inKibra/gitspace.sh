@@ -11,6 +11,8 @@ import { parseRuntimeSettings, type CloudProjectSummary } from '@gitspace/protoc
 import { matchAstPatterns } from './ast-match.js';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
+import { createLatestSender } from './latest-sender.js';
+import type { WorkspaceStatusSend } from './project-authority.js';
 import { createAccountGitLfsStore } from './git-lfs-store.js';
 import { importedProjectRepository, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readSourceCheckpoint, readWorkspaceMetadata, readWorkspaceReport, storeWorkspaceReport, storeWorkspaceStatus } from './workspace-metadata.js';
@@ -112,7 +114,15 @@ export async function createAccountWorkspaceRuntime(
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   const repository = artifactsWorkspaceRepository(identity.workspaceId);
   const ref = runtimeWorkspaceCodeRef(env, identity, () => metadata().branch);
-  const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref });
+  // Logged and told once per change of state: repeated failures while degraded only count up.
+  const instructionLoader = createRuntimeInstructionLoader({ code, repository, ref, onState(change) {
+    console.warn(JSON.stringify({ event: change.state === 'degraded' ? 'instructions_degraded' : 'instructions_recovered', workspaceId: identity.workspaceId, ...change }));
+    if (!change.notify || !runtime) return;
+    const text = change.state === 'degraded'
+      ? `This workspace's instructions could not be refreshed from its repository (${change.failure}). The agent uses the copy loaded at ${new Date(change.loadedAt).toISOString().slice(11, 16)} UTC until they can be read again.`
+      : 'This workspace\'s instructions are current again.';
+    waitUntil('instructions notice', runtime.notice(text, undefined, 'Repository').catch((error: unknown) => console.error('Instructions notice was not added', { workspaceId: identity.workspaceId, error })));
+  } });
   let runtime: WorkspaceRuntime | undefined;
   const documentMarkdown = createDocumentMarkdown(ctx.storage, env.AI);
   const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, documentMarkdown, images: { store: images.store, load: images.load }, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
@@ -123,9 +133,15 @@ export async function createAccountWorkspaceRuntime(
   const qa = createRuntimeQaServices(env, identity);
   const watch = projectWatchHooks(ctx.storage, identity, (report, onDone) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: identity.projectId }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, error }))));
   const automationTurns = automationTurnHooks(ctx.storage, identity, report => env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runTurnChanged(report), waitUntil);
-  // A send lost before this instance (cut off by a reset or a restart) left the object's own copy ahead of the account's:
-  // this instance's first publication is sent whatever its copy says.
-  let statusSent = false;
+  // The account's copy of this workspace's status: the sidebar's and the project agent's board. A send that fails stays
+  // owed (retried, and sent again by every publication until one arrives); before, a failed send left the account on the
+  // previous state, since this object's own copy already held the new one. The first publication of an instance is sent
+  // whatever its copy says: a send lost before it (cut off by a reset or a restart) left the account behind.
+  const status = createLatestSender<WorkspaceStatusSend>(payload => {
+    const sent = env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus(payload);
+    waitUntil('workspace status', sent.catch(() => {}));
+    return sent;
+  }, error => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error }));
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
@@ -148,16 +164,15 @@ export async function createAccountWorkspaceRuntime(
       await journalMessageDecisions(env, identity, current.kind === 'base' ? 'project' : current.phase ?? 'plan', sent);
     },
     published: (snapshot, report) => {
-      const status = report.summary;
-      // The account's row: the sidebar's status and the project agent's board (what it waits on, its main agent's latest
-      // message), sent when one of them changed. Sends run in the background and can arrive out of order (a turn's last
-      // message, then its end, a moment apart), so each carries the snapshot's cursor and the account keeps the newest.
+      const summary = report.summary;
+      // Sent when the status or what the board shows changed, or while an earlier send is still owed. Sends run in the
+      // background and can arrive out of order (a turn's last message, then its end, a moment apart), so each carries the
+      // snapshot's cursor and the account keeps the newest.
       const previous = readWorkspaceReport(ctx.storage);
       const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply || JSON.stringify(previous?.lastReplySource ?? null) !== JSON.stringify(report.lastReplySource);
-      const statusChanged = storeWorkspaceStatus(ctx.storage, status);
-      if (statusChanged || reportChanged || !statusSent) {
-        statusSent = true;
-        waitUntil('workspace status', env.USER_PROJECTS.getByName(env.ACCOUNT_ID).setWorkspaceStatus({ ...identity, status, waitingOn: report.waitingOn, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor }).catch((error: unknown) => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error })));
+      const statusChanged = storeWorkspaceStatus(ctx.storage, summary);
+      if (statusChanged || reportChanged || status.owed()) {
+        status.send({ ...identity, status: summary, waitingOn: report.waitingOn, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor });
       }
       storeWorkspaceReport(ctx.storage, report);
       watch.published(report);

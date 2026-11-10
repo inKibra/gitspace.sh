@@ -349,6 +349,39 @@ test('a branch read that Artifacts fails once is retried, and one that keeps fai
   } finally { jest.useRealTimers(); await f.close(); }
 });
 
+test('opening a repository, which Artifacts fails as it fails reads, is retried, and one that keeps failing says so', async () => {
+  const f = await fixture();
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected repository operation'); };
+  const head = { hash: f.previous.headCommit!, treeHash: f.previous.worktreeTree, message: 'head', author, committer: author, parents: [], authoredAt: 1, committedAt: 1 };
+  const repo: ArtifactsRepo = { ...f.repo, [Symbol.dispose]() {}, listTokens: unsupported, readBlob: unsupported, readFile: unsupported, fork: unsupported, log: async () => [head] };
+  let failures = 1;
+  const code = new ArtifactsCodeStore({
+    get: async () => {
+      if (failures-- > 0) throw new Error('An internal error occurred.');
+      return repo;
+    },
+    create: unsupported, import: unsupported, delete: unsupported, list: unsupported,
+  });
+  // Retry waits run on fake timers; each step lets the failed attempt settle before time moves on.
+  const elapse = async (milliseconds: number) => {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed += 50) {
+      for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+      jest.advanceTimersByTime(50);
+    }
+  };
+  jest.useFakeTimers();
+  try {
+    const resolved = code.resolveRef('fixture', 'refs/heads/main');
+    await elapse(300);
+    expect(await resolved).toBe(f.previous.headCommit);
+    failures = 10;
+    const failing = code.resolveRef('fixture', 'main').then(() => null, (error: unknown) => error);
+    await elapse(4_000);
+    const error = await failing;
+    expect(error instanceof Error ? error.message : error).toBe('open fixture: An internal error occurred.');
+  } finally { jest.useRealTimers(); await f.close(); }
+});
+
 test('committed fork initialization publishes a fetchable canonical ref without rewinding later checkpoints', async () => {
   const f = await fixture();
   const cache = await mkdtemp(join(tmpdir(), 'initial-checkpoint-cache-'));

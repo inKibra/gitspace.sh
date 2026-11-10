@@ -54,6 +54,8 @@ type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 /** How long a machine stays offline before its workspaces' conversations are told. */
 const OFFLINE_NOTICE_MS = 60_000;
 const OfflineMachinesSchema = z.record(z.string(), z.object({ since: z.number(), told: z.boolean() }));
+/** Each machine's newest connection state the relay reported, until this object's alarm applies it. */
+const PendingPresenceSchema = z.record(z.string(), z.boolean());
 
 /** Whether a base checkout at `commit` already holds the project's `tip` (true) or fast-forwards to it (false). One with
  * commits the tip lacks is never moved there: those commits would leave its branch. */
@@ -118,7 +120,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(portable_lfs_outbox)').toArray().some(column => column.name === 'attempts')) this.ctx.storage.sql.exec('ALTER TABLE portable_lfs_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
     this.ctx.storage.sql.exec('DROP TABLE IF EXISTS base_branch_steps');
     // Owners of earlier releases have no handler: their wakes would fire forever.
-    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner NOT IN ('runtime','lfs','presence-notice')");
+    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner NOT IN ('runtime','lfs','presence','presence-notice')");
     createWorkspaceMetadataTables(this.ctx.storage);
   }
 
@@ -155,6 +157,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async alarm(): Promise<void> {
     const due = this.ctx.storage.sql.exec<{ owner: string }>("SELECT owner FROM runtime_alarms WHERE timestamp <= ? AND owner <> 'runtime'", Date.now()).toArray();
     await this.flushPortableLfs();
+    if (due.some(row => row.owner === 'presence')) await this.applyPresence();
     if (due.some(row => row.owner === 'presence-notice')) await this.noticeOfflineMachines();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
     if (wake && wake.timestamp <= Date.now()) {
@@ -265,28 +268,52 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return [...new Set((await this.storedAttachments()).filter(item => item.state !== 'detached').map(item => item.machineId))];
   }
 
-  /** The relay's view of a machine's connection: its attachments here are online exactly while it is connected. */
+  /**
+   * The relay's view of a machine's connection: its attachments here are online exactly while it is connected. The relay
+   * reports to every workspace attached to the machine inside one presence pass, which other objects' calls start: the
+   * report is only recorded here (each machine's newest state) and applied from this object's alarm. Applied inside the
+   * pass, it opened the runtime and resumed its turns there, and those turns' calls then failed once the nesting passed
+   * Cloudflare's subrequest depth limit (SIMPLIFICATION 215).
+   */
   async runtimeMachinePresence(machineId: string, connected: boolean): Promise<void> {
     if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached' && item.online !== connected)) return;
-    const runtime = await this.getRuntime(await this.ctx.storage.get('runtime.identity'));
-    if (!runtime.attachments.presence(RuntimeMachineIdSchema.parse(machineId), connected)) return;
-    runtime.publish();
-    // A deploy or network blip drops a machine for seconds: the conversation hears of an absence only once it lasts a
-    // minute, and of the return only after it heard of the absence.
-    const offline = await this.offlineMachines();
-    if (!connected) {
-      offline[machineId] = { since: Date.now(), told: false };
+    const pending = PendingPresenceSchema.catch({}).parse(await this.ctx.storage.get('presence.pending') ?? {});
+    pending[machineId] = connected;
+    await this.ctx.storage.put('presence.pending', pending);
+    await this.scheduleAlarm('presence', Date.now());
+  }
+
+  /** Applies the reported machine connections, from this object's alarm. A machine that dropped and came back before
+   * it ran has only its newest state, so the blip changes nothing. The reports and their wake are cleared only once the
+   * runtime is open, and together: a failed open leaves them due for the alarm's retry, and a report that arrives while
+   * the runtime opens is applied with the others. */
+  private async applyPresence(): Promise<void> {
+    const identity = await this.ctx.storage.get('runtime.identity');
+    const runtime = identity === undefined ? null : await this.getRuntime(identity);
+    const pending = PendingPresenceSchema.catch({}).parse(await this.ctx.storage.get('presence.pending') ?? {});
+    await this.ctx.storage.delete('presence.pending');
+    await this.scheduleAlarm('presence', null);
+    if (!runtime) return;
+    for (const [machineId, connected] of Object.entries(pending)) {
+      if (!runtime.attachments.presence(RuntimeMachineIdSchema.parse(machineId), connected)) continue;
+      runtime.publish();
+      // A deploy or network blip drops a machine for seconds: the conversation hears of an absence only once it lasts a
+      // minute, and of the return only after it heard of the absence.
+      const offline = await this.offlineMachines();
+      if (!connected) {
+        offline[machineId] = { since: Date.now(), told: false };
+        await this.ctx.storage.put('presence.offline', offline);
+        await this.scheduleAlarm('presence-notice', Date.now() + OFFLINE_NOTICE_MS);
+        continue;
+      }
+      await runtime.machineReconnected();
+      const entry = offline[machineId];
+      delete offline[machineId];
       await this.ctx.storage.put('presence.offline', offline);
-      await this.scheduleAlarm('presence-notice', Date.now() + OFFLINE_NOTICE_MS);
-      return;
+      if (entry?.told) await runtime.notice(`Machine ${await this.machineLabel(machineId)} is back online; commands can run on it again.`);
+      // Back before its absence was told: its notice is no longer due.
+      else if (entry) await this.scheduleOfflineNotice(offline);
     }
-    await runtime.machineReconnected();
-    const entry = offline[machineId];
-    delete offline[machineId];
-    await this.ctx.storage.put('presence.offline', offline);
-    if (entry?.told) await runtime.notice(`Machine ${await this.machineLabel(machineId)} is back online; commands can run on it again.`);
-    // Back before its absence was told: its notice is no longer due.
-    else if (entry) await this.scheduleOfflineNotice(offline);
   }
 
   private async offlineMachines(): Promise<Record<string, { since: number; told: boolean }>> {

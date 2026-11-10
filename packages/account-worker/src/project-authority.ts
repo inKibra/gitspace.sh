@@ -361,6 +361,10 @@ function projectMcpGrant(row: ProjectMcpGrantRow): ProjectMcpGrant {
   };
 }
 
+/** One workspace's status as it sends it: the row, what its main conversation waits on, its main agent's latest message,
+ * and the snapshot cursor that orders its sends. */
+export type WorkspaceStatusSend = WorkspaceStatusRow & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply']; lastReplySource?: WorkspaceReport['lastReplySource']; cursor: number };
+
 export class UserProjectIndexDO extends BudgetedDurableObject {
   private readonly directory: AccountDirectoryProjection;
   private hydration: Promise<void> | null = null;
@@ -414,7 +418,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
    * row, and send a changed status to every open tab. `since` moves only when its activity (the status color) or what it
    * waits on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out of order;
    * one older than the row (by its snapshot `cursor`, which only grows) is dropped. */
-  setWorkspaceStatus(row: WorkspaceStatusRow & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply']; lastReplySource?: WorkspaceReport['lastReplySource']; cursor: number }): void {
+  setWorkspaceStatus(row: WorkspaceStatusSend): void {
     const { projectId, workspaceId, status } = workspaceStatusRowSchema.parse(row);
     const cursor = z.number().int().nonnegative().parse(row.cursor);
     const summary = JSON.stringify(status);

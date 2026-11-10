@@ -169,8 +169,10 @@ describe('relay presence', () => {
       expect(socket.readyState).toBe(WebSocket.OPEN);
       const closed = new Promise<CloseEvent>(resolve => socket.addEventListener('close', resolve, { once: true }));
       clock.mockReturnValue(pingedAt + RELAY_HEARTBEAT_LEASE_MS + 1_000);
-      // The read itself finds the lapsed lease: no alarm runs.
+      // The read itself finds the lapsed lease: no relay alarm runs. The workspace applies the report from its own alarm,
+      // due at the mocked time, which real time has not reached.
       expect(await machineState()).toBe('offline');
+      await runDurableObjectAlarm(space(workspace.workspaceId));
       expect(await attachmentOnline(workspace.workspaceId)).toBe(false);
       expect((await closed).code).toBe(1011);
     } finally { clock.mockRestore(); }
@@ -302,16 +304,21 @@ describe('machine notices', () => {
 
   it('tells the conversation of an absence only once it lasts a minute, then of the return', async () => {
     const workspace = await attachedWorkspace('notice-offline');
-    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    /** The relay's report, once the workspace's alarm has applied it. */
+    const report = async (connected: boolean) => {
+      await space(workspace.workspaceId).runtimeMachinePresence(machineId, connected);
+      await eventually(async () => await runInDurableObject(space(workspace.workspaceId), async (_instance, state) => await state.storage.get('presence.pending') === undefined));
+    };
+    await report(true);
     // A blip: offline and back within the minute says nothing.
-    await space(workspace.workspaceId).runtimeMachinePresence(machineId, false);
-    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    await report(false);
+    await report(true);
     expect(await notices(workspace.workspaceId)).toEqual([]);
-    await space(workspace.workspaceId).runtimeMachinePresence(machineId, false);
+    await report(false);
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
     await runDurableObjectAlarm(space(workspace.workspaceId));
     clock.mockRestore();
-    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    await report(true);
     expect(await notices(workspace.workspaceId)).toEqual([
       'Machine Darktop went offline. Commands on it fail until it reconnects; attach another machine if this work cannot wait.',
       'Machine Darktop is back online; commands can run on it again.',
