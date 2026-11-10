@@ -53,7 +53,8 @@ export function projectWatchHooks(storage: DurableObjectStorage, identity: Runti
       const watch = readProjectWatch(storage);
       if (watch?.requestId !== requestId) return;
       if (turn.state === 'running' && watch.startedAt === null) writeProjectWatch(storage, { ...watch, startedAt: Date.now() });
-      else if (turn.state === 'ended') end(watch, turn.outcome, turn.text, turn.source);
+      // The project agent hears a withdrawn instruction as failed, with why: it never ran.
+      else if (turn.state === 'ended') end(watch, turn.outcome === 'withdrawn' ? 'failed' : turn.outcome, turn.text, turn.source);
     },
     // A question only counts once the watched turn runs: one still pending from an earlier turn is not this turn's.
     published: report => {

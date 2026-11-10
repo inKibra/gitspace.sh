@@ -38,8 +38,9 @@ import { createToolResultStore, type WorkspaceToolResults } from './tool-results
 import { createMessageDecisions, type SentDecisions } from './message-decisions.js';
 export type { SentDecisions } from './message-decisions.js';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools' | 'contextRead'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** The decisions a person's prompt carried, once the prompt is placed in its conversation; called again (on the next submission change or wake) until it resolves, so it must accept the same message twice. */ recordMessageDecisions?(sent: SentDecisions): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl; /** What the host keeps in memory for this runtime, by holder name, for the memory estimate line. */ memoryHolders?(): Promise<Record<string, unknown>>; /** The release this code is, recorded at each open so the next one can tell a code update from a restart. */ version?: string };
-/** The main conversation's turn for an input submitted with a request id. */
-export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed'; text: string | null; source: TextSource | null };
+/** The main conversation's turn for an input submitted with a request id; `withdrawn`: the input was taken back before
+ * it ran (a person's cancel). */
+export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed' | 'withdrawn'; text: string | null; source: TextSource | null };
 /** One message of a turn, its text cut short. */
 export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: string };
 /** `historyFrom`: for a submission, the history ordinal from which its input and everything after it are read. */
@@ -143,7 +144,7 @@ const REPORT_CHARACTERS = 280;
 const TURN_ITEM_CHARACTERS = 400;
 const REPORT_VERB: Record<WorkspaceTurnReport['outcome'], string> = { finished: 'finished', failed: 'failed', asked: 'asked', approval: 'needs approval' };
 /** Why an unanswered input's turn ended, when pi recorded no detail. */
-const UNANSWERED: Record<string, string> = { aborted: 'it was stopped before it finished', reset: 'its context was reset before it answered', no_model: 'no model was available' };
+const UNANSWERED: Record<string, string> = { aborted: 'it was stopped before it finished', reset: 'its context was reset before it answered', no_model: 'no model was available', withdrawn: 'it was withdrawn before it started' };
 function textParts(content: ModelMessage['content']): string {
   if (typeof content === 'string') return content;
   const texts: string[] = [];
@@ -624,7 +625,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return { state: 'ended', outcome: 'finished', text: reply ? reply.slice(0, REPORT_CHARACTERS) : null, source: reply && first ? { conversationId: String(runtime.root.id), ordinal: Number(record.answer) * 1024 + first.index, characters: reply.length } : null };
     }
     const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED[record.reason] ?? record.reason;
-    return { state: 'ended', outcome: 'failed', text: why.slice(0, REPORT_CHARACTERS), source: null };
+    return { state: 'ended', outcome: record.reason === 'withdrawn' ? 'withdrawn' : 'failed', text: why.slice(0, REPORT_CHARACTERS), source: null };
   }
   /** pi settles a run's inputs as the run ends, so a submission names exactly the turn it started. */
   function turnChanged(record: SubmissionRecord) {

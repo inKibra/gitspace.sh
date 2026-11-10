@@ -9,7 +9,7 @@ import { createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime
 import type { WorkspaceTurnReport } from '@gitspace/blocks';
 import { projectProgress, projectWatchHooks, startFromProject } from '../src/project-watch.js';
 import { createWorkspaceMetadataTables } from '../src/workspace-metadata.js';
-import { automationTurnHooks, submitAutomationTurn } from '../src/automation-turns.js';
+import { automationTurnHooks, cancelAutomationTurn, submitAutomationTurn } from '../src/automation-turns.js';
 import type { AutomationTurnReport } from '../src/project-automations.js';
 import { readRuntimeHistory, type RuntimeHistoryReadResult } from '../src/runtime-transcript-reader.js';
 import { RuntimeHistoryReadArgumentsSchema } from '@gitspace/protocol-runtime';
@@ -187,6 +187,25 @@ test('an automation run reports its turn to the project\'s automations as it sta
       expect(f.automationReports).toHaveLength(2);
       expect(f.reports).toEqual([]);
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('an automation instruction withdrawn while it waits reports its turn withdrawn, not failed, and never reaches the model', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    const held = Promise.withResolvers<void>();
+    try {
+      const earlier = f.reply('Earlier work done.', held.promise);
+      await f.submit('earlier', 'Nightly cleanup.');
+      await earlier.requested.promise;
+      await f.automate('automation:run-2', 'Fix the failed checks.');
+      expect(await cancelAutomationTurn(ctx.storage, f.runtime, 'automation:run-2')).toMatchObject({ state: 'withdrawn' });
+      held.resolve();
+      await f.settle();
+      const run = { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, requestId: 'automation:run-2' };
+      expect(f.automationReports).toEqual([{ ...run, state: 'ended', outcome: 'withdrawn', text: 'it was withdrawn before it started' }]);
+      expect(f.requests).not.toContain('Fix the failed checks.');
+    } finally { held.resolve(); await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
 

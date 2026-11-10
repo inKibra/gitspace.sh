@@ -166,17 +166,19 @@ const StartSchema = z.object({
 type Start = z.infer<typeof StartSchema>;
 
 /** What the workspace tells a run's automations object about the run's turn: it started, or it ended (finished,
- * failed, or stopped to ask a person). */
+ * failed, withdrawn before it started, or stopped to ask a person). */
 export const AutomationTurnReportSchema = z.discriminatedUnion('state', [
   z.object({ projectId: z.string(), workspaceId: z.string(), requestId: z.string(), state: z.literal('running') }),
-  z.object({ projectId: z.string(), workspaceId: z.string(), requestId: z.string(), state: z.literal('ended'), outcome: z.enum(['finished', 'failed', 'asked']), text: z.string().nullable() }),
+  z.object({ projectId: z.string(), workspaceId: z.string(), requestId: z.string(), state: z.literal('ended'), outcome: z.enum(['finished', 'failed', 'withdrawn', 'asked']), text: z.string().nullable() }),
 ]);
 export type AutomationTurnReport = z.infer<typeof AutomationTurnReportSchema>;
 
-/** How a run ends with its turn: a turn that stops to ask a person frees its slot, as one that finished does. */
-const TURN_END: Record<'finished' | 'failed' | 'asked', { state: 'finished' | 'failed'; label: string; outcome(text: string | null): string }> = {
+/** How a run ends with its turn: a turn that stops to ask a person frees its slot, as one that finished does; a
+ * withdrawn instruction is a person's cancel, so its run is skipped as `cancelRun` records it. */
+const TURN_END: Record<'finished' | 'failed' | 'withdrawn' | 'asked', { state: 'finished' | 'failed' | 'skipped'; label: string; outcome(text: string | null): string }> = {
   finished: { state: 'finished', label: 'Finished', outcome: text => text ?? 'Finished' },
   failed: { state: 'failed', label: 'Failed', outcome: text => `Failed: ${text ?? 'the turn ended without a reply'}` },
+  withdrawn: { state: 'skipped', label: 'Cancelled', outcome: () => 'Cancelled' },
   asked: { state: 'finished', label: 'Stopped to ask a person', outcome: text => `Waiting for you: ${text ?? 'a question'}` },
 };
 

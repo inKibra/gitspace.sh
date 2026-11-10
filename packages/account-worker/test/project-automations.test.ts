@@ -139,6 +139,21 @@ describe('ProjectAutomationsDO', () => {
     expect(await alarm()).toBeNull();
   });
 
+  it('records a dismissed run as cancelled when the workspace reports the withdrawal before the cancel returns', async () => {
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
+    const { projectId, workspaceId, automations } = await project();
+    const automation = automationValue(await automations.create({ projectId, draft: { name: 'Failed checks', trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'Fix the checks.' }, enabled: true } }));
+    const run = automationValue(await automations.runNow({ projectId, automationId: automation.id, requestedBy: 'Brad' }));
+    await runDurableObjectAlarm(automations);
+    // The withdrawal's own turn report reaches the run first, as it does live; then the cancel's receipt returns. The
+    // workspace object reports through its own stub, as the real one does.
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationCancel').mockImplementation(async () => {
+      await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).runTurnChanged({ projectId, workspaceId, requestId: `automation:${run.id}`, state: 'ended', outcome: 'withdrawn', text: 'it was withdrawn before it started' });
+      return { state: 'withdrawn', conversationId: 'root', message: 'Withdrawn before execution' };
+    });
+    expect(automationValue(await automations.cancelRun({ projectId, runId: run.id }))).toMatchObject({ id: run.id, state: 'skipped', outcome: 'Cancelled' });
+  });
+
   it('refuses an instruction naming a field its trigger lacks, an invalid UTC schedule and a workspace outside the project', async () => {
     const { projectId, automations } = await project();
     const refused = (draft: AutomationDraft) => automations.create({ projectId, draft });
