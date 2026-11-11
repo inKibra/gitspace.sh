@@ -15,7 +15,7 @@ import type { PendingAskAnswer, RuntimeSessionCommand, RuntimeSessionResult } fr
 import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createAutomationRequests, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
-import type { JsonValue } from '@earendil-works/chord';
+import type { JsonValue } from '@earendil-works/chord/json';
 import { createSessionHistory } from './session-history.js';
 import { createReplicaStore, replicaEvents } from './replica-store.js';
 import { WorkspaceDraftStore } from './draft.js';
@@ -214,7 +214,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   // messages its newest model request was built from.
   const contextCharacters = new Map<string, number>();
   const requestLoad = createRequestLoad();
-  const runtime = await createRuntimeHarness({ ...options, tools: { ...options.tools, results: toolResults }, storage, models: marks.models(options.models, requestLoad.begin), unfinished: marks.unfinished, contextRead(conversationId, messages) {
+  // A sleeping task (a backoff, a scheduled start) is woken by the runtime alarm; pi keeps no timer that holds the object.
+  const runtime = await createRuntimeHarness({ ...options, tools: { ...options.tools, results: toolResults }, storage, models: marks.models(options.models, requestLoad.begin), unfinished: marks.unfinished, onWake(wake) { if (wake.at !== undefined) options.schedule(wake.at).catch(options.onReport); }, contextRead(conversationId, messages) {
     const sizes = messageCharacters(messages);
     contextCharacters.set(conversationId, sizes.characters + sizes.imageCharacters);
   } });
@@ -370,7 +371,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   let tasksLoaded = false;
   // Agent counts of the last rebuild, read live from tasks and questions.
   let agents: WorkspaceStatusSummary['agents'] = { green: 0, blue: 0, orange: 0, red: 0 };
-  const TASK_ORDER: Record<StoredTask['state']['status'], number> = { pending: 0, running: 1, waiting: 2, completing: 3, terminal: 4 };
+  const TASK_ORDER: Record<StoredTask['state']['status'], number> = { pending: 0, running: 1, waiting: 2, sleeping: 2, completing: 3, terminal: 4 };
   const TERMINAL_TASK_WINDOW = 128;
   async function conversationView(record: ConversationRecord, read?: { entries: number }): Promise<ConversationView | undefined> {
     const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
@@ -437,7 +438,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const terminal = task.state.status === 'terminal' || task.state.status === 'completing' ? task.state.outcome : null;
     const result = terminal?.result ?? null;
     const encodedResult = JSON.stringify(result);
-    return { id: String(task.id), kind: task.kind, conversationId: String(task.conversationId), parentId: task.owner === undefined ? null : String(task.owner), background: task.background, state: terminal ? terminal.status === 'completed' ? 'completed' : terminal.status === 'aborted' ? 'interrupted' : 'failed' : task.state.status === 'waiting' ? 'waiting' : task.state.status === 'running' ? 'running' : 'pending', machineId: attachments.runningMachine(`task:${task.id}`) ?? attachments.runningMachine(`tool:${task.id}`), result: encodedResult.length <= 4096 ? result : { truncated: true, taskId: String(task.id), preview: encodedResult.slice(0, 4096) } };
+    return { id: String(task.id), kind: task.kind, conversationId: String(task.conversationId), parentId: task.owner === undefined ? null : String(task.owner), background: task.background, state: terminal ? terminal.status === 'completed' ? 'completed' : terminal.status === 'aborted' ? 'interrupted' : 'failed' : task.state.status === 'waiting' || task.state.status === 'sleeping' ? 'waiting' : task.state.status === 'running' ? 'running' : 'pending', machineId: attachments.runningMachine(`task:${task.id}`) ?? attachments.runningMachine(`tool:${task.id}`), result: encodedResult.length <= 4096 ? result : { truncated: true, taskId: String(task.id), preview: encodedResult.slice(0, 4096) } };
   }
   async function refreshTasks(): Promise<void> {
     if (!tasksLoaded) {
@@ -445,7 +446,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       // Pi task scans are ascending. Seed the terminal cursor from the indexed newest-128 boundary,
       // then let the portable SDK decode records. Receipt GC follows materialization independently of this display window.
       const terminalFloor = options.storage.sql.exec<{ id: number }>(`SELECT id FROM tasks WHERE status='terminal' ORDER BY id DESC LIMIT 1 OFFSET ${TERMINAL_TASK_WINDOW - 1}`).toArray()[0]?.id;
-      for (const status of ['pending', 'running', 'waiting', 'completing', 'terminal'] as const) {
+      for (const status of ['pending', 'running', 'waiting', 'sleeping', 'completing', 'terminal'] as const) {
         let taskCursor: Cursor | undefined = status === 'terminal' && terminalFloor !== undefined ? { after: terminalFloor - 1 } : undefined;
         do {
           const page = await storage.scanTasks({ status }, 128, taskCursor, BACKGROUND_CONTEXT);
@@ -609,7 +610,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     if (record.status === 'placed') report(requestId, { state: 'running' });
     else if (record.status === 'done' || record.status === 'unanswered') options.waitUntil(turnOf(record).then(turn => report(requestId, turn)).catch(options.onReport));
   }
-  harness.subscribeCommits(publication => {
+  harness.observeCommits({ end() {}, advance(publication) {
     let ended: string | undefined;
     for (const change of publication.changes) {
       // The main agent's finished message: its invalid blocks get a notice, posted after the listener returns.
@@ -631,7 +632,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       const conversationId = ended;
       options.waitUntil(line.catch(() => {}).then(() => logMemory('turn-end', conversationId)));
     }
-  });
+  } });
   opening.update('flushing cloud retention');
   await flushCloudRetention();
   opening.update('rebuilding the snapshot');

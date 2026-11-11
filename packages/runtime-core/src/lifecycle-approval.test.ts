@@ -20,13 +20,13 @@ const pending: RuntimeLifecycleApprovalRequest = { phase: 'machine/prepare', scr
 async function open() {
   const invoked: unknown[] = [];
   let approved = false;
-  const models = { ...createModels(), getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }) {
+  const models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }) {
     const call = !JSON.stringify(request.messages).includes('"role":"toolResult"');
     const reply: AssistantMessage = { role: 'assistant', content: call ? [{ type: 'toolCall', id: 'prepare-call', name: 'environment', arguments: { ...run } }] : [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: call ? 'toolUse' : 'stop', timestamp: Date.now(), usage };
     const stream = createAssistantMessageEventStream();
     stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message: reply }); stream.end(reply);
     return stream;
-  } };
+  } });
   const runtime = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
     tools: {
@@ -46,7 +46,7 @@ async function open() {
     const found = Promise.withResolvers<NonNullable<typeof watch.value>['items'][number]>();
     const check = (value: typeof watch.value) => { const question = value?.items.find(item => item.kind === 'lifecycle-approval'); if (question) found.resolve(question); };
     check(watch.value);
-    watch.start(async value => { check(value); });
+    watch.start(async call => { if (call.kind === 'value') check(call.value); });
     try { return await found.promise; } finally { await watch.stop(); }
   }
   /** The person's answer, as the account records it once it approved the scripts (an approval lands first). */

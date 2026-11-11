@@ -59,7 +59,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@base-ui/react": "^1.0.0",
-        "@earendil-works/chord": "1.3.0",
+        "@earendil-works/chord": "1.5.2",
         "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol": "workspace:*",
         "@gitspace/protocol-agent": "workspace:*",
@@ -107,7 +107,7 @@
       "dependencies": {
         "@ast-grep/wasm": "0.51.0",
         "@composio/core": "0.18.0",
-        "@earendil-works/chord": "1.3.0",
+        "@earendil-works/chord": "1.5.2",
         "@gitspace/account-machine": "workspace:*",
         "@gitspace/blocks": "workspace:*",
         "@gitspace/browser-extension": "workspace:*",
@@ -138,8 +138,8 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
-        "@earendil-works/pi-ai": "1.3.0",
-        "@earendil-works/pi-durable": "1.3.0",
+        "@earendil-works/pi-ai": "1.5.2",
+        "@earendil-works/pi-durable": "1.5.2",
         "@msw/cloudflare": "^0.0.1",
         "msw": "^2.14.0",
       },
@@ -190,7 +190,7 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
-        "@earendil-works/pi-ai": "1.3.0",
+        "@earendil-works/pi-ai": "1.5.2",
       },
     },
     "packages/cli": {
@@ -253,7 +253,7 @@
       "name": "@gitspace/inference-worker",
       "version": "0.0.0",
       "dependencies": {
-        "@earendil-works/pi-ai": "1.3.0",
+        "@earendil-works/pi-ai": "1.5.2",
         "@gitspace/protocol-runtime": "workspace:*",
         "@gitspace/runtime-core": "workspace:*",
         "esbuild": "^0.28.1",
@@ -404,9 +404,9 @@
       "name": "@gitspace/runtime-core",
       "version": "0.0.0",
       "dependencies": {
-        "@earendil-works/chord": "1.3.0",
-        "@earendil-works/pi-ai": "1.3.0",
-        "@earendil-works/pi-durable": "1.3.0",
+        "@earendil-works/chord": "1.5.2",
+        "@earendil-works/pi-ai": "1.5.2",
+        "@earendil-works/pi-durable": "1.5.2",
         "@gitspace/blocks": "workspace:*",
         "@gitspace/catalog": "workspace:*",
         "@gitspace/protocol": "workspace:*",
@@ -423,8 +423,8 @@
       "name": "@gitspace/runtime-machine",
       "version": "0.0.0",
       "dependencies": {
-        "@earendil-works/chord": "1.3.0",
-        "@earendil-works/pi-durable": "1.3.0",
+        "@earendil-works/chord": "1.5.2",
+        "@earendil-works/pi-durable": "1.5.2",
         "@gitspace/protocol": "workspace:*",
         "@gitspace/protocol-environment": "workspace:*",
         "@gitspace/protocol-runtime": "workspace:*",
@@ -438,8 +438,8 @@
       "name": "@gitspace/runtime-workspace-do",
       "version": "0.0.0",
       "dependencies": {
-        "@earendil-works/chord": "1.3.0",
-        "@earendil-works/pi-durable": "1.3.0",
+        "@earendil-works/chord": "1.5.2",
+        "@earendil-works/pi-durable": "1.5.2",
         "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol-agent": "workspace:*",
         "@gitspace/protocol-environment": "workspace:*",
@@ -453,7 +453,7 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
-        "@earendil-works/pi-ai": "1.3.0",
+        "@earendil-works/pi-ai": "1.5.2",
         "miniflare": "4.20260302.0",
       },
     },
@@ -512,16 +512,16 @@
   },
   "patchedDependencies": {
     "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch",
-    "@earendil-works/pi-ai@1.3.0": "patches/@earendil-works%2Fpi-ai@1.3.0.patch",
+    "@earendil-works/pi-ai@1.5.2": "patches/@earendil-works%2Fpi-ai@1.5.2.patch",
     "web-tree-sitter@0.26.3": "patches/web-tree-sitter@0.26.3.patch",
     "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch",
     "rregex@1.13.1": "patches/rregex@1.13.1.patch",
   },
   "overrides": {
-    "@earendil-works/chord": "1.3.0",
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-durable": "1.3.0",
-    "@earendil-works/pi-mcp": "1.3.0",
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-mcp": "1.5.2",
     "@modelcontextprotocol/sdk": "1.32.1",
     "shiki": "4.3.1",
   },
@@ -666,15 +666,17 @@
 
     "@cspotcode/source-map-support": ["@cspotcode/source-map-support@0.8.1", "", { "dependencies": { "@jridgewell/trace-mapping": "0.3.9" } }, "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw=="],
 
-    "@earendil-works/chord": ["@earendil-works/chord@1.3.0", "", { "dependencies": { "typebox": "1.3.27" } }, "sha512-qqYhjALZ193atpBzmmS+M5pHQoiI4Aynetc1jXpv+5O2crXH3Y8wbFEy33orU2nmFrlw1U36rsdgUjaW4b3m/w=="],
+    "@earendil-works/chord": ["@earendil-works/chord@1.5.2", "", { "dependencies": { "@earendil-works/pi-schema": "1.5.2", "@earendil-works/pi-telemetry": "1.5.2" }, "peerDependencies": { "esbuild": "0.28.2", "react": "19.3.0", "ws": "8.21.0" }, "optionalPeers": ["esbuild", "react", "ws"] }, "sha512-3g088g7qVXL2cpRAKWjj9za6RLls9FBnuUo5c0hBZ0xCftBQjae0opS+34M22vdXTVE7BNqkRG/FPc9BsM7eEg=="],
 
-    "@earendil-works/pi-ai": ["@earendil-works/pi-ai@1.3.0", "", { "dependencies": { "@anthropic-ai/sdk": "0.129.0", "@aws-sdk/client-bedrock-runtime": "3.1127.0", "@earendil-works/pi-telemetry": "1.3.0", "@google/genai": "2.21.0", "@smithy/node-http-handler": "4.12.1", "http-proxy-agent": "9.1.0", "https-proxy-agent": "9.1.0", "openai": "7.19.0", "partial-json": "0.1.7", "typebox": "1.3.27" }, "bin": { "pi-ai": "dist/cli.js" } }, "sha512-KaBI8x7q7sPoFUXICNGD9efHzDG+oRNwVvkA9jdIsSQWH1RjFssOlEGsbLtewUPPgCrvmz0l2KTgSLXTyj3acw=="],
+    "@earendil-works/pi-ai": ["@earendil-works/pi-ai@1.5.2", "", { "dependencies": { "@anthropic-ai/sdk": "0.129.0", "@aws-sdk/client-bedrock-runtime": "3.1127.0", "@earendil-works/pi-schema": "1.5.2", "@earendil-works/pi-telemetry": "1.5.2", "@google/genai": "2.21.0", "@smithy/node-http-handler": "4.12.1", "http-proxy-agent": "9.1.0", "https-proxy-agent": "9.1.0", "openai": "7.19.0", "partial-json": "0.1.7" }, "bin": { "pi-ai": "dist/cli.js" } }, "sha512-2tWPSnV3qzfiDIY3aWluBag3vC++Vs+VsXt/UquSU5onPMohPih72FUhIhaqmDdMYubOgB3Byl9uF4Vk40JLvQ=="],
 
-    "@earendil-works/pi-codemode": ["@earendil-works/pi-codemode@1.3.0", "", { "dependencies": { "quickjs-wasi": "3.6.2" } }, "sha512-2G9tmbsPhgzwfz7cmzJpbLSLqOx3eu22Gbzm+Wc3HqeZMjLQS4F3KfAabozVhv7uEjq3k2O1dZTHmhhWr2xbfQ=="],
+    "@earendil-works/pi-codemode": ["@earendil-works/pi-codemode@1.5.2", "", { "dependencies": { "quickjs-wasi": "3.6.2" } }, "sha512-HoZQ40a9RgdZ1VgmrX6x8887cNXedaRJT1l+Ie5YRIMK4gY7v0EpsiNqf6dmixrKylZlTgUSyR+vE8xhjfkr+w=="],
 
-    "@earendil-works/pi-durable": ["@earendil-works/pi-durable@1.3.0", "", { "dependencies": { "@earendil-works/chord": "1.3.0", "@earendil-works/pi-ai": "1.3.0", "@earendil-works/pi-codemode": "1.3.0", "@silvia-odwyer/photon": "0.3.3", "diff": "8.0.4", "typebox": "1.3.27" } }, "sha512-2aD0xead1LH0BBwUBxex28in/PpUJEwyaEiW/nLoTFUcZ/lDYEl6LHX6mGZKJG8tUHzERwJyysDgy0ruidt84w=="],
+    "@earendil-works/pi-durable": ["@earendil-works/pi-durable@1.5.2", "", { "dependencies": { "@earendil-works/chord": "1.5.2", "@earendil-works/pi-ai": "1.5.2", "@earendil-works/pi-codemode": "1.5.2", "@earendil-works/pi-schema": "1.5.2", "@earendil-works/pi-telemetry": "1.5.2", "@silvia-odwyer/photon": "0.3.3", "diff": "8.0.4" } }, "sha512-zDB3anbI/yD0IG+VVY+g5tU+c5XOVqQAFwLkXRMiqZb4p/afWro0voZtLNoRAWcDA2r73kvmH6kKin9Ka8l55g=="],
 
-    "@earendil-works/pi-telemetry": ["@earendil-works/pi-telemetry@1.3.0", "", {}, "sha512-ERGZr+aXjNJzoUbB7ZzHVH3g5otzMHjHLs2Fyizm12By5X+gBEhod9cJXFOk13S7M8a29Am+Mq21zm73mRJFLg=="],
+    "@earendil-works/pi-schema": ["@earendil-works/pi-schema@1.5.2", "", {}, "sha512-hJoyCXWUhsSrXY5wJo2Q4kHXUsR51pNhkJHAMkWRwVMLDRtMDPkKNaa+JlVRVqTw1hjdSxcVVaFLSDbKlaTXEQ=="],
+
+    "@earendil-works/pi-telemetry": ["@earendil-works/pi-telemetry@1.5.2", "", {}, "sha512-m+cumjIqNh1aMISi/9ttcG3ZOwIdriPbz/eMyWmRMJCGa/WcgY1RX4lrb7HvsHhSfI/JUeBESA4nOCr8C3y5ow=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@1.11.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw=="],
 

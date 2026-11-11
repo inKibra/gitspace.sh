@@ -1,7 +1,8 @@
 import { defineDoc, defineExtension, defineTask, hook, GenerationTask, type ConversationId, type TaskId, type Task } from '@earendil-works/pi-durable';
 import { AgentDefinitionContextDoc, SubagentRunQueueDoc } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
-export const BackgroundAgentsDoc = defineDoc<{ children: Record<string, { conversationId: ConversationId; owner: TaskId }> }>({ kind: 'gitspace.background-agents', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ children: {} }) });
+import { boundedReplay } from './documents.js';
+export const BackgroundAgentsDoc = defineDoc<{ children: Record<string, { conversationId: ConversationId; owner: TaskId }> }>({ kind: 'gitspace.background-agents', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ children: {} }), checkpointWhen: boundedReplay });
 export type BackgroundAgentTask = Task<{ spawningTask: TaskId; attemptId: string }, { phase: 'wait' }, { conversationId: string }, object>;
 export function createBackgroundAgentTask(deliver: ConversationLifecycle['deliver']): BackgroundAgentTask {
   return defineTask<{ spawningTask: TaskId; attemptId: string }, { phase: 'wait' }, { conversationId: string }>({
@@ -24,8 +25,8 @@ export function createBackgroundAgentTask(deliver: ConversationLifecycle['delive
         const started = Promise.withResolvers<void>();
         const abort = () => started.reject(context.abortSignal?.reason);
         context.abortSignal?.addEventListener('abort', abort, { once: true });
-        queue.start(async value => { if (!value?.queue.some(item => item.conversationId === id)) started.resolve(); });
-        void queue.closed.then(value => { if (value.reason !== 'stopped') started.reject(new Error(`Background agent queue wait ended: ${value.reason}`)); });
+        queue.start(async call => { if (call.kind === 'value' && !call.value.queue.some(item => item.conversationId === id)) started.resolve(); });
+        void queue.closed.then(end => { if (end.kind !== 'stopped') started.reject(new Error(`Background agent queue wait ended: ${end.kind}`)); });
         try { await started.promise; }
         finally { context.abortSignal?.removeEventListener('abort', abort); await queue.stop(); }
       } else await queue?.stop();

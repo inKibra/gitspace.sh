@@ -22,13 +22,13 @@ for (const busy of [false, true]) test(`an automation run's instruction is deliv
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const prompts: string[] = [];
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input) {
     prompts.push(JSON.stringify(input));
     const stream = createAssistantMessageEventStream();
     const finish = () => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
     if (busy && prompts.length === 1) { entered.resolve(); void release.promise.then(finish); } else finish();
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
@@ -49,13 +49,13 @@ test('a retried submission delivers its instruction once, and a request id canno
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const prompts: string[] = [];
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input) {
     prompts.push(JSON.stringify(input));
     const stream = createAssistantMessageEventStream();
     const finish = () => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
     if (prompts.length === 1) { entered.resolve(); void release.promise.then(finish); } else finish();
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { followUpMode: 'one-at-a-time', compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
@@ -84,13 +84,13 @@ test('a batch that grows while the turn runs stays one queued input, delivered o
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const prompts: string[] = [];
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input) {
     prompts.push(JSON.stringify(input));
     const stream = createAssistantMessageEventStream();
     const finish = () => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
     if (prompts.length === 1) { entered.resolve(); void release.promise.then(finish); } else finish();
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { followUpMode: 'one-at-a-time', compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
@@ -114,14 +114,14 @@ test('a batch that grows while the turn runs stays one queued input, delivered o
 test('an automation\'s model role is admitted for its first run and becomes the conversation\'s role; a role the profile lacks is refused and changes nothing', async () => {
   const storage = new MemoryStorage();
   const prompts: string[] = [];
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input) {
     prompts.push(JSON.stringify(input));
     const stream = createAssistantMessageEventStream();
     const message = reply();
     stream.push({ type: 'done', reason: 'stop', message });
     stream.end(message);
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
@@ -159,13 +159,13 @@ test('withdrawing a queued instruction leaves the active user turn and other que
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const prompts: string[] = [];
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input) {
     prompts.push(JSON.stringify(input));
     const stream = createAssistantMessageEventStream();
     const finish = () => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
     if (prompts.length === 1) { entered.resolve(); void release.promise.then(finish); } else finish();
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { followUpMode: 'one-at-a-time', compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
@@ -191,12 +191,12 @@ test('a withdrawal racing with placement reports the instruction running and lea
   const storage = new MemoryStorage();
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple() {
     const stream = createAssistantMessageEventStream();
     entered.resolve();
     void release.promise.then(() => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); });
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });
@@ -214,7 +214,7 @@ test('a withdrawal racing with placement reports the instruction running and lea
 test('cancelling a running instruction stops the workspace agent', async () => {
   const storage = new MemoryStorage();
   const entered = Promise.withResolvers<void>();
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, _input, options) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, _input, options) {
     const stream = createAssistantMessageEventStream();
     entered.resolve();
     options?.signal?.addEventListener('abort', () => {
@@ -222,7 +222,7 @@ test('cancelling a running instruction stops the workspace agent', async () => {
       stream.push({ type: 'error', reason: 'aborted', error }); stream.end(error);
     }, { once: true });
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
   try {
     const root = await harness.root(context, { agent: { model: reference } });

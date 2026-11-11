@@ -5,7 +5,7 @@ import { applyInferenceThinking, SessionControlsDoc } from './session-controls.j
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS, SubagentRunQueueDoc, type QueuedSubagentRun } from './subagent-state.js';
 import { z } from 'zod';
 import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
-import { QuestionsDoc } from './documents.js';
+import { QuestionsDoc, boundedReplay } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
 import { noteTakeoverEvent } from './takeover.js';
 
@@ -48,7 +48,7 @@ type ConversationLifecycleState = {
   /** Oldest first; absent in documents written before handled events were dropped. */
   handled?: string[];
 };
-export const ConversationLifecycleDoc = defineDoc<ConversationLifecycleState>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [], handled: [] }) });
+export const ConversationLifecycleDoc = defineDoc<ConversationLifecycleState>({ kind: 'gitspace.conversation-lifecycle', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ stopped: false, events: [], handled: [] }), checkpointWhen: boundedReplay });
 const isHandled = (item: StoredEvent) => item.delivered === true || item.consumed === true;
 /** Drops the events with these request ids, and any an older release kept as handled, remembering their request ids. */
 export function handleEvents(state: ConversationLifecycleState, requestIds: ReadonlySet<string>): void {
@@ -334,7 +334,7 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       const abort = () => result.reject(signal?.reason);
       signal?.addEventListener('abort', abort, { once: true });
       watch.start(check);
-      void watch.closed.then(value => { if (value.reason !== 'stopped') result.reject(new Error(`Conversation wait ended: ${value.reason}`)); });
+      void watch.closed.then(end => { if (end.kind !== 'stopped') result.reject(new Error(`Conversation wait ended: ${end.kind}`)); });
       try { signal?.throwIfAborted(); await check(); return await result.promise; }
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); await watch.stop(); }
     },

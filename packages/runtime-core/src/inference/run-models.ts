@@ -1,4 +1,4 @@
-import { createModels, lazyStream, type Api, type AnyModel, type Model, type Context, type ModelsApiStreamOptions, type Models, type AssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { createModels, lazyStream, type Api, type AnyModel, type AuthResult, type Model, type Context, type ModelsApiStreamOptions, type Models, type AssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { interceptRuntimeModelStream } from '../retained-rules.js';
 
 /** API-specific options can only be forwarded to the same admitted transport. */
@@ -29,6 +29,14 @@ export function createRunModelsRouter(initial: Models | null, resolve: (signal?:
       throw error;
     }
   }
+  /** Auth from the catalog that has the provider, as the other routed reads are. pi binds `getAuth` when a harness opens
+   * (its client identity wrapper), so a router without it fails every open; spreading `catalog` copies no methods. */
+  function getAuth(providerId: string, overrides?: Parameters<Models['getAuth']>[1]): Promise<AuthResult | undefined>;
+  function getAuth(model: AnyModel, overrides?: Parameters<Models['getAuth']>[1]): Promise<AuthResult | undefined>;
+  function getAuth(target: string | AnyModel, overrides?: Parameters<Models['getAuth']>[1]): Promise<AuthResult | undefined> {
+    const owner = catalogs.find(({ models }) => models.getProvider(typeof target === 'string' ? target : target.provider))?.models ?? catalog;
+    return typeof target === 'string' ? owner.getAuth(target, overrides) : owner.getAuth(target, overrides);
+  }
   const routed: Models = {
     ...catalog,
     getProviders: () => unique(catalogs.flatMap(({ models }) => models.getProviders()), provider => provider.id),
@@ -57,6 +65,7 @@ export function createRunModelsRouter(initial: Models | null, resolve: (signal?:
     cancelDeferred: async (model, handle, options) => { const models = await resolve(options?.signal); const canonical = models.getModel(model.provider, model.id); if (!canonical) throw new Error('Model is not admitted for this run'); await models.cancelDeferred(canonical, handle, options); },
     generateImages: async (model, context, options) => { const models = await resolve(options?.signal); const canonical = models.getModelOfType('image', model.provider, model.id); if (!canonical) throw new Error('Image model is not admitted for this run'); return models.generateImages(canonical, context, options); },
     classify: async (model, context, options) => { const models = await resolve(options?.signal); const canonical = models.getModelOfType('classifier', model.provider, model.id); if (!canonical) throw new Error('Classifier model is not admitted for this run'); return models.classify(canonical, context, options); },
+    getAuth,
   };
   return {
     models: routed,

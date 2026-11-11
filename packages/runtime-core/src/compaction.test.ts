@@ -25,7 +25,7 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
     if (reason !== undefined) refusals.push(reason);
     return reason;
   };
-  const models = { ...createModels(), getModel: () => model,
+  const models = Object.assign(createModels(), { getModel: () => model,
     async completeSimple(_model: Model<Api>, request: Context, streamOptions?: { signal?: AbortSignal }) {
       if (refusal(streamOptions?.signal) !== undefined) return answer('', 'error');
       requests.push(request);
@@ -40,7 +40,7 @@ async function fixture(options: { fullFails?: boolean; unfinished?: Record<strin
       else stream.push({ type: 'error', reason: 'error', error: reply });
       stream.end(reply);
       return stream;
-    } };
+    } });
   const options_: RuntimeHarnessOptions = {
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },

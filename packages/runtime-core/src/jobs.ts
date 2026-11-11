@@ -1,6 +1,7 @@
 import { defineDoc, defineTask, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
-import type { Context, JsonValue } from '@earendil-works/chord';
-import { awaitWithContext, withAbortSignal } from '@earendil-works/chord/context';
+import type { JsonValue } from '@earendil-works/chord/json';
+import { boundedReplay } from './documents.js';
+import { awaitWithContext, withAbortSignal, type Context } from '@earendil-works/chord/context';
 import { PROCESS_MACHINE_DETACHED, RuntimeBashCommandArgumentsSchema, RuntimeBashControlArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, RuntimeToolResultSchema, receiptDigest, type RuntimeToolResult, type RuntimeJobAcceptance, type RuntimeJobObservation } from '@gitspace/protocol-runtime';
 import { z } from 'zod';
 import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
@@ -15,7 +16,7 @@ type JobRecord = { acceptance: RuntimeJobAcceptance; observation: RuntimeJobObse
 type JobInput = { key: string; spawningTask: TaskId };
 /** `failures`: consecutive failed tries of the current retry run, for its backoff; absent before the first. */
 type JobState = { phase: 'execute'; poll: number; failures?: number };
-export const DurableJobsDoc = defineDoc<{ records: Record<string, JobRecord> }>({ kind: 'gitspace.durable-jobs', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ records: {} }) });
+export const DurableJobsDoc = defineDoc<{ records: Record<string, JobRecord> }>({ kind: 'gitspace.durable-jobs', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ records: {} }), checkpointWhen: boundedReplay });
 const OlderObservationSchema = z.object({ status: z.string(), receipt: z.object({ result: RuntimeToolResultSchema }).optional(), completedAt: z.iso.datetime().optional() });
 /** A stored observation, upgraded when it predates tool results replacing executor receipts: a finished job carried
  * its result in `receipt`, a running one was `executing`, and a prevented launch was `not-started` with `fenced`. */
@@ -118,7 +119,12 @@ export function createJobTask(services: JobServices) {
       if (settled && continuationReady) return;
       failures++;
       const next = runtime.now() + retryDelay(failures);
-      await services.wakeAt(next); await runtime.sleep(next, context);
+      // A phase sleeps durably and resumes at its checkpoint; an abort handler runs in one invocation and waits in it.
+      if (!aborting) { await runtime.sleepUntil(next, { phase: 'execute', poll: runtime.now(), failures }, context); return; }
+      await services.wakeAt(next);
+      const elapsed = Promise.withResolvers<void>();
+      runtime.setTimer(elapsed.resolve, next - runtime.now());
+      await awaitWithContext(elapsed.promise, context);
     }
   }
   return defineTask<JobInput, JobState, RuntimeJobObservation>({
@@ -137,7 +143,7 @@ type ProcessExitState = { phase: 'observe'; poll: number; restartCount: number; 
  * `checks` counts machine reconnections: each makes every watch check its machine once more, as a machine that restarted
  * lost the exit waits it held.
  */
-export const ProcessExitsDoc = defineDoc<{ exits: Record<string, { daemon: JsonValue; reportedAt: number }>; checks?: number }>({ kind: 'gitspace.process-exits', version: 1, scope: 'session', initial: () => ({ exits: {} }) });
+export const ProcessExitsDoc = defineDoc<{ exits: Record<string, { daemon: JsonValue; reportedAt: number }>; checks?: number }>({ kind: 'gitspace.process-exits', version: 1, scope: 'session', initial: () => ({ exits: {} }), checkpointWhen: boundedReplay });
 /** Reports no watch takes (a process started outside a watch) are dropped beyond this many, oldest first. */
 const MAX_PROCESS_EXIT_REPORTS = 100;
 export const processExitKey = (daemon: Pick<DaemonSnapshot, 'id' | 'restartCount'>) => `${daemon.id}:${daemon.restartCount}`;
@@ -174,11 +180,11 @@ async function reportedExit(runtime: TaskRuntime<ProcessExitInput, ProcessExitSt
   try {
     runtime.signal.throwIfAborted();
     if (watch.value?.exits[key] || (watch.value?.checks ?? 0) !== checks) return;
-    watch.start(async value => { if (value?.exits[key] || (value?.checks ?? 0) !== checks) arrived.resolve(); });
-    await awaitWithContext(Promise.race([arrived.promise, watch.closed.then(end => { if (end.reason === 'listener_error') throw end.error; if (end.reason !== 'stopped') throw new Error(`Process exit reports ${end.reason}`); })]), context);
+    watch.start(async call => { if (call.kind === 'value' && (call.value.exits[key] || (call.value.checks ?? 0) !== checks)) arrived.resolve(); });
+    await awaitWithContext(Promise.race([arrived.promise, watch.closed.then(end => { if (end.kind === 'listener_error' || end.kind === 'failed') throw end.error; if (end.kind !== 'stopped') throw new Error(`Process exit reports ${end.kind}`); })]), context);
   } finally { runtime.signal.removeEventListener('abort', aborted); await watch.stop(); }
 }
-export const ProcessWatchesDoc = defineDoc<{ tasks: Record<string, string> }>({ kind: 'gitspace.process-watches', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ tasks: {} }) });
+export const ProcessWatchesDoc = defineDoc<{ tasks: Record<string, string> }>({ kind: 'gitspace.process-watches', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ tasks: {} }), checkpointWhen: boundedReplay });
 export function createProcessExitTask(services: JobServices) {
   return defineTask<ProcessExitInput, ProcessExitState, JsonValue>({
     name: 'gitspace.ProcessExit', version: 1, initial: input => ({ phase: 'observe', poll: 0, restartCount: input.restartCount }),
@@ -305,9 +311,12 @@ export function createProcessExitTask(services: JobServices) {
         const scoped = withAbortSignal(context.abortSignal ? AbortSignal.any([context.abortSignal, settled.signal]) : settled.signal, context);
         const waits = [reportedExit(runtime, processExitKey({ id: task.input.daemonId, restartCount }), checks, scoped).then(() => { failures = 0; })];
         if (failures < RETRY_ATTEMPTS) {
+          // An abort handler runs in one invocation: it waits in it, and the wake reruns it if the object stops meanwhile.
           const next = runtime.now() + retryDelay(failures);
           await services.wakeAt(next);
-          waits.push(runtime.sleep(next, scoped));
+          const elapsed = Promise.withResolvers<void>();
+          runtime.setTimer(elapsed.resolve, next - runtime.now());
+          waits.push(awaitWithContext(elapsed.promise, scoped));
         }
         try { await Promise.race(waits); } finally { settled.abort(); await Promise.allSettled(waits); }
       }
@@ -387,8 +396,8 @@ export function createJobTool(services: JobServices) {
       const timer = setTimeout(settled.resolve, args.timeoutMs);
       try {
         observe(watch.value);
-        watch.start(async value => { observe(value); });
-        await awaitWithContext(Promise.race([settled.promise, watch.closed.then(end => { if (end.reason === 'listener_error') throw end.error; if (end.reason !== 'stopped') throw new Error(`Command observation ${end.reason}`); })]), context);
+        watch.start(async call => { if (call.kind === 'value') observe(call.value); });
+        await awaitWithContext(Promise.race([settled.promise, watch.closed.then(end => { if (end.kind === 'listener_error' || end.kind === 'failed') throw end.error; if (end.kind !== 'stopped') throw new Error(`Command observation ${end.kind}`); })]), context);
         await consumeCompletion(observation);
         return observation;
       } finally { clearTimeout(timer); await watch.stop(); }

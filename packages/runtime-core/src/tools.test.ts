@@ -53,13 +53,13 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
   const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
-  const models: Models = { ...createModels(), getModel: () => chatModel, streamSimple(_model, context) {
+  const models: Models = Object.assign(createModels(), { getModel: () => chatModel, streamSimple(_model, context) {
     const providerSchema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()), anyOf: z.never().optional(), oneOf: z.never().optional(), allOf: z.never().optional() });
     for (const tool of getCurrentTools(context.messages)) providerSchema.parse(tool.parameters);
     const calls = rounds[generation++];
     const reply: AssistantMessage = { role: 'assistant', content: calls ?? [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: calls ? 'toolUse' : 'stop', timestamp: generation, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
-  } };
+  } } satisfies Partial<Models>);
   const storage = new MemoryStorage();
   const harness = await Harness.open(storage, { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: chatModel.provider, modelId: chatModel.id }, tools } });
@@ -79,7 +79,7 @@ test('every registered tool advertises its real object contract and executes thr
     const watch = await harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
     if (!watch) throw new Error('Question document missing');
     const opened = Promise.withResolvers<void>();
-    watch.start(async value => { if (value?.items.some(item => item.kind === 'takeover')) opened.resolve(); });
+    watch.start(async call => { if (call.kind === 'value' && call.value.items.some(item => item.kind === 'takeover')) opened.resolve(); });
     await root.submit({ type: 'input', content: 'Exercise all registered contracts.' }, BACKGROUND_CONTEXT);
     await opened.promise;
     await watch.stop();
@@ -249,11 +249,11 @@ test('a mutating machine command with no machine attached fails before dispatch'
   const tools = createRuntimeTools({ ...services, async invoke(input) { dispatched++; return completed(input); }, async preflight(input) { if (input.tool === 'bash') throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.'); } }, operations, (id, context) => harness.abortTask(id, context), async () => {});
   const registry = createRegistry(); registry.install(defineExtension({ name: 'preflight-proof', tools }));
   let generation = 0;
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple() {
     const calls = generation++ === 0 ? [call('bash', { command: 'touch effect' })] : undefined;
     const reply: AssistantMessage = { role: 'assistant', content: calls ?? [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: calls ? 'toolUse' : 'stop', timestamp: generation, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
   try {
     const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });

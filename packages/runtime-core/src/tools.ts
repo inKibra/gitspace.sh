@@ -2,8 +2,8 @@ import { AssistantEntry, ToolResultEntry, ToolTask, defineTool, type Harness, ty
 import type { ImageContent } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { z } from 'zod';
-import type { JsonValue, Context } from '@earendil-works/chord';
-import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
+import type { JsonValue } from '@earendil-works/chord/json';
+import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
 import { LIFECYCLE_APPROVAL_CHOICES, RuntimeApprovalAnswerSchema, RuntimeJsonSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeLifecycleApprovalRequest, type RuntimePlanStep, type RuntimeTakeoverTab, type RuntimeToolResult, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type AskAnswerer } from '@gitspace/blocks';
@@ -227,8 +227,8 @@ async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wak
       else if (question.answer !== null) result.resolve(question.answer);
     };
     settle(watch.value);
-    watch.start(async value => { settle(value); });
-    void watch.closed.then(end => { if (end.reason !== 'stopped') result.reject(new Error(`Take-over wait ended: ${end.reason}`)); });
+    watch.start(async call => { if (call.kind === 'value') settle(call.value); });
+    void watch.closed.then(end => { if (end.kind !== 'stopped') result.reject(new Error(`Take-over wait ended: ${end.kind}`)); });
     try { return await result.promise; } finally { await watch.stop(); }
   } finally { clearTimeout(timer); context.abortSignal?.removeEventListener('abort', abort); }
 }

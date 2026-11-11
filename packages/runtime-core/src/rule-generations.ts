@@ -1,9 +1,10 @@
 import { defineDoc, defineTask, GenerationTask, LiveDoc, UserEntry, type RegistryReader, type RegistrySnapshot, type TaskRuntime, type GenerationInput, type GenerationCheckpoint, type GenerationResult, type GenerationHooks } from '@earendil-works/pi-durable';
-import type { Context } from '@earendil-works/chord';
+import type { Context } from '@earendil-works/chord/context';
+import { boundedReplay } from './documents.js';
 import { RuntimeRuleInterruptionSchema, type RuntimeRuleInterruption } from '@gitspace/protocol-runtime';
 import { releaseRuntimeRuleBinding } from './retained-rules.js';
 
-export const RuleInterruptionsDoc = defineDoc<{ active: RuntimeRuleInterruption | null }>({ kind: 'gitspace.rule-interruptions', version: 1, scope: 'conversation', history: 'latest', fork: 'initial', initial: () => ({ active: null }) });
+export const RuleInterruptionsDoc = defineDoc<{ active: RuntimeRuleInterruption | null }>({ kind: 'gitspace.rule-interruptions', version: 1, scope: 'conversation', history: 'latest', fork: 'initial', initial: () => ({ active: null }), checkpointWhen: boundedReplay });
 export class RuleGenerationDiscard extends Error {
   constructor() { super('Generation discarded by project rule'); }
 }

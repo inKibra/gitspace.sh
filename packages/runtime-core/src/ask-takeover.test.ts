@@ -35,7 +35,7 @@ async function open(storage: Storage, args: object = asked) {
   /** What the runtime reported: a reset cuts the call off, which it reports. */
   const reports: unknown[] = [];
   let woken = Promise.withResolvers<void>();
-  const models = { ...createModels(), getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }) {
+  const models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }) {
     const text = JSON.stringify(request.messages);
     const ask = !text.includes('"role":"toolResult"');
     const reply: AssistantMessage = { role: 'assistant', content: ask ? [{ type: 'toolCall', id: 'takeover-call', name: 'ask_takeover', arguments: { ...args } }] : [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: ask ? 'toolUse' : 'stop', timestamp: Date.now(), usage };
@@ -44,7 +44,7 @@ async function open(storage: Storage, args: object = asked) {
     requests.push(text);
     const done = arrived; arrived = Promise.withResolvers(); done.resolve();
     return stream;
-  } };
+  } });
   const runtime = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage, models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, async takeoverTab(input) { lookups.push(input.args); return tab; }, results: { put: unused, text: unused } },
@@ -62,7 +62,7 @@ async function open(storage: Storage, args: object = asked) {
     const found = Promise.withResolvers<NonNullable<typeof watch.value>['items'][number]>();
     const check = (value: typeof watch.value) => { const question = value?.items.find(item => item.kind === 'takeover'); if (question) found.resolve(question); };
     check(watch.value);
-    watch.start(async value => { check(value); });
+    watch.start(async call => { if (call.kind === 'value') check(call.value); });
     try {
       const question = await found.promise;
       if (!question.takeover) throw new Error('A takeover question without its card');

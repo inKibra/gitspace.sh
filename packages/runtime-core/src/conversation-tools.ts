@@ -2,12 +2,13 @@ import { AgentDoc, defineDoc, type Harness, type Storage, type Conversation, typ
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
+import { boundedReplay } from './documents.js';
 import { SessionControlsDoc, definitionRoleChain, parseCloudAgentDefinition, resolveAgentDefinitions, type SessionControlServices } from './session-controls.js';
 import { BackgroundAgentsDoc, type BackgroundAgentTask } from './background-agents.js';
 import { AgentDefinitionContextDoc, SUBAGENT_QUEUED, SubagentRunQueueDoc, type SubagentMetadata } from './subagent-state.js';
 import { ConversationLifecycleDoc, type ConversationLifecycle } from './conversation-lifecycle.js';
 import { BUILT_IN_MODEL_ROLES, modelRoleThinkingSchema } from '@gitspace/protocol/inference';
-const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }) });
+const Anchors = defineDoc<{ entries: Record<string, string>; children: Record<string, string> }>({ kind: 'gitspace.context-anchors', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ entries: {}, children: {} }), checkpointWhen: boundedReplay });
 export type ConversationToolOptions = { harness: Harness; storage: Storage; lifecycle: ConversationLifecycle; backgroundAgentTask: BackgroundAgentTask; refreshDefinitions?(target: Conversation): Promise<void> } & Pick<SessionControlServices, 'admitInference' | 'configureModel' | 'catalog'>;
 export function createConversationTools(options: ConversationToolOptions) {
   const { harness, storage } = options;

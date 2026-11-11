@@ -61,11 +61,11 @@ async function fixture(storage = new MemoryStorage()) {
 
 /** Models that make the queued tool calls, one per turn, then reply. */
 function scriptedModels(turns: (ToolCall | null)[]): Models {
-  return { ...createModels(), getModel: () => model, streamSimple() {
+  return Object.assign(createModels(), { getModel: () => model, streamSimple() {
     const call = turns.shift() ?? null;
     const reply: AssistantMessage = { role: 'assistant', content: call ? [call] : [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: call ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
-  } };
+  } });
 }
 
 test('an approved plan loads the todo list; only linked items move its steps, and from:"plan" resumes it after a detour', async () => {

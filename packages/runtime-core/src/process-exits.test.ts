@@ -188,7 +188,7 @@ async function watched(services: (supervisor: ProcessSupervisor) => Partial<JobS
     ...services(supervisor),
   });
   const registry = createRegistry(); registry.install(defineExtension({ name: 'process-events', tasks: [task] }));
-  const harness = await Harness.open(await openNodeJsonlStorage(join(rootPath, 'session'), BACKGROUND_CONTEXT), { registry, models: createModels(), ...(now ? { now } : {}), onReport: error => { reports.push(error instanceof Error ? error.message : String(error)); } }, BACKGROUND_CONTEXT);
+  const harness = await Harness.open(await openNodeJsonlStorage(join(rootPath, 'session'), BACKGROUND_CONTEXT), { registry, models: createModels(), ...(now ? { now } : {}), onReport: report => { reports.push(report.error instanceof Error ? report.error.message : String(report.error)); } }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT);
   const started = await supervisor.request({ op: 'start', spec: { name: 'server', application: '/bin/sleep', args: ['30'], cwd: rootPath, env: {}, pty: false, persist: true, detached: false, restart: 'no' } });
   if (started.op !== 'start') throw new Error('Unexpected start result');

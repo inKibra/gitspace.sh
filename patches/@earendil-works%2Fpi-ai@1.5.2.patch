@@ -1,0 +1,33 @@
+diff --git a/dist/auth/oauth/openai-chatgpt.js b/dist/auth/oauth/openai-chatgpt.js
+index a351c28f6972d3ede55ca09f812778a787ce6f16..560a498476381136ba841c809c0c7804d7f01208 100644
+--- a/dist/auth/oauth/openai-chatgpt.js
++++ b/dist/auth/oauth/openai-chatgpt.js
+@@ -144,6 +144,7 @@ function credentialFromTokenResponse(token, clientId) {
+     if (!scopes.includes(DIRECT_TOKEN_SCOPE)) {
+         throw new Error(`OpenAI OAuth grant did not include ${DIRECT_TOKEN_SCOPE}`);
+     }
++    const email = idTokenEmail(token.id_token);
+     return {
+         type: "oauth",
+         access,
+@@ -151,8 +152,20 @@ function credentialFromTokenResponse(token, clientId) {
+         expires: Date.now() + token.expires_in * 1000 - EXPIRY_MARGIN_MS,
+         clientId,
+         scopes,
++        ...(email ? { email } : {}),
+     };
+ }
++// GitSpace: the access token names no one and userinfo answers only `sub`; the ID token's email names the account.
++function idTokenEmail(idToken) {
++    if (typeof idToken !== "string") return undefined;
++    try {
++        const claims = JSON.parse(atob((idToken.split(".")[1] ?? "").replace(/-/g, "+").replace(/_/g, "/")));
++        return typeof claims?.email === "string" && claims.email.includes("@") ? claims.email : undefined;
++    }
++    catch {
++        return undefined;
++    }
++}
+ async function exchangeAuthorizationCode(code, verifier, clientId, signal) {
+     const token = await requestToken(new URLSearchParams({
+         grant_type: "authorization_code",

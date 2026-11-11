@@ -5,7 +5,8 @@ import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { canonicalJson, RuntimeRuleInterruptionSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuleGenerationDiscard, RuleInterruptionsDoc } from './rule-generations.js';
-import type { Context } from '@earendil-works/chord';
+import type { Context } from '@earendil-works/chord/context';
+import { boundedReplay } from './documents.js';
 async function digest(value: string): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -57,8 +58,8 @@ export type RetainedRuleServices = {
   judge(conversationId: string, state: string, questions: Record<string, string>): Promise<Record<string, number>>;
   matchAst(conversationId: string, content: string, paths: string[], patterns: string[]): Promise<boolean>;
 };
-const RuleState = defineDoc<{ turn: number; claims: Record<string, number>; warnings: string[] }>({ kind: 'gitspace.rules', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ turn: 0, claims: {}, warnings: [] }) });
-const RuleToolAdmissions = defineDoc<{ generation: string; calls: Record<string, string> }>({ kind: 'gitspace.rule-tool-admissions', version: 1, scope: 'conversation', history: 'latest', fork: 'initial', initial: () => ({ generation: '', calls: {} }) });
+const RuleState = defineDoc<{ turn: number; claims: Record<string, number>; warnings: string[] }>({ kind: 'gitspace.rules', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ turn: 0, claims: {}, warnings: [] }), checkpointWhen: boundedReplay });
+const RuleToolAdmissions = defineDoc<{ generation: string; calls: Record<string, string> }>({ kind: 'gitspace.rule-tool-admissions', version: 1, scope: 'conversation', history: 'latest', fork: 'initial', initial: () => ({ generation: '', calls: {} }), checkpointWhen: boundedReplay });
 type Output = { source: 'text' | 'thinking' | 'tool'; text: string; tool?: string; paths: string[]; ordinal?: number };
 type Binding = { taskId: string; conversationId: string; harness: Harness; interrupting: boolean; check(output: Output, completed: boolean, context: Context): Promise<{ text: string; interrupt: boolean }[]>; context: Context };
 const bindings = new WeakMap<AbortSignal, Binding>();

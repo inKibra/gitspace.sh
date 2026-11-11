@@ -433,7 +433,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       });
       // A storage error ends the session for good: forget it so the next call opens a fresh one from what was committed.
       runtime.then(opened => opened.harness.closed.then(end => {
-        if (end.reason !== 'failed' || this.runtime !== runtime) return;
+        if (end.kind !== 'failed' || this.runtime !== runtime) return;
         this.runtime = undefined;
         const error = end.error instanceof Error ? end.error.message : String(end.error);
         console.error(JSON.stringify({ event: 'runtime_session_failed', workspaceId: identity.workspaceId, error }));

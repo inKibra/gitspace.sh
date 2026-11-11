@@ -36,7 +36,7 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
   const backgroundAgentTask = createBackgroundAgentTask(event => lifecycle.deliver(event));
   const catalog = async () => ({ models: [], roles: [{ id: 'sub', label: 'Sub', provider: model.provider, model: model.id, thinking: null, current: false }] });
   const entered = Promise.withResolvers<void>();
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input, options) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input, options) {
     requests.push(JSON.stringify(input));
     const controller = new AbortController();
     options?.signal?.addEventListener('abort', () => controller.abort(options.signal?.reason), { once: true });
@@ -68,7 +68,7 @@ async function fixture(mode: 'text' | 'delta' | 'tool' | 'cancel' | 'recover' | 
       stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply }); stream.end(reply);
     }
     return interceptRuntimeModelStream(stream, options?.signal, controller);
-  } };
+  } } satisfies Partial<Models>);
   const effect = defineTool({ name: mode === 'patch' ? 'apply_patch' : mode === 'write' ? 'write' : mode === 'spawn' ? 'spawn' : 'effect', description: 'Record an effect', parameters: Type.Object({ command: Type.Optional(Type.String()), patch: Type.Optional(Type.String()), path: Type.Optional(Type.String()), content: Type.Optional(Type.String()) }), async execute(_args, api) {
     effects++;
     if (mode === 'spawn') return createConversationTools({ harness, storage, lifecycle, backgroundAgentTask, admitInference, configureModel, catalog: async () => ({ models: [], roles: [{ id: 'sub', label: 'sub', provider: model.provider, model: model.id, thinking: null, current: false }] }) })({ tool: 'agents', args: { op: 'spawn', role: 'sub', task: 'Child task' }, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: 'spawn-request', attemptId: 'spawn-attempt', replay: 'unsafe', signal: AbortSignal.timeout(30_000) }).then(result => ({ output: result.status === 'completed' ? result.content : [{ type: 'text' as const, text: 'Spawn failed' }] }));
@@ -290,20 +290,18 @@ describe('durable rule generation discard', () => {
       return events;
     };
     const deferred = { provider: model.provider, modelId: model.id, api: model.api, id: 'admitted-request', pollAfterMs: mode === 'discard' ? 0 : 60000 };
-    const provider: Models = {
-      ...createModels(), getModel: () => model,
-      streamSimple() {
-        requests++;
-        return stream(requests === 1 ? { ...message(''), stopReason: 'deferred', deferred } : message('Corrected'));
-      },
-      streamDeferred() { return stream(message('FORBIDDEN')); },
-      async cancelDeferred(_model, handle, options) {
-        const scope = options?.signal ? scopes.get(options.signal) : undefined;
-        if (!scope) throw new Error('Model request has no durable inference admission');
-        expect(handle).toEqual(deferred);
-        cancellations.push(scope);
-      },
-    };
+    const provider: Models = Object.assign(createModels(), { getModel: () => model,
+    streamSimple() {
+      requests++;
+      return stream(requests === 1 ? { ...message(''), stopReason: 'deferred', deferred } : message('Corrected'));
+    },
+    streamDeferred() { return stream(message('FORBIDDEN')); },
+    async cancelDeferred(_model, handle, options) {
+      const scope = options?.signal ? scopes.get(options.signal) : undefined;
+      if (!scope) throw new Error('Model request has no durable inference admission');
+      expect(handle).toEqual(deferred);
+      cancellations.push(scope);
+    }, } satisfies Partial<Models>);
     const router = createRunModelsRouter(provider, async signal => {
       const scope = signal ? scopes.get(signal) : undefined;
       if (!signal || !scope) throw new Error('Model request has no durable inference admission');
@@ -324,7 +322,8 @@ describe('durable rule generation discard', () => {
           if (live.generation?.deferred) polling.resolve();
         },
       })] }));
-      const harness = await Harness.open(storage, { registry: ruleGenerationRegistry(registry), models: router.models, settings: { compaction: { enabled: false } }, onReport: error => { reports.push(error); } }, BACKGROUND_CONTEXT);
+      // A deferred response waits for its poll asleep (pi 1.4+): the wake it asks for marks the request as pending.
+      const harness = await Harness.open(storage, { registry: ruleGenerationRegistry(registry), models: router.models, settings: { compaction: { enabled: false } }, onWake: wake => { if (wake.at !== undefined) polling.resolve(); }, onReport: report => { reports.push(report.error); } }, BACKGROUND_CONTEXT);
       return { harness, root: await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id } } }) };
     };
     let { harness, root } = await open();

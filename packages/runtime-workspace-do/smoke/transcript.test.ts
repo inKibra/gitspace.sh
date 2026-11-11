@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { Harness, MemoryStorage, ToolTask, createRegistry, defineExtension, defineTool, type Conversation, type EntryDraft, type Tx } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { Type, createModels, type AssistantMessage } from '@earendil-works/pi-ai';
+import { createModels, type AssistantMessage } from '@earendil-works/pi-ai';
 import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
 import { formatConversationEvents, type TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
@@ -221,7 +221,7 @@ test('a call shows when it started executing while it runs, and once finished sp
   const storage = new MemoryStorage();
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const wait = defineTool({ name: 'wait', description: 'Wait until released', parameters: Type.Object({}), async execute() {
+  const wait = defineTool({ name: 'wait', description: 'Wait until released', parameters: { type: 'object', properties: {} }, async execute() {
     started.resolve();
     await release.promise;
     return { output: [{ type: 'text', text: 'released' }] };

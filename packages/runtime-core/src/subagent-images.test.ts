@@ -28,14 +28,14 @@ async function withScreenshots(conversation: Conversation) {
 
 test('a subagent sends its newest 4 screenshots while the main conversation sends all of them', async () => {
   const requests: Context[] = [];
-  const models = { ...createModels(), getModel: () => model,
+  const models = Object.assign(createModels(), { getModel: () => model,
     streamSimple(_model: Model<Api>, request: Context) {
       requests.push(request);
       const stream = createAssistantMessageEventStream();
       stream.push({ type: 'done', reason: 'stop', message: answer });
       stream.end(answer);
       return stream;
-    } };
+    } });
   const { harness, root } = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },

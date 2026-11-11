@@ -9,8 +9,8 @@ const unused = async (): Promise<never> => { throw new Error('Unexpected service
 /** The tool call that admitted the job; it has returned. */
 const Spawn = defineTask<null, { phase: 'run' }, null>({ name: 'proof.Spawn', version: 1, initial: () => ({ phase: 'run' }), phases: { async run(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
 
-/** A background command whose outcome reads fail `failures` times, or for good; the clock moves only when the alarm the
- * job asks for fires. */
+/** A background command whose outcome reads fail `failures` times, or for good; the clock moves only when the wake pi asks
+ * the host for fires, as the workspace's alarm does. */
 async function fixture(failures: number) {
   let now = Date.now();
   let reads = 0;
@@ -23,11 +23,15 @@ async function fixture(failures: number) {
       if (++reads <= failures) throw new Error('Machine unreachable');
       return { status: 'completed', requestId: attemptId, attemptId, content: [{ type: 'text', text: 'built' }] };
     },
-    async wakeAt(at) { delays.push(at - now); now = at; },
+    wakeAt: unused,
     async deliverConversationEvent(input) { delivered.push(input); },
   });
   const registry = createRegistry(); registry.install(defineExtension({ name: 'jobs', tasks: [task, Spawn] }));
-  const harness = await Harness.open(new MemoryStorage(), { registry, models: createModels(), now: () => now, onReport: error => { reports.push(error instanceof Error ? error.message : String(error)); } }, BACKGROUND_CONTEXT);
+  const opened = Promise.withResolvers<Harness>();
+  const harness = await Harness.open(new MemoryStorage(), { registry, models: createModels(), now: () => now,
+    onWake: wake => { if (wake.at === undefined || wake.at <= now) return; delays.push(wake.at - now); now = wake.at; void opened.promise.then(open => open.resume()); },
+    onReport: report => { reports.push(report.error instanceof Error ? report.error.message : String(report.error)); } }, BACKGROUND_CONTEXT);
+  opened.resolve(harness);
   const root = await harness.root(BACKGROUND_CONTEXT);
   const id = await root.commit(async tx => {
     const spawn = await tx.createTask(Spawn, null, { ownership: { kind: 'conversation' }, conversationId: root.id, background: true });

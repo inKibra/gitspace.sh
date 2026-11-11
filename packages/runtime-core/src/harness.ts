@@ -1,7 +1,7 @@
-import { Harness, createRegistry, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessOptions, type ModelRef, type Storage, type ConversationId, type Cursor } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessSettings, type ModelRef, type Storage, type ConversationId, type Cursor, type Wake } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { JsonValue } from '@earendil-works/chord';
-import type { Message } from '@earendil-works/pi-ai';
+import type { JsonValue } from '@earendil-works/chord/json';
+import type { Api, Message, Model, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
 import { BROWSER_TOOL_NAME, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
@@ -30,15 +30,17 @@ export type RuntimeHarnessOptions = {
   workspacePhase?: WorkspacePhase;
   /** Persist phase policy before a session transition or an approved plan becomes effective. */
   setWorkspacePhase?(phase: WorkspacePhase): Promise<void>;
-  models: HarnessOptions['models'];
+  models: Models;
   /** Absent until explicit inference admission; history does not require a configured provider. */
   model?: ModelRef;
-  settings?: HarnessOptions['settings'];
+  settings?: HarnessSettings;
   tools: Omit<ToolServices, 'question'>;
   operations: OperationalServices;
   retainedRules: RetainedRuleServices;
   editTool(model: ModelRef): 'edit' | 'apply_patch';
   onReport(error: unknown): void;
+  /** When pi next needs this session to run, for a sleeping task (`at`); the host arms its own wake, pi keeps no timer. */
+  onWake?(wake: Wake): void;
   admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }): Promise<InferenceModelAdmission>;
   bindInferenceConversation(conversationId: string, signal: AbortSignal, submissionIds: readonly string[], requestIds: readonly string[], flags: { fastMode: boolean }): Promise<void>;
   /**
@@ -57,6 +59,20 @@ export type RuntimeHarnessOptions = {
    */
   unfinished: { begin(key: string): number; end(key: string): void };
 };
+/** Claude on Bedrock holds a tool call's input until it is complete, so a large call (a whole file) is a stream silent
+ * for minutes, which a Cloudflare Worker's connection does not outlast; fine-grained tool streaming streams the input as
+ * it is written. The request body is pi-ai's ConverseStream input. GovCloud model ids are skipped, as pi-ai skips its own
+ * betas there; the hook does not see the configured region. */
+const BedrockRequestSchema = z.looseObject({ additionalModelRequestFields: z.record(z.string(), z.unknown()).optional() });
+function bedrockToolInputStreaming(model: Model<Api>, payload: unknown): { payload: unknown } | undefined {
+  const id = model.id.toLowerCase();
+  const claude = id.includes('anthropic.claude') || id.includes('anthropic/claude') || (model.name ?? '').toLowerCase().includes('claude');
+  if (model.api !== 'bedrock-converse-stream' || !claude || id.startsWith('us-gov.') || id.startsWith('arn:aws-us-gov:')) return undefined;
+  const body = BedrockRequestSchema.parse(payload);
+  const fields = body.additionalModelRequestFields ?? {};
+  const betas = Array.isArray(fields.anthropic_beta) ? fields.anthropic_beta : [];
+  return { payload: { ...body, additionalModelRequestFields: { ...fields, anthropic_beta: [...betas, 'fine-grained-tool-streaming-2025-05-14'] } } };
+}
 /**
  * How a request is sent after resets cut off earlier attempts: whole twice (a release or a neighbouring object's reset
  * cuts off any request), then with bulky tool output cut down. Past that the count is cleared and the request fails in
@@ -145,11 +161,11 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const current = watch.value?.items.find(item => item.id === id);
     if (current?.answer !== null && current?.answer !== undefined) { await watch.stop(); return current.answer; }
     const waiting = Promise.withResolvers<JsonValue>();
-    watch.start(async value => {
-      const question = value?.items.find(item => item.id === id);
+    watch.start(async call => {
+      const question = call.kind === 'value' ? call.value.items.find(item => item.id === id) : undefined;
       if (question?.answer !== null && question?.answer !== undefined) waiting.resolve(question.answer);
     });
-    void watch.closed.then(result => { if (result.reason !== 'stopped') waiting.reject(new Error(`Question wait ended: ${result.reason}`)); });
+    void watch.closed.then(end => { if (end.kind !== 'stopped') waiting.reject(new Error(`Question wait ended: ${end.kind}`)); });
     const abort = () => { waiting.reject(context.abortSignal?.reason); };
     context.abortSignal?.addEventListener('abort', abort, { once: true });
     try { return await waiting.promise; }
@@ -211,7 +227,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const board = !child && options.tools.projectBoard && live?.run ? await boardForTurn(harness, runtime.conversationId, String(live.run.taskId), input.messages, options.tools.projectBoard, context) : null;
     if (board) return { messages: [...outgoing, board] };
     return described || lean || repaired ? { messages: outgoing } : undefined;
-  }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
+  }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); }, beforeProviderRequest: request => bedrockToolInputStreaming(request.model, request.payload) }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');
     // Pi reports a throw here and summarizes the full prefix itself, without this hook's binding or dropped form: every
@@ -288,7 +304,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time',
     // An idle conversation's parsed context (8 MB for a 250k-token conversation with screenshots) is dropped at once:
     // a workspace object holds many conversations, and re-reading one costs tens of milliseconds.
-    contextRetentionMs: 0 }, onReport: options.onReport }, BACKGROUND_CONTEXT);
+    contextRetentionMs: 0 }, onReport: report => options.onReport(report.error), ...(options.onWake ? { onWake: options.onWake } : {}) }, BACKGROUND_CONTEXT);
   const modelTools = (model?: ModelRef) => tools.filter(tool => tool.name !== ((!model || options.editTool(model) === 'edit') ? 'apply_patch' : 'edit'));
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { ...(options.model ? { model: options.model } : {}), tools: modelTools(options.model) } });
   // Pi stores tool names; a renamed or newly added tool would otherwise never reach an existing workspace.

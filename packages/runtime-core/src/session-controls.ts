@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeMessageDecision, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
-import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc } from './documents.js';
+import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, boundedReplay } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { ToolServices } from './tools.js';
@@ -21,7 +21,7 @@ import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/proto
 const ThinkingSchema = modelRoleThinkingSchema.unwrap();
 const ThinkingSelectionSchema = z.discriminatedUnion('source', [z.object({ source: z.literal('profile') }), z.object({ source: z.literal('conversation'), thinking: modelRoleThinkingSchema })]);
 const ControlsSchema = z.object({ revision: z.number(), settingsRevision: z.number(), instructionsRevision: z.number(), inferenceRevision: z.number(), selection: ModelSelectionIntentSchema, role: z.string().nullable(), thinkingSelection: ThinkingSelectionSchema.optional(), fastMode: z.boolean(), goal: SessionControlSchema.shape.goal, definitions: z.array(AgentDefinitionSchema), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
-export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, thinkingSelection: { source: 'profile' }, fastMode: false, goal: null, definitions: [] }) });
+export const SessionControlsDoc = defineDoc<z.infer<typeof ControlsSchema>>({ kind: 'gitspace.session-controls', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ revision: 0, settingsRevision: 0, instructionsRevision: 0, inferenceRevision: 0, selection: { kind: 'default' }, role: null, thinkingSelection: { source: 'profile' }, fastMode: false, goal: null, definitions: [] }), checkpointWhen: boundedReplay });
 /** An explicit session effort (including auto/null) wins until the user selects another role. */
 export async function applyInferenceThinking(target: Conversation, admission: InferenceModelAdmission): Promise<void> {
   const thinking = await target.commit(async tx => {
@@ -42,8 +42,8 @@ export function selectRole(controls: z.infer<typeof ControlsSchema>, role: strin
   controls.selection = role === 'default' ? { kind: 'default' } : { kind: 'role', role };
   controls.thinkingSelection = { source: 'profile' };
 }
-export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>({ kind: 'gitspace.session-selection', version: 1, scope: 'session', initial: () => ({ conversationId: null }) });
-const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }) });
+export const SessionSelectionDoc = defineDoc<{ conversationId: string | null }>({ kind: 'gitspace.session-selection', version: 1, scope: 'session', initial: () => ({ conversationId: null }), checkpointWhen: boundedReplay });
+const GoalClockDoc = defineDoc<{ startedAt: number | null; elapsedSeconds: number; tokensAtStart: number }>({ kind: 'gitspace.goal-clock', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ startedAt: null, elapsedSeconds: 0, tokensAtStart: 0 }), checkpointWhen: boundedReplay });
 const DefinitionMetadataSchema = z.object({ name: z.string().min(1).optional(), description: z.string().default(''), model: z.union([z.string(), z.array(z.string())]).optional(), thinking: ThinkingSchema.nullable().optional(), tools: z.union([z.string(), z.array(z.string())]).optional(), spawns: z.union([z.string(), z.array(z.string())]).optional() });
 export function parseCloudAgentDefinition(path: string, content: string) {
   if (!/^(?:\.omp|\.agents|gitspace)\/agents\/[A-Za-z0-9._-]+\.md$/u.test(path)) throw new Error('Agent definitions must be workspace .agents/agents/*.md or .omp/agents/*.md files');

@@ -165,11 +165,11 @@ test('real durable authority completes a caught denied read after an effect with
     registry.install(defineExtension({ name: 'codemode-authority-proof', tools }));
     const model: Model<Api> = { id: 'proof', name: 'Proof', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
     let generated = false;
-    const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+    const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple() {
       const first = !generated; generated = true;
       const message: AssistantMessage = { role: 'assistant', content: first ? [{ type: 'toolCall', id: 'parent', name: 'codemode', arguments: { code: 'await tools.write({path:"effect",content:"once"}); try { await tools.read({path:"denied"}); } catch { return "caught"; } return "not caught";', timeoutMs: 5000 } }] : [{ type: 'text', text: 'Done' }], api: model.api, provider: model.provider, model: model.id, stopReason: first ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: first ? 'toolUse' : 'stop', message }); stream.end(message); return stream;
-    } };
+    } });
     const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
     try {
       const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
@@ -208,11 +208,11 @@ test('an MCP result past what the transcript keeps reaches mcp.call whole, the s
     registry.install(defineExtension({ name: 'codemode-mcp-proof', tools }));
     const model: Model<Api> = { id: 'proof', name: 'Proof', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
     let generated = false;
-    const models: Models = { ...createModels(), getModel: () => model, streamSimple() {
+    const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple() {
       const first = !generated; generated = true;
       const message: AssistantMessage = { role: 'assistant', content: first ? [{ type: 'toolCall', id: 'parent', name: 'codemode', arguments: { code: 'const comments = await mcp.call({ connectionId: "figma", name: "list_comments" }); return comments.filter(comment => comment.author.handle === "ana").map(comment => comment.id);', timeoutMs: 10000 } }] : [{ type: 'text', text: 'Done' }], api: model.api, provider: model.provider, model: model.id, stopReason: first ? 'toolUse' : 'stop', timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: first ? 'toolUse' : 'stop', message }); stream.end(message); return stream;
-    } };
+    } });
     const harness = await Harness.open(new MemoryStorage(), { registry, models, settings: { compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
     try {
       const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });

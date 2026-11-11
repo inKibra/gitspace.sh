@@ -3,7 +3,8 @@ import { Type } from 'typebox';
 import { Harness, createRegistry, defineExtension, defineTask, defineTool, type ConversationId, type Storage } from '@earendil-works/pi-durable';
 import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { JsonValue } from '@earendil-works/chord';
+import type { JsonValue } from '@earendil-works/chord/json';
+import { holdPhase } from './task-hold.test-support.js';
 import { createModels, createAssistantMessageEventStream, type Models, type Model, type Api, type AssistantMessage } from '@earendil-works/pi-ai';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -22,7 +23,7 @@ const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0
 const spawnsReturned = new Map<string, PromiseWithResolvers<void>>();
 const spawnReturned = (id: string) => { const found = spawnsReturned.get(id) ?? Promise.withResolvers<void>(); spawnsReturned.set(id, found); return found; };
 /** The task a spawn runs in, as an agents tool call: `hold` stays live; `return` ends once its spawn returned. */
-const Owner = defineTask<{ label: 'hold' | 'return' }, { phase: 'run' }, null>({ name: 'proof.QueueOwner', version: 1, initial: () => ({ phase: 'run' }), phases: { async run(task, runtime, ctx) { if (task.input.label === 'hold') await runtime.sleep(Date.now() + 3_600_000, ctx); else await spawnReturned(String(task.id)).promise; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
+const Owner = defineTask<{ label: 'hold' | 'return' }, { phase: 'run' }, null>({ name: 'proof.QueueOwner', version: 1, initial: () => ({ phase: 'run' }), phases: { async run(task, runtime, ctx) { if (task.input.label === 'hold') await holdPhase(runtime, Date.now() + 3_600_000, ctx); else await spawnReturned(String(task.id)).promise; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
 const SpawnSchema = z.union([z.object({ conversationId: z.string(), submissionId: z.string() }), z.object({ conversationId: z.string(), queued: z.string() })]);
 
 async function directory() {
@@ -57,7 +58,7 @@ async function fixture(storage: Storage, hold = true) {
   const held = new Map<string, () => void>();
   const starts = new Map<string, PromiseWithResolvers<void>>();
   const started = (text: string) => { const found = starts.get(text) ?? Promise.withResolvers<void>(); starts.set(text, found); if (requests.some(request => request.includes(text))) found.resolve(); return found.promise; };
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_selected, input, options) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_selected, input, options) {
     const latest = input.messages.findLast(message => message.role === 'user' || message.role === 'toolResult');
     const text = latest?.role === 'user' ? typeof latest.content === 'string' ? latest.content : latest.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') : '';
     requests.push(text);
@@ -72,7 +73,7 @@ async function fixture(storage: Storage, hold = true) {
       held.set(text, () => { options?.signal?.removeEventListener('abort', abort); answer(reply); });
     } else answer(reply);
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry, models, settings: { extensions: registry.snapshot().installed(), compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: model.id }, tools } });
   const reports: unknown[] = [];

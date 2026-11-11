@@ -3,6 +3,7 @@ import { AssistantEntry, defineDoc, MemoryStorage, ToolResultEntry, UserEntry } 
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { createAssistantMessageEventStream, createModels, type Api, type AssistantMessage, type Context, type Message, type Model } from '@earendil-works/pi-ai';
 import { RuntimeIdentitySchema, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
+import { boundedReplay } from './documents.js';
 import { createRuntimeHarness } from './harness.js';
 import { PROJECT_BOARD_INSTRUCTION } from './project-board.js';
 
@@ -26,7 +27,7 @@ async function fixture(options: { history?: number; script?: AssistantMessage[] 
   const requests: Context[] = [];
   const script = [...options.script ?? []];
   const board: { rows: WorkspaceBoardRow[]; failure: string | null } = { rows: [row('billing', 'Billing export'), row('search', 'Search index', { status: colored('green') })], failure: null };
-  const models = { ...createModels(), getModel: () => model,
+  const models = Object.assign(createModels(), { getModel: () => model,
     async completeSimple(_model: Model<Api>, request: Context) {
       requests.push(request);
       return reply([{ type: 'text', text: 'Handoff: the person asked about billing.' }], 'stop');
@@ -38,7 +39,7 @@ async function fixture(options: { history?: number; script?: AssistantMessage[] 
       stream.push({ type: 'done', reason: answer.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: answer });
       stream.end(answer);
       return stream;
-    } };
+    } });
   const { harness, root } = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'project' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => 'Project instructions.', preflight: async () => {}, results: { put: unused, text: unused },
@@ -94,9 +95,7 @@ test('a board stored by an earlier release, its rows without every pull request\
     // The state the release before left: version 2 rows with one pull request number, and a full board the
     // conversation shows.
     const full = 'Workspace board, 2026-11-08 17:00:00 UTC (1 workspace):';
-    const BoardVersion2 = defineDoc<{ rows: Array<Omit<WorkspaceBoardRow, 'pullRequests'> & { pullRequest: number | null }>; at: number; full: string | null; changes: number; turn: string | null }>({
-      kind: 'gitspace.project-board', version: 2, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ rows: [], at: 0, full: null, changes: 0, turn: null }),
-    });
+    const BoardVersion2 = defineDoc<{ rows: Array<Omit<WorkspaceBoardRow, 'pullRequests'> & { pullRequest: number | null }>; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 2, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ rows: [], at: 0, full: null, changes: 0, turn: null }), checkpointWhen: boundedReplay });
     await f.root.commit(async tx => {
       await tx.appendEntry(UserEntry, f.root.id, { model: [{ role: 'user', content: `${full}\n- Billing export (billing) · code · idle · PR #42 · since 17:00`, timestamp: 1 }] });
       const { pullRequests: _pulls, ...earlier } = row('billing', 'Billing export');

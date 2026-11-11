@@ -1,5 +1,5 @@
 import { defineTask } from '@earendil-works/pi-durable';
-import type { JsonValue } from '@earendil-works/chord';
+import type { JsonValue } from '@earendil-works/chord/json';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 export type OperationalKind = 'Checkpoint' | 'LifecycleRun' | 'Job' | 'Service' | 'Merge';
 export type OperationalInput = { args: JsonValue; deadlineAt: string; replay: 'safe' | 'unsafe'; scheduledAt?: number };
@@ -21,9 +21,10 @@ export function createOperationalTasks(services: OperationalServices) {
     name: `gitspace.${kind}`, version: 1, initial: () => ({ phase: 'prepare' }),
     phases: {
       async prepare(task, runtime, context) {
+        // The phase sleeps durably until the scheduled time, then runs again from the start.
         if (task.input.scheduledAt !== undefined && task.input.scheduledAt > runtime.now()) {
-          await services.wakeAt(task.input.scheduledAt);
-          await runtime.sleep(task.input.scheduledAt, context);
+          await runtime.sleepUntil(task.input.scheduledAt, { phase: 'prepare' }, context);
+          return;
         }
         await runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'execute', attemptId: `task:${task.id}` } }), context);
       },

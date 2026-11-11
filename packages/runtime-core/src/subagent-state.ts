@@ -1,7 +1,8 @@
 import { defineDoc } from '@earendil-works/pi-durable';
 import type { RuntimeSubagentRecord } from '@gitspace/protocol-runtime';
+import { boundedReplay } from './documents.js';
 export type SubagentMetadata = RuntimeSubagentRecord;
-export const AgentDefinitionContextDoc = defineDoc<{ child: SubagentMetadata | null }>({ kind: 'gitspace.agent-definition', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ child: null }) });
+export const AgentDefinitionContextDoc = defineDoc<{ child: SubagentMetadata | null }>({ kind: 'gitspace.agent-definition', version: 1, scope: 'conversation', history: 'latest', fork: 'current', initial: () => ({ child: null }), checkpointWhen: boundedReplay });
 /**
  * Subagents of a workspace that run at once. A workspace object has 128 MB, and a model request is in memory three
  * times while it is built and sent (the loaded history, the SDK's JSON string, the encoded bytes). Workspaces reset
@@ -17,4 +18,4 @@ export const SUBAGENT_QUEUED = `queued: starts when one of the ${MAX_RUNNING_SUB
  */
 export type QueuedSubagentRun = { conversationId: string; input?: { requestId: string; content: string } };
 /** Subagents waiting for a run slot, oldest first; one item per subagent. */
-export const SubagentRunQueueDoc = defineDoc<{ queue: QueuedSubagentRun[] }>({ kind: 'gitspace.subagent-run-queue', version: 1, scope: 'session', initial: () => ({ queue: [] }) });
+export const SubagentRunQueueDoc = defineDoc<{ queue: QueuedSubagentRun[] }>({ kind: 'gitspace.subagent-run-queue', version: 1, scope: 'session', initial: () => ({ queue: [] }), checkpointWhen: boundedReplay });

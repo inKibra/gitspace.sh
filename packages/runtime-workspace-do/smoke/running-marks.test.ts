@@ -31,7 +31,7 @@ test('a model request a reset cut off is described by what it sent, images and t
   const database = new Database(':memory:');
   const marks = createRunningMarks(storage(database));
   const pending = createAssistantMessageEventStream();
-  const models = marks.models({ ...createModels(), streamSimple: () => pending });
+  const models = marks.models(Object.assign(createModels(), { streamSimple: () => pending }));
   const model: Model<Api> = { id: 'opus', name: 'Opus', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://invalid.test', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
   const screenshot = { type: 'image' as const, mimeType: 'image/png', data: 'A'.repeat(300_000) };
   const context: Context = { messages: [
@@ -50,7 +50,7 @@ test('a reply a reset cut off is described by when the provider answered and how
   const database = new Database(':memory:');
   const pending = createAssistantMessageEventStream();
   const answered = Promise.withResolvers<(status: number) => Promise<void>>();
-  const models = createRunningMarks(storage(database)).models({ ...createModels(), streamSimple: (selected, _context, options) => { answered.resolve(async status => { await options?.onResponse?.({ status, headers: {} }, selected); }); return pending; } });
+  const models = createRunningMarks(storage(database)).models(Object.assign(createModels(), { streamSimple: (selected, _context, options) => { answered.resolve(async status => { await options?.onResponse?.({ status, headers: {} }, selected); }); return pending; } }));
   const model: Model<Api> = { id: 'opus', name: 'Opus', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
   const partial = { role: 'assistant' as const, content: [], api: 'anthropic-messages' as const, provider: 'anthropic', model: 'opus', stopReason: 'stop' as const, timestamp: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
   const marked = () => database.query('SELECT detail FROM runtime_running').all();
@@ -90,7 +90,7 @@ test('a stage a reset cut off is reported with the last progress it recorded, an
 
 test('a compaction request a reset cut off is named as compaction, not as a turn', () => {
   const database = new Database(':memory:');
-  const models = createRunningMarks(storage(database)).models({ ...createModels(), completeSimple: () => new Promise<never>(() => {}) });
+  const models = createRunningMarks(storage(database)).models(Object.assign(createModels(), { completeSimple: () => new Promise<never>(() => {}) }));
   const model: Model<Api> = { id: 'opus', name: 'Opus', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
   void models.completeSimple(model, { messages: [{ role: 'user', content: 'x'.repeat(250_000), timestamp: 1 }] });
   expect(createRunningMarks(storage(database)).leftover.map(({ step, detail }) => ({ step, detail }))).toEqual([

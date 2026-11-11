@@ -1,5 +1,6 @@
 import { defineDoc, type ConversationId, type Harness } from '@earendil-works/pi-durable';
-import type { Context } from '@earendil-works/chord';
+import type { Context } from '@earendil-works/chord/context';
+import { boundedReplay } from './documents.js';
 import type { Message, UserMessage } from '@earendil-works/pi-ai';
 import { workspaceBoard, workspaceBoardChanges, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 
@@ -17,7 +18,7 @@ export const PROJECT_BOARD_INSTRUCTION = 'Workspace board: your turns carry this
  * pull request with its state, `pullRequests`, version 3 `lastReplySource`); they were only the baseline of the next
  * changes, so an earlier state becomes the initial one and the next turn gets a full board. */
 const initialBoard = () => ({ rows: [], at: 0, full: null, changes: 0, turn: null });
-export const ProjectBoardDoc = defineDoc<{ rows: WorkspaceBoardRow[]; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 4, scope: 'conversation', history: 'latest', fork: 'current', initial: initialBoard, migrate: initialBoard });
+export const ProjectBoardDoc = defineDoc<{ rows: WorkspaceBoardRow[]; at: number; full: string | null; changes: number; turn: string | null }>({ kind: 'gitspace.project-board', version: 4, scope: 'conversation', history: 'latest', fork: 'current', initial: initialBoard, migrate: initialBoard, checkpointWhen: boundedReplay });
 
 /**
  * The board message a turn of the project agent starts with, read once per turn (`turn`, its run) and appended to the

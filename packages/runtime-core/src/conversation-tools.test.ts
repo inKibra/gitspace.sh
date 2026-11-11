@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { Type } from 'typebox';
 import { Harness, MemoryStorage, UserEntry, createRegistry, defineExtension, defineTask, defineTool, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { JsonValue } from '@earendil-works/chord';
+import type { JsonValue } from '@earendil-works/chord/json';
+import { holdPhase } from './task-hold.test-support.js';
 import { createModels, createAssistantMessageEventStream, type Models, type Model, type Api, type AssistantMessage } from '@earendil-works/pi-ai';
 import { AgentDefinitionSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime';
 import { createConversationTools } from './conversation-tools.js';
@@ -18,7 +19,7 @@ import { resolveModelSelection, resolveProfileModel } from './inference/admissio
 const context = BACKGROUND_CONTEXT;
 const model: Model<Api> = { id: 'child-fixture', name: 'Child fixture', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 const definition = AgentDefinitionSchema.parse({ name: 'review', description: 'Review source', source: 'cloud', path: '.agents/agents/review.md', editable: true, content: '---\nmodel: test/file-model\nthinking: low\ntools: read\n---\nOnly the saved reviewer persona.', revision: 'exact-file-revision', modelSelectors: ['test/file-model'], role: null, provider: 'test', model: 'file-model', thinking: 'low', selection: 'definition', tools: ['read'], spawns: null });
-const Owner = defineTask<{ label: string }, { phase: 'hold' }, null>({ name: 'proof.SpawnOwner', version: 1, initial: () => ({ phase: 'hold' }), phases: { async hold(task, runtime, ctx) { if (task.input.label !== 'complete') await runtime.sleep(Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
+const Owner = defineTask<{ label: string }, { phase: 'hold' }, null>({ name: 'proof.SpawnOwner', version: 1, initial: () => ({ phase: 'hold' }), phases: { async hold(task, runtime, ctx) { if (task.input.label !== 'complete') await holdPhase(runtime, Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
 async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; content: string }>) {
   const storage = new MemoryStorage();
   const registry = createRegistry();
@@ -33,13 +34,13 @@ async function fixture(ownerLabel = 'spawns', files?: Array<{ path: string; cont
   const backgroundReceived = Promise.withResolvers<void>();
   const available = ['file-model', 'role-model', 'default-model', 'parent-only-model'].map(id => ({ ...model, id }));
   const settings = { modelRoles: { default: 'test/default-model:high', review: ['other/role-model:low', 'pi/reviewer'], reviewer: 'test/role-model:medium' } };
-  const models: Models = { ...createModels(), getModels: provider => available.filter(model => provider === undefined || model.provider === provider), getAvailable: async () => available, getModel: (_provider, id) => ({ ...model, id }), streamSimple(selected, input, options) {
+  const models: Models = Object.assign(createModels(), { getModels: provider => available.filter(model => provider === undefined || model.provider === provider), getAvailable: async () => available, getModel: (_provider, id) => ({ ...model, id }), streamSimple(selected, input, options) {
     seen.push(JSON.stringify({ model: selected.id, system: input.systemPrompt, messages: input.messages }));
     requests.push({ model: selected.id, reasoning: options?.reasoning });
     if (JSON.stringify(input.messages).includes('source=\\"BackgroundReviewer')) backgroundReceived.resolve();
     const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: selected.id, stopReason: 'stop', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(reply); return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry, models, settings: { extensions: registry.snapshot().installed(), compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: 'parent-only-model' }, thinkingLevel: 'max', instructions: 'PRIVATE PARENT PERSONA', tools } });
   await root.commit(async tx => { const state = await tx.doc(SessionControlsDoc, root.id); state.definitions = files ? [] : [definition]; state.fastMode = true; state.role = 'parent'; state.selection = { kind: 'explicit', provider: 'test', modelId: 'parent-only-model' }; }, context);

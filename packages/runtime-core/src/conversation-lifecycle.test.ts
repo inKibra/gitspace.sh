@@ -1,6 +1,7 @@
 import { expect, test, onTestFinished, vi } from 'vitest';
 import { Harness, MemoryStorage, createRegistry, defineTask, defineExtension, type ConversationId, type Storage } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { holdPhase } from './task-hold.test-support.js';
 import { createModels, createAssistantMessageEventStream, type Models, type Model, type Api, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createConversationLifecycle, ConversationLifecycleDoc, type ConversationEvent } from './conversation-lifecycle.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
@@ -26,9 +27,9 @@ async function fixture(storage: Storage = new MemoryStorage(), blocked = false, 
   const threeStarted = Promise.withResolvers<void>();
   let aborted = 0;
   let backgroundAborted = 0;
-  const background = defineTask<null, { phase: 'wait' }, null>({ name: 'proof.BackgroundCommand', version: 1, initial: () => ({ phase: 'wait' }), phases: { async wait(_task, runtime, ctx) { await runtime.sleep(Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { backgroundAborted++; await backgroundStopHeld; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
+  const background = defineTask<null, { phase: 'wait' }, null>({ name: 'proof.BackgroundCommand', version: 1, initial: () => ({ phase: 'wait' }), phases: { async wait(_task, runtime, ctx) { await holdPhase(runtime, Date.now() + 300000, ctx); await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx); } }, async abort(_task, runtime, ctx) { backgroundAborted++; await backgroundStopHeld; await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx); } });
   const registry = createRegistry(); registry.install(defineExtension({ name: 'proof.background', tasks: [background] }));
-  const models: Models = { ...createModels(), getModel: () => model, streamSimple(_model, input, options) {
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input, options) {
     seen.push(JSON.stringify(input.messages));
     if (seen.length === 3) threeStarted.resolve();
     const stream = createAssistantMessageEventStream();
@@ -38,7 +39,7 @@ async function fixture(storage: Storage = new MemoryStorage(), blocked = false, 
     else if (blocked) { if (options?.signal?.aborted) finish(); else options?.signal?.addEventListener('abort', finish, { once: true }); }
     else { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(reply); }
     return stream;
-  } };
+  } } satisfies Partial<Models>);
   const harness = await Harness.open(storage, { registry, models, settings: { compaction: { enabled: false } } }, context);
   const root = await harness.root(context, { agent: { model: { provider: 'test', modelId: model.id } } });
   if (blocked) await root.commit(tx => tx.createTask(background, null, { ownership: { kind: 'conversation' }, conversationId: root.id, background: true }), context);

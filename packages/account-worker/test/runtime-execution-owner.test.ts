@@ -2,6 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { expect, test, vi } from 'vitest';
 import { createModels, createAssistantMessageEventStream, type ToolCall, type AssistantMessage } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
+import type { JsonValue } from '@earendil-works/chord/json';
 import { Result } from 'better-result';
 import { RuntimeAttachmentSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
@@ -207,7 +208,8 @@ test('only the project agent manages automations: a workspace agent is refused e
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`automations-workspace:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text } = await ownerFixture(ctx);
     try {
-      for (const args of [{ method: 'list' }, { method: 'test', draft }, { method: 'propose', draft, asked: 'Audit nightly', reason: 'Requested' }]) {
+      const calls: Array<Record<string, JsonValue>> = [{ method: 'list' }, { method: 'test', draft }, { method: 'propose', draft, asked: 'Audit nightly', reason: 'Requested' }];
+      for (const args of calls) {
         const refused = await invoke('space_automations', args);
         expect(refused.status).toBe('failed');
         expect(text(refused)).toContain('Only the project agent can change automations');

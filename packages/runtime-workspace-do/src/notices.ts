@@ -1,9 +1,9 @@
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { AssistantEntry, defineDoc, type ConversationId, type EntryRecord, type Harness } from '@earendil-works/pi-durable';
-import { invalidBlocksNotice } from '@gitspace/runtime-core';
+import { boundedReplay, invalidBlocksNotice } from '@gitspace/runtime-core';
 
 // Retain the persisted document kind so acknowledged cache notices are not emitted again.
-export const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }) });
+export const CacheNoticesDoc = defineDoc<{ seen: Record<string, boolean> }>({ kind: 'gitspace.replica-notices', version: 1, scope: 'session', initial: () => ({ seen: {} }), checkpointWhen: boundedReplay });
 
 /** Appends a line to a conversation that its agent reads on its next turn; it starts none. A `key` appends it at most
  * once, across restarts too. `source` labels it. */

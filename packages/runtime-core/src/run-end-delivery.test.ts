@@ -26,7 +26,7 @@ async function open(storage: Storage) {
   let arrived = Promise.withResolvers<void>();
   const wakes: number[] = [];
   const reports: unknown[] = [];
-  const models = { ...createModels(), getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }, streamOptions?: { signal?: AbortSignal }) {
+  const models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }, streamOptions?: { signal?: AbortSignal }) {
     const stream = createAssistantMessageEventStream();
     const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: Date.now(), usage };
     // A reset cuts the request off: it ends aborted, as a provider stream does.
@@ -35,7 +35,7 @@ async function open(storage: Storage) {
     requests.push({ text: JSON.stringify(request.messages), answer() { streamOptions?.signal?.removeEventListener('abort', cut); stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(reply); } });
     const done = arrived; arrived = Promise.withResolvers(); done.resolve();
     return stream;
-  } };
+  } });
   const runtime = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage, models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },
