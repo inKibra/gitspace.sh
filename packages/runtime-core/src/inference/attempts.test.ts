@@ -7,6 +7,7 @@ import { attemptEvents, attemptEventStream, createAttemptRunner, restoreStandIns
 import type { ImageRequestTransport } from './image-requests';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 const providerId = 'attempt-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -213,6 +214,14 @@ it('accepts the onPayload pi passes on every request; the request sent is the at
   const result = await catalog.streamSimple(catalog.getModel(providerId, 'chat')!, context, { onPayload: async () => ({ replaced: true }) }).result();
   expect(result.content).toEqual([{ type: 'text', text: 'sent' }]);
   expect(sent).toEqual([{ modelId: 'chat', additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } }]);
+});
+
+it('streams a request carrying pi\'s tracing context, which cannot cross to the inference worker', async () => {
+  const sent: unknown[] = [];
+  const catalog = await models(remote(createAttemptRunner({ providers: () => [payloadProvider(sent, [chat])] })), [payloadProvider(sent, [chat])]);
+  const result = await catalog.streamSimple(catalog.getModel(providerId, 'chat')!, context, { telemetry: BACKGROUND_CONTEXT.telemetry }).result();
+  expect(result.stopReason).toBe('stop');
+  expect(result.content).toEqual([{ type: 'text', text: 'sent' }]);
 });
 
 it('streams Claude on Bedrock\'s tool input beside pi-ai\'s own betas; other Bedrock models and GovCloud are sent as built', async () => {

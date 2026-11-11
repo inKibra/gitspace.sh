@@ -41,9 +41,10 @@ export type AttemptRequest = { type: 'request'; bytes: number; images: number; i
 export type AttemptEvent = AssistantMessageEvent | AttemptResponse | AttemptRequest;
 export type AttemptRunner = (attempt: InferenceAttempt, signal?: AbortSignal) => AsyncIterable<AttemptEvent>;
 
-/** A request's options as an attempt carries them: functions and signals cannot cross to the inference worker. */
+/** A request's options as an attempt carries them: functions, signals and pi's tracing context (`telemetry`, whose span
+ * methods a copy loses, so pi-ai's request span would fail on the first chunk) cannot cross to the inference worker. */
 export function attemptOptions(options: object | undefined): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== undefined && typeof value !== 'function' && !(value instanceof AbortSignal)));
+  return Object.fromEntries(Object.entries(options ?? {}).filter(([key, value]) => key !== 'telemetry' && value !== undefined && typeof value !== 'function' && !(value instanceof AbortSignal)));
 }
 
 /** pi-ai's providers and GitSpace's own, before a profile admits them. Their models are pi-ai's pinned rows; a
