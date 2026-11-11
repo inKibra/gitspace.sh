@@ -3381,13 +3381,12 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
   const started = Date.now();
   const { response, procedures, target } = await routeAccountRpc(request, env);
   const durationMs = Date.now() - started;
-  // Diagnostic for blank protected terminals (2026-11-11): every terminal batch, with what the machine returned. Read
-  // from a copy as the body streams, so the caller is not held for it.
+  // Diagnostic for blank protected terminals (2026-11-11): every terminal batch, with the size and event count of what
+  // the machine returned (never its content: protected output). Awaited: a log written after the response is sent is
+  // dropped, and a batch is one JSON document the caller reads whole anyway.
   if (procedures?.some(procedure => procedure.startsWith('terminals.'))) {
-    void response.clone().text().then(
-      body => console.log(JSON.stringify({ event: 'terminal_rpc', procedures, status: response.status, durationMs, target, bytes: body.length, events: body.match(/"cursor"/gu)?.length ?? 0, head: response.status >= 400 ? body.slice(0, 300) : undefined })),
-      (error: unknown) => console.log(JSON.stringify({ event: 'terminal_rpc', procedures, status: response.status, durationMs, target, unreadable: error instanceof Error ? error.message : String(error) })),
-    );
+    const body = await response.clone().text().catch((error: unknown) => `<unreadable: ${error instanceof Error ? error.message : String(error)}>`);
+    console.log(JSON.stringify({ event: 'terminal_rpc', procedures, status: response.status, durationMs, target, bytes: body.length, cursors: body.match(/"cursor"/gu)?.length ?? 0, outputs: body.match(/"output"/gu)?.length ?? 0, head: response.status >= 400 ? body.slice(0, 300) : undefined }));
   }
   if (response.status < 400 && durationMs <= SLOW_RPC_BATCH_MS) return response;
   let code: string | undefined;
