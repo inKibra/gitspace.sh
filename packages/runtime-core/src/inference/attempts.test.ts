@@ -4,6 +4,7 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createRequestGate } from './request-gate';
 import { createVaultModels } from './index';
 import { attemptEvents, attemptEventStream, createAttemptRunner, restoreStandIns, type AttemptRunner } from './attempts';
+import type { ImageRequestTransport } from './image-requests';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 
@@ -125,6 +126,32 @@ it('ends an attempt whose stream breaks with the provider\'s error, naming how l
   expect(result.stopReason).toBe('error');
   expect(result.errorMessage).toMatch(/^Network connection lost\. \(after \d+\.\d s: 2 events, 3 characters received; request 0\.0 MB, 1 messages, 1 images \(0\.0 MB\)\)$/u);
   expect(isRetryableAssistantError(result)).toBe(true);
+});
+
+it('names what a request carried when the provider fails before answering, and leaves an answered error as the provider stated it', async () => {
+  const refusing: Provider = { ...provider([]), stream: refusingTransport, streamSimple: refusingTransport };
+  function refusingTransport(model: Model<Api>, received: TranscriptContext, request?: StreamOptions) {
+    const stream = createAssistantMessageEventStream();
+    void (async () => {
+      let errorMessage: string;
+      try {
+        const response = await request?.fetch?.('https://provider.invalid/v1', { method: 'POST', body: JSON.stringify(received) });
+        errorMessage = `Provider answered ${response?.status}`;
+      } catch (error) { errorMessage = error instanceof Error ? error.message : String(error); }
+      const failed: AssistantMessage = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, stopReason: 'error', errorMessage, timestamp: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { ...cost, total: 0 } } };
+      stream.push({ type: 'error', reason: 'error', error: failed });
+      stream.end(failed);
+    })();
+    return stream;
+  }
+  /** The request's catalog, its image request sent by `send` (the request carries a stored image). */
+  const catalogSending = (send: ImageRequestTransport) => models(remote(createAttemptRunner({ providers: () => [refusing], imageTransport: send })), [refusing]);
+  // The connection to the provider is lost while the request goes out: no answer arrives.
+  const lost = await (await catalogSending(async () => { throw new Error('Network connection lost.'); })).streamSimple(chat, context).result();
+  expect(lost.errorMessage).toMatch(/^Network connection lost\. \(after \d+\.\d s: 1 events, 0 characters received; request 0\.0 MB, 1 messages, 1 images \(0\.0 MB\)\)$/u);
+  expect(isRetryableAssistantError(lost)).toBe(true);
+  const answered = await (await catalogSending(async () => new Response('{}', { status: 400 }))).streamSimple(chat, context).result();
+  expect(answered.errorMessage).toBe('Provider answered 400');
 });
 
 it('streams a long tool call across the attempt boundary in bytes linear in its arguments, every delta still carrying the message so far', async () => {

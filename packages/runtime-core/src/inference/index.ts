@@ -285,9 +285,9 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     }
     /** One attempt of a streamed request, on the account `streamAttempts` chose: its images fitted to the model's limits
      * by reference, built and sent by the runner. The gate permit is held until the provider answers. An attempt whose
-     * stream breaks or ends unanswered names how long it ran, what it received and what its request carried: the
-     * runner's isolate ends with no reason of its own ("Network connection lost"), and these tell its memory (the
-     * request) from its CPU (the reply). A provider's own error states its reason and stays as it is. */
+     * stream breaks or ends unanswered, or whose provider fails before answering, names how long it ran, what it
+     * received and what its request carried: such an ending has no reason of its own ("Network connection lost"), and
+     * these tell the request's size from the reply's. A provider's answered error states its reason and stays as it is. */
     function attempted(method: InferenceAttempt['method'], model: Model<Api>, context: Context, request?: { signal?: AbortSignal; onResponse?: (response: ProviderResponse, model: Model<Api>) => unknown }) {
       const fitted = fitRequestImages(context, imageLimits(model));
       return async function* (credential: ResolvedCredential, attempt: Attempt, subscription: boolean): AsyncGenerator<AssistantMessageEvent> {
@@ -309,11 +309,13 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           return { type: 'error', reason, error: message };
         };
         let ended = false;
+        let answered = false;
         try {
           for await (const event of run(sent, request?.signal)) {
             attempt.release();
             if (event.type === 'request') { outgoing = event; continue; }
             if (event.type === 'response') {
+              answered = true;
               const response = { status: event.status, headers: event.headers };
               attempt.observe(response);
               await request?.onResponse?.(response, model);
@@ -322,7 +324,9 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
             events += 1;
             if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') characters += event.delta.length;
             ended = event.type === 'done' || event.type === 'error';
-            yield event;
+            // A provider error before any answer (the connection to the provider lost while the request went out) has no
+            // reason of its own either.
+            yield event.type === 'error' && event.reason === 'error' && !answered ? { ...event, error: { ...event.error, errorMessage: measured(event.error.errorMessage ?? 'The model request failed') } } : event;
           }
         } catch (error) {
           if (request?.signal?.aborted) throw error;
