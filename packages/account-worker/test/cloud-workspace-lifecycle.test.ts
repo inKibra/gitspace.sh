@@ -503,7 +503,10 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(inspected.value.newest[0]?.rows.map(row => row.i)).toEqual(Array.from({ length: 20 }, (_, index) => String(1000 - index)));
     expect(inspected.value.newest[0]?.rows[0]?.text).toBe(`${'x'.repeat(300)}… (1000 characters)`);
 
-    expect(await run(client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: null }))).toMatchObject({ kind: 'workspace.archive', state: 'succeeded' });
+    // As the sidebar's Archive does: read the workspace and its placement first, then archive at that generation.
+    const view = await client.inspector.view({ projectId: project.id, workspaceId });
+    if (view.status === 'error') throw view.error;
+    expect(await run(client.workspace.archive({ projectId: project.id, spaceId: workspaceId, expectedGeneration: view.value.placement?.generation ?? null }))).toMatchObject({ kind: 'workspace.archive', state: 'succeeded' });
     expect((await authority.listWorkspaces()).find(workspace => workspace.id === workspaceId)).toMatchObject({ lifecycle: 'archived' });
     // The machine syncing it is let go; the workspace stays paused, its rows kept.
     expect(detached).toHaveBeenCalledWith('syncing-machine', workspaceId);

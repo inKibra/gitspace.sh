@@ -1414,8 +1414,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     });
   }
 
+  /** The space's placement. A paused object's is read with its pause set aside: lifecycle actions (Archive) read the
+   * placement they act on first, and a refused read left a paused workspace impossible to archive. */
   get(): SpaceAuthorityRecord | null {
-    const row = this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM space_authority WHERE id = 1').toArray()[0];
+    const read = () => this.ctx.storage.sql.exec<{ record_json: string }>('SELECT record_json FROM space_authority WHERE id = 1').toArray()[0];
+    const row = this.storageBreakerStatus().quarantined ? this.unguardedStorage(read) : read();
     return row ? SpaceAuthorityRecordSchema.parse(JSON.parse(row.record_json)) : null;
   }
 
