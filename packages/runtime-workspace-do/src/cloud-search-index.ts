@@ -3,6 +3,7 @@ import { createSearchMatcher, searchMatchingLines, searchTrigramQuery, type Sear
 import { compileSearchIgnores, searchPathFilter, searchRoot, type SearchIgnoreRules } from '../../protocol-runtime/src/search-paths.js';
 import type { ArtifactsRepositoryReader } from './artifacts.js';
 import type { RunningStep } from './running-marks.js';
+import { KEPT_PREDECESSORS } from './cloud-files.js';
 
 /** The SQL surface the index uses: Durable Object storage, or a wrapper that observes each statement. */
 export type CodeSearchStorage = { sql: Pick<SqlStorage, 'exec'>; transactionSync<T>(closure: () => T): T };
@@ -69,7 +70,7 @@ type IndexedBlob = { id: number; state: number; chunks: { firstLine: number; con
 const PENDING = 0, TEXT = 1, BINARY = 2, TOO_LARGE = 3, UNREADABLE = 4, GENERATED = 5;
 /** FTS rowid = blob id × CHUNKS_PER_BLOB + chunk ordinal. */
 const CHUNKS_PER_BLOB = 4096;
-const GARBAGE_ROWS = 256, SCOPE_PAGE = 256, BEHIND_LIMIT = 100;
+const GARBAGE_ROWS = 256, SCOPE_PAGE = 256;
 /** A blob whose read fails this often is skipped (reported as unreadable) instead of blocking the build. */
 const BLOB_ATTEMPTS = 3;
 /** A failed build attempt waits this long, doubling per consecutive failure up to `RETRY_MAX_MS`. After `RETRY_ATTEMPTS`
@@ -325,7 +326,7 @@ export class CodeSearchIndex {
           }
         }
       }
-      const behind = stale ? this.options.snapshots.distance(commit, current.worktreeCommit, BEHIND_LIMIT) : 0;
+      const behind = stale ? this.options.snapshots.distance(commit, current.worktreeCommit, KEPT_PREDECESSORS) : 0;
       const notes: string[] = [];
       if (stoppedAt !== null) notes.push(`Verified ${verifiedFiles} files in path order and stopped before ${stoppedAt}${query === null ? ': the pattern has no 3-character literal to look up in the index' : candidates === null ? ': too many files contain the pattern\'s literals' : ''}. Narrow path, glob or pattern, or use grep on an attached machine for an exhaustive search.`);
       if (skippedFiles) notes.push(`${skippedFiles} files in scope are not indexed (over ${this.limits.blobBytes / 1024} KiB, a line over ${this.limits.chunkBytes / 1024} KiB, generated (minified, a source map or a lockfile), or unreadable); grep on an attached machine searches them.`);

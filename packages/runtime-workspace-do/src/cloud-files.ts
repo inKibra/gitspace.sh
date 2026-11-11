@@ -20,6 +20,15 @@ const MachinePendingSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, 
 const RetentionCheckpointSchema = RuntimeGitCheckpointSchema.extend({ publicationId: z.string().optional(), acceptedPublicationIds: z.array(z.string()).optional() });
 const CLOUD_FILE_READ_LIMIT = 8 * 1024 * 1024;
 const LFS_POINTER_LIMIT = 1024;
+/** Recorded snapshots kept behind the current one, whatever their age: the search index measures how far its commit is
+ * behind along them, up to this many. */
+export const KEPT_PREDECESSORS = 100;
+/** Recorded snapshots and settled machine publications are kept this long; a later sync names a base by commit id, and
+ * a machine retries a publication by its id. */
+const HISTORY_KEPT_MS = 24 * 60 * 60 * 1000;
+/** Rows deleted per pass; a full batch lets the next publication prune again, otherwise passes are an hour apart. */
+const HISTORY_PRUNE_BATCH = 1_000;
+const HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 function assertCloudReadSize(size: number, path: string): void {
   if (size > CLOUD_FILE_READ_LIMIT) throw new Error(`File ${path} (${size} bytes) exceeds the 8 MiB cloud read limit; use a machine to read its content.`);
@@ -71,13 +80,14 @@ export class CloudFileStore {
   private readonly running = new Map<string, Promise<RuntimeToolResult>>();
   private readonly machineRunning = new Map<string, Promise<Checkpoint>>();
   private retaining: Promise<void> | undefined;
+  private prunedAt = 0;
   private admission: Promise<void> = Promise.resolve();
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.admission.then(operation);
     this.admission = result.then(() => {}, () => {});
     return result;
   }
-  constructor(private readonly storage: DurableObjectStorage, _attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>, private readonly documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>) {
+  constructor(private readonly storage: DurableObjectStorage, private readonly attachments: Pick<AttachmentStore, 'list'>, private readonly code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'>, private readonly workspaceId: string, private readonly publish: (source?: string) => void, private readonly lfs: GitLfsStore, private readonly retainLfs: (checkpoint: Checkpoint, publicationId?: string) => Promise<void>, private readonly initialCheckpoint?: () => Promise<Checkpoint | null>, private readonly documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>) {
     storage.sql.exec('DROP TABLE IF EXISTS runtime_cloud_writer');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_cloud_files(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, result TEXT)');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_cloud_files_pending ON runtime_cloud_files(id) WHERE pending IS NOT NULL');
@@ -87,6 +97,10 @@ export class CloudFileStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
     if (storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications DROP COLUMN abandoned');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_machine_publications_pending ON runtime_machine_publications(id) WHERE pending IS NOT NULL');
+    // When a row was recorded, for retention; rows from before the column existed have none and count as old.
+    for (const table of ['runtime_code_commits', 'runtime_machine_publications']) {
+      if (!storage.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().some(column => column.name === 'recorded_at')) storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN recorded_at INTEGER`);
+    }
     // One full path list per published commit (about 0.5 MB each for 7,000 files), written on every sync and never read
     // past the current one: replaced by one row per path of the commit `runtime_snapshot_files_at` names.
     storage.sql.exec('DROP TABLE IF EXISTS runtime_snapshot_paths');
@@ -189,7 +203,7 @@ export class CloudFileStore {
         authorize?.();
         const latest = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
         if ((latest ? checkpointIdentity(RuntimeGitCheckpointSchema.parse(JSON.parse(latest.checkpoint))) : null) !== (current ? checkpointIdentity(current) : null)) throw new Error('Canonical snapshot changed before machine publication');
-        this.storage.sql.exec('INSERT OR REPLACE INTO runtime_machine_publications(id,input,pending) VALUES(?,?,?)', id, identity, JSON.stringify(pending));
+        this.storage.sql.exec('INSERT OR REPLACE INTO runtime_machine_publications(id,input,pending,recorded_at) VALUES(?,?,?,?)', id, identity, JSON.stringify(pending), Date.now());
       });
     }
     try { await this.storage.sync(); return await this.finishMachine(id, pending); }
@@ -242,10 +256,10 @@ export class CloudFileStore {
       this.enqueueRetention(checkpoint, current, `${machineId}:${checkpoint.checkpointRef}`);
       this.storage.sql.exec('INSERT OR REPLACE INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(accepted));
       // The path list is not moved here: the next reader catches it up from its own commit by a tree diff.
-      this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=? WHERE id=?', JSON.stringify(accepted), id);
+      this.storage.sql.exec('UPDATE runtime_machine_publications SET pending=NULL,checkpoint=?,recorded_at=? WHERE id=?', JSON.stringify(accepted), Date.now(), id);
     });
     // The publishing machine installs the accepted snapshot from this answer.
-    await this.storage.sync(); await this.flushRetention(); this.publish(machineId); return accepted;
+    await this.storage.sync(); await this.flushRetention(); this.publish(machineId); this.pruneHistory(); return accepted;
   }
   execute(raw: Invocation, signal?: AbortSignal): Promise<RuntimeToolResult> {
     const input = InvocationSchema.parse(raw);
@@ -426,7 +440,7 @@ export class CloudFileStore {
         this.storage.sql.exec('UPDATE runtime_snapshot_files_at SET commit_id=?,tree=? WHERE singleton=1', accepted.worktreeCommit, accepted.worktreeTree);
       }
     });
-    await this.storage.sync(); await this.flushRetention(); this.publish(); return completed;
+    await this.storage.sync(); await this.flushRetention(); this.publish(); this.pruneHistory(); return completed;
   }
   /** The file paths of `checkpoint`'s worktree. The stored list names its commit; one of another commit is moved by a
    * tree diff, and the whole tree is walked only when there is no list. */
@@ -492,7 +506,39 @@ export class CloudFileStore {
       if (prior.predecessor !== predecessor || checkpointIdentity(RuntimeGitCheckpointSchema.parse(JSON.parse(prior.checkpoint))) !== checkpointIdentity(checkpoint)) throw new Error('Immutable checkpoint publication changed');
       return;
     }
-    this.storage.sql.exec('INSERT INTO runtime_code_commits(commit_id,predecessor,checkpoint) VALUES(?,?,?)', checkpoint.worktreeCommit, predecessor, encoded);
+    this.storage.sql.exec('INSERT INTO runtime_code_commits(commit_id,predecessor,checkpoint,recorded_at) VALUES(?,?,?,?)', checkpoint.worktreeCommit, predecessor, encoded, Date.now());
+  }
+  /** Deletes recorded snapshots and settled machine publications nothing can read any more. A snapshot row is read as a
+   * machine's merge base (the machine names its base, which it reports as `materializedCommit`), and along the current
+   * snapshot's predecessors; a settled publication is read when its machine retries it, and a machine retries only its
+   * newest. Rows of the last day are kept as well, for a base a machine has not reported yet. A failure is logged: the
+   * publication that triggered the pass has already landed. */
+  private pruneHistory(): void {
+    const now = Date.now();
+    if (now - this.prunedAt < HISTORY_PRUNE_INTERVAL_MS) return;
+    try {
+      const keep = new Set<string>();
+      const current = this.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_code_snapshot WHERE singleton=1').toArray()[0];
+      let commit = current ? RuntimeGitCheckpointSchema.parse(JSON.parse(current.checkpoint)).worktreeCommit : null;
+      for (let steps = 0; commit !== null && steps <= KEPT_PREDECESSORS; steps++) {
+        keep.add(commit);
+        commit = this.storage.sql.exec<{ predecessor: string | null }>('SELECT predecessor FROM runtime_code_commits WHERE commit_id=?', commit).toArray()[0]?.predecessor ?? null;
+      }
+      for (const attachment of this.attachments.list()) {
+        const base = attachment.executionObservation?.materializedCommit;
+        if (attachment.state !== 'detached' && base) keep.add(base);
+      }
+      const cutoff = now - HISTORY_KEPT_MS;
+      this.storage.sql.exec(`DELETE FROM runtime_code_commits WHERE commit_id IN (SELECT commit_id FROM runtime_code_commits WHERE (recorded_at IS NULL OR recorded_at < ?) AND commit_id NOT IN (SELECT value FROM json_each(?)) LIMIT ${HISTORY_PRUNE_BATCH})`, cutoff, JSON.stringify([...keep]));
+      const commits = this.storage.sql.exec<{ removed: number }>('SELECT changes() AS removed').one().removed;
+      // A publication id is `machineId:checkpointRef:commit`, and every checkpoint ref starts with `refs/`.
+      this.storage.sql.exec(`DELETE FROM runtime_machine_publications WHERE rowid IN (SELECT rowid FROM runtime_machine_publications WHERE pending IS NULL AND (recorded_at IS NULL OR recorded_at < ?) AND rowid NOT IN (SELECT max(rowid) FROM runtime_machine_publications GROUP BY substr(id, 1, instr(id, ':refs/') - 1)) LIMIT ${HISTORY_PRUNE_BATCH})`, cutoff);
+      const publications = this.storage.sql.exec<{ removed: number }>('SELECT changes() AS removed').one().removed;
+      if (commits < HISTORY_PRUNE_BATCH && publications < HISTORY_PRUNE_BATCH) this.prunedAt = now;
+    } catch (error) {
+      this.prunedAt = now;
+      console.error(JSON.stringify({ event: 'snapshot_history_prune_failed', workspaceId: this.workspaceId, message: error instanceof Error ? error.message : String(error) }));
+    }
   }
   private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null, publicationId?: string): void {
     this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', publicationId ? `${checkpoint.worktreeCommit}:${publicationId}` : checkpoint.worktreeCommit, JSON.stringify({ ...checkpoint, ...(publicationId ? { publicationId } : {}) }), previous ? JSON.stringify(previous) : null);
