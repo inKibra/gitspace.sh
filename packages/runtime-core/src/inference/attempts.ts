@@ -13,7 +13,7 @@ import { applyProviderCatalog } from './catalog.js';
 import { claudeCode, type ClaudeCodeTransport } from './claude-code-request.js';
 import { fastServingProvider } from './fast.js';
 import { parseImageReference } from '@gitspace/protocol-runtime/image-reference';
-import type { ImageRequestTransport } from './image-requests.js';
+import { expandedLength, requestImages, type ImageRequestTransport } from './image-requests.js';
 import { createLegacyCloudProviders } from './providers/index.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import type { ResolvedCredential } from './selection.js';
@@ -35,7 +35,10 @@ export interface InferenceAttempt {
 /** What an attempt streams back: pi's events, and the provider's status and headers once they arrive (a failure's
  * account policy and the provider's reset are read from them). */
 export type AttemptResponse = { type: 'response'; status: number; headers: Record<string, string> };
-export type AttemptEvent = AssistantMessageEvent | AttemptResponse;
+/** What the request an attempt sent carried, measured as it went out: its body's bytes with each stored image written
+ * in, those images and their stored bytes, and the context's messages. A failed attempt names them. */
+export type AttemptRequest = { type: 'request'; bytes: number; images: number; imageBytes: number; messages: number };
+export type AttemptEvent = AssistantMessageEvent | AttemptResponse | AttemptRequest;
 export type AttemptRunner = (attempt: InferenceAttempt, signal?: AbortSignal) => AsyncIterable<AttemptEvent>;
 
 /** A request's options as an attempt carries them: functions and signals cannot cross to the inference worker. */
@@ -142,12 +145,16 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
       shapes.set(key, shaping);
     }
     const shape = await shaping;
-    const responses: AttemptResponse[] = [];
+    const reports: Array<AttemptResponse | AttemptRequest> = [];
     let observed = false;
     const fetch: typeof globalThis.fetch = async (input, init) => {
+      if (typeof init?.body === 'string') {
+        const images = requestImages(init.body);
+        reports.push({ type: 'request', bytes: expandedLength(init.body, images), images: images.length, imageBytes: images.reduce((sum, image) => sum + image.size, 0), messages: attempt.context.messages.length });
+      }
       const response = await shape.fetch(input, init);
       observed = true;
-      responses.push({ type: 'response', status: response.status, headers: Object.fromEntries(response.headers.entries()) });
+      reports.push({ type: 'response', status: response.status, headers: Object.fromEntries(response.headers.entries()) });
       return response;
     };
     let context = attempt.context;
@@ -160,14 +167,14 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
       const request = {
         ...attempt.options, ...(signal ? { signal } : {}), ...(GLOBAL_FETCH_APIS[attempt.model.api] ? {} : { fetch }), onPayload: shape.onPayload,
         // A provider that sends without our fetch (Bedrock's and Google's SDKs) reports its answer here.
-        onResponse: async (response: { status: number; headers: Record<string, string> }) => { if (!observed) responses.push({ type: 'response', status: response.status, headers: response.headers }); },
+        onResponse: async (response: { status: number; headers: Record<string, string> }) => { if (!observed) reports.push({ type: 'response', status: response.status, headers: response.headers }); },
       };
       const events = attempt.method === 'stream' ? models.stream(attempt.model, context, request) : models.streamSimple(attempt.model, context, request);
       for await (const event of events) {
-        yield* responses.splice(0);
+        yield* reports.splice(0);
         yield event;
       }
-      yield* responses.splice(0);
+      yield* reports.splice(0);
     } finally {
       for (const token of tokens) standIns.delete(token);
     }

@@ -6,7 +6,7 @@ import { limitContextWindows } from './catalog.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
 import { withCatalogRows, type ProfileCatalog } from './account-models.js';
 import { contextWindowLimits } from './admission.js';
-import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRunner, type InferenceAttempt } from './attempts.js';
+import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRequest, type AttemptRunner, type InferenceAttempt } from './attempts.js';
 import { fitRequestImages, imageLimits } from './image-limits.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
@@ -284,26 +284,56 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       });
     }
     /** One attempt of a streamed request, on the account `streamAttempts` chose: its images fitted to the model's limits
-     * by reference, built and sent by the runner. The gate permit is held until the provider answers. */
+     * by reference, built and sent by the runner. The gate permit is held until the provider answers. An attempt whose
+     * stream breaks or ends unanswered names how long it ran, what it received and what its request carried: the
+     * runner's isolate ends with no reason of its own ("Network connection lost"), and these tell its memory (the
+     * request) from its CPU (the reply). A provider's own error states its reason and stays as it is. */
     function attempted(method: InferenceAttempt['method'], model: Model<Api>, context: Context, request?: { signal?: AbortSignal; onResponse?: (response: ProviderResponse, model: Model<Api>) => unknown }) {
       const fitted = fitRequestImages(context, imageLimits(model));
       return async function* (credential: ResolvedCredential, attempt: Attempt, subscription: boolean): AsyncGenerator<AssistantMessageEvent> {
         const sent: InferenceAttempt = { method, model: subscription ? subscriptionModel(model) : model, context: fitted, options: attemptOptions(request), credential, settings, fastMode, claude: session };
+        const startedAt = Date.now();
+        let events = 0;
+        let characters = 0;
+        let outgoing: AttemptRequest | undefined;
+        /** `reason` with the attempt's measures, logged once. */
+        const measured = (reason: string): string => {
+          const seconds = (Date.now() - startedAt) / 1000;
+          const megabytes = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MB`;
+          const carried = outgoing ? `request ${megabytes(outgoing.bytes)}, ${outgoing.messages} messages, ${outgoing.images} images (${megabytes(outgoing.imageBytes)})` : 'request size unknown';
+          console.warn(JSON.stringify({ event: 'model_attempt_failed', provider: model.provider, model: model.id, reason, seconds, events, characters, request: outgoing ?? null }));
+          return `${reason} (after ${seconds.toFixed(1)} s: ${events.toLocaleString('en-US')} events, ${characters.toLocaleString('en-US')} characters received; ${carried})`;
+        };
+        const ending = (reason: 'aborted' | 'error', errorMessage: string): AssistantMessageEvent => {
+          const message: AssistantMessage = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, stopReason: reason, timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, errorMessage };
+          return { type: 'error', reason, error: message };
+        };
         let ended = false;
-        for await (const event of run(sent, request?.signal)) {
-          attempt.release();
-          if (event.type !== 'response') { ended = event.type === 'done' || event.type === 'error'; yield event; continue; }
-          const response = { status: event.status, headers: event.headers };
-          attempt.observe(response);
-          await request?.onResponse?.(response, model);
+        try {
+          for await (const event of run(sent, request?.signal)) {
+            attempt.release();
+            if (event.type === 'request') { outgoing = event; continue; }
+            if (event.type === 'response') {
+              const response = { status: event.status, headers: event.headers };
+              attempt.observe(response);
+              await request?.onResponse?.(response, model);
+              continue;
+            }
+            events += 1;
+            if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') characters += event.delta.length;
+            ended = event.type === 'done' || event.type === 'error';
+            yield event;
+          }
+        } catch (error) {
+          if (request?.signal?.aborted) throw error;
+          // The runner's stream broke (its isolate ended): the attempt ends as a provider's error would.
+          yield ending('error', measured(error instanceof Error ? error.message : String(error)));
+          return;
         }
         // A stream cancelled by an abort, or cut off with its worker, ends as a provider's would: with an error event, so
         // the request settles instead of waiting for an answer that cannot come.
-        if (!ended) {
-          const aborted = request?.signal?.aborted === true;
-          const message: AssistantMessage = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, stopReason: aborted ? 'aborted' : 'error', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, errorMessage: aborted ? 'Request was aborted' : 'The inference worker ended the request without an answer' };
-          yield { type: 'error', reason: aborted ? 'aborted' : 'error', error: message };
-        }
+        if (ended) return;
+        yield request?.signal?.aborted === true ? ending('aborted', 'Request was aborted') : ending('error', measured('The inference worker ended the request without an answer'));
       };
     }
     const facade: Models = {

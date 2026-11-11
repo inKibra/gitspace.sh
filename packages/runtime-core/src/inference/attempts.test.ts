@@ -4,6 +4,7 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createRequestGate } from './request-gate';
 import { createVaultModels } from './index';
 import { attemptEvents, attemptEventStream, createAttemptRunner, restoreStandIns, type AttemptRunner } from './attempts';
+import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 
 const providerId = 'attempt-provider';
@@ -93,6 +94,37 @@ it('gives a Bedrock request base64 stand-ins that become references again in its
   expect(btoa(atob(standIn))).toBe(standIn);
   expect(seen[0]!.standInRestored).toBe(JSON.stringify({ bytes: reference }));
   expect(restoreStandIns(JSON.stringify({ bytes: standIn }))).toBe(JSON.stringify({ bytes: standIn }));
+});
+
+it('ends an attempt whose stream breaks with the provider\'s error, naming how long it ran, what it received and what its request carried', async () => {
+  globalThis.fetch = vi.fn(async () => new Response('{}'));
+  const streaming: Provider = { ...provider([]), stream: brokenTransport, streamSimple: brokenTransport };
+  function brokenTransport(model: Model<Api>, received: TranscriptContext, request?: StreamOptions) {
+    const stream = createAssistantMessageEventStream();
+    void (async () => {
+      // The body carries the stored image as its reference, as pi-ai's providers serialize it.
+      await request?.fetch?.('https://provider.invalid/v1', { method: 'POST', body: JSON.stringify(received) });
+      const partial: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'abc' }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { ...cost, total: 0 } } };
+      stream.push({ type: 'start', partial });
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: 'abc', partial });
+      // As a provider's request does, the stream ends when the attempt is cancelled.
+      request?.signal?.addEventListener('abort', () => { const aborted: AssistantMessage = { ...partial, stopReason: 'aborted' }; stream.push({ type: 'error', reason: 'aborted', error: aborted }); stream.end(aborted); }, { once: true });
+    })();
+    return stream;
+  }
+  const across = remote(createAttemptRunner({ providers: () => [streaming] }));
+  // The inference worker's isolate ends after the first delta: its stream breaks.
+  const broken: AttemptRunner = async function* (attempt, signal) {
+    for await (const event of across(attempt, signal)) {
+      yield event;
+      if (event.type === 'text_delta') throw new Error('Network connection lost.');
+    }
+  };
+  const catalog = await models(broken, [streaming]);
+  const result = await catalog.streamSimple(catalog.getModel(providerId, 'chat')!, context).result();
+  expect(result.stopReason).toBe('error');
+  expect(result.errorMessage).toMatch(/^Network connection lost\. \(after \d+\.\d s: 2 events, 3 characters received; request 0\.0 MB, 1 messages, 1 images \(0\.0 MB\)\)$/u);
+  expect(isRetryableAssistantError(result)).toBe(true);
 });
 
 it('streams a long tool call across the attempt boundary in bytes linear in its arguments, every delta still carrying the message so far', async () => {
