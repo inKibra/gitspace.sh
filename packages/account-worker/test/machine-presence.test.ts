@@ -236,6 +236,18 @@ describe('relay presence', () => {
     await connect({ notices: RELAY_NOTICE_MODE });
     await eventually(async () => await attachmentOnline(workspace.workspaceId) === true);
   });
+
+  it('counts a paused workspace as told, so its machine\'s presence is recorded and no retry is left', async () => {
+    await settledRelay();
+    const workspace = await attachedWorkspace('presence-paused');
+    await space(workspace.workspaceId).pauseStorage('Paused for the presence test');
+    const relay = env.RELAY.getByName(env.RELAY_NAME);
+    try {
+      await connect({ notices: RELAY_NOTICE_MODE });
+      await eventually(async () => await runInDurableObject(relay, (_instance, state) => state.storage.sql.exec('SELECT 1 FROM machine_presence WHERE machine_id=?', machineId).toArray().length) === 1);
+      expect(await runInDurableObject(relay, (_instance, state) => state.storage.sql.exec('SELECT machine_id FROM presence_retries').toArray())).toEqual([]);
+    } finally { await space(workspace.workspaceId).resumeStorage(); }
+  });
 });
 
 describe('relay notices', () => {

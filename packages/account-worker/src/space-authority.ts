@@ -270,9 +270,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   }
 
   /** Machines with a live attachment here, read without starting the runtime; the fleet's machine index is built
-   * once from these. */
+   * once from these. A paused workspace's are read with its pause set aside: refused, the index stayed incomplete and
+   * every presence pass failed. */
   async runtimeAttachedMachines(): Promise<string[]> {
-    return [...new Set((await this.storedAttachments()).filter(item => item.state !== 'detached').map(item => item.machineId))];
+    const attachments = this.storageBreakerStatus().quarantined ? this.unguardedStorage(() => this.attachmentRows()) : await this.storedAttachments();
+    return [...new Set(attachments.filter(item => item.state !== 'detached').map(item => item.machineId))];
   }
 
   /**
@@ -283,6 +285,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
    * Cloudflare's subrequest depth limit (SIMPLIFICATION 215).
    */
   async runtimeMachinePresence(machineId: string, connected: boolean): Promise<void> {
+    // A paused workspace runs nothing and its storage refuses every read: it takes the report as told. Refused, it left
+    // the relay's presence unreported, and every presence read ran the whole pass again (SIMPLIFICATION 224).
+    if (this.storageBreakerStatus().quarantined) return;
     if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached' && item.online !== connected)) return;
     const pending = PendingPresenceSchema.catch({}).parse(await this.ctx.storage.get('presence.pending') ?? {});
     pending[machineId] = connected;

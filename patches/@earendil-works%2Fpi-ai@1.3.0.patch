@@ -21,7 +21,7 @@ index befb18b2e7d519b3731f6355921de1cb7892c7ac..c76970114bf0d9d5aaa0fd6aae0ceeee
                                  type: "toolcall_delta",
                                  contentIndex: index,
 diff --git a/dist/api/bedrock-converse-stream.js b/dist/api/bedrock-converse-stream.js
-index 6ec62d045eab17f1298c39962cbada2073cb1bd3..5f366f691887fe1370c5cfb6783fa79279f2df56 100644
+index 6ec62d045eab17f1298c39962cbada2073cb1bd3..1a8de44627245aa94a9acac93684564f571f2bf5 100644
 --- a/dist/api/bedrock-converse-stream.js
 +++ b/dist/api/bedrock-converse-stream.js
 @@ -7,7 +7,7 @@ import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.js";
@@ -33,6 +33,15 @@ index 6ec62d045eab17f1298c39962cbada2073cb1bd3..5f366f691887fe1370c5cfb6783fa792
  import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.js";
  import { getProviderEnvValue } from "../utils/provider-env.js";
  import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+@@ -152,7 +152,7 @@ export const stream = (model, context, options = {}) => {
+                     ...(options.temperature !== undefined && { temperature: options.temperature }),
+                 },
+                 toolConfig: convertToolConfig(getCurrentTools(normalizedContext.messages), options.toolChoice, supportsStrictMode),
+-                additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
++                additionalModelRequestFields: withToolInputStreaming(model, options, buildAdditionalModelRequestFields(model, options)),
+                 ...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
+             };
+             const nextCommandInput = await options?.onPayload?.(commandInput, model);
 @@ -461,7 +461,7 @@ function handleContentBlockDelta(event, blocks, output, stream) {
      }
      else if (delta?.toolUse && block?.type === "toolCall") {
@@ -42,6 +51,24 @@ index 6ec62d045eab17f1298c39962cbada2073cb1bd3..5f366f691887fe1370c5cfb6783fa792
          stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
      }
      else if (delta?.reasoningContent) {
+@@ -1006,6 +1006,17 @@ function isGovCloudBedrockTarget(model, options) {
+     const modelId = model.id.toLowerCase();
+     return modelId.startsWith("us-gov.") || modelId.startsWith("arn:aws-us-gov:");
+ }
++/**
++ * GitSpace: Claude on Bedrock holds a tool call's input back until it is complete, so a large call (a whole file) is a
++ * stream silent for minutes, which a Cloudflare Worker's connection does not outlast. Fine-grained tool streaming
++ * streams the input as it is written. Skipped on GovCloud like the thinking fields.
++ */
++function withToolInputStreaming(model, options, fields) {
++    if (!isAnthropicClaudeModel(model) || isGovCloudBedrockTarget(model, options))
++        return fields;
++    const betas = Array.isArray(fields?.anthropic_beta) ? fields.anthropic_beta : [];
++    return { ...fields, anthropic_beta: [...betas, "fine-grained-tool-streaming-2025-05-14"] };
++}
+ function buildAdditionalModelRequestFields(model, options) {
+     if (!options.reasoning || !model.reasoning) {
+         return undefined;
 diff --git a/dist/api/mistral-conversations.js b/dist/api/mistral-conversations.js
 index 9038a1c498e0ea0d305fcfdc946455e72714683b..e455a328fd901a4fe6dfb7b7feec3d0b5c1a7e50 100644
 --- a/dist/api/mistral-conversations.js
