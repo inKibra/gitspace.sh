@@ -77,12 +77,14 @@ function rejectOverrides(options: unknown): void {
  * instead of announcing mid-conversation changes (`tool_addition`/`tool_removal` blocks, which pi-ai sends for models
  * that support them). Every request Anthropic refused as a third-party app's (billed to extra usage) carried 40 or more
  * of those blocks, whatever its size; Claude Code's own requests are not known to send them. A tool-set change then
- * restarts the prompt cache.
+ * restarts the prompt cache. Nor does it use message threads, which pi-ai turns on for every model on Anthropic's API:
+ * a thread's `continue` request carries no system prompt (so no billing block, and it is refused before sending), and
+ * every threaded request adds a `thread` field and a beta Claude Code does not send.
  */
-function subscriptionModel<T extends Api>(model: Model<T>): Model<T> {
+function subscriptionModel(model: Model<Api>): Model<Api> {
   const unpriced = { ...model, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
-  if (model.api !== 'anthropic-messages' || !model.compat || !('supportsMidConvoToolChanges' in model.compat) || !model.compat.supportsMidConvoToolChanges) return unpriced;
-  return { ...unpriced, compat: { ...model.compat, supportsMidConvoToolChanges: false } };
+  if (model.api !== 'anthropic-messages') return unpriced;
+  return { ...unpriced, compat: { ...model.compat, supportsMidConvoToolChanges: false, supportsMessageThreads: false } };
 }
 /** Sign-ins whose credential is billed per token (OpenRouter's sign-in issues a credit-funded API key): their requests
  * keep their cost. */
