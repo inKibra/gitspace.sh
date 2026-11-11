@@ -3382,11 +3382,13 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
   const { response, procedures, target } = await routeAccountRpc(request, env);
   const durationMs = Date.now() - started;
   // Diagnostic for blank protected terminals (2026-11-11): every terminal batch, with the size and event count of what
-  // the machine returned (never its content: protected output). Awaited: a log written after the response is sent is
-  // dropped, and a batch is one JSON document the caller reads whole anyway.
+  // the machine returned. Its start is logged only when it carries no protected output (states and errors only).
+  // Awaited: a log written after the response is sent is dropped, and a batch is one JSON document the caller reads
+  // whole anyway.
   if (procedures?.some(procedure => procedure.startsWith('terminals.'))) {
     const body = await response.clone().text().catch((error: unknown) => `<unreadable: ${error instanceof Error ? error.message : String(error)}>`);
-    console.log(JSON.stringify({ event: 'terminal_rpc', procedures, status: response.status, durationMs, target, bytes: body.length, cursors: body.match(/"cursor"/gu)?.length ?? 0, outputs: body.match(/"output"/gu)?.length ?? 0, head: response.status >= 400 ? body.slice(0, 300) : undefined }));
+    const outputs = body.match(/"output"/gu)?.length ?? 0;
+    console.log(JSON.stringify({ event: 'terminal_rpc', procedures, status: response.status, durationMs, target, bytes: body.length, outputs, head: outputs === 0 ? body.slice(0, 400) : undefined }));
   }
   if (response.status < 400 && durationMs <= SLOW_RPC_BATCH_MS) return response;
   let code: string | undefined;
