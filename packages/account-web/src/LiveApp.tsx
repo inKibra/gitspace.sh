@@ -519,7 +519,8 @@ function AccountFrame({ children }: { children: ReactNode }) {
   // The selected workspace's stack, whose positions its stacked rows' captions show; read again as its runtime publishes.
   const selectedGraph = projectId ? graphs[projectId] : undefined;
   const selectedStack = selectedGraph && workspaceId ? stackOf(Object.entries(selectedGraph.relations).map(([id, relations]) => ({ id, ...relations })), workspaceId).flatMap((link) => link.stackedOn === null ? [] : [link.id]) : [];
-  const selectedStackStatuses = useStackStatuses(selectedStack, useLiveChanges(workspaceLiveKey(workspaceId ?? '', 'runtime', projectId)));
+  // A project's base space has no workspace and no stack: it watches nothing.
+  const selectedStackStatuses = useStackStatuses(selectedStack, useLiveChanges(workspaceId ? workspaceLiveKey(workspaceId, 'runtime', projectId) : null));
   const frameView = route === 'agent' && !projectId ? 'projects' : route;
   useEffect(() => { if (frameView !== 'projects') setSettingsProjectId(null); }, [frameView]);
   const globalSidebar = frameView !== 'agent' && runtimeSidebar?.view === frameView && runtimeSidebar.selected === null ? runtimeSidebar : null;

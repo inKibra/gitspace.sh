@@ -63,13 +63,22 @@ it('ignores notices for keys it does not watch, and stops watching when unobserv
   expect(read).toHaveBeenCalledTimes(1);
 });
 
+it('refuses a key the account rejects before it reaches the socket, so other subscriptions keep their notices', () => {
+  const notices = new LiveNotices();
+  const sent: string[] = [];
+  notices.attach({ readyState: 1, send: (message: string) => sent.push(message) });
+  notices.watch(key, () => {});
+  expect(() => notices.watch(workspaceLiveKey('', 'runtime', 'project'), () => {})).toThrow();
+  expect(sent.map(message => JSON.parse(message))).toEqual([{ type: 'subscribe', keys: [key] }]);
+});
+
 it('reports the channel open after a reconnect read finds nothing new', async () => {
   const { notices, reads, channel } = scene();
   await vi.waitFor(() => expect(reads).toHaveLength(1));
   reads[0]!.resolve([{ type: 'snapshot', resource: 'environment:workspace', cursor: 1, revision: 1, previous: null, value: 'first' }]);
   await vi.waitFor(() => expect(channel.snapshot().cursor).toBe(1));
-  const socket = { readyState: 1, send: vi.fn() };
-  notices.attach(socket as unknown as WebSocket);
+  const socket = { readyState: 1, send: vi.fn((_message: string) => {}) };
+  notices.attach(socket);
   expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'subscribe', keys: [key] }));
   await vi.waitFor(() => expect(reads).toHaveLength(2));
   expect(reads[1]!.after).toBe(1);

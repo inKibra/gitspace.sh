@@ -1,18 +1,23 @@
 import { useEffect, useState } from 'react';
-import { liveKeyId, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
+import { liveKeyId, liveKeySchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import type { SynchronizationSource } from './synchronization.js';
 
 /** `null`: the socket (re)opened, so notices sent while it was down are lost and every watcher refetches. */
 type NoticeListener = (version: number | null) => void;
 type LiveRead<T> = (after: number | null, signal: AbortSignal) => Promise<{ status: 'ok'; value: readonly StreamEvent<T>[] } | { status: 'error'; error: Error }>;
+/** What the subscriptions use of the account directory socket: its state and text frames. */
+interface LiveSocket { readonly readyState: number; send(message: string): void }
 
 /** The tab's subscriptions, multiplexed over whichever account directory socket is open. Keys outlive sockets. */
 export class LiveNotices {
   private readonly watched = new Map<string, { key: LiveKey; listeners: Set<NoticeListener> }>();
-  private socket: WebSocket | null = null;
+  private socket: LiveSocket | null = null;
 
+  /** Throws on a key the account refuses: one invalid key in a subscription closes the tab's directory socket, so on
+   * every reconnect it would cut every other key's notices too. */
   watch(key: LiveKey, listener: NoticeListener): () => void {
+    liveKeySchema.parse(key);
     const id = liveKeyId(key);
     let entry = this.watched.get(id);
     if (!entry) {
@@ -30,14 +35,14 @@ export class LiveNotices {
   }
 
   /** The socket is open: subscribe every watched key again, then have every watcher refetch. */
-  attach(socket: WebSocket): void {
+  attach(socket: LiveSocket): void {
     this.socket = socket;
     const keys = [...this.watched.values()].map(entry => entry.key);
     for (let start = 0; start < keys.length; start += MAX_LIVE_SUBSCRIPTIONS) this.send('subscribe', keys.slice(start, start + MAX_LIVE_SUBSCRIPTIONS));
     for (const entry of [...this.watched.values()]) for (const listener of [...entry.listeners]) listener(null);
   }
 
-  detach(socket: WebSocket): void {
+  detach(socket: LiveSocket): void {
     if (this.socket === socket) this.socket = null;
   }
 
@@ -102,11 +107,11 @@ export function liveState<T>(resource: string, keys: readonly LiveKey[], read: (
   };
 }
 
-/** A count of `key`'s notices (and socket reopens) since mount; `null` until the first. */
-export function useLiveChanges(key: LiveKey, notices: LiveNotices = liveNotices): number | null {
+/** A count of `key`'s notices (and socket reopens) since mount; `null` until the first. A null key watches nothing. */
+export function useLiveChanges(key: LiveKey | null, notices: LiveNotices = liveNotices): number | null {
   const [count, setCount] = useState<number | null>(null);
-  const id = liveKeyId(key);
-  useEffect(() => notices.watch(key, () => setCount(previous => (previous ?? 0) + 1)), [id, notices]);
+  const id = key ? liveKeyId(key) : null;
+  useEffect(() => key ? notices.watch(key, () => setCount(previous => (previous ?? 0) + 1)) : undefined, [id, notices]);
   return count;
 }
 
