@@ -8,6 +8,9 @@ import type { ImageRequestTransport } from './image-requests';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { MemoryStorage } from '@earendil-works/pi-durable';
+import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { createRuntimeHarness } from '../harness';
 
 const providerId = 'attempt-provider';
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -236,4 +239,28 @@ it('streams Claude on Bedrock\'s tool input beside pi-ai\'s own betas; other Bed
     { modelId: nova.id, additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } },
     { modelId: govCloud.id, additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } },
   ]);
+});
+
+it('answers a turn of the workspace harness through profile inference and the inference worker boundary', async () => {
+  // pi passes its own request options (hooks, tracing) on every model request; each must survive this path or the
+  // turn fails, as both did once: a refused option and a tracing context copied without its methods.
+  const sent: unknown[] = [];
+  const catalog = await models(remote(createAttemptRunner({ providers: () => [payloadProvider(sent, [chat])] })), [payloadProvider(sent, [chat])]);
+  const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
+  const { harness, root } = await createRuntimeHarness({
+    identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage: new MemoryStorage(), models: catalog, model: { provider: providerId, modelId: 'chat' },
+    tools: { images: { store: async image => image, load: async image => image }, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused },
+      async invoke(input) { return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: '[]' }] }; } },
+    operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
+    retainedRules: { loadRules: async () => [], judge: unused, matchAst: unused }, editTool: () => 'edit',
+    onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: unused,
+    unfinished: { begin: () => 0, end: () => {} },
+  });
+  try {
+    await root.submit({ type: 'input', content: 'Reply.', requestId: 'turn' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(BACKGROUND_CONTEXT);
+    const replies = (await root.entries({}, 16, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []).filter(message => message.role === 'assistant');
+    expect(replies.map(reply => reply.role === 'assistant' ? [reply.stopReason, reply.content] : null)).toEqual([['stop', [{ type: 'text', text: 'sent' }]]]);
+    expect(sent).toHaveLength(1);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
