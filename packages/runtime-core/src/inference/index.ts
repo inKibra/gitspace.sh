@@ -1,6 +1,7 @@
 import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type AuthResult, type AssistantMessage, type AssistantMessageEvent, type AssistantMessageEventStream, type AssistantImages, type ClassifierResult } from '@earendil-works/pi-ai';
 import { z } from 'zod';
 import { isModelType } from '@earendil-works/pi-ai';
+import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import type { Credential, ProviderResponse } from '@earendil-works/pi-ai';
 import { limitContextWindows } from './catalog.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
@@ -284,10 +285,11 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       });
     }
     /** One attempt of a streamed request, on the account `streamAttempts` chose: its images fitted to the model's limits
-     * by reference, built and sent by the runner. The gate permit is held until the provider answers. An attempt whose
-     * stream breaks or ends unanswered, or whose provider fails before answering, names how long it ran, what it
-     * received and what its request carried: such an ending has no reason of its own ("Network connection lost"), and
-     * these tell the request's size from the reply's. A provider's answered error states its reason and stays as it is. */
+     * by reference, built and sent by the runner. The gate permit is held until the provider answers. An attempt that
+     * fails transiently (its stream breaks or ends unanswered, or the provider's error is one pi retries, as a connection
+     * to the provider lost before or during its answer) names how long it ran, what it received and what its request
+     * carried: such an ending has no reason of its own ("Network connection lost"), and these tell the request's size
+     * from the reply's. A provider's final error (a usage limit, a refused request) states its reason and stays as it is. */
     function attempted(method: InferenceAttempt['method'], model: Model<Api>, context: Context, request?: { signal?: AbortSignal; onResponse?: (response: ProviderResponse, model: Model<Api>) => unknown }) {
       const fitted = fitRequestImages(context, imageLimits(model));
       return async function* (credential: ResolvedCredential, attempt: Attempt, subscription: boolean): AsyncGenerator<AssistantMessageEvent> {
@@ -309,13 +311,11 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           return { type: 'error', reason, error: message };
         };
         let ended = false;
-        let answered = false;
         try {
           for await (const event of run(sent, request?.signal)) {
             attempt.release();
             if (event.type === 'request') { outgoing = event; continue; }
             if (event.type === 'response') {
-              answered = true;
               const response = { status: event.status, headers: event.headers };
               attempt.observe(response);
               await request?.onResponse?.(response, model);
@@ -324,9 +324,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
             events += 1;
             if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') characters += event.delta.length;
             ended = event.type === 'done' || event.type === 'error';
-            // A provider error before any answer (the connection to the provider lost while the request went out) has no
-            // reason of its own either.
-            yield event.type === 'error' && event.reason === 'error' && !answered ? { ...event, error: { ...event.error, errorMessage: measured(event.error.errorMessage ?? 'The model request failed') } } : event;
+            yield event.type === 'error' && isRetryableAssistantError(event.error) ? { ...event, error: { ...event.error, errorMessage: measured(event.error.errorMessage ?? 'The model request failed') } } : event;
           }
         } catch (error) {
           if (request?.signal?.aborted) throw error;
