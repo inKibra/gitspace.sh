@@ -155,6 +155,29 @@ it('separates explicit terminal machine targets from cloud authority in signed b
   ]));
 });
 
+it('prompts a reload only for an account reply from another release, never for a machine reply a reload cannot change', async () => {
+  const events: string[] = [];
+  const machineRelease = 'machine-release-contract';
+  const client = createBrowserClient({
+    contract: gitspaceContract,
+    onEvent: (event) => { if (event.type === 'skew') events.push(event.serverContract); },
+    transport: createRoutedTransport({
+      homeUrl: 'https://account.test/rpc',
+      fetch: (async (input: RequestInfo | URL) => {
+        const terminal = String(input).includes('terminals.');
+        const items = terminal ? [{ v: 1, status: 'ok', value: [] }] : [{ v: 1, status: 'ok', value: { revision: 1 } }];
+        return new Response(encoded({ v: 1, batch: items.map((item, index) => ({ id: `b${index}`, status: 200, response: item })) }), {
+          headers: { 'content-type': 'application/result-rpc+devalue; sv=1', 'x-result-rpc-contract': terminal ? machineRelease : 'next-account-release' },
+        });
+      }) as typeof fetch,
+    }),
+  });
+  expect(await client.terminals.list({ spaceId: 'space', machineId: 'machine' })).toMatchObject({ status: 'ok' });
+  expect(events).toEqual([]);
+  await client.settings.get({});
+  expect(events).toEqual(['next-account-release']);
+});
+
 it('bounds the procedure tag and counts the procedures it omits', async () => {
   const urls: string[] = [];
   const transport = createRoutedTransport({ homeUrl: '/rpc', fetch: (async (input: RequestInfo | URL) => { urls.push(String(input)); return new Response('reached'); }) as typeof fetch });

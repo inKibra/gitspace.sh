@@ -1,6 +1,7 @@
-import { deserialize } from 'result-rpc';
+import { contractDigest, deserialize } from 'result-rpc';
 import { batchFetchTransport, fetchTransport, type ClientTransport } from 'result-rpc/client';
 import { accountRpcAuthority, rpcCallTarget } from './account-rpc.js';
+import { gitspaceContract } from './rpc-contract.js';
 
 /**
  * Every call goes to the account endpoint, which serves cloud work or forwards
@@ -66,11 +67,30 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   // capture can outlast ordinary queries. Keep those calls out of their batch and timeout budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
   const inspectorContext = batch();
-  // A signed machine batch goes whole to one explicit machine and workspace.
+  // A signed machine batch goes whole to one explicit machine and workspace. A machine runs its own release, which
+  // reloading this page cannot change: its replies carry this page's contract, so a machine on another release never
+  // reports skew (the "GitSpace was updated" prompt). A reply this page cannot read still fails to decode.
+  const contract = contractDigest(gitspaceContract);
   const targets = new Map<string, ClientTransport>();
   const queue = (key: string): ClientTransport => {
     let transport = targets.get(key);
-    if (!transport) { transport = batch(); targets.set(key, transport); }
+    if (!transport) {
+      const machine = batch();
+      const stream = machine.stream;
+      transport = {
+        request: async (envelope, requestOptions) => {
+          const outcome = await machine.request(envelope, requestOptions);
+          return outcome.ok ? { ok: true, response: { ...outcome.response, contract: outcome.response.contract === null ? null : contract } } : outcome;
+        },
+        ...(stream ? {
+          stream: async (envelope, requestOptions) => {
+            const outcome = await stream(envelope, requestOptions);
+            return outcome.ok ? { ok: true, response: { ...outcome.response, contract: outcome.response.contract === null ? null : contract } } : outcome;
+          },
+        } : {}),
+      };
+      targets.set(key, transport);
+    }
     return transport;
   };
 
