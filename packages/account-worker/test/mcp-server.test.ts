@@ -36,9 +36,10 @@ async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceI
     capabilities, canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: 3_600_000,
     enrollUrl: `${env.ACCOUNT_URL}/v1/devices/enroll`, ...overrides,
   }, privateKey, { kind: 'device', deviceId: binding.deviceId });
-  const enabled = enable ? mcpAccessResultSchema.parse(await (await management('enable', { expectedRevision: 0, invite: clientInvite() })).json()) : null;
+  const enabled = enable ? mcpAccessResultSchema.parse(await (await management('create', { expectedRevision: 0, label: 'Desktop', invite: clientInvite() })).json()) : null;
   if (enabled?.status === 'error') throw new Error(enabled.error.message);
   const accessKey = enabled?.value.token ?? '';
+  const connectionId = enabled?.value.connectionId ?? '';
   const configured = env;
   const request = (token = accessKey) => new Request(`${env.ACCOUNT_URL}/mcp`, {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -49,7 +50,7 @@ async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceI
     requestInit: { headers: { authorization: `Bearer ${accessKey}` } },
     fetch: (input, init) => worker.fetch(new Request(input, init), configured),
   });
-  return { client, transport, configured, request, vault, deviceId: enabled?.value.deviceId ?? '', browserId: binding.deviceId, accessKey, management, clientInvite };
+  return { client, transport, configured, request, vault, deviceId: enabled?.value.connections.find(connection => connection.connectionId === connectionId)?.deviceId ?? '', connectionId, browserId: binding.deviceId, accessKey, management, clientInvite };
 }
 
 describe('tenant MCP authority boundary', () => {
@@ -113,18 +114,62 @@ describe('tenant MCP authority boundary', () => {
     const value = await fixture(['rpc.read']);
     const status = mcpAccessResultSchema.parse(await (await value.management('status')).json());
     if (status.status !== 'ok') throw new Error('Status failed');
-    expect(status).toMatchObject({ status: 'ok', value: { revision: 1, enabled: true, active: true, deviceId: value.deviceId } });
-    expect(Object.keys(status.value).sort()).toEqual(['active', 'capabilities', 'deviceId', 'enabled', 'endpoint', 'expiresAt', 'revision', 'scope', 'updatedAt']);
+    expect(status.value).toMatchObject({ revision: 1, connections: [{ connectionId: value.connectionId, label: 'Desktop', active: true, deviceId: value.deviceId, capabilities: ['rpc.read'] }] });
     expect(JSON.stringify(status)).not.toContain(value.accessKey);
-    const rotated = mcpAccessResultSchema.parse(await (await value.management('rotate', { expectedRevision: 1 })).json());
+    const rotated = mcpAccessResultSchema.parse(await (await value.management('rotate', { expectedRevision: 1, connectionId: value.connectionId })).json());
     if (rotated.status !== 'ok' || !rotated.value.token) throw new Error('Rotation failed');
     expect(rotated.value.token).not.toBe(value.accessKey);
     expect((await worker.fetch(value.request(), env)).status).toBe(401);
     expect((await worker.fetch(value.request(rotated.value.token), env)).status).toBe(200);
-    expect((await value.management('disable', { expectedRevision: 2 })).status).toBe(200);
+    expect((await value.management('disable', { expectedRevision: 2, connectionId: value.connectionId })).status).toBe(200);
     expect((await worker.fetch(value.request(rotated.value.token), env)).status).toBe(401);
     expect((await value.vault.listDeviceGrants()).find(record => record.binding.deviceId === value.deviceId)?.revokedAt).toEqual(expect.any(Number));
-    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 3, enabled: false, active: false } });
+    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 3, connections: [] } });
+    expect((await value.management('rotate', { expectedRevision: 3, connectionId: value.connectionId })).status).toBe(404);
+  });
+
+  it('gives each connection its own token, capabilities and revocation', async () => {
+    const value = await fixture(['rpc.read', 'rpc.write']);
+    const second = mcpAccessResultSchema.parse(await (await value.management('create', { expectedRevision: 1, label: 'Laptop', invite: value.clientInvite({ capabilities: ['rpc.read'] }) })).json());
+    if (second.status !== 'ok' || !second.value.token || !second.value.connectionId) throw new Error('Second connection failed');
+    expect(second.value.connections.map(connection => [connection.label, connection.capabilities])).toEqual([['Desktop', ['rpc.read', 'rpc.write']], ['Laptop', ['rpc.read']]]);
+    const tools = async (token: string) => {
+      const response = await worker.fetch(value.request(token), env);
+      return { status: response.status, writes: (await response.text()).includes('gitspace_configuration_values_put') };
+    };
+    expect(await tools(value.accessKey)).toEqual({ status: 200, writes: true });
+    expect(await tools(second.value.token)).toEqual({ status: 200, writes: false });
+    const rotated = mcpAccessResultSchema.parse(await (await value.management('rotate', { expectedRevision: 2, connectionId: value.connectionId })).json());
+    if (rotated.status !== 'ok' || !rotated.value.token) throw new Error('Rotation failed');
+    expect(rotated.value.connectionId).toBe(value.connectionId);
+    expect((await tools(value.accessKey)).status).toBe(401);
+    expect(await tools(second.value.token)).toEqual({ status: 200, writes: false });
+    expect((await value.management('disable', { expectedRevision: 3, connectionId: second.value.connectionId })).status).toBe(200);
+    expect((await tools(second.value.token)).status).toBe(401);
+    expect(await tools(rotated.value.token)).toEqual({ status: 200, writes: true });
+    const grants = await value.vault.listDeviceGrants();
+    expect(grants.find(record => record.binding.deviceId === second.value.connections[1]?.deviceId)?.revokedAt).toEqual(expect.any(Number));
+    expect(grants.find(record => record.binding.deviceId === value.deviceId)?.revokedAt).toBeNull();
+    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 4, connections: [{ label: 'Desktop', active: true }] } });
+  });
+
+  it('moves an existing single grant into the connection list with its token unchanged', async () => {
+    const value = await fixture(['rpc.read']);
+    await runInDurableObject(value.vault, async (_instance, state) => {
+      state.storage.sql.exec(`CREATE TABLE mcp_access (
+        id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL,
+        device_id TEXT, sealed_key TEXT, token_hash TEXT, updated_at TEXT NOT NULL
+      )`);
+      state.storage.sql.exec('INSERT INTO mcp_access SELECT 1, 5, device_id, sealed_key, token_hash, updated_at FROM mcp_connections');
+      state.storage.sql.exec('DELETE FROM mcp_connections');
+      state.storage.sql.exec('DELETE FROM mcp_access_revision');
+      const restarted = new CredentialVaultDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      expect((await restarted.resolveMcpAccess(value.accessKey))?.device.deviceId).toBe(value.deviceId);
+      expect(state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'mcp_access'").toArray()).toHaveLength(0);
+    });
+    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 5, connections: [{ label: 'GitSpace MCP', deviceId: value.deviceId, active: true }] } });
+    expect((await worker.fetch(value.request(), env)).status).toBe(200);
   });
 
   it('keeps encrypted access and its revision across vault reconstruction', async () => {
@@ -134,12 +179,12 @@ describe('tenant MCP authority boundary', () => {
       await state.blockConcurrencyWhile(async () => {});
       const access = await restarted.resolveMcpAccess(value.accessKey);
       expect(access?.device.deviceId).toBe(value.deviceId);
-      const persisted = JSON.stringify(state.storage.sql.exec('SELECT * FROM mcp_access').toArray());
+      const persisted = JSON.stringify(state.storage.sql.exec('SELECT * FROM mcp_connections').toArray());
       expect(persisted).not.toContain(value.accessKey);
       if (!access) throw new Error('Persisted access was lost');
       expect(persisted).not.toContain(access.key);
     });
-    expect((await value.management('rotate', { expectedRevision: 0 })).status).toBe(409);
+    expect((await value.management('rotate', { expectedRevision: 0, connectionId: value.connectionId })).status).toBe(409);
     expect((await worker.fetch(value.request(), env)).status).toBe(200);
   });
 
@@ -153,11 +198,11 @@ describe('tenant MCP authority boundary', () => {
     const value = await fixture(['rpc.read'], {}, false);
     const delegated = value.clientInvite();
     const forged = value.clientInvite({ capabilities: ['account.admin'] });
-    expect((await value.management('enable', { expectedRevision: 0, invite: forged })).status).toBe(403);
+    expect((await value.management('create', { expectedRevision: 0, label: 'Desktop', invite: forged })).status).toBe(403);
     const foreign = { ...delegated, issuer: { kind: 'device', deviceId: crypto.randomUUID() } };
-    expect((await value.management('enable', { expectedRevision: 0, invite: foreign })).status).toBe(403);
+    expect((await value.management('create', { expectedRevision: 0, label: 'Desktop', invite: foreign })).status).toBe(403);
     expect((await value.vault.listDeviceGrants()).filter(record => record.invite.invite.label === 'MCP')).toHaveLength(0);
-    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 0, enabled: false } });
+    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 0, connections: [] } });
   });
 
   it.each([
@@ -167,20 +212,20 @@ describe('tenant MCP authority boundary', () => {
     { canDelegate: false },
   ])('rejects setup without browser account delegation authority: %j', async (rights) => {
     const value = await fixture(['rpc.read'], rights, false);
-    expect((await value.management('enable', { expectedRevision: 0, invite: value.clientInvite() })).status).toBe(403);
+    expect((await value.management('create', { expectedRevision: 0, label: 'Desktop', invite: value.clientInvite() })).status).toBe(403);
     expect((await value.vault.listDeviceGrants()).filter(record => record.invite.invite.label === 'MCP')).toHaveLength(0);
   });
 
   it('requires signed management and prevents stale concurrent enrollment from leaving grants', async () => {
     const value = await fixture(['rpc.read'], {}, false);
-    expect((await value.management('enable', { expectedRevision: 0, invite: value.clientInvite() }, false)).status).toBe(403);
+    expect((await value.management('create', { expectedRevision: 0, label: 'Desktop', invite: value.clientInvite() }, false)).status).toBe(403);
     const responses = await Promise.all([
-      value.management('enable', { expectedRevision: 0, invite: value.clientInvite() }),
-      value.management('enable', { expectedRevision: 0, invite: value.clientInvite() }),
+      value.management('create', { expectedRevision: 0, label: 'Desktop', invite: value.clientInvite() }),
+      value.management('create', { expectedRevision: 0, label: 'Laptop', invite: value.clientInvite() }),
     ]);
     expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
     expect((await value.vault.listDeviceGrants()).filter(record => record.invite.invite.label === 'MCP')).toHaveLength(1);
-    expect((await value.management('disable', { expectedRevision: 0 })).status).toBe(409);
-    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 1, active: true } });
+    expect((await value.management('disable', { expectedRevision: 0, connectionId: 'any' })).status).toBe(409);
+    expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 1, connections: [{ active: true }] } });
   });
 });

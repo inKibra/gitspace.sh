@@ -69,11 +69,11 @@ Standard MCP client + MCP bearer key
 
 The endpoint uses the official TypeScript MCP SDK and Streamable HTTP. Clients do not install a GitSpace-specific operation SDK.
 
-### Enable MCP
+### Add an MCP connection
 
-In **Settings > Connections**, choose **Enable MCP** and select the backing client's scope, permissions, and lifetime. An account-scoped browser with device-management and delegation authority must approve setup.
+In **Settings > Connections**, choose **Add connection**, name it, and select its client's scope, permissions, and lifetime. An account-scoped browser with device-management and delegation authority must approve setup. An account has any number of connections, for example one per computer or tool; each has its own token, backing client, permissions, and revocation.
 
-The browser signs a dedicated API-client invitation. The account vault generates the signing key, enrolls the client, and stores the key encrypted. It also generates a random 32-byte bearer token and stores only its SHA-256 hash. Setup does not expose the signing key to the browser or MCP client.
+The browser signs a dedicated API-client invitation. The account vault generates the signing key, enrolls the client under the connection's label, and stores the key encrypted. It also generates a random 32-byte bearer token and stores only its SHA-256 hash. Setup does not expose the signing key to the browser or MCP client.
 
 Copy the bearer token when setup completes. It appears once, alongside a copyable client configuration:
 
@@ -85,13 +85,15 @@ Authorization: Bearer <generated-token>
 
 The bearer token is the MCP access key. There is no token exchange, OAuth login, or GitSpace-specific SDK to install in the MCP client. Keep the token out of repository files, logs, and shared conversations.
 
-All callers using this token share the dedicated API client's authority and audit identity. This is not a multi-user privilege broker. Full in-scope account control requires `rpc.read`, `rpc.write`, `session.prompt`, `fleet.control`, `devices.manage`, `deployment.control`, `account.admin`, and `lifecycle.control`. Administrative permissions remain opt-in. A narrow grant does not gain account authority.
+All callers using one connection's token share its API client's authority and audit identity. This is not a multi-user privilege broker; give each client its own connection to tell them apart and revoke them separately. Full in-scope account control requires `rpc.read`, `rpc.write`, `session.prompt`, `fleet.control`, `devices.manage`, `deployment.control`, `account.admin`, and `lifecycle.control`. Administrative permissions remain opt-in. A narrow grant does not gain account authority.
 
-**Rotate token** generates a replacement and immediately invalidates the old token for new requests. Copy the replacement once. Rotation keeps the signing client and its permissions. If you lose a token, rotate it; the server cannot retrieve its original value.
+**Rotate token** on a connection generates a replacement and immediately invalidates that connection's old token for new requests. Copy the replacement once. Rotation keeps the signing client and its permissions, and other connections are unaffected. If you lose a token, rotate it; the server cannot retrieve its original value.
 
-**Disable MCP** invalidates access, revokes the dedicated signing client, and removes the stored signing key and bearer hash. Revoking the client or any issuer in its grant chain also prevents MCP access. The endpoint checks the current backing grant on every request, including discovery. Requests already executing are subject to their existing cancellation and authorization behavior.
+**Disable** on a connection invalidates its token, revokes its signing client, and removes its stored signing key and bearer hash. Other connections keep working. Revoking the client or any issuer in its grant chain also prevents MCP access. The endpoint checks the current backing grant on every request, including discovery. Requests already executing are subject to their existing cancellation and authorization behavior. A connection whose grant was revoked or expired shows as inactive; disable it and add a new one.
 
-Status reads reveal metadata only. Setup, rotation, and disable use signed browser-only endpoints outside the MCP tool catalog. Revision checks reject stale changes instead of silently replacing another browser's token. After an ambiguous setup or rotation failure, refresh status and rotate deliberately rather than retrying automatically.
+Status reads reveal metadata only. Setup, rotation, and disable use signed browser-only endpoints outside the MCP tool catalog. Every change advances one revision for the account's connections, and a change based on an older revision is rejected instead of silently replacing another browser's work. After an ambiguous setup or rotation failure, refresh status and rotate deliberately rather than retrying automatically.
+
+An account that enabled MCP before connections existed keeps its grant as a connection named "GitSpace MCP", with its token unchanged.
 
 ### Deployment
 
@@ -437,4 +439,4 @@ Verified in this checkout, without deploying:
 - [Device capabilities and scopes](../packages/protocol/src/device-grant.ts), [signed machine dispatch](../packages/account-machine/src/signed-rpc.ts), [Inspector input schemas](../packages/protocol/src/inspector-contract.ts).
 - [Original SDK design](FLEET.md#L906) and [parity roadmap](FLEET.md#L1043).
 
-Coverage is an inventory plus targeted runtime evidence, not a claim that every operation was executed against every live provider. No tenant has been deployed or configured by this work. Enable MCP in Connections after deploying the compatible source release.
+Coverage is an inventory plus targeted runtime evidence, not a claim that every operation was executed against every live provider. No tenant has been deployed or configured by this work. Add an MCP connection in Connections after deploying the compatible source release.

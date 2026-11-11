@@ -1144,11 +1144,11 @@ function GitSpaceProduct() {
     onSignOut={signOutThisBrowser}
     onCreateApiClient={mintApiClient}
     canManageMcp={canManageMcp}
-    canEnableMcp={canManageMcp && Boolean(browserDevice?.canDelegate)}
-    onMcpStatus={() => requestMcpAccess('status')}
-    onMcpEnable={(revision, permissions) => requestMcpAccess('enable', revision, permissions)}
-    onMcpRotate={(revision) => requestMcpAccess('rotate', revision)}
-    onMcpDisable={(revision) => requestMcpAccess('disable', revision)}
+    canCreateMcp={canManageMcp && Boolean(browserDevice?.canDelegate)}
+    onMcpStatus={() => requestMcpAccess({ operation: 'status' })}
+    onMcpCreate={(expectedRevision, draft) => requestMcpAccess({ operation: 'create', expectedRevision, draft })}
+    onMcpRotate={(expectedRevision, connectionId) => requestMcpAccess({ operation: 'rotate', expectedRevision, connectionId })}
+    onMcpDisable={(expectedRevision, connectionId) => requestMcpAccess({ operation: 'disable', expectedRevision, connectionId })}
     canConnectBrowser={canConnectBrowser(browserDevice, currentBrowserView)}
     onCreateBrowserInvitation={() => createBrowserInvitation(new URL(window.location.origin), currentBrowserView)}
     onBrowserInvitationStatus={browserInvitationStatus}

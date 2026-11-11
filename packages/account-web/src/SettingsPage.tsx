@@ -5,12 +5,12 @@ import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSe
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import type { ApiClientDraft } from './device.js';
-import type { McpAccessView } from '@gitspace/protocol/mcp-access';
+import type { McpAccessView, McpConnectionView } from '@gitspace/protocol/mcp-access';
 import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubInstallRequestView, GitHubPerson, GitHubState } from '@gitspace/protocol/github';
 import { GITHUB_REMOVED_KEPT, GitHubLoginSchema } from '@gitspace/protocol/github';
 import { CopyStepsButton, OwnerSteps, githubInstallationUrl, githubInstallationsUrl, githubTime, ownerStepsText, rememberGitHubInstall, takeGitHubInstall } from './GitHubAccess.js';
 import { formatRelativeTime } from './relative-time.js';
-import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
+import type { McpAccessActions } from './mcp-access.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { rpcClient } from './rpc-client.js';
 import {
@@ -524,13 +524,14 @@ function DeviceRows({ devices, kind, onRevokeDevice, onSignOut }: Pick<SettingsP
 }
 
 /** One-time bearer values live only in this mounted Connections section. */
-export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpStatus, onMcpEnable, onMcpRotate, onMcpDisable }: McpAccessActions & { projects: ReadonlyArray<{ id: string; name: string }> }) {
+export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpStatus, onMcpCreate, onMcpRotate, onMcpDisable }: McpAccessActions & { projects: ReadonlyArray<{ id: string; name: string }> }) {
   const [view, setView] = useState<McpAccessView | null>(null);
-  const [action, setAction] = useState<'enable' | 'rotate' | 'disable' | null>(null);
-  const [secret, setSecret] = useState<{ token: string; endpoint: string } | null>(null);
+  const [action, setAction] = useState<{ kind: 'create' } | { kind: 'rotate' | 'disable'; connection: McpConnectionView } | null>(null);
+  const [secret, setSecret] = useState<{ token: string; endpoint: string; label: string } | null>(null);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [label, setLabel] = useState('');
   const [projectId, setProjectId] = useState('');
   const [capabilities, setCapabilities] = useState<DeviceCapability[]>(['rpc.read', 'session.prompt']);
   const [ttl, setTtl] = useState('never');
@@ -543,7 +544,7 @@ export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpS
       const result = await status.current();
       if (alive.current) {
         // Never allow a credential returned by a server into status state.
-        const { token: _token, ...next } = result as McpAccessValue;
+        const { token: _token, connectionId: _connectionId, ...next } = result;
         setView(next);
       }
     } catch (failure) {
@@ -564,13 +565,14 @@ export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpS
     setPending(true);
     setError(null);
     try {
-      const result = action === 'enable'
-        ? await onMcpEnable(view.revision, { scope: projectId ? { kind: 'project', projectId } : { kind: 'user' }, capabilities, ttlMs: API_CLIENT_TTLS.find(option => option.value === ttl)?.ms ?? null })
-        : action === 'rotate' ? await onMcpRotate(view.revision) : await onMcpDisable(view.revision);
+      const result = action.kind === 'create'
+        ? await onMcpCreate(view.revision, { label: label.trim(), scope: projectId ? { kind: 'project', projectId } : { kind: 'user' }, capabilities, ttlMs: API_CLIENT_TTLS.find(option => option.value === ttl)?.ms ?? null })
+        : action.kind === 'rotate' ? await onMcpRotate(view.revision, action.connection.connectionId) : await onMcpDisable(view.revision, action.connection.connectionId);
       if (alive.current) {
-        const { token, ...next } = result;
+        const { token, connectionId, ...next } = result;
         setView(next);
-        setSecret(token ? { token, endpoint: next.endpoint } : null);
+        const connection = next.connections.find(candidate => candidate.connectionId === connectionId);
+        setSecret(token && connection ? { token, endpoint: next.endpoint, label: connection.label } : null);
         setAction(null);
       }
     } catch (failure) {
@@ -580,33 +582,37 @@ export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpS
       if (alive.current) { await refresh(); setPending(false); }
     }
   };
-  const open = (next: 'enable' | 'rotate' | 'disable'): void => {
+  const open = (next: NonNullable<typeof action>): void => {
     setError(null);
     setSecret(null);
+    setLabel('');
     setProjectId('');
     setCapabilities(['rpc.read', 'session.prompt']);
     setTtl('never');
     setAction(next);
   };
-  const scope = view?.scope;
+  const target = action && action.kind !== 'create' ? action.connection.label : '';
   return <Group title="MCP">
     <SettingRows>
-      <SettingRow title="GitSpace MCP" description="Connect an MCP client over Streamable HTTP. Access stays off until you enable it.">
-        <Badge color={view?.active ? 'green' : view?.enabled ? 'amber' : 'gray'}>{loading ? 'Loading…' : view?.active ? 'Active' : view?.enabled ? 'Inactive grant' : view ? 'Disabled' : 'Unavailable'}</Badge>
+      <SettingRow title="GitSpace MCP" description="Connect MCP clients over Streamable HTTP. Each connection has its own token, permissions, and revocation.">
+        {loading ? <Badge color="gray">Loading…</Badge> : view ? null : <Badge color="gray">Unavailable</Badge>}
       </SettingRow>
-      {view ? <>
-        <SettingRow title="Endpoint" description={view.endpoint}>{null}</SettingRow>
-        {view.enabled ? <SettingRow title="Access" description={<>{scope?.kind === 'project' ? `Project: ${projects.find(project => project.id === scope.projectId)?.name ?? scope.projectId}` : 'Whole account'}<span className="mt-1 block">{view.capabilities.join(', ')}</span><span className="mt-1 block">{view.expiresAt ? `Expires ${new Date(view.expiresAt).toLocaleString()}` : 'Until revoked'}</span></>}>{null}</SettingRow> : null}
-      </> : null}
+      {view ? <SettingRow title="Endpoint" description={view.endpoint}>{null}</SettingRow> : null}
+      {view?.connections.map(connection => {
+        const scope = connection.scope;
+        return <SettingRow key={connection.connectionId} title={<>{connection.label}<Badge color={connection.active ? 'green' : 'amber'}>{connection.active ? 'Active' : 'Inactive grant'}</Badge></>}
+          description={<>{scope?.kind === 'project' ? `Project: ${projects.find(project => project.id === scope.projectId)?.name ?? scope.projectId}` : 'Whole account'}<span className="mt-1 block">{connection.capabilities.join(', ')}</span><span className="mt-1 block">{connection.expiresAt ? `Expires ${new Date(connection.expiresAt).toLocaleString()}` : 'Until revoked'}</span>{connection.active ? null : <span className="mt-1 block">Its grant was revoked or expired. Disable it and add a new connection.</span>}</>}>
+          {canManageMcp ? <div className="flex gap-2">
+            <Button variant="ghost" size="compact" disabled={pending || loading || !connection.active} onClick={() => open({ kind: 'rotate', connection })}>Rotate token</Button>
+            <Button variant="ghost" size="compact" disabled={pending || loading} onClick={() => open({ kind: 'disable', connection })}>Disable</Button>
+          </div> : null}
+        </SettingRow>;
+      })}
     </SettingRows>
     {!canManageMcp ? <p className="text-caption text-muted-foreground">Manage MCP from an active account-scoped browser with Device management permission.</p> : <>
-      {view?.enabled && !view.active ? <p className="text-caption text-muted-foreground">The dedicated grant was revoked or expired. Disable MCP, then enable it again to authorize a new grant.</p> : null}
-      {!view?.enabled && !canEnableMcp ? <p className="text-caption text-muted-foreground">This browser cannot delegate access. Use a delegating account browser to enable MCP.</p> : null}
+      {!canCreateMcp ? <p className="text-caption text-muted-foreground">This browser cannot delegate access. Use a delegating account browser to add a connection.</p> : null}
       <div className="flex flex-wrap gap-2 pt-3">
-        {view?.enabled ? <>
-          <Button variant="secondary" size="compact" disabled={pending || loading || !view.active} onClick={() => open('rotate')}>Rotate token</Button>
-          <Button variant="secondary" size="compact" disabled={pending || loading} onClick={() => open('disable')}>Disable MCP</Button>
-        </> : <Button variant="primary" size="compact" disabled={!view || !canEnableMcp || loading || pending} onClick={() => open('enable')}>Enable MCP</Button>}
+        <Button variant="primary" size="compact" disabled={!view || !canCreateMcp || loading || pending} onClick={() => open({ kind: 'create' })}>Add connection</Button>
         <Button variant="ghost" size="compact" disabled={pending || loading} onClick={() => { setError(null); void refresh(); }}>Refresh status</Button>
       </div>
     </>}
@@ -614,20 +620,21 @@ export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpS
     <Dialog open={action !== null || secret !== null} onOpenChange={(next) => { if (!next) close(); }}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{secret ? 'Copy your MCP token' : action === 'enable' ? 'Enable GitSpace MCP' : action === 'rotate' ? 'Rotate MCP token?' : 'Disable MCP?'}</DialogTitle>
-          <DialogDescription>{secret ? 'Shown once. Copy it now and keep it private. Closing this dialog clears the token; it cannot be retrieved later.' : action === 'enable' ? 'Authorize the dedicated GitSpace MCP client with the scope, permissions, and lifetime you choose. The private signing key stays in the vault.' : action === 'rotate' ? 'The current bearer token stops working immediately. Update every connected MCP client with the new token.' : 'The bearer token stops working immediately and the dedicated client grant is revoked. Enabling again requires fresh authorization.'}</DialogDescription>
+          <DialogTitle>{secret ? `Copy the token for ${secret.label}` : action?.kind === 'create' ? 'Add an MCP connection' : action?.kind === 'rotate' ? `Rotate the token for ${target}?` : `Disable ${target}?`}</DialogTitle>
+          <DialogDescription>{secret ? 'Shown once. Copy it now and keep it private. Closing this dialog clears the token; it cannot be retrieved later.' : action?.kind === 'create' ? 'Authorize a dedicated MCP client with the scope, permissions, and lifetime you choose. The private signing key stays in the vault.' : action?.kind === 'rotate' ? 'This connection\'s current token stops working immediately. Update the clients that use it with the new token. Other connections are unaffected.' : 'This connection\'s token stops working immediately and its client grant is revoked. Other connections are unaffected.'}</DialogDescription>
         </DialogHeader>
         {secret ? <div className="flex min-w-0 flex-col gap-4">
           <InputCopy label="Streamable HTTP URL" value={secret.endpoint} />
           <InputCopy label="Bearer token" value={secret.token} />
           <InputCopy label="MCP client configuration" value={JSON.stringify({ mcpServers: { gitspace: { type: 'http', url: secret.endpoint, headers: { Authorization: `Bearer ${secret.token}` } } } }, null, 2)} />
           <p className="text-caption text-muted-foreground">Choose Streamable HTTP in your client and send the token in the Authorization header, not the URL. Clients may use different configuration formats.</p>
-        </div> : action === 'enable' ? <fieldset disabled={pending} className="min-w-0">
+        </div> : action?.kind === 'create' ? <fieldset disabled={pending} className="flex min-w-0 flex-col gap-4">
+          <InputGroup className="w-full"><InputField index={0} label="Label" value={label} placeholder="Laptop, CI, Claude Desktop" onChange={setLabel} autoFocus required /></InputGroup>
           <ApiClientPermissions projects={projects} projectId={projectId} setProjectId={setProjectId} capabilities={capabilities} setCapabilities={setCapabilities} ttl={ttl} setTtl={setTtl} id="mcp-client" />
         </fieldset> : null}
         <DialogFooter>
           <Button variant="secondary" disabled={pending} onClick={close}>{secret ? 'Done' : 'Cancel'}</Button>
-          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action === 'enable' && (!canEnableMcp || capabilities.length === 0))} onClick={() => void submit()}>{action === 'enable' ? 'Enable MCP' : action === 'rotate' ? 'Rotate and invalidate old token' : 'Disable MCP'}</Button> : null}
+          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action?.kind === 'create' && (!canCreateMcp || capabilities.length === 0 || !label.trim()))} onClick={() => void submit()}>{action?.kind === 'create' ? 'Add connection' : action?.kind === 'rotate' ? 'Rotate and invalidate old token' : 'Disable connection'}</Button> : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -636,7 +643,7 @@ export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpS
 
 function ConnectionsSettings({
   devices, onRevokeDevice, onSignOut, onCreateApiClient, projects,
-  canManageMcp, canEnableMcp, onMcpStatus, onMcpEnable, onMcpRotate, onMcpDisable,
+  canManageMcp, canCreateMcp, onMcpStatus, onMcpCreate, onMcpRotate, onMcpDisable,
   composioSetup, onPutComposioSetup, onDeleteComposioSetup,
   canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
 }: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup'> & BrowserConnectionActions & McpAccessActions) {
@@ -644,7 +651,7 @@ function ConnectionsSettings({
   const [browserOpen, setBrowserOpen] = useState(false);
   const [composioOpen, setComposioOpen] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('setup') === 'composio');
   return <>
-    <McpAccessSettings projects={projects} canManageMcp={canManageMcp} canEnableMcp={canEnableMcp} onMcpStatus={onMcpStatus} onMcpEnable={onMcpEnable} onMcpRotate={onMcpRotate} onMcpDisable={onMcpDisable} />
+    <McpAccessSettings projects={projects} canManageMcp={canManageMcp} canCreateMcp={canCreateMcp} onMcpStatus={onMcpStatus} onMcpCreate={onMcpCreate} onMcpRotate={onMcpRotate} onMcpDisable={onMcpDisable} />
     <Group title="Plugin providers">
       <SettingRows>
         <SettingRow title="Composio" description={composioSetup?.source === 'account' ? <>Encrypted account credential · updated {composioSetup.updatedAt?.toLocaleString() ?? 'recently'}</> : composioSetup?.source === 'platform' ? 'Provided by this GitSpace deployment' : 'Connect hosted apps without copying OAuth credentials into workspaces.'}>
