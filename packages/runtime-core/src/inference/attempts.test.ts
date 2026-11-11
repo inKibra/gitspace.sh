@@ -189,3 +189,42 @@ it('streams a long tool call across the attempt boundary in bytes linear in its 
   const done = received.find(event => event.type === 'done');
   expect(done?.type === 'done' && done.message.content[0]).toMatchObject({ type: 'toolCall', name: 'write', arguments: { path: 'mock.html', content: piece.repeat(4_000) } });
 });
+
+/** A provider that builds a Bedrock-shaped body with pi-ai's own thinking beta, passes it through the request's
+ * `onPayload` as pi-ai's providers do, and records what it would send. */
+function payloadProvider(sent: unknown[], models: Model<Api>[]): Provider {
+  const transport = (model: Model<Api>, _received: TranscriptContext, request?: StreamOptions) => {
+    const stream = createAssistantMessageEventStream();
+    void (async () => {
+      const body = { modelId: model.id, additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } };
+      sent.push(await request?.onPayload?.(body, model) ?? body);
+      const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'sent' }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { ...cost, total: 0 } } };
+      stream.push({ type: 'done', reason: 'stop', message: reply });
+      stream.end(reply);
+    })();
+    return stream;
+  };
+  return { id: providerId, name: 'Payload provider', auth: { apiKey: { name: 'Key', async resolve({ credential }) { return credential?.key ? { auth: { apiKey: credential.key } } : undefined; } } }, getModels: () => models, getAllModels: () => models, stream: transport, streamSimple: transport };
+}
+
+it('accepts the onPayload pi passes on every request; the request sent is the attempt\'s, across the worker boundary', async () => {
+  const sent: unknown[] = [];
+  const catalog = await models(remote(createAttemptRunner({ providers: () => [payloadProvider(sent, [chat])] })), [payloadProvider(sent, [chat])]);
+  const result = await catalog.streamSimple(catalog.getModel(providerId, 'chat')!, context, { onPayload: async () => ({ replaced: true }) }).result();
+  expect(result.content).toEqual([{ type: 'text', text: 'sent' }]);
+  expect(sent).toEqual([{ modelId: 'chat', additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } }]);
+});
+
+it('streams Claude on Bedrock\'s tool input beside pi-ai\'s own betas; other Bedrock models and GovCloud are sent as built', async () => {
+  const claude: Model<Api> = { ...base, id: 'us.anthropic.claude-opus-5-5', name: 'Claude Opus', api: 'bedrock-converse-stream' };
+  const nova: Model<Api> = { ...base, id: 'amazon.nova-pro-v1:0', name: 'Nova Pro', api: 'bedrock-converse-stream' };
+  const govCloud: Model<Api> = { ...base, id: 'us-gov.anthropic.claude-opus-5-5', name: 'Claude Opus', api: 'bedrock-converse-stream' };
+  const sent: unknown[] = [];
+  const catalog = await models(remote(createAttemptRunner({ providers: () => [payloadProvider(sent, [claude, nova, govCloud])] })), [payloadProvider(sent, [claude, nova, govCloud])]);
+  for (const model of [claude, nova, govCloud]) await catalog.streamSimple(catalog.getModel(providerId, model.id)!, { messages: [{ role: 'user', content: 'write it', timestamp: 1 }] }).result();
+  expect(sent).toEqual([
+    { modelId: claude.id, additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14', 'fine-grained-tool-streaming-2025-05-14'] } },
+    { modelId: nova.id, additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } },
+    { modelId: govCloud.id, additionalModelRequestFields: { anthropic_beta: ['interleaved-thinking-2025-05-14'] } },
+  ]);
+});

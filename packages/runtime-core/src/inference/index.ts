@@ -63,7 +63,9 @@ function rejectOverrides(options: unknown): void {
   if (!options || typeof options !== 'object') return;
   for (const [key, value] of Object.entries(options)) {
     if (value === undefined) continue;
-    if (['apiKey', 'env', 'fetch', 'transformHeaders', 'credentials', 'profile', 'bearerToken', 'baseUrl', 'onPayload', 'client', 'region', 'project', 'location', 'endpoint'].includes(key)) throw new Error(`Profile-managed inference forbids request override ${key}`);
+    // pi passes `onPayload` on every request (its `beforeProviderRequest` hooks); it never reaches the request sent:
+    // functions do not cross to the inference worker (`attemptOptions`), whose attempt shapes the body itself.
+    if (['apiKey', 'env', 'fetch', 'transformHeaders', 'credentials', 'profile', 'bearerToken', 'baseUrl', 'client', 'region', 'project', 'location', 'endpoint'].includes(key)) throw new Error(`Profile-managed inference forbids request override ${key}`);
     if (key === 'headers' && value && typeof value === 'object' && Object.keys(value).some(name => credentialHeader.test(name))) throw new Error('Profile-managed inference forbids credential headers');
     if (key === 'providerOptions') rejectOverrides(value);
   }

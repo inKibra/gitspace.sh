@@ -1,7 +1,7 @@
 import { Harness, createRegistry, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessSettings, type ModelRef, type Storage, type ConversationId, type Cursor, type Wake } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord/json';
-import type { Api, Message, Model, Models } from '@earendil-works/pi-ai';
+import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
 import { BROWSER_TOOL_NAME, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
@@ -59,20 +59,6 @@ export type RuntimeHarnessOptions = {
    */
   unfinished: { begin(key: string): number; end(key: string): void };
 };
-/** Claude on Bedrock holds a tool call's input until it is complete, so a large call (a whole file) is a stream silent
- * for minutes, which a Cloudflare Worker's connection does not outlast; fine-grained tool streaming streams the input as
- * it is written. The request body is pi-ai's ConverseStream input. GovCloud model ids are skipped, as pi-ai skips its own
- * betas there; the hook does not see the configured region. */
-const BedrockRequestSchema = z.looseObject({ additionalModelRequestFields: z.record(z.string(), z.unknown()).optional() });
-function bedrockToolInputStreaming(model: Model<Api>, payload: unknown): { payload: unknown } | undefined {
-  const id = model.id.toLowerCase();
-  const claude = id.includes('anthropic.claude') || id.includes('anthropic/claude') || (model.name ?? '').toLowerCase().includes('claude');
-  if (model.api !== 'bedrock-converse-stream' || !claude || id.startsWith('us-gov.') || id.startsWith('arn:aws-us-gov:')) return undefined;
-  const body = BedrockRequestSchema.parse(payload);
-  const fields = body.additionalModelRequestFields ?? {};
-  const betas = Array.isArray(fields.anthropic_beta) ? fields.anthropic_beta : [];
-  return { payload: { ...body, additionalModelRequestFields: { ...fields, anthropic_beta: [...betas, 'fine-grained-tool-streaming-2025-05-14'] } } };
-}
 /**
  * How a request is sent after resets cut off earlier attempts: whole twice (a release or a neighbouring object's reset
  * cuts off any request), then with bulky tool output cut down. Past that the count is cleared and the request fails in
@@ -227,7 +213,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const board = !child && options.tools.projectBoard && live?.run ? await boardForTurn(harness, runtime.conversationId, String(live.run.taskId), input.messages, options.tools.projectBoard, context) : null;
     if (board) return { messages: [...outgoing, board] };
     return described || lean || repaired ? { messages: outgoing } : undefined;
-  }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); }, beforeProviderRequest: request => bedrockToolInputStreaming(request.model, request.payload) }), hook(CompactionTask, { async beforeCompact(input, api, context) {
+  }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');
     // Pi reports a throw here and summarizes the full prefix itself, without this hook's binding or dropped form: every

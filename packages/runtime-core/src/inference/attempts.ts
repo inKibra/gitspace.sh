@@ -128,6 +128,20 @@ export interface AttemptRunnerOptions {
   imageTransport?: ImageRequestTransport;
 }
 
+/** Claude on Bedrock holds a tool call's input until it is complete, so a large call (a whole file) is a stream silent
+ * for minutes, which a Cloudflare Worker's connection does not outlast; fine-grained tool streaming streams the input as
+ * it is written. The body is pi-ai's ConverseStream input; its own `anthropic_beta` entries are kept. GovCloud model ids
+ * are skipped, as pi-ai skips its own betas there. */
+const BedrockRequestSchema = z.looseObject({ additionalModelRequestFields: z.record(z.string(), z.unknown()).optional() });
+export function withBedrockToolStreaming(model: Model<Api>, payload: unknown): unknown {
+  const id = model.id.toLowerCase();
+  const claude = id.includes('anthropic.claude') || id.includes('anthropic/claude') || (model.name ?? '').toLowerCase().includes('claude');
+  if (model.api !== 'bedrock-converse-stream' || !claude || id.startsWith('us-gov.') || id.startsWith('arn:aws-us-gov:')) return payload;
+  const body = BedrockRequestSchema.parse(payload);
+  const fields = body.additionalModelRequestFields ?? {};
+  const betas = Array.isArray(fields.anthropic_beta) ? fields.anthropic_beta : [];
+  return { ...body, additionalModelRequestFields: { ...fields, anthropic_beta: [...betas, 'fine-grained-tool-streaming-2025-05-14'] } };
+}
 /** Runs attempts in this isolate: pi-ai builds and sends each request, with Claude Code's shape for a subscription. */
 export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptRunner {
   const shapes = new Map<string, Promise<ClaudeCodeTransport>>();
@@ -165,7 +179,9 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
       const auth = requestAuth(attempt.credential);
       models.setProvider({ ...(attempt.fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal: resolving }) => { resolving.throwIfAborted(); return { ...auth, source: 'Profile vault' }; } } } });
       const request = {
-        ...attempt.options, ...(signal ? { signal } : {}), ...(GLOBAL_FETCH_APIS[attempt.model.api] ? {} : { fetch }), onPayload: shape.onPayload,
+        ...attempt.options, ...(signal ? { signal } : {}), ...(GLOBAL_FETCH_APIS[attempt.model.api] ? {} : { fetch }),
+        // A Claude subscription body is shaped last; any other comes back undefined and is sent as the Bedrock step left it.
+        onPayload: async (payload: unknown, selected: Model<Api>) => { const streamed = withBedrockToolStreaming(selected, payload); return await shape.onPayload(streamed, selected) ?? streamed; },
         // A provider that sends without our fetch (Bedrock's and Google's SDKs) reports its answer here.
         onResponse: async (response: { status: number; headers: Record<string, string> }) => { if (!observed) reports.push({ type: 'response', status: response.status, headers: response.headers }); },
       };
