@@ -37,8 +37,8 @@ The release targets are `worker`, `frontend`, and `machine`. Pi inference is par
 Use the existing product client or an available, authorized integration. These are RPC procedure names, not shell commands or assumed harness tools:
 
 - `deployment.status({})`: current selections, release records, running machine state, and the latest launch on the answering machine.
-- `deployment.launch({ workspaceId, machineId, targets })`: start the source build and launch on exactly the named, online, enrolled build machine. No available-machine fallback exists. Ensure that machine has the source workspace checkout and resume a paused cache before calling. It returns progress immediately, not proof of activation.
-- Progress arrives through `deployment` fact events and `deployment.status({}).launch`.
+- `deployment.launch({ source, machineId, targets })`: start the source build and launch on exactly the named, online, enrolled build machine. `source` is a workspace checkout (`{ kind: 'workspace', workspaceId }`) or a commit of the GitSpace project's repository (`{ kind: 'canonical', repository, branch, commit }`). No available-machine fallback exists. For a workspace source, ensure that machine has the checkout and resume a paused cache before calling. It returns progress immediately, not proof of activation.
+- Progress arrives through `deployment` fact events and `deployment.status({}).launch`. The launch has finished when `launch.status` is `succeeded` or `failed` (it is `running` until then). `launch.phase` is a step label (`checkout`, `install`, `build`, `upload`, `stage`, `launch`, then `launched` on success or `failed`), not the outcome. Check `launch.launchId` is yours, and read status again only while it is `running`.
 - `deployment.backToDefault({})`: launch the account's default release to every target, ending any trial. The account runs it with no machine and reports it as the latest launch; the browser labels this **Back to default**.
 - `deployment.launchPublished({ tag })`: launch a published GitSpace release from the channel by reference to every target, with no machine; it becomes the default once its Worker runs.
 
