@@ -288,8 +288,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     // A paused workspace runs nothing and its storage refuses every read: it takes the report as told. Refused, it left
     // the relay's presence unreported, and every presence read ran the whole pass again (SIMPLIFICATION 224).
     if (this.storageBreakerStatus().quarantined) return;
-    if (!(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached' && item.online !== connected)) return;
     const pending = PendingPresenceSchema.catch({}).parse(await this.ctx.storage.get('presence.pending') ?? {});
+    // A report waiting for the alarm is replaced even when this one matches the stored state: a reconnect reported before
+    // the alarm applied the drop otherwise left the drop to be applied, and the attachment offline until the next change.
+    if (pending[machineId] === undefined && !(await this.storedAttachments()).some(item => item.machineId === machineId && item.state !== 'detached' && item.online !== connected)) return;
     pending[machineId] = connected;
     await this.ctx.storage.put('presence.pending', pending);
     await this.scheduleAlarm('presence', Date.now());

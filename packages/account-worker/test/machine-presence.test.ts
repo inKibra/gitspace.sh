@@ -360,6 +360,19 @@ describe('machine notices', () => {
     expect(await runInDurableObject(space(workspace.workspaceId), (_instance, state) => state.storage.sql.exec("SELECT owner FROM runtime_alarms WHERE owner='presence-notice'").toArray())).toEqual([]);
   });
 
+  it('applies a return the relay reports before the absence was applied', async () => {
+    const workspace = await attachedWorkspace('presence-return-pending');
+    await space(workspace.workspaceId).runtimeMachinePresence(machineId, true);
+    await eventually(async () => await attachmentOnline(workspace.workspaceId) === true);
+    // A one-second reconnect: both reports arrive before the workspace's alarm applies the first.
+    await runInDurableObject(space(workspace.workspaceId), async instance => {
+      await instance.runtimeMachinePresence(machineId, false);
+      await instance.runtimeMachinePresence(machineId, true);
+    });
+    await eventually(async () => await runInDurableObject(space(workspace.workspaceId), async (_instance, state) => await state.storage.get('presence.pending') === undefined));
+    expect(await attachmentOnline(workspace.workspaceId)).toBe(true);
+  });
+
   it('tells the conversation of a failed setup step once', async () => {
     const workspace = await attachedWorkspace('notice-setup');
     const [attachment] = await space(workspace.workspaceId).runtimeAttachmentRecords(workspace);
