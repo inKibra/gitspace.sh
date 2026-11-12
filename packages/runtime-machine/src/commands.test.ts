@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from 'bun:test';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuntimeAttachmentSchema, RuntimeFullOutputDetailsSchema, RuntimeToolDispatchSchema } from '@gitspace/protocol-runtime';
@@ -67,4 +68,17 @@ test('a command stopped at its own time limit returns its whole output and the t
   expect(lines.slice(0, 2)).toEqual(['1', '2']);
   expect(lines.slice(-3)).toEqual(['20000', '[timed out after 1000 ms; process tree stopped]', '']);
   expect(lines).toHaveLength(20_002);
+}, 30_000);
+
+test('a command sent again after a machine restart waits for the process the supervisor kept and runs once', async () => {
+  const attemptId = 'kept-across-restart';
+  const marker = join(base, 'runs.log');
+  const command = `echo run >> ${marker}; echo done`;
+  // The generation before the restart started the attempt's process; the supervisor kept it running.
+  const name = `exec-${createHash('sha256').update(`${attemptId}:0`).digest('hex').slice(0, 40)}`;
+  const path = join(client.runtimeDir, 'outputs', `${name}.log`);
+  await client.request({ op: 'start', owner: attemptId, spec: { name, application: '/bin/bash', args: ['-c', `sleep 1; ${command}`], cwd: rootPath, inheritEnv: true, env: {}, pty: false, restart: 'no', persist: true, detached: false, keepOutput: { path, maxBytes: COMMAND_OUTPUT_MAX_BYTES } } });
+  const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', command], cwd: rootPath, attemptId, sequence: 0, deadlineAt: new Date(Date.now() + 60_000).toISOString(), signal: new AbortController().signal });
+  expect(result).toEqual({ exitCode: 0, output: 'done\n' });
+  expect(await readFile(marker, 'utf8')).toBe('run\n');
 }, 30_000);

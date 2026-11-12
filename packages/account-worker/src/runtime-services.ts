@@ -10,7 +10,7 @@ import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority
 import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
-import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, workspaceActivity, workspaceBoard, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
+import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, workspaceActivity, workspaceBoard, RuntimeBashCommandArgumentsSchema, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeAutomationsArgumentsSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { automationValue } from './project-automations.js';
 import { confirmMachinePresence } from './machine-notices.js';
@@ -428,8 +428,12 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       return settle(await options.runtime().attachments.execute(dispatch, controller.signal));
     } catch (error) {
-      // Aborting the request stops the command on the machine.
-      if (controller.signal.aborted) return settle(interrupted(input, savedDispatch(input.attemptId) ? 'Execution cancelled; the machine stopped the command.' : 'Execution cancelled before dispatch.'));
+      if (controller.signal.aborted) {
+        // A command outlives the request that sent it: stopping the call stops the command on its machine explicitly.
+        const sent = savedDispatch(input.attemptId);
+        if (sent && RuntimeBashCommandArgumentsSchema.safeParse(sent.args).success) await cancelMachineCommand(sent).catch(() => undefined);
+        return settle(interrupted(input, sent ? 'Execution cancelled; the machine was told to stop the command.' : 'Execution cancelled before dispatch.'));
+      }
       return settle(failed(input, error));
     } finally {
       clearTimeout(timeout);
@@ -437,12 +441,20 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       active.delete(input.attemptId);
     }
   }
-  /** A dispatched command that is not running and has no recorded result was cut off by a restart: its outcome is unknown. */
+  /** Stops a bash command on its machine. */
+  function cancelMachineCommand(dispatch: RuntimeToolDispatch): Promise<RuntimeToolResult> {
+    const id = `job-cancel:${dispatch.attemptId}:${crypto.randomUUID()}`;
+    return options.runtime().attachments.execute({ ...dispatch, requestId: id, attemptId: id, args: { op: 'cancel', attemptId: dispatch.attemptId }, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'unsafe' }, AbortSignal.timeout(30_000));
+  }
+  /** A dispatched command that is not running here and has no recorded result. A bash command was cut off from its
+   * reply (a restart of this object, a dropped relay): it keeps running on its machine, and sending its dispatch again
+   * attaches to it, so its outcome is not settled here. Any other was cut off by a restart: its outcome is unknown. */
   function attemptOutcome(attemptId: string): RuntimeToolResult | null {
     const original = savedDispatch(attemptId);
     if (!original || active.has(attemptId)) return null;
     const settled = selections.load(attemptId)?.result;
     if (settled) return RuntimeToolResultSchema.parse(settled);
+    if (RuntimeBashCommandArgumentsSchema.safeParse(original.args).success) return null;
     return interrupted(original, `Machine ${original.machineId} did not return a result before GitSpace restarted; the outcome is unknown.`);
   }
   async function cancelLifecycle(dispatch: RuntimeToolDispatch) {
@@ -692,7 +704,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         await confirmMachinePresence(env, options.runtime().attachments.list().filter(item => isAttachmentOnline(item)).map(item => item.machineId));
         return completed(input, await options.runtime().status());
       }
-      if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind') return options.runtime().invokeConversationTool(input);
+      if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind' || input.tool === 'wait') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
       if (input.tool === 'sync') return sync(input);
       if (input.tool === 'generate_image') {
@@ -1009,7 +1021,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const dispatch = savedDispatch(input.attemptId);
         if (!dispatch || dispatch.tool !== 'bash') throw new Error('Background command has no admitted executor');
         const id = `job-${input.op}:${dispatch.attemptId}:${crypto.randomUUID()}`;
-        if (input.op === 'cancel') return options.runtime().attachments.execute({ ...dispatch, requestId: id, attemptId: id, args: { op: 'cancel', attemptId: dispatch.attemptId }, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'unsafe' }, AbortSignal.timeout(30_000));
+        if (input.op === 'cancel') return cancelMachineCommand(dispatch);
         return options.runtime().attachments.execute({ ...dispatch, requestId: id, attemptId: id, args: { op: 'logs', attemptId: dispatch.attemptId, ...(input.lines !== undefined ? { lines: input.lines } : {}), ...(input.head !== undefined ? { head: input.head } : {}), ...(input.cursor !== undefined ? { cursor: input.cursor } : {}) }, deadlineAt: new Date(Date.now() + 30_000).toISOString(), replay: 'safe' }, AbortSignal.timeout(30_000));
       },
       observeProcess: input => controlProcess(input, 'safe'),
@@ -1024,8 +1036,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       },
       async cancel(attemptId) {
         codemode.cancel(attemptId);
-        active.get(attemptId)?.abort(new Error('Cancelled'));
+        const controller = active.get(attemptId);
+        // A running call's abort tells the machine itself; with none running here, the machine is told directly.
+        if (controller) controller.abort(new Error('Cancelled'));
         const dispatch = savedDispatch(attemptId);
+        if (!controller && dispatch && RuntimeBashCommandArgumentsSchema.safeParse(dispatch.args).success) await cancelMachineCommand(dispatch);
         if (dispatch?.tool === 'lifecycle') await cancelLifecycle(dispatch);
       },
       wakeAt: options.schedule,

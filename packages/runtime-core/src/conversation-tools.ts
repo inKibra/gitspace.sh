@@ -1,6 +1,6 @@
 import { AgentDoc, defineDoc, type Harness, type Storage, type Conversation, type ConversationId, type Cursor, type EntryId } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, SUBAGENT_READONLY_TOOLS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
+import { RuntimeAgentsArgumentsSchema, RuntimeCheckpointArgumentsSchema, RuntimeRewindArgumentsSchema, RuntimeWaitArgumentsSchema, SUBAGENT_READONLY_TOOLS, WAIT_MAX_MS, type RuntimeToolResult, type ModelSelectionIntent } from '@gitspace/protocol-runtime';
 import type { ToolServices } from './tools.js';
 import { boundedReplay } from './documents.js';
 import { SessionControlsDoc, definitionRoleChain, parseCloudAgentDefinition, resolveAgentDefinitions, type SessionControlServices } from './session-controls.js';
@@ -150,6 +150,9 @@ export function createConversationTools(options: ConversationToolOptions) {
       if (!omitted) throw new Error('Context checkpoint not found');
       await target.commit(tx => tx.appendEntry(target.id, { kind: 'gitspace.rewind', edits: omitted.map(entry => ({ target: entry, action: 'omit' as const })), model: [{ role: 'user', content: args.report, timestamp: Date.now() }] }), context);
       output = 'Context rewound; immutable history retained.';
+    } else if (input.tool === 'wait') {
+      const args = RuntimeWaitArgumentsSchema.parse(input.args);
+      output = JSON.stringify(await options.lifecycle.wait(input.conversationId, { timeoutMs: args.timeoutMs ?? WAIT_MAX_MS, untilMessage: true, ...(input.signal ? { signal: input.signal } : {}) }));
     } else throw new Error('Not a conversation tool');
     return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: output }] };
   };

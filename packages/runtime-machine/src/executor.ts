@@ -11,9 +11,10 @@ export type ExecutorImage = Extract<ExecutorContent[number], { type: 'image' }>;
 export type MachineExecutorOptions = MachineToolOptions & { machineId: string; journal: ExecutorJournal; activeChanged?: (attachmentId: string) => void; storeImage?: (dispatch: RuntimeToolDispatch, image: ExecutorImage) => Promise<ExecutorImage> };
 type Run = { attachmentId: string; tool: string; controller: AbortController; done: Promise<RuntimeToolResult> };
 
-/** Runs a signed dispatch on its attachment's checkout and returns the result. The same dispatch sent again (its reply
- * was lost with the relay connection) waits for the running command or answers with the result it finished with. A
- * machine restart ends running commands, and the cloud reports them as interrupted. */
+/** Runs a signed dispatch on its attachment's checkout and returns the result. A command outlives the request that sent
+ * it: it ends when it finishes, at its deadline, or when cancelled (a bash `cancel`, or the attachment draining). The same
+ * dispatch sent again (its reply was lost with the relay connection) waits for the running command or answers with the
+ * result it finished with; after a machine restart, a bash command attaches to its process, which the supervisor kept. */
 export class MachineExecutor {
   private readonly running = new Map<symbol, Run>();
   private readonly attempts = new Map<string, { fingerprint: string; done: Promise<RuntimeToolResult> }>();
@@ -44,7 +45,7 @@ export class MachineExecutor {
     if (!attempt) {
       try { this.authorize(dispatch); }
       catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 }); }
-      const done = this.execute(dispatch, request.signal).then(result => {
+      const done = this.execute(dispatch).then(result => {
         // A replay-safe read is simply run again; only results a replay must not repeat are kept.
         if (dispatch.replay === 'unsafe') this.options.journal.saveExecutionResult(dispatch.attachmentId, dispatch.attemptId, fingerprint, result);
         return result;
@@ -76,7 +77,7 @@ export class MachineExecutor {
     await Promise.allSettled(runs.map(run => run.done));
   }
 
-  /** Runs the dispatch; `signal` (the caller's request) cancels it. Failures are results, never thrown. */
+  /** Runs the dispatch; `signal` cancels it. Failures are results, never thrown. */
   async execute(dispatch: RuntimeToolDispatch, signal?: AbortSignal): Promise<RuntimeToolResult> {
     const identity = { requestId: dispatch.requestId, attemptId: dispatch.attemptId };
     let local: LocalAttachment;

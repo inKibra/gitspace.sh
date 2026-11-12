@@ -4,7 +4,7 @@ import type { RuntimeHarnessOptions } from './harness.js';
 import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS, SubagentRunQueueDoc, type QueuedSubagentRun } from './subagent-state.js';
 import { z } from 'zod';
-import { RuntimeJsonSchema } from '@gitspace/protocol-runtime';
+import { RuntimeJsonSchema, WAIT_MAX_MS } from '@gitspace/protocol-runtime';
 import { QuestionsDoc, boundedReplay } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
 import { noteTakeoverEvent } from './takeover.js';
@@ -68,7 +68,9 @@ export type ConversationLifecycle = {
    *  object hands over from its own request, so the turn starts in a request of this object's own (an alarm), not
    *  one level deeper than the caller's. */
   enqueue(event: ConversationEvent): Promise<void>;
-  wait(conversationId: string, options: { timeoutMs: number; signal?: AbortSignal }): Promise<ConversationEvent | { kind: 'timeout' | 'stopped' }>;
+  /** The conversation's next event, its timeout, or its stop; `untilMessage` also ends it, as `message`, once a message
+   * waits in the conversation's inbox (a person's, the project agent's, an automation's). */
+  wait(conversationId: string, options: { timeoutMs: number; untilMessage?: boolean; signal?: AbortSignal }): Promise<ConversationEvent | { kind: 'timeout' | 'stopped' | 'message' }>;
   stop(conversationId: string): Promise<void>;
   resume(conversationId: string): Promise<void>;
   recover(): Promise<void>;
@@ -307,14 +309,15 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     async enqueue(event) {
       await serialized(() => record(event));
     },
-    async wait(id, { timeoutMs, signal }) {
-      if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw new Error('Wait timeout must be between 1 and 300000 milliseconds');
+    async wait(id, { timeoutMs, untilMessage, signal }) {
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > WAIT_MAX_MS) throw new Error(`Wait timeout must be between 1 and ${WAIT_MAX_MS} milliseconds`);
       signal?.throwIfAborted();
       const conversation = await resolve(id);
       await conversation.commit(async tx => handleEvents(await tx.doc(ConversationLifecycleDoc, conversation.id), new Set()), context);
       const watch = await harness.watchDoc(ConversationLifecycleDoc, conversation.id, context);
       if (!watch) throw new Error('Conversation lifecycle missing');
-      const result = Promise.withResolvers<ConversationEvent | { kind: 'timeout' | 'stopped' }>();
+      const inbox = untilMessage ? await harness.watchDoc(InboxDoc, conversation.id, context) : undefined;
+      const result = Promise.withResolvers<ConversationEvent | { kind: 'timeout' | 'stopped' | 'message' }>();
       let checking = false;
       const check = async () => {
         if (checking) return;
@@ -335,8 +338,10 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
       signal?.addEventListener('abort', abort, { once: true });
       watch.start(check);
       void watch.closed.then(end => { if (end.kind !== 'stopped') result.reject(new Error(`Conversation wait ended: ${end.kind}`)); });
+      const message = (value: NonNullable<typeof inbox>['value']) => { if (value?.items.some(item => item.mode !== 'write')) result.resolve({ kind: 'message' }); };
+      if (inbox) { message(inbox.value); inbox.start(async call => { if (call.kind === 'value') message(call.value); }); }
       try { signal?.throwIfAborted(); await check(); return await result.promise; }
-      finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); await watch.stop(); }
+      finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); await watch.stop(); await inbox?.stop(); }
     },
     async stop(id) {
       const settled = Promise.withResolvers<void>();

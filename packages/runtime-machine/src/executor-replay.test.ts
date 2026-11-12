@@ -25,16 +25,25 @@ async function fixture() {
   });
   let runs = 0;
   const release = Promise.withResolvers<void>();
-  const executor = new MachineExecutor({ machineId: 'machine-a', journal, runCommand: async () => { runs += 1; await release.promise; return { exitCode: 0, output: `run ${runs}` }; } });
+  const started = Promise.withResolvers<void>();
+  // Like the supervisor's runner, a command stops when its signal is cancelled.
+  const executor = new MachineExecutor({ machineId: 'machine-a', journal, runCommand: async command => {
+    runs += 1;
+    started.resolve();
+    const cancelled = Promise.withResolvers<never>();
+    command.signal.addEventListener('abort', () => cancelled.reject(new Error('Command canceled; process tree stopped')), { once: true });
+    await Promise.race([release.promise, cancelled.promise]);
+    return { exitCode: 0, output: `run ${runs}` };
+  } });
   const dispatch = (attemptId: string, command: string, workspace = 'a') => JSON.stringify({
     version: 1, projectId: 'project-a', workspaceId: `workspace-${workspace}`, machineId: 'machine-a', attachmentId: `attachment-${workspace}`, generation: 1,
     conversationId: 'conversation-a', conversationKind: 'main', taskId: 'task-a', requestId: 'request-a', attemptId,
     tool: 'bash', args: { command }, replay: 'unsafe', deadlineAt: new Date(Date.now() + 60_000).toISOString(),
   });
-  const send = (body: string) => executor.fetch(new Request('http://machine/runtime/execute', {
-    method: 'POST', body, headers: { 'x-gitspace-execution-signature': createHmac('sha256', Buffer.from(secret, 'base64url')).update(body).digest('base64url') },
+  const send = (body: string, signal?: AbortSignal) => executor.fetch(new Request('http://machine/runtime/execute', {
+    method: 'POST', body, signal, headers: { 'x-gitspace-execution-signature': createHmac('sha256', Buffer.from(secret, 'base64url')).update(body).digest('base64url') },
   }));
-  return { send, dispatch, release, runs: () => runs, journal };
+  return { send, dispatch, release, started: started.promise, runs: () => runs, journal };
 }
 
 test('a command sent again after its reply was lost runs once and answers with its result', async () => {
@@ -52,6 +61,23 @@ test('a command sent again after its reply was lost runs once and answers with i
   expect(runs()).toBe(1);
   // A different command reusing the attempt id is refused rather than answered with another command's result.
   expect((await send(dispatch('attempt-a', 'rm -rf .'))).status).toBe(409);
+  journal.close();
+});
+
+test('a command outlives the request that sent it: sent again, it answers with the result of its one run', async () => {
+  const { send, dispatch, release, started, runs, journal } = await fixture();
+  const body = dispatch('attempt-long', 'make build');
+  const request = new AbortController();
+  const first = send(body, request.signal);
+  await started;
+  // The relay drops the request (a 300 s client timeout, a reconnect) while the command runs.
+  request.abort();
+  const resent = send(body);
+  release.resolve();
+  const expected = { requestId: 'request-a', attemptId: 'attempt-long', status: 'completed', content: [{ type: 'text', text: 'Exit code: 0\nrun 1' }] };
+  expect(RuntimeToolResultSchema.parse(await (await resent).json())).toEqual(expected);
+  expect(RuntimeToolResultSchema.parse(await (await first).json())).toEqual(expected);
+  expect(runs()).toBe(1);
   journal.close();
 });
 

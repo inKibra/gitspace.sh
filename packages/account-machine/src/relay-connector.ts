@@ -320,12 +320,14 @@ export class MachineRelayConnector {
         ? undefined
         : new Blob(pending.chunks.map((chunk) => Uint8Array.from(chunk).buffer)).stream();
       // The tunnel carries the body as the service encoded it, with its Content-Encoding; the account sends it unchanged.
+      // `timeout: false`: Bun's fetch otherwise gives up after 300 s, and a long command's reply comes when it ends.
       const response = await fetch(new URL(pending.path, this.options.localOrigin), {
         method: pending.method,
         headers: pending.headers,
         body,
         signal: controller.signal,
         decompress: false,
+        timeout: false,
         ...(body ? { duplex: 'half' } : {}),
       } as RequestInit);
       this.send(socket, {

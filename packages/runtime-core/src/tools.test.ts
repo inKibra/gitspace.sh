@@ -44,12 +44,20 @@ const samples: Record<string, ToolCall['arguments']> = {
   web_search: { query: 'TypeScript documentation' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },
   history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' },
-  checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' },
+  checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, wait: { timeoutMs: 1000 },
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'], steps: [{ id: 'implement', title: 'Implement the selected plan', detail: 'The selected path.' }] },
   ask_takeover: { source: 'headless', targetId: 'tab', reason: 'Solve the CAPTCHA' },
 };
-async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
+async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, given: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
+  // A foreground bash command runs as a job, which reaches its machine through `execute`: unless a test supplies one,
+  // it is answered like any other dispatched tool, by `invoke`.
+  const jobServices: JobServices = given.execute !== unused ? given : {
+    ...given,
+    execute: input => invoke({ tool: 'bash', args: input.args, conversationId: input.conversationId, taskId: input.taskId, requestId: input.requestId, attemptId: input.attemptId, replay: input.replay, signal: input.signal }),
+    reconcile: async () => null,
+    deliverConversationEvent: async () => {},
+  };
   const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context)), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
@@ -176,9 +184,10 @@ test('machine selectors survive real bash and proc registrations and invalid sel
   try {
     await root.submit({ type: 'input', content: 'Select machines explicitly.' }, BACKGROUND_CONTEXT);
     await root.waitForIdle(BACKGROUND_CONTEXT);
-    expect(routed.find(input => input.requestId === 'selected-bash')?.args).toEqual(bash);
+    // A foreground command runs as a job, which dispatches under its own request id.
+    expect(routed.find(input => input.tool === 'bash')?.args).toEqual(bash);
     expect(routed.find(input => input.requestId === 'selected-proc')?.args).toEqual(proc);
-    expect(routed.map(input => input.requestId).sort()).toEqual(['selected-bash', 'selected-proc']);
+    expect(routed.map(input => input.tool).sort()).toEqual(['bash', 'proc']);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.filter(result => result.isError).map(result => result.toolCallId).sort()).toEqual(['invalid-bash', 'invalid-proc']);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
@@ -281,7 +290,7 @@ for (const mode of ['settled', 'timeout', 'cancelled'] as const) test(`bash wait
       const interrupted = new Error('Cancelled bounded command wait');
       let finished = false;
       // The timeout case deliberately exercises the production timer against the actual Harness watch.
-      const pending = createJobTool(operations)({ op: 'wait', job: acceptance.job, timeoutMs: mode === 'timeout' ? 50 : 1000 }, api, withAbortSignal(controller.signal, context));
+      const pending = createJobTool(operations, unused).control({ op: 'wait', job: acceptance.job, timeoutMs: mode === 'timeout' ? 50 : 1000 }, api, withAbortSignal(controller.signal, context));
       void pending.then(() => { finished = true; }, () => { finished = true; });
       await api.snapshot(DurableJobsDoc, api.conversationId, context);
       await api.snapshot(DurableJobsDoc, api.conversationId, context);
@@ -335,6 +344,122 @@ test('a background command settles on its executor result and delivers its compl
   } finally { resume = () => {}; await harness.close(BACKGROUND_CONTEXT); }
 }, 5000);
 
+
+test('a foreground command still running at its limit keeps running as a job: the call answers with its handle and output so far, and its result arrives once, later', async () => {
+  const delivered: unknown[] = [];
+  const deliveredOnce = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let resume = () => {};
+  const jobServices: JobServices = {
+    ...operations,
+    // Production wakes the Harness from an alarm at the time asked; background tasks run on resume.
+    wakeAt: async at => { setTimeout(() => resume(), Math.max(0, at - Date.now())); },
+    async execute(input) { await release.promise; return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: 'Exit code: 0\nbuilt' }] }; },
+    reconcile: async () => null,
+    async controlJob(input) { return { status: 'completed', requestId: 'logs', attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify({ op: 'logs', state: 'running', text: 'compiling 1/3\n', cursor: 14 }) }] }; },
+    async deliverConversationEvent(input) { delivered.push(input.payload); deliveredOnce.resolve(); },
+  };
+  const probe = defineTool({
+    name: 'foreground-probe', description: 'Run a foreground command.', parameters: Type.Object({}), replay: 'safe',
+    async execute(_input, api, context) { return { output: (await createJobTool(jobServices, unused, 50).foreground({ command: 'make build' }, api, context)).content }; },
+  });
+  const { harness, root } = await registered([[call('foreground-probe', {})]], completed, jobServices, [probe]);
+  resume = () => harness.resume();
+  try {
+    await root.submit({ type: 'input', content: 'Build.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const answer = JSON.stringify((await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult')?.content);
+    expect(answer).toContain('Still running after 0.05 s: the command keeps running as background job job:');
+    expect(answer).toContain('compiling 1/3');
+    expect(delivered).toEqual([]);
+    release.resolve();
+    await deliveredOnce.promise;
+    await harness.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(delivered).toHaveLength(1);
+    const observation = RuntimeJobObservationSchema.parse(delivered[0]);
+    expect(observation.status === 'terminal' && observation.result.content).toEqual([{ type: 'text', text: 'Exit code: 0\nbuilt' }]);
+  } finally { resume = () => {}; release.resolve(); await harness.close(BACKGROUND_CONTEXT); }
+}, 8000);
+
+test('a foreground command whose dispatch fails answers with the failure at once, tried once and announced nowhere else', async () => {
+  let dispatched = 0;
+  const delivered: unknown[] = [];
+  const jobServices: JobServices = {
+    ...operations,
+    wakeAt: async () => {},
+    async execute() { dispatched++; throw new Error('No machine is attached'); },
+    reconcile: async () => null,
+    async deliverConversationEvent(input) { delivered.push(input.payload); },
+  };
+  const { harness, root } = await registered([[call('bash', { command: 'make build' }, 'build')]], completed, jobServices);
+  try {
+    await root.submit({ type: 'input', content: 'Build.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult');
+    expect(result?.role === 'toolResult' && result.isError).toBe(true);
+    expect(JSON.stringify(result?.content)).toContain('No machine is attached');
+    expect([dispatched, delivered]).toEqual([1, []]);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('a message sent to steer ends a running foreground command\'s wait: the command keeps running as a job and the message reaches the model now', async () => {
+  const entered = Promise.withResolvers<void>();
+  const jobServices: JobServices = {
+    ...operations,
+    wakeAt: async () => {},
+    async execute(input) {
+      entered.resolve();
+      const aborted = Promise.withResolvers<void>();
+      input.signal?.addEventListener('abort', () => aborted.resolve(), { once: true });
+      await aborted.promise;
+      return { status: 'interrupted', requestId: input.requestId, attemptId: input.attemptId, content: [] };
+    },
+    reconcile: async () => null,
+    async controlJob(input) { return { status: 'completed', requestId: 'logs', attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify({ op: 'logs', state: 'running', text: 'step 1\n', cursor: 7 }) }] }; },
+    deliverConversationEvent: async () => {},
+  };
+  const { harness, root } = await registered([[call('bash', { command: 'make all' }, 'long')]], completed, jobServices);
+  try {
+    await root.submit({ type: 'input', content: 'Build.' }, BACKGROUND_CONTEXT);
+    await entered.promise;
+    await root.submit({ type: 'input', content: 'Stop building and check the docs instead.', whenBusy: 'steer' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const messages = (await root.context(BACKGROUND_CONTEXT)).messages;
+    const result = messages.findIndex(message => message.role === 'toolResult');
+    expect(JSON.stringify(messages[result]?.content)).toContain('A message arrived while it ran: the command keeps running as background job job:');
+    expect(JSON.stringify(messages.slice(result + 1))).toContain('Stop building and check the docs instead.');
+    const jobs = Object.values((await harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT))?.records ?? {});
+    expect(jobs.map(job => [job.handedOff, job.cancelRequested])).toEqual([[true, false]]);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('stopping a foreground command stops it on its machine', async () => {
+  const cancelled: string[] = [];
+  const entered = Promise.withResolvers<void>();
+  const jobServices: JobServices = {
+    ...operations,
+    wakeAt: async () => {},
+    async execute(input) {
+      entered.resolve();
+      const aborted = Promise.withResolvers<void>();
+      input.signal?.addEventListener('abort', () => aborted.resolve(), { once: true });
+      await aborted.promise;
+      return { status: 'interrupted', requestId: input.requestId, attemptId: input.attemptId, content: [] };
+    },
+    reconcile: async () => null,
+    async cancel(attemptId) { cancelled.push(attemptId); },
+    deliverConversationEvent: async () => {},
+  };
+  const { harness, root } = await registered([[call('bash', { command: 'sleep 600' }, 'long')]], completed, jobServices);
+  try {
+    await root.submit({ type: 'input', content: 'Wait.' }, BACKGROUND_CONTEXT);
+    await entered.promise;
+    await root.abort(BACKGROUND_CONTEXT);
+    const jobs = Object.values((await harness.snapshot(DurableJobsDoc, root.id, BACKGROUND_CONTEXT))?.records ?? {});
+    expect(jobs.map(job => job.cancelRequested)).toEqual([true]);
+    expect(cancelled).toEqual([jobs[0]!.attemptId]);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
 test('finished background commands are kept to the most recent while running and undelivered ones stay', async () => {
   const seed = defineTool({
     name: 'seed-jobs', description: 'Store earlier background commands.', parameters: Type.Object({}), replay: 'safe',

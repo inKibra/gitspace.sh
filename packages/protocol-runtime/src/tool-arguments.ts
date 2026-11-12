@@ -63,7 +63,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
@@ -146,6 +146,9 @@ export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(
 export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384), tool: z.string().max(160).optional(), model: z.string().max(256).optional(), reference: z.string().max(2048).optional() });
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string() });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string(), report: z.string() });
+/** The longest a `wait` call holds the conversation. */
+export const WAIT_MAX_MS = 30 * 60_000;
+export const RuntimeWaitArgumentsSchema = z.object({ timeoutMs: z.number().int().min(1_000).max(WAIT_MAX_MS).optional() }).strict();
 export const RuntimeMcpInvokeArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ connectionId: path, name: path, arguments: z.record(z.string(), RuntimeJsonSchema).optional() }).strict();
 export const RuntimeMcpDiscoverArgumentsSchema = z.union([z.object({}).strict(), RuntimeDispatchSelectionSchema.extend({ connectionId: path, name: path.optional() }).strict()]);
 const MCP_LISTED_DESCRIPTION_CHARACTERS = 300;

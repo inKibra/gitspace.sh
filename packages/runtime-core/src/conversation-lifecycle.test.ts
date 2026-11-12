@@ -306,3 +306,16 @@ test('wait returns first durable event of every kind, then times out, and suppor
     await f.root.waitForIdle(context);
   } finally { await f.harness.close(context); }
 });
+
+test('a wait for messages ends once a message waits for the busy conversation, and a plain wait does not', async () => {
+  const f = await fixture(new MemoryStorage(), true);
+  try {
+    await f.root.submit({ type: 'input', content: 'Start.' }, context);
+    await until(() => f.seen.length === 1);
+    const plain = f.lifecycle.wait(String(f.root.id), { timeoutMs: 300 });
+    const forMessage = f.lifecycle.wait(String(f.root.id), { timeoutMs: 300000, untilMessage: true });
+    await f.root.submit({ type: 'input', content: 'Look at this instead.', whenBusy: 'followUp' }, context);
+    expect(await forMessage).toEqual({ kind: 'message' });
+    expect(await plain).toEqual({ kind: 'timeout' });
+  } finally { await f.harness.close(context); }
+});

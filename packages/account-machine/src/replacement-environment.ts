@@ -276,8 +276,9 @@ class MachineHost implements MachineReplacementHost {
         const procedures = source.searchParams.get('p');
         const path = procedures === null ? source.pathname : `${source.pathname}?p=${procedures.slice(0, 512)}`;
         try {
-          // `decompress: false`: Bun otherwise decodes the body and keeps its Content-Encoding, so the next reader fails to decode it.
-          const response = await fetch(new Request(target, request), { decompress: false });
+          // `decompress: false`: Bun otherwise decodes the body and keeps its Content-Encoding, so the next reader fails to
+          // decode it. `timeout: false`: Bun otherwise gives up after 300 s, and a long command's reply comes when it ends.
+          const response = await fetch(new Request(target, request), { decompress: false, timeout: false });
           const durationMs = Math.round(performance.now() - started);
           if (response.status >= 500 || durationMs > HOST_PROXY_SLOW_MS) {
             console.warn(JSON.stringify({ event: 'host_proxy', at, method: request.method, path, status: response.status, durationMs }));

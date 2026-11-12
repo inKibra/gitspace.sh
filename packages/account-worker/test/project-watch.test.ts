@@ -59,7 +59,7 @@ async function watchFixture(ctx: DurableObjectState) {
   const runtime: WorkspaceRuntime = await createWorkspaceRuntime({
     storage: ctx.storage, identity, models, model: { provider: 'fixture', modelId: 'fixture' },
     tools: { images: { store: async image => image, load: async image => image }, invoke: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: `${input.tool} ran` }] }), prepareBrowser: unsupported, takeoverTab: unsupported, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {} },
-    operations: { execute: unsupported, reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: async () => {} },
+    operations: { execute: async input => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: 'bash ran' }] }), reconcile: async () => null, cancel: unsupported, jobScope: () => identity, controlJob: unsupported, observeProcess: unsupported, stopProcess: unsupported, wakeAt: async () => {} },
     code: { readFile: async () => null, listSnapshotPaths: async () => [], changedSnapshotPaths: unsupported, mergeSnapshot: unsupported, writeSnapshot: unsupported, reader: () => ({ readTree: async () => [], readBlob: async () => null, close: async () => {} }) },
     initialCheckpoint: async () => checkpoint,
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
