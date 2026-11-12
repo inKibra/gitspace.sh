@@ -156,21 +156,13 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await invoke('write', { path: 'bad-tree.txt', content: 'reject' })).status, 'failed');
     rejectWrite = false;
     assert.equal((await invoke('write', { path: 'unblocked.txt', content: 'lease released' })).status, 'completed');
-    const beforeRetentionFailure = await store.snapshot();
+    // A snapshot without LFS objects retains nothing: an edit neither waits for nor depends on the project's retention.
     retentionUnavailable = true;
-    await assert.rejects(invoke('write', { path: 'retention-recovery.txt', content: 'accepted before acknowledgement' }, 'retention-recovery'), /Retention unavailable/u);
-    const acceptedWithoutAck = await store.snapshot(); assert(acceptedWithoutAck);
-    assert.notEqual(acceptedWithoutAck.worktreeCommit, beforeRetentionFailure?.worktreeCommit);
-    assert(store.lfsRoots().some(root => root.worktreeCommit === beforeRetentionFailure?.worktreeCommit), 'Previous root survives pending acknowledgement');
-    const pushesBeforeRetentionRecovery = pushes;
-    store = open();
-    await assert.rejects(store.flushRetention(), /Retention unavailable/u);
-    retentionUnavailable = false;
-    await store.flushRetention();
-    assert.equal((await invoke('write', { path: 'retention-recovery.txt', content: 'accepted before acknowledgement' }, 'retention-recovery')).status, 'completed');
-    assert.equal(pushes, pushesBeforeRetentionRecovery, 'Cold recovery retries retention without republishing');
+    const retentionCallsBefore = retentionCalls;
+    assert.equal((await invoke('write', { path: 'retention-free.txt', content: 'no LFS objects' }, 'retention-free')).status, 'completed');
+    assert.equal(retentionCalls, retentionCallsBefore);
     assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 0);
-    assert(!store.lfsRoots().some(root => root.worktreeCommit === beforeRetentionFailure?.worktreeCommit), 'Historical acceptance alone is not a restore root');
+    retentionUnavailable = false;
     const interrupted: Parameters<CloudFileStore['execute']>[0] = { tool: 'write', args: { path: 'before-prepare.txt', content: 'recovered' }, requestId: 'before-prepare', attemptId: 'before-prepare' };
     this.ctx.storage.sql.exec('INSERT INTO runtime_cloud_files(id,input) VALUES(?,?)', interrupted.attemptId, canonicalJson(interrupted));
     store = open();
@@ -252,6 +244,8 @@ export class CloudFilesProof extends DurableObject {
     await store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit, 'machine');
     headAttributes.set('.gitattributes', '*.dat filter=lfs\n[attr]large filter=lfs\n*.large large\n"space name.bin" filter=lfs\nliteral\\*.bin filter=lfs\ndeep/**/object.bin filter=lfs\n');
     headAttributes.set('nested/.gitattributes', '*.bin filter=lfs\nplain.dat -filter\n');
+    // The fixture changes the head commit's attributes in place; a new store reads them, as a moved head would be.
+    store = open();
     assert.deepEqual((await invoke('read', { path: 'asset.dat' })).content, [{ type: 'text', text: 'real LFS content\nsecond line' }]);
     assert.deepEqual((await invoke('read', { path: 'asset.dat', offset: 2 })).content, [{ type: 'text', text: 'second line' }]);
     files.set('oversized.dat', `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${8 * 1024 * 1024 + 1}\n`);
@@ -283,7 +277,9 @@ export class CloudFilesProof extends DurableObject {
     assert.match(JSON.stringify(largeArtifact.content), /8 MiB.*machine/u);
     blobs.set('not-a-pointer.txt', new UnreadBlob([new Uint8Array(1025)]));
     assert.equal((await invoke('write', { path: 'not-a-pointer.txt', content: 'replacement' })).status, 'completed');
+    // A head commit's files never change, so the store keeps what it read; a new store reads the replaced file.
     blobs.set('.gitattributes', oversizedBlob);
+    store = open();
     const largeAttributes = await invoke('read', { path: 'asset.dat' });
     assert.equal(largeAttributes.status, 'failed');
     assert.match(JSON.stringify(largeAttributes.content), /8 MiB.*machine/u);
@@ -326,8 +322,11 @@ export class CloudFilesProof extends DurableObject {
     const pendingOrigin = this.ctx.storage.sql.exec<{ checkpoint: string }>('SELECT checkpoint FROM runtime_lfs_retention_outbox WHERE commit_id=?', transitioned.worktreeCommit).toArray()[0]; assert(pendingOrigin);
     assert.deepEqual(RuntimeGitCheckpointSchema.parse(JSON.parse(pendingOrigin.checkpoint)).lfs?.objects[0], { ...object, source: 'origin', location });
     retentionUnavailable = false;
+    const pushesBeforeRetentionRecovery = pushes;
     store = open(); await store.flushRetention();
     assert.deepEqual(retained.get(transitioned.worktreeCommit)?.lfs?.objects[0], { ...object, source: 'origin', location });
+    assert.equal((await invoke('write', { path: 'origin-outbox.txt', content: 'accepted with retention pending' }, 'origin-outbox')).status, 'completed');
+    assert.equal(pushes, pushesBeforeRetentionRecovery, 'Cold recovery retries retention without republishing');
     assert.equal((await invoke('write', { path: 'after-origin-transition.txt', content: 'retains origin source' })).status, 'completed');
     assert.equal((await store.snapshot())?.lfs?.objects[0]?.source, 'origin');
     assert.deepEqual((await store.snapshot())?.lfs?.objects[0], { ...object, source: 'origin', location });
@@ -389,6 +388,7 @@ export class CloudFilesProof extends DurableObject {
     assert.equal((await store.snapshot())?.worktreeCommit, mergedCheckpoint.worktreeCommit);
     mergedCheckpoint = undefined;
     headAttributes.set('.gitattributes', '[[:alpha:]].bin filter=lfs\n');
+    store = open();
     const unsupportedPattern = await invoke('write', { path: 'a.bin', content: 'must not bypass LFS policy' });
     assert.equal(unsupportedPattern.status, 'failed');
     assert.match(JSON.stringify(unsupportedPattern.content), /Unsupported HEAD attribute.*machine/u);

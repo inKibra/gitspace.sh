@@ -352,10 +352,10 @@ export class CloudFileStore {
         await this.storage.sync();
         return this.finish(pending, mark);
       }
-      const trackedLfs = await this.isLfsPath(previous, path);
-      mark('lfsAttributes');
+      // The path's attributes and the file itself are read at once: neither depends on the other.
+      const [trackedLfs, blob] = await Promise.all([this.isLfsPath(previous, path), this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, path)]);
+      mark('lookup');
       const read = async () => {
-        const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, path);
         if (!blob) throw new Error(`File not found: ${path}`);
         assertCloudReadSize(blob.size, path);
         return new Uint8Array(await blob.arrayBuffer());
@@ -363,7 +363,6 @@ export class CloudFileStore {
       if (input.tool === 'read') {
         const parsed = RuntimeReadArgumentsSchema.parse(input.args);
         let bytes: Uint8Array<ArrayBuffer> = await read();
-        mark('read');
         const pointer = bytes.byteLength <= LFS_POINTER_LIMIT ? parseGitLfsPointer(bytes) : null;
         if (pointer) {
           assertCloudReadSize(pointer.size, path);
@@ -397,14 +396,13 @@ export class CloudFileStore {
         }
         this.complete(input, completed); return completed;
       }
-      if (trackedLfs || await this.hasLfsPointer(previous, path) || previous.lfs?.heldBack.some(entry => entry.path === path)) throw new Error(`LFS file ${path} cannot be ${input.tool === 'write' ? 'written' : 'edited'} in the cloud; use a machine and commit the LFS change.`);
-      mark('lfsPointer');
+      const pointer = blob !== null && blob.size <= LFS_POINTER_LIMIT && parseGitLfsPointer(new Uint8Array(await blob.arrayBuffer())) !== null;
+      if (trackedLfs || pointer || previous.lfs?.heldBack.some(entry => entry.path === path)) throw new Error(`LFS file ${path} cannot be ${input.tool === 'write' ? 'written' : 'edited'} in the cloud; use a machine and commit the LFS change.`);
       let content: string;
       if (input.tool === 'write') content = RuntimeWriteArgumentsSchema.parse(input.args).content;
       else {
         const { edits } = RuntimeEditArgumentsSchema.parse(input.args);
         content = applyTextEdits(new TextDecoder('utf-8', { fatal: true }).decode(await read()), edits);
-        mark('read');
       }
       const mutations = [{ path, content }];
       assertValidMutations(mutations);
@@ -485,17 +483,36 @@ export class CloudFileStore {
     const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), checkpoint.worktreeCommit, path);
     return blob !== null && blob.size <= LFS_POINTER_LIMIT && parseGitLfsPointer(new Uint8Array(await blob.arrayBuffer())) !== null;
   }
+  /** `.gitattributes` texts of one head commit by directory, null where there is none: a commit's files never change,
+   * and the head moves only when its branch does. */
+  private attributeTexts: { commit: string; texts: Map<string, Promise<string | null>> } | undefined;
+  private attributesText(commit: string, directory: string): Promise<string | null> {
+    if (this.attributeTexts?.commit !== commit) this.attributeTexts = { commit, texts: new Map() };
+    const texts = this.attributeTexts.texts;
+    let text = texts.get(directory);
+    if (!text) {
+      const path = `${directory ? `${directory}/` : ''}.gitattributes`;
+      text = this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), commit, path).then(blob => {
+        if (!blob) return null;
+        assertCloudReadSize(blob.size, path);
+        return blob.text();
+      });
+      texts.set(directory, text);
+      void text.catch(() => texts.delete(directory));
+    }
+    return text;
+  }
   private async isLfsPath(checkpoint: Checkpoint, path: string): Promise<boolean> {
-    if (!checkpoint.headCommit) return false;
+    const head = checkpoint.headCommit;
+    if (!head) return false;
     const parts = path.split('/');
+    const texts = await Promise.all(parts.map((_part, depth) => this.attributesText(head, parts.slice(0, depth).join('/'))));
     let filter: string | null = null;
     const macros = new Map<string, string[]>();
     for (let depth = 0; depth < parts.length; depth++) {
-      const directory = parts.slice(0, depth).join('/');
-      const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), checkpoint.headCommit, `${directory ? `${directory}/` : ''}.gitattributes`);
-      if (!blob) continue;
-      assertCloudReadSize(blob.size, `${directory ? `${directory}/` : ''}.gitattributes`);
-      for (const line of (await blob.text()).split(/\r?\n/u)) {
+      const text = texts[depth];
+      if (text === null || text === undefined) continue;
+      for (const line of text.split(/\r?\n/u)) {
         const tokens = attributeTokens(line);
         const pattern = tokens.shift();
         if (!pattern || pattern.startsWith('#') || pattern.startsWith('!')) continue;
@@ -558,6 +575,8 @@ export class CloudFileStore {
     }
   }
   private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null, publicationId?: string): void {
+    // A snapshot with no LFS objects retains none, and only a machine's publication holds pins of its own to release.
+    if (!publicationId && !checkpoint.lfs?.objects.length) return;
     this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', publicationId ? `${checkpoint.worktreeCommit}:${publicationId}` : checkpoint.worktreeCommit, JSON.stringify({ ...checkpoint, ...(publicationId ? { publicationId } : {}) }), previous ? JSON.stringify(previous) : null);
   }
   /** Whether a write's publication outcome is unknown (an uncertain push): its plan is kept to finish it. */
@@ -578,6 +597,7 @@ export class CloudFileStore {
     } while (this.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox LIMIT 1').toArray().length > 0);
   }
   private async drainRetention(): Promise<void> {
+    if (this.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox LIMIT 1').toArray().length === 0) return;
     await this.storage.sync();
     for (;;) {
       const row = this.storage.sql.exec<{ commit_id: string; checkpoint: string }>('SELECT commit_id,checkpoint FROM runtime_lfs_retention_outbox ORDER BY rowid LIMIT 1').toArray()[0];

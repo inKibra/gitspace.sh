@@ -8,8 +8,21 @@ import { artifactsPushRefusal, collectBytes, sameGitLfsSnapshot, smallerArtifact
 
 export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
-export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean; /** Called with each step's name as it ends; the caller times the steps. */ mark?: (step: string) => void; /** The result's trees, already in the repository: a machine
+export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean; /** Called with each step's name as it ends; the caller times the steps. */ mark?: (step: string) => void; /** Commits and trees earlier writes read or published, read here before the repository. */ objects?: SnapshotObjects; /** The result's trees, already in the repository: a machine
  * publication onto an unchanged cloud adopts the machine's trees instead of rebuilding them from mutations. */ adopt?: { worktreeTree: string; indexTree: string; trackedTree: string } };
+/** The commits and trees a workspace's snapshot writes read and publish, kept between writes by object id: a Git object
+ * never changes, and one write's commits and trees are where the next write starts. Past `limit` of either, the oldest
+ * goes. */
+export class SnapshotObjects {
+  readonly trees = new Map<string, ArtifactsTreeEntry[]>();
+  readonly commits = new Map<string, Pick<ArtifactsCommitMetadata, 'treeHash' | 'committedAt'>>();
+  constructor(private readonly limit = 2048) {}
+  keep<T>(map: Map<string, T>, oid: string, value: T): void {
+    map.delete(oid);
+    map.set(oid, value);
+    if (map.size > this.limit) map.delete(map.keys().next().value!);
+  }
+}
 export interface ArtifactsFetch { (input: string, init?: RequestInit): Promise<Response> }
 export class ArtifactsSnapshotError extends TaggedError('ArtifactsSnapshotError')<{ operation: string; message: string; certainty: 'not-published' | 'unknown' }> {}
 /** Credentials for Git over HTTPS: Artifacts takes a bearer token; GitHub takes an installation token as Basic
@@ -456,7 +469,14 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
         }
       }
     }
-    const parent = await repo.readCommit(previous.worktreeCommit);
+    const readCommit = async (oid: string) => {
+      const cached = input.objects?.commits.get(oid);
+      if (cached) return cached;
+      const commit = await repo.readCommit(oid);
+      if (commit) input.objects?.keep(input.objects.commits, oid, { treeHash: commit.treeHash, committedAt: commit.committedAt });
+      return commit;
+    };
+    const parent = await readCommit(previous.worktreeCommit);
     input.mark?.('readParent');
     if (!parent || parent.treeHash !== previous.worktreeTree) throw new Error('Previous snapshot is missing or inconsistent');
     const fs = createFsFromVolume(new Volume());
@@ -464,6 +484,8 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     await git.init({ fs, dir });
     const oids = new Set<string>();
     const trees = new Map<string, ArtifactsTreeEntry[]>();
+    // The trees this write makes, kept for later writes once the publication lands.
+    const written = new Map<string, ArtifactsTreeEntry[]>();
     let hydratedEntries = 0;
     const markerConflicts = new Set(input.conflicts ?? previous.conflicts ?? []);
     const rescanConflicts = input.machine !== undefined && (input.forcePublication === true || input.conflicts === undefined);
@@ -472,11 +494,12 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       if (cached) return cached;
       input.signal?.throwIfAborted();
       if (!input.machine && trees.size >= 256) throw new Error('Snapshot tree hydration budget exceeded');
-      const entries = await repo.readTree(oid);
+      const entries = input.objects?.trees.get(oid) ?? await repo.readTree(oid);
       if (!entries) throw new Error(`Missing tree ${oid}`);
       hydratedEntries += entries.length;
       if (hydratedEntries > 200_000) throw new Error('Snapshot tree entry budget exceeded');
       trees.set(oid, entries);
+      input.objects?.keep(input.objects.trees, oid, entries);
       return entries;
     };
     const editTree = async (oid: string | undefined, edits: SnapshotMutation[], tracked: boolean, prefix = ''): Promise<string> => {
@@ -520,7 +543,9 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       }
       const tree = await git.writeTree({ fs, dir, tree: [...entries.values()] });
       if (tree !== oid) oids.add(tree);
-      if (rescanConflicts) trees.set(tree, [...entries.values()].map(entry => ({ name: entry.path, hash: entry.oid, mode: entry.mode, type: entry.type === 'commit' ? 'gitlink' : entry.type })));
+      const listed = [...entries.values()].map((entry): ArtifactsTreeEntry => ({ name: entry.path, hash: entry.oid, mode: entry.mode, type: entry.type === 'tree' ? 'tree' : entry.type === 'commit' ? 'gitlink' : entry.mode === '120000' ? 'symlink' : entry.mode === '100755' ? 'exec' : 'blob' }));
+      written.set(tree, listed);
+      if (rescanConflicts) trees.set(tree, listed);
       return tree;
     };
     const worktreeTree = input.adopt?.worktreeTree ?? await editTree(previous.worktreeTree, mutations, false);
@@ -553,7 +578,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const conflicts = [...markerConflicts].sort();
     const conflictsChanged = JSON.stringify(conflicts ?? []) !== JSON.stringify(previous.conflicts ?? []);
     if (worktreeTree === previous.worktreeTree && !input.machine && !input.forcePublication && !conflictsChanged) return previous;
-    const trackedParent = await repo.readCommit(previous.trackedWorktreeCommit);
+    const trackedParent = await readCommit(previous.trackedWorktreeCommit);
     if (!trackedParent) throw new Error('Previous tracked snapshot is missing');
     const trackedTree = input.adopt?.trackedTree ?? await editTree(trackedParent.treeHash, input.trackedMutations ?? mutations, input.trackedMutations === undefined);
     input.mark?.('trackedTree');
@@ -576,11 +601,15 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     // First-machine imports still promote a machine ref to the cloud-owned ref.
     const workspaceRefs = [`refs/gitspace/spaces/${input.workspaceId}/checkpoints`, `refs/gitspace/spaces/${input.workspaceId}/runtime/checkpoints`];
     const checkpointRef = workspaceRefs.includes(previous.checkpointRef) ? previous.checkpointRef : workspaceRefs[0]!;
-    const info = await repo.info();
-    const token = await repo.createToken('write', 60);
+    const [info, token] = await Promise.all([repo.info(), repo.createToken('write', 60)]);
     input.mark?.('token');
     try { await publishSnapshotPack({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: previous.worktreeCommit, commit: worktreeCommit, pack: packed.packfile, signal: input.signal, onPublicationState: state => { certainty = state; } }, request); input.mark?.('receivePack'); }
     finally { await repo.revokeToken(token.id); input.mark?.('revoke'); }
+    if (input.objects) {
+      for (const [oid, entries] of written) input.objects.keep(input.objects.trees, oid, entries);
+      input.objects.keep(input.objects.commits, trackedWorktreeCommit, { treeHash: trackedTree, committedAt: identity.timestamp });
+      input.objects.keep(input.objects.commits, worktreeCommit, { treeHash: worktreeTree, committedAt: identity.timestamp });
+    }
     return RuntimeGitCheckpointSchema.parse({ ...(input.machine ?? previous), checkpointRef, indexCommit, indexTree, trackedWorktreeCommit, worktreeCommit, worktreeTree, conflicts });
   }, catch: error => new ArtifactsSnapshotError({ operation: 'writeSnapshot', certainty, message: error instanceof Error ? error.message : String(error) }) });
 }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import git from 'isomorphic-git';
 import fs from 'node:fs';
-import { copyNegotiation, NEGOTIATION_WINDOW, readAdvertisedRefs, transferCommit, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
+import { copyNegotiation, NEGOTIATION_WINDOW, readAdvertisedRefs, SnapshotObjects, transferCommit, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
 import { GitLfsSnapshotSchema } from '@gitspace/protocol-workspace';
@@ -103,6 +103,29 @@ test('bounded snapshot push preserves HEAD/index, executable/symlink/LFS bytes a
     const afterDelete = (await git.readTree({ fs, dir: f.dir, oid: deleted.value.worktreeTree })).tree;
     expect(afterDelete.some(entry => entry.path === 'script' || entry.path === 'new')).toBe(false);
   } finally { await f.close(); }
+});
+
+test('a write starting from the objects earlier writes read and published makes the same snapshot without reading them', async () => {
+  const plain = await fixture();
+  const cached = await fixture();
+  try {
+    const objects = new SnapshotObjects();
+    const twoWrites = async (f: typeof plain, withObjects?: SnapshotObjects) => {
+      const first = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: f.previous, mutations: [{ path: 'new/dir/file', content: text.encode('first') }], objects: withObjects }, f.request);
+      if (first.isErr()) throw first.error;
+      const fetchedBefore = f.fetched.length;
+      const second = await writeArtifactsSnapshot(f.repo, { repository: 'fixture', workspaceId: 'workspace', previous: first.value, mutations: [{ path: 'new/dir/file', content: text.encode('second') }, { path: 'nested/added', content: text.encode('added') }], objects: withObjects }, f.request);
+      if (second.isErr()) throw second.error;
+      return { checkpoint: second.value, treesRead: f.fetched.slice(fetchedBefore) };
+    };
+    const expected = await twoWrites(plain);
+    const actual = await twoWrites(cached, objects);
+    expect(actual.checkpoint).toEqual(expected.checkpoint);
+    expect((await git.readBlob({ fs, dir: cached.dir, oid: actual.checkpoint.worktreeCommit, filepath: 'new/dir/file' })).blob).toEqual(text.encode('second'));
+    // Only `nested`, which the first write never loaded, is read; the root and `new/dir` come from the first write.
+    expect(expected.treesRead.length).toBeGreaterThan(1);
+    expect(actual.treesRead).toEqual([cached.nested]);
+  } finally { await plain.close(); await cached.close(); }
 });
 
 test('invalid paths and symlink traversal fail before credentials; transport failure revokes token', async () => {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
-import { ARTIFACTS_COPY_DEPTH, ArtifactsSnapshotError, copyNegotiation, initializeArtifactsRepository, NEGOTIATION_WINDOW, publishRef, readAdvertisedRefs, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
+import { ARTIFACTS_COPY_DEPTH, ArtifactsSnapshotError, copyNegotiation, initializeArtifactsRepository, NEGOTIATION_WINDOW, publishRef, readAdvertisedRefs, SnapshotObjects, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { changedSnapshotEntries, planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
 export { ArtifactsSnapshotError, type RuntimeGitCheckpoint, type SnapshotMutation, type WriteSnapshotInput } from './artifacts-snapshot.js';
@@ -120,6 +120,8 @@ export interface ArtifactsRepositoryReader {
 
 /** The binding is supplied by the tenant Worker, never an account control-plane token. */
 export class ArtifactsCodeStore {
+  /** The objects snapshot writes of one repository share; a workspace runtime's store writes one repository. */
+  private written: { repository: string; objects: SnapshotObjects } | undefined;
   constructor(private readonly binding: Artifacts) {}
 
   async writeSnapshot(input: WriteSnapshotInput) {
@@ -130,7 +132,8 @@ export class ArtifactsCodeStore {
     if (opened.isErr()) return opened;
     input.mark?.('open');
     const repo = opened.value;
-    try { return await writeArtifactsSnapshot(repo, input); }
+    if (this.written?.repository !== input.repository) this.written = { repository: input.repository, objects: new SnapshotObjects() };
+    try { return await writeArtifactsSnapshot(repo, { ...input, objects: this.written.objects }); }
     finally { await disposeArtifactsRepository(repo); input.mark?.('dispose'); }
   }
 
