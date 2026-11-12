@@ -725,8 +725,8 @@ export async function completedOperation(env: Env, operation: CloudProjectOperat
 }
 
 /** The agent's `space_workspace` changes. `create` adds a workspace to the agent's project with its first instruction
- * records; the others act on `workspaceId`, or the agent's own workspace, within the agent's project. */
-export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, request: z.infer<typeof RuntimeWorkspaceMutationArgumentsSchema>): Promise<unknown> {
+ * records, written as `actorId`; the others act on `workspaceId`, or the agent's own workspace, within the agent's project. */
+export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, request: z.infer<typeof RuntimeWorkspaceMutationArgumentsSchema>, actorId: string): Promise<unknown> {
   const userId = env.ACCOUNT_ID;
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${identity.projectId}`);
   if (request.method === 'create') {
@@ -748,11 +748,11 @@ export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, 
       initialized.push(entity);
     };
     try {
-      if (goal) await publish('goal', await context.putGoal({ ...owned, expectedRevision: 0, goal }));
+      if (goal) await publish('goal', await context.putGoal({ ...owned, expectedRevision: 0, goal: { ...goal, updatedBy: actorId } }));
       initializing = 'workflow';
-      if (workflow) await publish('workflow', await context.putWorkflow({ ...owned, expectedRevision: 0, workflow }));
+      if (workflow) await publish('workflow', await context.putWorkflow({ ...owned, expectedRevision: 0, workflow: { ...workflow, updatedBy: actorId } }));
       initializing = 'rubric';
-      if (rubric) await publish('rubric', await context.putRubric({ ...owned, expectedRevision: 0, rubric }));
+      if (rubric) await publish('rubric', await context.putRubric({ ...owned, expectedRevision: 0, rubric: { ...rubric, updatedBy: actorId } }));
       return { ...created, identity: owned, ready: true, initialized };
     } catch (error) {
       return { ...created, identity: owned, ready: false, initialized, error: { operation: `${initializing}.put`, message: failureMessage(error),

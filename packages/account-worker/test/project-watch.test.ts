@@ -274,7 +274,7 @@ test('progress shows the running turn\'s newest messages; a question in it repor
     const f = await watchFixture(ctx);
     const held = Promise.withResolvers<void>();
     try {
-      f.call('workspace_status', {});
+      f.call('find', { pattern: '*.md' });
       const asking = f.call('ask', { prompt: 'Which bucket?', choices: ['assets', 'uploads'] }, held.promise);
       await f.start('start:progress', 'Move the uploads.');
       await asking.requested.promise;
@@ -283,8 +283,8 @@ test('progress shows the running turn\'s newest messages; a question in it repor
       expect(progress.turn?.startedAt).not.toBeNull();
       expect(progress.items).toEqual([
         { role: 'user', text: 'Instruction from the project agent:\n\nMove the uploads.' },
-        { role: 'assistant', text: '[workspace_status {}]' },
-        { role: 'tool', text: 'workspace_status: workspace_status ran' },
+        { role: 'assistant', text: '[find {"pattern":"*.md"}]' },
+        { role: 'tool', text: 'find: find ran' },
       ]);
       const reported = f.reported();
       held.resolve();
@@ -373,7 +373,7 @@ test('a wake report starts the project agent\'s turn with a workspace event from
       const context = (await f.root.context(BACKGROUND_CONTEXT)).messages.map(message => message.role === 'user' ? message.content : null);
       expect(context).toContain('Workspace FEAT-33 finished: "Plan drafted."');
       expect(context).toContain('Workspace FEAT-33 asked: "Which bucket?" (space_workspace questions, workspaceId feat-33, lists it.)');
-      expect(context).toContain(`Workspace FEAT-33 finished: "${'r'.repeat(280)}…" (280 of 4,000 characters; whole: history_read { workspaceId: "feat-33", conversationId: "1", offset: 13498368, limit: 1, textOnly: true })`);
+      expect(context).toContain(`Workspace FEAT-33 finished: "${'r'.repeat(280)}…" (280 of 4,000 characters; whole: tools.history_read({ workspaceId: "feat-33", conversationId: "1", offset: 13498368, limit: 1, textOnly: true }))`);
 
       const answered = f.reply('I will review FEAT-33 next.');
       const before = Date.now();

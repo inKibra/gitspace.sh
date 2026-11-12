@@ -16,9 +16,8 @@ export type ToolResultStore = {
 /** What pi-durable keeps of a tool's output by default (its `DEFAULT_MAX_BYTES` and `DEFAULT_MAX_LINES`, from the head),
  * set on every GitSpace tool registration so the harness and `keepWholeOutput` cut at the same place. */
 export const TOOL_OUTPUT_LIMITS: OutputLimits = { maxBytes: 50 * 1024, maxLines: 2000, retain: 'head' };
-/** What a codemode child's entry keeps of its output. Its entry is hidden from the model (an `omit` edit) and only the
- * script reads the output, from the store, yet every later turn reads the entry until the conversation compacts, so it
- * keeps a short preview and the reference. */
+/** What a codemode child's nested result keeps of its output: the script reads the whole output from the store, so the
+ * result, kept in the codemode call's task document while the script runs, holds a short preview and the reference. */
 export const CODEMODE_CHILD_OUTPUT_LIMITS: OutputLimits = { maxBytes: 1024, maxLines: 20, retain: 'head' };
 
 /** Lines as pi-durable counts them: a trailing newline ends the last line rather than starting another. */

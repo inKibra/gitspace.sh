@@ -2,7 +2,7 @@
 // tiny waterfall), the files the calls edited, and the images they returned. Open, each call is a row on a shared time
 // axis; a selected row shows its diff, its output as a log (or its JSON result as a tree), and its arguments.
 import type { ToolCallBlock, TranscriptItem } from '@gitspace/blocks';
-import { RuntimeBrowserExecutionSchema } from '@gitspace/protocol-runtime';
+import { RuntimeBrowserExecutionSchema, RuntimeCodemodeDetailsSchema, type RuntimeCodemodeCall } from '@gitspace/protocol-runtime';
 import { Badge, Button, TabsSubtle, TabsSubtleItem, Tooltip, badgeColors, useShape } from '@gitspace/ui';
 import { Check, ChevronDown, ChevronRight, Clock, File02, Loading02, SlashCircle01, XClose } from '@untitledui/icons';
 import { useEffect, useMemo, useState } from 'react';
@@ -22,6 +22,8 @@ const WRITE_DIFF_LINES = 400;
 const ADDED = badgeColors.green;
 const REMOVED = badgeColors.red;
 const browserExecutionDetails = z.object({ browser: RuntimeBrowserExecutionSchema });
+/** A script call's status as the call rows draw it. */
+const SCRIPT_CALL_STATUS: Record<RuntimeCodemodeCall['status'], ToolCallBlock['status']> = { running: 'running', completed: 'done', failed: 'error', interrupted: 'interrupted' };
 const pathArgs = z.object({ path: z.string() });
 const patchArgs = z.object({ patch: z.string() });
 const writeArgs = z.object({ content: z.string() });
@@ -411,7 +413,10 @@ function CallDetail({ call, timing, edit, end, browser }: { call: GroupCall; tim
     return isJsonValue(plain) ? plain : null;
   }, [block.args]);
   const diffs = call.complete ? edit?.diffs ?? [] : [];
-  const labels = [...diffs.length ? ['Diff'] : [], json === null ? 'Output' : 'Result', 'Arguments'];
+  // A codemode call's script calls ran inside it and have no rows of their own.
+  const parsedCalls = block.tool === 'codemode' ? RuntimeCodemodeDetailsSchema.safeParse(block.details) : null;
+  const scriptCalls = parsedCalls?.success ? parsedCalls.data.calls : [];
+  const labels = [...diffs.length ? ['Diff'] : [], ...scriptCalls.length ? ['Calls'] : [], json === null ? 'Output' : 'Result', 'Arguments'];
   const shown = labels[Math.min(tab, labels.length - 1)];
   const path = edit?.files.length === 1 ? edit.files[0]!.path : null;
   let body = null;
@@ -425,6 +430,17 @@ function CallDetail({ call, timing, edit, end, browser }: { call: GroupCall; tim
     </div>)}
     {edit?.omitted ? <p className="text-caption text-muted-foreground">{edit.omitted} more {edit.omitted === 1 ? 'line' : 'lines'} not shown</p> : null}
   </div>;
+  else if (shown === 'Calls') body = <ol className={`flex min-w-0 flex-col overflow-hidden border border-border ${shape.container}`} data-script-calls>
+    {scriptCalls.map((item, index) => <li key={index} className="flex min-w-0 flex-col gap-0.5 border-b border-border px-3 py-1.5 last:border-b-0">
+      <span className="flex min-w-0 items-center gap-1.5">
+        <StatusIcon status={SCRIPT_CALL_STATUS[item.status]} />
+        <ToolChip tool={item.tool} />
+        <span className="min-w-0 truncate font-mono text-[11.5px] text-foreground" title={item.args}>{item.args}</span>
+        <span className="ml-auto shrink-0 pl-2 font-mono text-[11px] tabular-nums text-muted-foreground">{item.durationMs === undefined ? '—' : duration(item.durationMs)}</span>
+      </span>
+      {item.error ? <span className="font-mono text-caption text-destructive [overflow-wrap:anywhere]">{item.error}</span> : null}
+    </li>)}
+  </ol>;
   else if (shown === 'Arguments') body = argsJson === null ? <p className="text-caption text-muted-foreground">No arguments recorded.</p> : <JsonTree value={argsJson} name="args" />;
   else if (json !== null) body = <JsonTree value={json} name="result" />;
   else body = <div className="flex min-w-0 flex-col gap-2">

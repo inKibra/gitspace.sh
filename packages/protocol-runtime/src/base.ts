@@ -57,13 +57,13 @@ export const RuntimeApprovalAnswerSchema = z.strictObject({ approved: z.boolean(
 const RuntimeWorkStatusSchema = z.enum(['pending', 'active', 'completed']);
 /** A step of a conversation's plan. Its `status` changes only through a todo item that names it (`planStep`). */
 export const RuntimePlanStepSchema = z.object({
-  id: z.string().trim().min(1).max(64), title: z.string().trim().min(1).max(512), detail: z.string().max(32_768),
-  where: z.array(z.string().min(1).max(1024)).max(64), requirementIds: z.array(z.string().min(1).max(128)).max(64), status: RuntimeWorkStatusSchema,
+  id: z.string().trim().min(1).max(64).describe('The step\'s id, unique in the plan, at most 64 characters; a revised plan keeps completed steps by id.'), title: z.string().trim().min(1).max(512).describe('What the step does, in one line.'), detail: z.string().max(32_768).describe('How, in Markdown; a gitspace-ui, svg or mermaid block in it must be valid.'),
+  where: z.array(z.string().min(1).max(1024)).max(64).describe('Files or areas the step touches.'), requirementIds: z.array(z.string().min(1).max(128)).max(64).describe('Goal requirements the step advances.'), status: RuntimeWorkStatusSchema.describe('pending, active or completed; set by a todo item naming the step.'),
 });
 export type RuntimePlanStep = z.infer<typeof RuntimePlanStepSchema>;
 /** `propose_plan`: `prompt` is the plan's Markdown summary on the approval card; `steps` become the plan once approved. */
 export const RuntimeProposePlanArgumentsSchema = z.object({
-  prompt: z.string(), choices: z.array(z.string()),
+  prompt: z.string().describe('The plan\'s summary in Markdown, shown on the approval card.'), choices: z.array(z.string()).describe('The card\'s buttons, such as Approve and Reject.'),
   steps: z.array(RuntimePlanStepSchema.omit({ status: true }).extend({ where: RuntimePlanStepSchema.shape.where.default([]), requirementIds: RuntimePlanStepSchema.shape.requirementIds.default([]) })).min(1).max(64)
     .superRefine((steps, issues) => {
       const seen = new Set<string>();
@@ -71,13 +71,13 @@ export const RuntimeProposePlanArgumentsSchema = z.object({
         if (seen.has(step.id)) issues.addIssue({ code: 'custom', path: [index, 'id'], message: `Step id ${step.id} is used by an earlier step` });
         seen.add(step.id);
       }
-    }),
+    }).describe('The plan\'s steps, at most 64; once approved they load into the todo list.'),
 });
 /** One item of a conversation's todo list; `planStep` names the plan step the item's status sets. */
-export const RuntimeTodoItemSchema = z.object({ id: z.string(), text: z.string(), status: RuntimeWorkStatusSchema, planStep: z.string().min(1).optional() });
+export const RuntimeTodoItemSchema = z.object({ id: z.string().describe('The item\'s id, unique in the list.'), text: z.string().describe('What to do.'), status: RuntimeWorkStatusSchema.describe('pending, active or completed.'), planStep: z.string().min(1).optional().describe('The approved plan step this item tracks: its status becomes the step\'s.') });
 export type RuntimeTodoItem = z.infer<typeof RuntimeTodoItemSchema>;
 /** `todo`: `items` replaces the list; `from: 'plan'` loads the approved plan's steps. */
-export const RuntimeTodoArgumentsSchema = z.union([z.strictObject({ items: z.array(RuntimeTodoItemSchema) }), z.strictObject({ from: z.literal('plan') })]);
+export const RuntimeTodoArgumentsSchema = z.union([z.strictObject({ items: z.array(RuntimeTodoItemSchema).describe('The whole new list; it replaces the old one.') }), z.strictObject({ from: z.literal('plan').describe('Load the approved plan\'s steps as the list.') })]);
 export const RuntimeWatchInputSchema = z.object({ ...identity, after: z.number().int().nonnegative().nullable() });
 const segment = z.union([z.string().refine(value => !['__proto__', 'prototype', 'constructor'].includes(value)), z.number().int().nonnegative()]);
 const path = z.array(segment);

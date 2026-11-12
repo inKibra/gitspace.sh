@@ -8,11 +8,13 @@ import { createModels, createAssistantMessageEventStream, getCurrentTools, type 
 import { RuntimeBrowserApprovalCardSchema, RuntimeFullOutputDetailsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, TOOL_RESULT_MAX_BYTES, toolResultReference } from '@gitspace/protocol-runtime';
 import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
 import { SessionControlsDoc } from './session-controls.js';
-import { createRuntimeTools, parseToolArguments, runtimeToolParameters, type ToolServices } from './tools.js';
-import { CODEMODE_CHILD_OUTPUT_LIMITS, type ToolResultKey } from './tool-results.js';
+import { createRuntimeTools, parseToolArguments, runtimeToolParameters, scriptToolSources, type ToolServices } from './tools.js';
+import { declareTool, declareTools } from './tool-declarations.js';
+import ts from 'typescript';
+import type { ToolResultKey } from './tool-results.js';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { DurableJobsDoc, createJobTask, createJobTool, type JobServices } from './jobs.js';
-import { RuntimeBashArgumentsSchema } from '@gitspace/protocol-runtime/tool-arguments';
+import { RuntimeBashArgumentsSchema, RuntimeCodemodeDetailsSchema } from '@gitspace/protocol-runtime/tool-arguments';
 
 const model: Model<Api> = { id: 'tool-contract', name: 'Tool contract', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 const unused = async (): Promise<never> => { throw new Error('Unexpected operation'); };
@@ -132,6 +134,84 @@ test('published operation parameters admit both command and control arguments', 
   const advertised = z.fromJSONSchema(runtimeToolParameters(RuntimeBashArgumentsSchema));
   expect(advertised.parse({ command: 'pwd' })).toEqual({ command: 'pwd' });
   expect(advertised.parse({ op: 'list' })).toEqual({ op: 'list' });
+});
+
+/** Paths of the fields (object properties, at any depth) whose schema says nothing about them. */
+function undescribed(path: string, schema: unknown, field: boolean): string[] {
+  if (typeof schema !== 'object' || schema === null) return [];
+  const own = field && typeof Reflect.get(schema, 'description') !== 'string' ? [path] : [];
+  const properties: unknown = Reflect.get(schema, 'properties');
+  const children = typeof properties === 'object' && properties !== null ? Object.entries(properties).flatMap(([name, child]) => undescribed(`${path}.${name}`, child, true)) : [];
+  const nested = ['items', 'additionalProperties'].flatMap(key => undescribed(`${path}[]`, Reflect.get(schema, key), false));
+  const variants: unknown = Reflect.get(schema, 'anyOf');
+  return [...own, ...children, ...nested, ...Array.isArray(variants) ? variants.flatMap(variant => undescribed(path, variant, false)) : []];
+}
+
+test('every field of every tool says what it is', () => {
+  const tools = createRuntimeTools({ ...services, invoke: completed }, operations, unused);
+  expect([...new Set(tools.flatMap(tool => undescribed(tool.name, tool.parameters, false)))]).toEqual([]);
+});
+
+test('every script example typechecks against the declarations scripts see', () => {
+  const files: Record<string, string> = {
+    'tools.d.ts': declareTools(scriptToolSources),
+    'examples.ts': scriptToolSources.flatMap(source => (source.examples ?? []).map((example, index) => `async function ${source.name}${index}() {\n${example}\n}`)).join('\n\n'),
+  };
+  const options: ts.CompilerOptions = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2022, lib: ['lib.es2022.d.ts'], types: [] };
+  const host = ts.createCompilerHost(options);
+  const fromDisk = host.getSourceFile;
+  host.getSourceFile = (name, language, ...rest) => files[name] === undefined ? fromDisk(name, language, ...rest) : ts.createSourceFile(name, files[name], language);
+  const program = ts.createProgram(Object.keys(files), options, host);
+  const problems = ts.getPreEmitDiagnostics(program).map(item => {
+    const at = item.file && item.start !== undefined ? item.file.getLineAndCharacterOfPosition(item.start) : null;
+    return `${item.file?.fileName ?? ''}:${at ? at.line + 1 : 0} ${ts.flattenDiagnosticMessageText(item.messageText, '\n')}`;
+  });
+  expect(problems).toEqual([]);
+}, 30_000);
+
+test('a tool\'s declaration of one operation holds only it, an unknown operation names them, and none asks for what the host fills', () => {
+  const journal = scriptToolSources.find(source => source.name === 'space_journal');
+  if (!journal) throw new Error('space_journal is not a script tool');
+  const start = declareTool(journal, 'startPhase').split('type SpaceJournalArgs = ')[1] ?? '';
+  expect(start).toContain('method: "startPhase"');
+  expect(start).not.toContain('"endPhase"');
+  expect(() => declareTool(journal, 'close')).toThrow('space_journal has no operation close; its operations are list, startPhase, endPhase, append');
+  const space = declareTools(scriptToolSources.filter(source => source.name.startsWith('space_')));
+  expect(space).not.toMatch(/\b(createdBy|updatedBy|authorId|reviewerId|entryId)\??:/u);
+});
+
+test('a script lists and declares only the tools its conversation can call', async () => {
+  const described: string[] = [];
+  const fixture = await registered([[call('codemode', { code: 'describe' })]], async input => {
+    if (input.tool !== 'codemode') return completed(input);
+    if (!input.codemodeDescribe) throw new Error('Missing codemode authority');
+    described.push(await input.codemodeDescribe(null, null), await input.codemodeDescribe('space_journal', 'append'));
+    await expect(input.codemodeDescribe('space_goal', null)).rejects.toThrow('space_goal is not a tool this script can call');
+    return completed(input);
+  });
+  try {
+    await fixture.root.configure({ tools: fixture.tools.filter(tool => tool.name !== 'space_goal') }, BACKGROUND_CONTEXT);
+    await fixture.root.submit({ type: 'input', content: 'Describe the tools.' }, BACKGROUND_CONTEXT);
+    await fixture.root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(described[0]).toContain('- space_journal: ');
+    expect(described[0]).not.toContain('- space_goal: ');
+    expect(described[1]).toContain('space_journal(args: SpaceJournalArgs): Promise<[TextContent]>;');
+    expect(described[1]).toContain('method: "append"');
+  } finally { await fixture.harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
+test('published operations keep every operation\'s description of a shared field, and unions are anyOf at every depth', () => {
+  const target = z.discriminatedUnion('kind', [z.object({ kind: z.literal('file'), path: z.string() }), z.object({ kind: z.literal('url'), url: z.string() })]);
+  const schema = z.discriminatedUnion('op', [
+    z.object({ op: z.literal('wait'), job: z.string().describe('The job to wait for.'), timeoutMs: z.number().describe('How long to wait.') }),
+    z.object({ op: z.literal('logs'), job: z.string().describe('The job whose output to read.'), target }),
+    z.object({ op: z.literal('cancel'), job: z.string().describe('The job to wait for.'), timeoutMs: z.string().describe('How long to wait.') }),
+  ]);
+  const published = runtimeToolParameters(schema);
+  expect(published.properties?.job).toEqual({ type: 'string', description: 'The job to wait for. The job whose output to read.' });
+  expect(published.properties?.timeoutMs).toEqual({ anyOf: [{ type: 'number' }, { type: 'string' }], description: 'How long to wait.' });
+  expect(JSON.stringify(published)).not.toContain('oneOf');
+  expect(z.fromJSONSchema(published).parse({ op: 'logs', job: 'j', target: { kind: 'url', url: 'https://example.test' } })).toMatchObject({ target: { kind: 'url' } });
 });
 
 
@@ -533,7 +613,7 @@ test('codemode children own durable attempts', async () => {
     const signal = AbortSignal.timeout(2000);
     await input.codemodeTools({ tool: 'read', args: { path: 'before.txt' }, callId: 'nested-read', signal });
     await input.codemodeTools({ tool: 'write', args: { path: 'allowed.txt', content: 'allowed' }, callId: 'nested-write', signal });
-    await expect(input.codemodeTools({ tool: 'codemode', args: { code: 'return 1' }, callId: 'nested-isolate', signal })).resolves.toMatchObject({ status: 'failed', error: expect.stringContaining('Nested codemode') });
+    await expect(input.codemodeTools({ tool: 'codemode', args: { code: 'return 1' }, callId: 'nested-isolate', signal })).resolves.toMatchObject({ status: 'failed', error: 'codemode is called by the model, not from scripts' });
     return completed(input);
   });
   try {
@@ -638,7 +718,7 @@ test('a codemode child gets the whole output the transcript cut, and one past 25
   const huge = numbered(Math.ceil((TOOL_RESULT_MAX_BYTES + 1024 * 1024) / 30));
   const outcomes: unknown[] = [];
   const { harness, root } = await registered([[call('codemode', { code: 'filter' })]], async input => {
-    if (input.tool === 'read') return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: input.requestId === 'whole' ? whole : huge }] };
+    if (input.tool === 'read') return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: input.requestId === 'codemode/whole' ? whole : huge }] };
     if (!input.codemodeTools) throw new Error('Missing codemode authority');
     for (const callId of ['whole', 'huge']) outcomes.push(await input.codemodeTools({ tool: 'read', args: { path: `${callId}.txt` }, callId, signal: AbortSignal.timeout(5000) }));
     return completed(input);
@@ -646,7 +726,7 @@ test('a codemode child gets the whole output the transcript cut, and one past 25
   try {
     await root.submit({ type: 'input', content: 'Filter the output.' }, BACKGROUND_CONTEXT);
     await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
-    const hugeReference = keptReference({ conversationId: String(root.id), callId: 'huge' });
+    const hugeReference = keptReference({ conversationId: String(root.id), callId: 'codemode/huge' });
     expect(outcomes).toEqual([{ status: 'completed', value: [{ type: 'text', text: whole }] }, { status: 'failed', error: expect.stringContaining(hugeReference) }]);
     // Past the cap the first 25 MB is kept, in whole lines.
     const keptHuge = kept.get(hugeReference) ?? '';
@@ -656,8 +736,8 @@ test('a codemode child gets the whole output the transcript cut, and one past 25
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 15_000);
 
-test('a codemode child\'s stored entry keeps a stub and the reference, while a model-issued call keeps the same output inline', async () => {
-  // Longer than a child's entry keeps, shorter than a model-issued call's.
+test('a codemode child\'s output enters no conversation entry and the script gets it whole, while a model-issued call keeps the same output inline', async () => {
+  // Longer than a child's result keeps, shorter than a model-issued call's.
   const output = numbered(200);
   const outcomes: unknown[] = [];
   const { harness, root, storage } = await registered([[call('codemode', { code: 'filter' }), call('bash', { command: 'cat out.txt' }, 'direct')]], async input => {
@@ -671,13 +751,10 @@ test('a codemode child\'s stored entry keeps a stub and the reference, while a m
     await root.waitForIdle(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
     expect(outcomes).toEqual([{ status: 'completed', value: [{ type: 'text', text: output }] }]);
     const stored = (await storage.scanEntries({ conversationId: root.id }, 1000, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []);
-    const text = (id: string) => resultOf(stored, id).content.flatMap(item => item.type === 'text' ? [item.text] : []).join('');
-    const reference = keptReference({ conversationId: String(root.id), callId: 'child' });
-    expect(kept.get(reference)).toBe(output);
-    expect(new TextEncoder().encode(text('child')).length).toBeLessThanOrEqual(CODEMODE_CHILD_OUTPUT_LIMITS.maxBytes);
-    expect(text('child')).toContain(reference);
-    expect(output.startsWith(text('child').split('\n').slice(0, -1).join('\n'))).toBe(true);
-    expect(text('direct')).toBe(output);
+    expect(stored.flatMap(message => message.role === 'toolResult' ? [message.toolCallId] : []).sort()).toEqual(['codemode', 'direct']);
+    expect(kept.get(keptReference({ conversationId: String(root.id), callId: 'codemode/child' }))).toBe(output);
+    expect(resultOf(stored, 'direct').content.flatMap(item => item.type === 'text' ? [item.text] : []).join('')).toBe(output);
+    expect(RuntimeCodemodeDetailsSchema.parse(resultOf(stored, 'codemode').details).calls).toEqual([{ tool: 'read', args: '{"path":"out.txt"}', status: 'completed', durationMs: expect.any(Number) }]);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 15_000);
 

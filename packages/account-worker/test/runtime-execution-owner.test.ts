@@ -344,14 +344,14 @@ test('agent workspace creation and phase changes run in the cloud with no machin
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`owner-proof:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const { runtime, invoke, text } = await ownerFixture(ctx);
     try {
-      const goal = { id: 'goal', title: 'Child task', summary: 'Implement the child task', phase: 'plan', requirements: [], updatedBy: 'agent' };
+      const goal = { id: 'goal', title: 'Child task', summary: 'Implement the child task', phase: 'plan', requirements: [] };
       const created = await invoke('space_workspace', { method: 'create', name: 'Agent child', branch: 'agent-child', sourceKind: 'base', sourceRef: '', phase: 'plan', goal });
       expect(created.status, text(created)).toBe('completed');
       const value = z.object({ workspace: z.object({ id: z.string() }).passthrough() }).passthrough().parse(JSON.parse(text(created)));
       expect(value).toMatchObject({ ready: true, initialized: ['goal'], workspace: { projectId, name: 'Agent child', branch: 'agent-child', phase: 'plan', lifecycle: 'active' }, operation: { kind: 'workspace.create', state: 'succeeded' } });
       expect(setBranch).toHaveBeenCalledWith(`workspace-${value.workspace.id}`, 'agent-child', source);
       expect(await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).locateWorkspace(value.workspace.id)).toBe(projectId);
-      expect(await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, value.workspace.id])).getGoal({ projectId, spaceId: value.workspace.id })).toMatchObject({ title: 'Child task', revision: 1 });
+      expect(await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, value.workspace.id])).getGoal({ projectId, spaceId: value.workspace.id })).toMatchObject({ title: 'Child task', revision: 1, updatedBy: expect.stringMatching(/^conversation:/u) });
 
       const phased = await invoke('space_phase', { phase: 'review' });
       expect(phased.status, text(phased)).toBe('completed');
@@ -619,12 +619,12 @@ test('space_workspace list and board give every workspace\'s status in one read 
       const listed = z.array(z.object({ id: z.string(), name: z.string(), status: z.unknown() })).parse(JSON.parse(text(await invoke('space_workspace', { method: 'list' }))));
       expect(listed.find(item => item.id === 'billing')?.status).toEqual({
         activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: expect.any(String),
-        lastReply: '"Exports are ready; which bucket?…" (32 of 900 characters; whole: history_read { workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true })', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
+        lastReply: '"Exports are ready; which bucket?…" (32 of 900 characters; whole: tools.history_read({ workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true }))', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
       });
       expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequests: [] });
       const board = text(await invoke('space_workspace', { method: 'board' }));
       expect(board).toMatch(/^Workspace board, .+ UTC \(2 workspaces\):\n/u);
-      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n {2}last message: "Exports are ready; which bucket\?…" \(32 of 900 characters; whole: history_read \{ workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true \}\)\n {2}journal: decision "Exports go to the archive bucket" \(\d\d:\d\d\)\n/u);
+      expect(board).toMatch(/\n- Billing export \(billing\) · code · waiting on a person to answer "Which bucket should exports go to\?" · PR #42 · since \d\d:\d\d\n {2}last message: "Exports are ready; which bucket\?…" \(32 of 900 characters; whole: tools\.history_read\(\{ workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true \}\)\)\n {2}journal: decision "Exports go to the archive bucket" \(\d\d:\d\d\)\n/u);
       expect(board).toMatch(/\n- Search index \(search\) · plan · working · since \d\d:\d\d$/u);
       // The project agent's turns read the same rows.
       expect((await services.tools.projectBoard?.())?.map(row => row.name)).toEqual(['Billing export', 'Search index']);

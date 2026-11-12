@@ -18,7 +18,7 @@ export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
 ]);
 export type ModelSelectionIntent = z.infer<typeof ModelSelectionIntentSchema>;
 
-export const PendingAskAnswerSchema = z.object({ id: z.string(), selectedOptions: z.array(z.string()).readonly(), customInput: z.string().nullable() });
+export const PendingAskAnswerSchema = z.object({ id: z.string().describe('The question answered.'), selectedOptions: z.array(z.string()).readonly().describe('Labels of the options chosen.'), customInput: z.string().nullable().describe('A written answer; null for none.') });
 export type PendingAskAnswer = z.infer<typeof PendingAskAnswerSchema>;
 export const PendingAskSchema = z.object({ id: z.string(), source: z.enum(['ask-tool', 'gitspace']), links: z.array(z.object({ label: z.string(), uri: z.string() })), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string().nullable(), options: z.array(z.object({ label: z.string(), description: z.string().nullable(), preview: z.string().nullable() })), multi: z.boolean(), recommended: z.number().nullable(), written: z.boolean() })) });
 /** A conversation's plan: the approved one in effect, or, before any approval, the latest proposal. `revision` counts approvals. */

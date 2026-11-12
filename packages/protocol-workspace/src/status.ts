@@ -66,7 +66,7 @@ export function cutForAgent(text: string, limit: number, read: { workspaceId: st
   if (flat.length <= limit && (total === null || total <= flat.length)) return `"${flat}"`;
   const shown = Math.min(limit, flat.length);
   const call = read.source
-    ? `history_read { workspaceId: "${read.workspaceId}", conversationId: "${read.source.conversationId}", offset: ${read.source.ordinal}, limit: 1, textOnly: true }`
-    : `history_read { workspaceId: "${read.workspaceId}", fromEnd: true, role: "assistant", textOnly: true, limit: 1 }`;
+    ? `tools.history_read({ workspaceId: "${read.workspaceId}", conversationId: "${read.source.conversationId}", offset: ${read.source.ordinal}, limit: 1, textOnly: true })`
+    : `tools.history_read({ workspaceId: "${read.workspaceId}", fromEnd: true, role: "assistant", textOnly: true, limit: 1 })`;
   return `"${flat.slice(0, limit)}…" (${total === null ? `the first ${shown} characters` : `${shown} of ${total.toLocaleString('en-US')} characters`}; whole: ${call})`;
 }

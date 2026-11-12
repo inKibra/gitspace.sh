@@ -90,6 +90,12 @@ export function createCloudCodemode(options: Options) {
       class Capabilities extends RpcTarget {
         cancelled() { return stopped.promise; }
         tool(tool: string, args: unknown) { return rpc(() => invoke(tool, args)); }
+        describe(tool: unknown, op: unknown) {
+          return rpc(async () => {
+            if (!input.codemodeDescribe) throw new Error('Codemode tool declarations require the durable tool authority');
+            return input.codemodeDescribe(z.string().nullable().parse(tool), z.string().nullable().parse(op));
+          });
+        }
         model(operation: unknown, args: unknown) { return rpc(() => options.model({ conversationId: input.conversationId, operation: models.parse(operation), args: RuntimeJsonSchema.parse(args), signal: controller.signal })); }
         async mcp(method: unknown, args: unknown) {
           return rpc(() => invokeMcpNamespace(methods.parse(method), RuntimeJsonSchema.parse(args), async (tool, args) => {
@@ -112,11 +118,11 @@ export default class Sandbox extends WorkerEntrypoint { async execute(capability
   const images = Object.freeze({ read: async image => new Uint8Array(await new Response(await reader.read(typeof image === 'string' ? image : image?.data)).arrayBuffer()) });
   const display = value => { const text = JSON.stringify(value) ?? 'null'; bytes += new TextEncoder().encode(text).length; if (bytes > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); output.push(text); };
   const unwrap = async pending => { const result = await pending; if (!result.ok) throw new Error(result.error); return JSON.parse(new TextDecoder().decode(result.value)); };
-  const tools = new Proxy(Object.create(null), { get: (_, name) => typeof name === 'string' ? args => unwrap(capability.tool(name, args ?? {})) : undefined });
+  const tools = new Proxy(Object.create(null), { get: (_, name) => name === 'describe' ? (tool, op) => unwrap(capability.describe(tool ?? null, op ?? null)) : typeof name === 'string' ? args => unwrap(capability.tool(name, args ?? {})) : undefined });
   const mcp = Object.freeze(Object.fromEntries(['list','search','describe','call'].map(method => [method, args => unwrap(capability.mcp(method, args ?? {}))])));
   const cancelled = capability.cancelled().then(reason => { throw new Error(reason); });
   try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display, images), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
-  catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge, display and images; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }).' : text).slice(0, 4096) }); }
+  catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge, display and images; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }), and await tools.describe(name) for its declaration.' : text).slice(0, 4096) }); }
 } }`,
         }, globalOutbound: null, limits: { cpuMs: 1000, subRequests: MAX_CALLS } });
         // The reader reaches the script only through images.read: the isolate's env stays empty.

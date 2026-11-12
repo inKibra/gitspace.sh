@@ -5,8 +5,8 @@ const id = z.string().min(1).max(256);
  * Chrome (`relay`, chosen by `pairingId` as for the browser tool) or on the cloud browser (`headless`), for `reason`.
  * The call waits up to `timeoutMinutes`. */
 export const RuntimeAskTakeoverArgumentsSchema = z.strictObject({
-  source: z.enum(['relay', 'headless']), pairingId: z.string().uuid().optional(), targetId: id,
-  reason: z.string().trim().min(1).max(1000), timeoutMinutes: z.number().int().min(1).max(120).default(30),
+  source: z.enum(['relay', 'headless']).describe('relay: a tab on the user\'s Chrome; headless: a tab of the cloud browser.'), pairingId: z.string().uuid().optional().describe('With relay: the Chrome, as for web_browser.'), targetId: id.describe('The tab, as web_browser tabs lists it.'),
+  reason: z.string().trim().min(1).max(1000).describe('What the user should do there, in a sentence or two.'), timeoutMinutes: z.number().int().min(1).max(120).default(30).describe('Longest to wait for the hand-back, 1 to 120 minutes (default 30).'),
 });
 export type RuntimeAskTakeoverArguments = z.infer<typeof RuntimeAskTakeoverArgumentsSchema>;
 /** The tab an ask_takeover card names, as the account found it when the agent asked: on one of your Chromes

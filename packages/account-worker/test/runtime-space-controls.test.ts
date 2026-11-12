@@ -1,7 +1,10 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { invokeRuntimeSpaceTool } from '../src/runtime-space-tools.js';
+import { createWorkspaceMetadataTables, storeWorkspaceReport } from '../src/workspace-metadata.js';
 
 async function fixture() {
   const identity = RuntimeIdentitySchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a' });
@@ -16,7 +19,7 @@ async function fixture() {
   const call = (tool: string, args: Parameters<typeof invokeRuntimeSpaceTool>[2]['args']) => invokeRuntimeSpaceTool(env, identity, { tool, args, conversationId: 'agent-a', attemptId: crypto.randomUUID() });
   return { call, context, owned, authority };
 }
-const goal = { id: 'goal', title: 'Task', summary: 'Implement the task', phase: 'code', requirements: [], updatedBy: 'agent' };
+const goal = { id: 'goal', title: 'Task', summary: 'Implement the task', phase: 'code', requirements: [] };
 
 describe('Cloud workspace authority controls', () => {
   it('rejects claimed human approval before authority writes', async () => {
@@ -53,5 +56,19 @@ describe('Cloud workspace authority controls', () => {
       await expect(call('space_goal', { method: 'put', ...target, expectedRevision: 0, goal })).rejects.toThrow();
     }
     expect(await context.getGoal(owned)).toBeNull();
+  });
+  it('fills the ids, authors and code of records, so the agent names only what it wrote', async () => {
+    const { call } = await fixture();
+    expect(await call('space_goal', { method: 'put', expectedRevision: 0, goal })).toMatchObject({ updatedBy: 'conversation:agent-a' });
+    const headCommit = 'a'.repeat(40);
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:workspace-a`), async (_instance, ctx) => {
+      createWorkspaceMetadataTables(ctx.storage);
+      storeWorkspaceReport(ctx.storage, { summary: emptyWorkspaceStatus, phase: 'code', waitingOn: null, failure: null, lastReply: null, lastReplySource: null, lastActivityAt: null, model: null, code: { branch: 'main', headCommit, uncommitted: false } });
+    });
+    const started = await call('space_journal', { method: 'startPhase', phase: 'build', intent: 'Build the parser.' });
+    expect(started).toMatchObject({ kind: 'phase-start', createdBy: 'conversation:agent-a', snapshot: { headCommit } });
+    const phaseRunId = z.object({ phaseRunId: z.string() }).parse(started).phaseRunId;
+    expect(await call('space_journal', { method: 'endPhase', phaseRunId, outcome: 'Parser built.', decisions: [], surprises: [], revert: null })).toMatchObject({ kind: 'phase-end', phaseRunId, createdBy: 'conversation:agent-a' });
+    expect(await call('space_review', { method: 'create', anchor: { kind: 'workspace' }, decision: 'pending', message: { body: 'Check the parser.' } })).toMatchObject({ messages: [{ authorId: 'conversation:agent-a', body: 'Check the parser.' }] });
   });
 });

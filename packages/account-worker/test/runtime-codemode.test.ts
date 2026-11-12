@@ -11,7 +11,7 @@ import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earend
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createRuntimeTools, WorkspaceDoc, type ToolServices } from '@gitspace/runtime-core';
-import { parseToolResultReference, RuntimeFullOutputDetailsSchema, RuntimeToolResultRequestSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeToolResultRequestSchema, toolResultReference, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 
 const noModel = async (): Promise<never> => { throw new Error('No inference in local isolate proof'); };
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
@@ -222,12 +222,10 @@ test('an MCP result past what the transcript keeps reaches mcp.call whole, the s
       expect(results).toEqual([expect.objectContaining({ status: 'completed', content: [{ type: 'text', text: JSON.stringify(['comment-7', 'comment-1007', 'comment-2007']) }] })]);
       const parent = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'parent');
       expect(parent?.role === 'toolResult' ? parent.content : null).toEqual([{ type: 'text', text: JSON.stringify(['comment-7', 'comment-1007', 'comment-2007']) }]);
-      // The child's output was kept indented: a grep of its reference finds Ana's nested handle on lines of its own.
-      const child = (await root.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items.flatMap(entry => entry.model ?? []).find(message => message.role === 'toolResult' && message.toolName === 'mcp_invoke');
-      const reference = RuntimeFullOutputDetailsSchema.parse(child?.role === 'toolResult' ? child.details : null).fullOutput.reference;
-      const location = parseToolResultReference(reference);
-      if (!location) throw new Error(`Not a result reference: ${reference}`);
-      const found = await kept.answer(location, RuntimeToolResultRequestSchema.parse({ tool: 'grep', args: { pattern: '"handle": "ana"', path: reference } }));
+      // The child's output was kept whole and indented, under its nested call (the codemode call's id, then its attempt's
+      // second child: mcp.call discovers the tool first): a grep of it finds Ana's nested handle on lines of its own.
+      const location = { workspaceId: 'workspace', conversationId: String(root.id), callId: `parent/${results[0]?.attemptId}:child:1` };
+      const found = await kept.answer(location, RuntimeToolResultRequestSchema.parse({ tool: 'grep', args: { pattern: '"handle": "ana"', path: toolResultReference(location) } }));
       expect(found.split('\n')).toEqual([expect.stringMatching(/^\d+: {6}"handle": "ana"$/u), expect.stringMatching(/^\d+: {6}"handle": "ana"$/u), expect.stringMatching(/^\d+: {6}"handle": "ana"$/u)]);
     } finally { await harness.close(BACKGROUND_CONTEXT); }
   });

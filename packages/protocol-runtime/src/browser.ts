@@ -6,55 +6,57 @@ import { RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, Run
 import { BROWSER_DEBUG_DURATION_MS, BROWSER_DEBUG_KINDS, BROWSER_STORAGE_KINDS, BROWSER_STORAGE_OPS, BrowserEverythingSchema, BrowserPowersSchema, BrowserStorageSiteSchema, browserPowerGrantShape } from './browser-powers.js';
 
 const id = z.string().min(1).max(256);
-const source = z.enum(['relay', 'headless']).default('headless');
+const source = z.enum(['relay', 'headless']).default('headless').describe('headless: the cloud browser (the default); relay: the user\'s Chrome, main agent only.');
 /** `on` puts a headless step on that machine's headless browser instead of the cloud browser. */
-const selection = { source, on: RuntimeDispatchSelectionSchema.shape.on.describe('Only for a port with no service URL; prefer the cloud browser.'), pairingId: z.string().uuid().optional() };
-const tab = { ...selection, targetId: id };
+const selection = { source, on: RuntimeDispatchSelectionSchema.shape.on.describe('Only for a port with no service URL; prefer the cloud browser.'), pairingId: z.string().uuid().optional().describe('With relay: the user\'s Chrome, from chromes; the project default when omitted.') };
+const tab = { ...selection, targetId: id.describe('The tab, as tabs lists it.') };
+const capture = z.string().uuid().describe('The capture\'s id, as capture://<id> names it.');
+const scriptSites = z.array(BrowserOriginPatternSchema).max(32).optional().describe('On the user\'s Chrome: the granted sites (exact patterns) the script may use; every granted site that allows scripts when omitted.');
 export const RuntimeBrowserArgumentsSchema = z.discriminatedUnion('action', [
-  z.strictObject({ action: z.literal('open'), ...selection, targetId: id.optional(), url: z.string().max(8192).optional() }),
-  z.strictObject({ action: z.literal('tabs'), ...selection }),
-  z.strictObject({ action: z.literal('navigate'), ...tab, url: z.string().max(8192) }),
-  z.strictObject({ action: z.literal('observe'), ...tab, screenshot: z.boolean().default(false), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(1000).default(400) }),
-  z.strictObject({ action: z.literal('act'), ...tab, ref: id, operation: z.enum(['click', 'fill', 'press']), value: z.string().max(16384).optional() }),
-  z.strictObject({ action: z.literal('evaluate'), ...tab, expression: z.string().min(1).max(32768) }),
-  z.strictObject({ action: z.literal('screenshot'), ...tab }),
-  z.strictObject({ action: z.literal('close'), ...tab }),
+  z.strictObject({ action: z.literal('open').describe('Open a tab in the workspace\'s group.'), ...selection, targetId: id.optional().describe('Tab to open the page in; a new tab when omitted.'), url: z.string().max(8192).optional().describe('Page to open; an empty tab when omitted.') }),
+  z.strictObject({ action: z.literal('tabs').describe('List the tabs of the workspace\'s group.'), ...selection }),
+  z.strictObject({ action: z.literal('navigate').describe('Go to a page in a tab.'), ...tab, url: z.string().max(8192).describe('Page to go to.') }),
+  z.strictObject({ action: z.literal('observe').describe('The page as an indented outline, with [ref=…] on what can be acted on.'), ...tab, screenshot: z.boolean().default(false).describe('Add a screenshot.'), offset: z.number().int().nonnegative().default(0).describe('Outline lines to skip.'), limit: z.number().int().min(1).max(1000).default(400).describe('Most outline lines, 1 to 1000 (default 400).') }),
+  z.strictObject({ action: z.literal('act').describe('Click, fill or press on an element.'), ...tab, ref: id.describe('The element: a [ref=…] from observe.'), operation: z.enum(['click', 'fill', 'press']).describe('What to do to it.'), value: z.string().max(16384).optional().describe('Text to fill, or the key to press.') }),
+  z.strictObject({ action: z.literal('evaluate').describe('Evaluate JavaScript in the page.'), ...tab, expression: z.string().min(1).max(32768).describe('The expression; its value is returned.') }),
+  z.strictObject({ action: z.literal('screenshot').describe('Screenshot the tab.'), ...tab }),
+  z.strictObject({ action: z.literal('close').describe('Close the tab.'), ...tab }),
   /** A Playwright script, the body of an async function of `{ page, context, browser, state, view, act, capture, upload }` (docs/APERTURE-DESIGN.md §6.1).
    * On your Chrome `sites` names the granted sites (exact patterns) the script may use; omitted, every granted site
    * that allows scripts. The cloud browser ignores it. */
-  z.strictObject({ action: z.literal('run'), ...selection, script: z.string().min(1).max(65_536), sites: z.array(BrowserOriginPatternSchema).max(32).optional() }),
+  z.strictObject({ action: z.literal('run').describe('Run a Playwright script.'), ...selection, script: z.string().min(1).max(65_536).describe('The body of an async function of { page, context, browser, state, view, act, capture, upload }; it stops after 120 s.'), sites: scriptSites }),
   // Browser powers (`browser-powers.ts`): on your Chrome each needs its power in the grant, or Everything; the cloud
   // browser needs no approval. Neither runs on a machine's headless browser.
   /** `debug`: a CPU profile, a performance trace or a heap snapshot of the tab, saved to the drive with a summary. */
-  z.strictObject({ action: z.literal('debug'), ...tab, kind: z.enum(BROWSER_DEBUG_KINDS), durationMs: z.number().int().min(BROWSER_DEBUG_DURATION_MS.min).max(BROWSER_DEBUG_DURATION_MS.max).optional() }),
+  z.strictObject({ action: z.literal('debug').describe('Record a CPU profile, performance trace or heap snapshot of the tab, saved to the drive with a summary.'), ...tab, kind: z.enum(BROWSER_DEBUG_KINDS).describe('profile, trace or heap.'), durationMs: z.number().int().min(BROWSER_DEBUG_DURATION_MS.min).max(BROWSER_DEBUG_DURATION_MS.max).optional().describe('How long to record a profile or trace, 500 to 30000 ms (default 5000).') }),
   /** `storage`: reads (`get`), sets or clears one approved site's cookies, localStorage, sessionStorage or IndexedDB,
    * through a tab of the workspace group (on `site`, except for cookies). `name`: the cookie, the storage key, or the
    * IndexedDB database; `store` and `key`: the IndexedDB object store and record key; `value`: what `set` writes. */
-  z.strictObject({ action: z.literal('storage'), ...tab, op: z.enum(BROWSER_STORAGE_OPS), kind: z.enum(BROWSER_STORAGE_KINDS), site: BrowserStorageSiteSchema, name: z.string().min(1).max(4096).optional(), store: z.string().min(1).max(1024).optional(), key: z.string().max(4096).optional(), value: z.string().max(16_384).optional() }),
+  z.strictObject({ action: z.literal('storage').describe('Read, set or clear a site\'s cookies or storage.'), ...tab, op: z.enum(BROWSER_STORAGE_OPS).describe('get, set or clear.'), kind: z.enum(BROWSER_STORAGE_KINDS).describe('Which storage.'), site: BrowserStorageSiteSchema.describe('The approved site: one lowercase hostname.'), name: z.string().min(1).max(4096).optional().describe('The cookie, the storage key, or the IndexedDB database.'), store: z.string().min(1).max(1024).optional().describe('The IndexedDB object store.'), key: z.string().max(4096).optional().describe('The IndexedDB record key.'), value: z.string().max(16_384).optional().describe('What set writes.') }),
 ]);
 export type RuntimeBrowserArguments = z.infer<typeof RuntimeBrowserArgumentsSchema>;
 /** `chromes` touches no browser: it lists the project's Chromes (names, pairing ids, online, approved, default) for the
  * agent to choose from. */
-export const RuntimeBrowserChromesArgumentsSchema = z.strictObject({ action: z.literal('chromes') });
+export const RuntimeBrowserChromesArgumentsSchema = z.strictObject({ action: z.literal('chromes').describe('List the project\'s Chromes: name, pairingId, online, approved, default, note.') });
 // Comments for the agent (docs/APERTURE-DESIGN.md §9, `browser-comments.ts`). None touches a browser.
 /** `comments`: the workspace's comment threads (`gitspace.page-comments`), newest first; `open` (the default) leaves
  * resolved ones out. Subagents read them too. */
-export const RuntimeBrowserCommentsArgumentsSchema = z.strictObject({ action: z.literal('comments'), status: RuntimeBrowserCommentStatusSchema.default('open'), limit: z.number().int().min(1).max(100).default(20) });
+export const RuntimeBrowserCommentsArgumentsSchema = z.strictObject({ action: z.literal('comments').describe('List the workspace\'s comment threads, newest first.'), status: RuntimeBrowserCommentStatusSchema.default('open').describe('open (the default) or all.'), limit: z.number().int().min(1).max(100).default(20).describe('Most threads, 1 to 100 (default 20).') });
 /** `commentReply` (main agent only): a reply in a thread, shown as the agent on the page and to the thread's viewers. */
-export const RuntimeBrowserCommentReplyArgumentsSchema = z.strictObject({ action: z.literal('commentReply'), threadId: z.string().uuid(), text: RuntimeBrowserCommentTextSchema });
+export const RuntimeBrowserCommentReplyArgumentsSchema = z.strictObject({ action: z.literal('commentReply').describe('Reply in a comment thread.'), threadId: z.string().uuid().describe('The thread.'), text: RuntimeBrowserCommentTextSchema.describe('The reply.') });
 /** `commentResolve` (main agent only): resolves a thread, or with `reopen` reopens it. */
-export const RuntimeBrowserCommentResolveArgumentsSchema = z.strictObject({ action: z.literal('commentResolve'), threadId: z.string().uuid(), reopen: z.boolean().optional() });
+export const RuntimeBrowserCommentResolveArgumentsSchema = z.strictObject({ action: z.literal('commentResolve').describe('Resolve a comment thread once handled.'), threadId: z.string().uuid().describe('The thread.'), reopen: z.boolean().optional().describe('Reopen it instead.') });
 // Captures for the agent (docs/APERTURE-DESIGN.md §11, `browser-capture-agent.ts`).
 /** `captures` touches no browser: the workspace's captures, newest first. */
-export const RuntimeBrowserCapturesArgumentsSchema = z.strictObject({ action: z.literal('captures'), limit: z.number().int().min(1).max(100).default(20) });
+export const RuntimeBrowserCapturesArgumentsSchema = z.strictObject({ action: z.literal('captures').describe('List the workspace\'s captures, newest first.'), limit: z.number().int().min(1).max(100).default(20).describe('Most captures, 1 to 100 (default 20).') });
 /** `capture` touches no browser: one capture as a mention of it reads (`captureSummary`). */
-export const RuntimeBrowserCaptureArgumentsSchema = z.strictObject({ action: z.literal('capture'), capture: z.string().uuid() });
+export const RuntimeBrowserCaptureArgumentsSchema = z.strictObject({ action: z.literal('capture').describe('Read one capture: its steps, tracks and comments.'), capture });
 /** `replay` runs a capture's steps as a `run` script (`captureReplayScript`) where `run` would: `args` holds the value
  * of each parameter the capture's steps need (its secrets, its upload files). */
-export const RuntimeBrowserReplayArgumentsSchema = z.strictObject({ action: z.literal('replay'), ...selection, capture: z.string().uuid(), sites: z.array(BrowserOriginPatternSchema).max(32).optional(), args: z.record(z.string().min(1).max(64), z.string().max(16_384)).optional() });
+export const RuntimeBrowserReplayArgumentsSchema = z.strictObject({ action: z.literal('replay').describe('Run a capture\'s steps as a Playwright script.'), ...selection, capture, sites: scriptSites, args: z.record(z.string().min(1).max(64), z.string().max(16_384)).optional().describe('Each value the capture masked and each upload\'s drive://workspace file, by the names its summary lists; ask the user, never guess.') });
 /** `captureSaved` (main agent only) records the repository skill made from a capture, `path` its folder
  * (`.gitspace/skills/<slug>`), at the working copy's commit holding its `SKILL.md`. */
-export const RuntimeBrowserCaptureSavedArgumentsSchema = z.strictObject({ action: z.literal('captureSaved'), capture: z.string().uuid(), path: z.string().min(1).max(1024) });
+export const RuntimeBrowserCaptureSavedArgumentsSchema = z.strictObject({ action: z.literal('captureSaved').describe('Record the skill made from a capture.'), capture, path: z.string().min(1).max(1024).describe('The skill\'s folder, .gitspace/skills/<slug>.') });
 /** The browser tool as agents call it: every browser action, plus `chromes`, `comments` and the capture actions. */
 export const RuntimeBrowserToolArgumentsSchema = z.discriminatedUnion('action', [...RuntimeBrowserArgumentsSchema.options, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema, RuntimeBrowserCommentReplyArgumentsSchema, RuntimeBrowserCommentResolveArgumentsSchema,
   RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema, RuntimeBrowserCaptureSavedArgumentsSchema]);

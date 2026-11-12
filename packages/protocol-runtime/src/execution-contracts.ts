@@ -7,11 +7,14 @@ export const RuntimeSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const RuntimeRequestIdSchema = z.string().min(1).brand<'RuntimeRequestId'>();
 const RuntimeJobIdSchema = z.string().min(1).brand<'RuntimeJobId'>();
 
+/** A background job's handle: an agent passes it back whole, as the job's acceptance returned it. */
 export const RuntimeJobHandleSchema = RuntimeIdentitySchema.extend({
-  jobId: RuntimeJobIdSchema,
-  taskId: RuntimeTaskIdSchema,
-  conversationId: RuntimeConversationIdSchema,
-  requestId: RuntimeRequestIdSchema,
+  projectId: RuntimeIdentitySchema.shape.projectId.describe('The job\'s project.'),
+  workspaceId: RuntimeIdentitySchema.shape.workspaceId.describe('The job\'s workspace.'),
+  jobId: RuntimeJobIdSchema.describe('The job.'),
+  taskId: RuntimeTaskIdSchema.describe('The task that runs the job.'),
+  conversationId: RuntimeConversationIdSchema.describe('The conversation that started the job.'),
+  requestId: RuntimeRequestIdSchema.describe('The request that started the job.'),
 }).strict();
 export const RuntimeJobAcceptanceSchema = z.strictObject({ status: z.literal('accepted'), job: RuntimeJobHandleSchema, acceptedAt: z.iso.datetime() });
 /** A background command's state. `terminal` carries the command's tool result as the executor returned it. */

@@ -55,11 +55,11 @@ test('a board line carries the workspace\'s latest message on one line, cut with
   const reply = `Exports now land in the archive bucket. ${'y'.repeat(250)}`.slice(0, 200);
   expect(workspaceBoardLine(reported, at)).toBe([
     'Billing export (billing) · code · idle · since 17:02',
-    `  last message: "${reply}…" (200 of 4,041 characters; whole: history_read { workspaceId: "billing", conversationId: "1", offset: 13498368, limit: 1, textOnly: true })`,
+    `  last message: "${reply}…" (200 of 4,041 characters; whole: tools.history_read({ workspaceId: "billing", conversationId: "1", offset: 13498368, limit: 1, textOnly: true }))`,
     '  journal: decision "Exports go to the archive bucket" (18:40) · finding "Old bucket is read-only" (11-07 09:15)',
   ].join('\n'));
   // A row from before sources: the cut points at the workspace's latest reply.
-  expect(workspaceBoardLine({ ...reported, lastReplySource: null, journal: [] }, at)).toContain('(the first 200 characters; whole: history_read { workspaceId: "billing", fromEnd: true, role: "assistant", textOnly: true, limit: 1 })');
+  expect(workspaceBoardLine({ ...reported, lastReplySource: null, journal: [] }, at)).toContain('(the first 200 characters; whole: tools.history_read({ workspaceId: "billing", fromEnd: true, role: "assistant", textOnly: true, limit: 1 }))');
   // Whole text is shown as it is, with nothing added.
   expect(workspaceBoardChanges([rows[0]!], [{ ...rows[0]!, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 2048, characters: 5 } }], at, at)?.endsWith('  last message: "Done."')).toBe(true);
 });

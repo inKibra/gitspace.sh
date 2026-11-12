@@ -286,53 +286,53 @@ export const AUTOMATION_WATCH_EVERY_LABEL: Record<AutomationWatchEvery, string> 
 // stored JSON and the project agent's tool all read it.
 
 const AutomationEventTriggerSchema = z.object({
-  event: z.enum(AUTOMATION_GITHUB_EVENTS),
-  actions: z.array(z.string().min(1).max(60)).max(20),
+  event: z.enum(AUTOMATION_GITHUB_EVENTS).describe('The GitHub event.'),
+  actions: z.array(z.string().min(1).max(60)).max(20).describe('Its actions that start the automation, such as opened or closed; empty for an event that has none, such as push.'),
 }).strict();
 export const AutomationTriggerSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('schedule'), cron: z.string().min(1).max(200) }).strict(),
-  z.object({ kind: z.literal('manual') }).strict(),
+  z.object({ kind: z.literal('schedule').describe('On a schedule.'), cron: z.string().min(1).max(200).describe('A five-field cron schedule, in UTC.') }).strict(),
+  z.object({ kind: z.literal('manual').describe('Only when a person runs it.') }).strict(),
   /** One or more GitHub events, each with the actions it starts on. */
-  z.object({ kind: z.literal('github'), events: z.array(AutomationEventTriggerSchema).min(1).max(AUTOMATION_GITHUB_EVENTS.length) }).strict(),
+  z.object({ kind: z.literal('github').describe('On GitHub events of the project\'s repository.'), events: z.array(AutomationEventTriggerSchema).min(1).max(AUTOMATION_GITHUB_EVENTS.length).describe('The events, each with the actions it starts on.') }).strict(),
   /** A `gitspace:plan`, `gitspace:code`, `gitspace:review` or `gitspace:ship` label added to an issue or pull request. */
-  z.object({ kind: z.literal('label') }).strict(),
+  z.object({ kind: z.literal('label').describe('When a gitspace:plan, gitspace:code, gitspace:review or gitspace:ship label is added to an issue or pull request.') }).strict(),
   /** A repository publishing something: `repository` null watches the project's own repository, or its upstream parent
    * when it is a fork; any other is an `owner/name` the account can read. */
-  z.object({ kind: z.literal('watch'), repository: z.string().regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/u, 'A watched repository is owner/name').nullable(), on: AutomationWatchOnSchema, every: AutomationWatchEverySchema }).strict(),
-]);
+  z.object({ kind: z.literal('watch').describe('When a repository publishes a release, tag or deployment.'), repository: z.string().regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/u, 'A watched repository is owner/name').nullable().describe('owner/name of a repository the account can read; null for the project\'s own, or its upstream when it is a fork.'), on: AutomationWatchOnSchema.describe('What to watch for.'), every: AutomationWatchEverySchema.describe('How often to check.') }).strict(),
+]).describe('What starts the automation.');
 export type AutomationTrigger = z.infer<typeof AutomationTriggerSchema>;
 export type AutomationTriggerKind = AutomationTrigger['kind'];
 export const AutomationTriggerCodec = wire.serializable((value): value is AutomationTrigger => AutomationTriggerSchema.safeParse(value).success, { id: 'gitspace/automation-trigger/v2', jsonSchema: AutomationTriggerSchema });
 
-const conditionValues = z.array(z.string().min(1).max(200)).min(1).max(50);
-const listCondition = <K extends string>(kind: K) => z.object({ kind: z.literal(kind), mode: z.enum(['oneOf', 'noneOf']), values: conditionValues }).strict();
+const conditionValues = z.array(z.string().min(1).max(200)).min(1).max(50).describe('Values, or patterns: * within a path segment, ** across segments.');
+const listCondition = <K extends string>(kind: K, what: string) => z.object({ kind: z.literal(kind).describe(what), mode: z.enum(['oneOf', 'noneOf']).describe('oneOf: passes when any value matches; noneOf: when none does.'), values: conditionValues }).strict();
 /** Filters on the event, at most one of each; all must pass. Values may be patterns: `*` within a path segment, `**`
  * across segments. */
 export const AutomationConditionSchema = z.discriminatedUnion('kind', [
   /** The event's pull request, issue or branch has a linked workspace (or has none). */
-  z.object({ kind: z.literal('linked'), linked: z.boolean() }).strict(),
+  z.object({ kind: z.literal('linked').describe('Whether the event\'s pull request, issue or branch has a linked workspace.'), linked: z.boolean().describe('true: it has one; false: it has none.') }).strict(),
   /** The comment or review mentions the tenant's bot. */
-  z.object({ kind: z.literal('mentionsBot') }).strict(),
-  listCondition('baseBranch'),
-  listCondition('headBranch'),
-  listCondition('branch'),
-  listCondition('author'),
+  z.object({ kind: z.literal('mentionsBot').describe('The comment or review mentions the bot.') }).strict(),
+  listCondition('baseBranch', 'The pull request\'s base branch.'),
+  listCondition('headBranch', 'The pull request\'s head branch.'),
+  listCondition('branch', 'The pushed or checked branch.'),
+  listCondition('author', 'The event\'s author.'),
   /** `oneOf`: has any of the labels; `noneOf`: has none of them. */
-  listCondition('labels'),
+  listCondition('labels', 'The issue\'s or pull request\'s labels.'),
   /** `oneOf`: touches any of the paths; `noneOf`: touches none of them. */
-  listCondition('changedFiles'),
+  listCondition('changedFiles', 'The files the change touches.'),
   /** `draft: false` passes only pull requests that are not drafts. */
-  z.object({ kind: z.literal('draft'), draft: z.boolean() }).strict(),
-  z.object({ kind: z.literal('conclusion'), values: conditionValues }).strict(),
-  z.object({ kind: z.literal('reviewState'), values: conditionValues }).strict(),
+  z.object({ kind: z.literal('draft').describe('Whether the pull request is a draft.'), draft: z.boolean().describe('false passes only pull requests that are not drafts.') }).strict(),
+  z.object({ kind: z.literal('conclusion').describe('The check suite\'s conclusion, such as success or failure.'), values: conditionValues }).strict(),
+  z.object({ kind: z.literal('reviewState').describe('The review\'s state, such as approved or changes_requested.'), values: conditionValues }).strict(),
   /** A watched release's or tag's name. */
-  listCondition('tag'),
+  listCondition('tag', 'The watched release\'s or tag\'s name.'),
   /** `prerelease: false` passes only releases that are not prereleases. */
-  z.object({ kind: z.literal('prerelease'), prerelease: z.boolean() }).strict(),
+  z.object({ kind: z.literal('prerelease').describe('Whether the release is a prerelease.'), prerelease: z.boolean().describe('false passes only releases that are not prereleases.') }).strict(),
   /** A watched deployment's environment (`preview`, `production`). */
-  listCondition('environment'),
+  listCondition('environment', 'The watched deployment\'s environment, such as preview or production.'),
   /** A watched deployment's state (`success`, `failure`, `error`, …). */
-  z.object({ kind: z.literal('deploymentState'), values: conditionValues }).strict(),
+  z.object({ kind: z.literal('deploymentState').describe('The watched deployment\'s state, such as success, failure or error.'), values: conditionValues }).strict(),
 ]);
 export type AutomationCondition = z.infer<typeof AutomationConditionSchema>;
 export type AutomationConditionKind = AutomationCondition['kind'];
@@ -367,18 +367,19 @@ export function automationConditionKinds(trigger: AutomationTrigger): readonly A
 }
 
 /** The project agent's workspace id is its project's id. */
+const automationInstruction = z.string().max(16_000).describe('What to do; {{field}} names a field of the event, filled in when it runs.');
 export const AutomationActionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('messageProjectAgent'), instruction: z.string().max(16_000) }).strict(),
-  z.object({ kind: z.literal('messageWorkspace'), workspaceId: z.string().min(1).max(200), instruction: z.string().max(16_000) }).strict(),
+  z.object({ kind: z.literal('messageProjectAgent').describe('Message the project agent.'), instruction: automationInstruction }).strict(),
+  z.object({ kind: z.literal('messageWorkspace').describe('Message one workspace\'s agent.'), workspaceId: z.string().min(1).max(200).describe('The workspace.'), instruction: automationInstruction }).strict(),
   /** A new workspace for the event's pull request, issue or branch, linked to it; the rendered instruction and the event
    * are its first message. `mode` null (a label trigger only) starts in the label's mode. `role` is the model role of
    * the project's inference profile its first run uses, set on its session as a person switching role sets it; absent,
    * the profile's default role. */
-  z.object({ kind: z.literal('startWorkspace'), mode: z.enum(AUTOMATION_MODES).nullable(), role: z.string().min(1).max(100).optional(), instruction: z.string().max(16_000) }).strict(),
+  z.object({ kind: z.literal('startWorkspace').describe('Start a workspace for the event\'s pull request, issue or branch, linked to it.'), mode: z.enum(AUTOMATION_MODES).nullable().describe('The phase it starts in; null (label triggers only) for the label\'s.'), role: z.string().min(1).max(100).optional().describe('The model role its first run uses; the profile\'s default when omitted.'), instruction: automationInstruction }).strict(),
   /** The workspace linked to the event's subject: `wake` starts its agent, otherwise a notice leaves it asleep. With no
    * linked workspace the run is skipped, or with `orProjectAgent` goes to the project agent. */
-  z.object({ kind: z.literal('sendToLinked'), wake: z.boolean(), orProjectAgent: z.boolean(), instruction: z.string().max(16_000) }).strict(),
-]);
+  z.object({ kind: z.literal('sendToLinked').describe('Send the event to the workspace linked to its subject.'), wake: z.boolean().describe('true starts its agent; false leaves a notice.'), orProjectAgent: z.boolean().describe('With no linked workspace: true sends it to the project agent; false skips the run.'), instruction: automationInstruction }).strict(),
+]).describe('What the automation does.');
 export type AutomationAction = z.infer<typeof AutomationActionSchema>;
 export const AutomationActionCodec = wire.serializable((value): value is AutomationAction => AutomationActionSchema.safeParse(value).success, { id: 'gitspace/automation-action/v2', jsonSchema: AutomationActionSchema });
 
@@ -452,10 +453,10 @@ export const AutomationSubjectCodec = wire.serializable((value): value is Automa
 
 /** A pull request, issue or branch as a person or agent names one to link. */
 export const AutomationSubjectRefSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('pullRequest'), number: z.number().int().positive() }).strict(),
-  z.object({ kind: z.literal('issue'), number: z.number().int().positive() }).strict(),
-  z.object({ kind: z.literal('branch'), branch: z.string().min(1).max(255) }).strict(),
-]);
+  z.object({ kind: z.literal('pullRequest').describe('A pull request.'), number: z.number().int().positive().describe('Its number.') }).strict(),
+  z.object({ kind: z.literal('issue').describe('An issue.'), number: z.number().int().positive().describe('Its number.') }).strict(),
+  z.object({ kind: z.literal('branch').describe('A branch.'), branch: z.string().min(1).max(255).describe('Its name.') }).strict(),
+]).describe('The pull request, issue or branch.');
 export type AutomationSubjectRef = z.infer<typeof AutomationSubjectRefSchema>;
 export const AutomationSubjectRefCodec = wire.serializable((value): value is AutomationSubjectRef => AutomationSubjectRefSchema.safeParse(value).success, { id: 'gitspace/automation-subject-ref/v1', jsonSchema: AutomationSubjectRefSchema });
 
@@ -515,11 +516,11 @@ export const AutomationPhasesSchema = z.array(z.enum(AUTOMATION_MODES)).min(1).m
   .describe('The workspace phases (plan, code, review, ship) in which it messages or sends to a workspace; absent, every phase. A workspace in another phase skips the run unless a person made an exception for that workspace and phase. Starting a workspace and messaging the project agent are not limited by phase.');
 
 export const AutomationDraftSchema = z.object({
-  name: z.string().max(200),
+  name: z.string().max(200).describe('The automation\'s name.'),
   trigger: AutomationTriggerSchema,
-  conditions: z.array(AutomationConditionSchema).max(12),
+  conditions: z.array(AutomationConditionSchema).max(12).describe('Filters on the event, at most one of each kind; all must pass.'),
   action: AutomationActionSchema,
-  enabled: z.boolean(),
+  enabled: z.boolean().describe('Whether it runs.'),
   phases: AutomationPhasesSchema.optional(),
 }).strict();
 export type AutomationDraft = z.infer<typeof AutomationDraftSchema>;

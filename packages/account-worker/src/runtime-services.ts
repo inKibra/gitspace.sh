@@ -790,7 +790,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             return completed(input, automationValue(await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).link({ projectId: identity.projectId, subject: args.subject, workspaceId, source: 'agent', detail: by })));
           }
           case 'unlink': return completed(input, { unlinked: await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).unlink({ projectId: identity.projectId, subject: args.subject }) });
-          default: return completed(input, await changeAgentWorkspace(env, identity, args));
+          default: return completed(input, await changeAgentWorkspace(env, identity, args, `conversation:${input.conversationId}`));
         }
       }
       if (input.tool === 'space_automations') {

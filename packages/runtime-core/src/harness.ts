@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord/json';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
-import { BROWSER_TOOL_NAME, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
+import { BROWSER_TOOL_NAME, CODE_ONLY_TOOLS, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
@@ -266,7 +266,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     }
   } })] });
   const [firstBrowserAction, ...otherBrowserActions] = RuntimeBrowserArgumentsSchema.options;
-  const headlessSource = { source: z.literal('headless').default('headless') };
+  const headlessSource = { source: z.literal('headless').default('headless').describe('Always headless: the cloud browser.') };
   const headlessBrowser = z.discriminatedUnion('action', [firstBrowserAction.extend(headlessSource), ...otherBrowserActions.map(option => option.extend(headlessSource)), RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema,
     RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema.extend(headlessSource)]);
   const childExtension = defineExtension({ name: 'gitspace.child-tools', tools: tools.filter(tool => tool.name === 'agents' || tool.name === BROWSER_TOOL_NAME).map(tool => {
@@ -291,18 +291,24 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     // a workspace object holds many conversations, and re-reading one costs tens of milliseconds.
     contextRetentionMs: 0 }, onReport: report => options.onReport(report.error), ...(options.onWake ? { onWake: options.onWake } : {}) }, BACKGROUND_CONTEXT);
   const modelTools = (model?: ModelRef) => tools.filter(tool => tool.name !== ((!model || options.editTool(model) === 'edit') ? 'apply_patch' : 'edit'));
-  const root = await harness.root(BACKGROUND_CONTEXT, { agent: { ...(options.model ? { model: options.model } : {}), tools: modelTools(options.model) } });
+  // A main conversation's model reaches the code-only tools through codemode; a subagent, which has no codemode, is
+  // offered every tool its definition lists.
+  const codeOnly = { remove: tools.filter(tool => CODE_ONLY_TOOLS.includes(tool.name)) };
+  const names = (list: readonly { name: string }[]) => list.map(tool => tool.name).sort().join('\n');
+  const root = await harness.root(BACKGROUND_CONTEXT, { agent: { ...(options.model ? { model: options.model } : {}), tools: modelTools(options.model), modelTools: codeOnly } });
   // Pi stores tool names; a renamed or newly added tool would otherwise never reach an existing workspace.
   const rootAgent = await root.agent(BACKGROUND_CONTEXT);
   const rootTools = modelTools(rootAgent.model ?? options.model);
-  if (rootAgent.tools.map(tool => tool.name).sort().join('\n') !== rootTools.map(tool => tool.name).sort().join('\n')) await root.configure({ tools: rootTools }, BACKGROUND_CONTEXT);
+  const offered = rootTools.filter(tool => !CODE_ONLY_TOOLS.includes(tool.name));
+  const callable = rootTools.filter(tool => tool.callers?.includes('tools') ?? true);
+  if (names(rootAgent.tools) !== names(offered) || names(rootAgent.callable) !== names(callable)) await root.configure({ tools: rootTools, modelTools: codeOnly }, BACKGROUND_CONTEXT);
   const configureModel = async (conversationId: ConversationId, model: ModelRef) => {
     const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error('Conversation not found');
     const child = (await harness.snapshot(AgentDefinitionContextDoc, conversationId, BACKGROUND_CONTEXT))?.child;
     // Definitions name the browser by its dispatch name, not the model alias.
     const selected = child ? modelTools(model).filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : modelTools(model);
-    await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
+    await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, modelTools: child ? null : codeOnly, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
   const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport });
   lifecycleReady.resolve(lifecycle);
