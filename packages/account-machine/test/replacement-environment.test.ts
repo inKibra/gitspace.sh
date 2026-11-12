@@ -680,4 +680,31 @@ describe('replacement environment host routes', () => {
     expect(served?.pid).toBeNumber();
     expect(served?.pid).not.toBe(first.pid);
   });
+
+  it('hands on a generation\'s compressed body as the encoded bytes it sent', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-generation-gzip-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'test-generation-gzip', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const page = 'body{color:red}\n'.repeat(500);
+    const candidate = join(root, 'candidates', 'machine-gzip');
+    await mkdir(candidate, { recursive: true });
+    await writeFile(join(candidate, 'machine.js'), `
+      const gzipped = Bun.gzipSync(new TextEncoder().encode(${JSON.stringify(page)}));
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(new Blob([gzipped]).stream(), { headers: { 'content-encoding': 'gzip', 'content-type': 'text/css' } }) });
+      console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+    `);
+    await nativeFixture(candidate);
+    const hash = await hashArtifactPath(candidate);
+    await environment.deploy({ artifacts: [{ entrypoint: 'machine-daemon', path: candidate, hash, dependsOn: [] }], releaseSha: 'gzip-1', revision: 'gzip-1', dirty: false });
+
+    for (const url of [`http://127.0.0.1:${environment.options.rpcPort}/site.css`, `${environment.hostUrl}/rpc`]) {
+      const response = await fetch(url, { headers: { 'accept-encoding': 'gzip' }, decompress: false });
+      expect(response.headers.get('content-encoding')).toBe('gzip');
+      expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await response.arrayBuffer())))).toBe(page);
+    }
+  });
 });

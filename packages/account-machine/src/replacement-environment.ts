@@ -276,7 +276,8 @@ class MachineHost implements MachineReplacementHost {
         const procedures = source.searchParams.get('p');
         const path = procedures === null ? source.pathname : `${source.pathname}?p=${procedures.slice(0, 512)}`;
         try {
-          const response = await fetch(new Request(target, request));
+          // `decompress: false`: Bun otherwise decodes the body and keeps its Content-Encoding, so the next reader fails to decode it.
+          const response = await fetch(new Request(target, request), { decompress: false });
           const durationMs = Math.round(performance.now() - started);
           if (response.status >= 500 || durationMs > HOST_PROXY_SLOW_MS) {
             console.warn(JSON.stringify({ event: 'host_proxy', at, method: request.method, path, status: response.status, durationMs }));
@@ -559,7 +560,7 @@ class FrontendHost implements FrontendReplacementHost {
           return new Response('Complete machine update is not committed', { status: 503 });
         }
         if (url.pathname === '/rpc' || url.pathname === '/health') {
-          return fetch(new Request(new URL(`${url.pathname}${url.search}`, `http://127.0.0.1:${options.rpcPort}`), request));
+          return fetch(new Request(new URL(`${url.pathname}${url.search}`, `http://127.0.0.1:${options.rpcPort}`), request), { decompress: false });
         }
         if (url.pathname === '/__environment/health') {
           return Response.json({ status: this.generationPath ? 'ok' : 'starting', generationPath: this.generationPath });

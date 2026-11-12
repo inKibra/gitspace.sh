@@ -93,3 +93,16 @@ test('machine-B loopback WebSocket forwarding signs the relay target and preserv
     expect(new Uint8Array(received)).toEqual(new Uint8Array([0, 128, 255]));
   } finally { socket.close(); await forward.close(); await relay.stop(true); }
 }, 15_000);
+
+test('machine-B loopback forwarding hands on a compressed response as the encoded bytes it negotiated', async () => {
+  const signingPrivateKey = new Uint8Array(32).fill(17);
+  const page = 'body{color:red}\n'.repeat(500);
+  const gzipped = Bun.gzipSync(new TextEncoder().encode(page));
+  const relay = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(new Blob([gzipped]).stream(), { headers: { 'content-encoding': 'gzip', 'content-type': 'text/css' } }) });
+  const forward = await createServiceAccessClient({ baseUrl: `http://127.0.0.1:${relay.port}`, userId: 'user-a', machineId: 'machine-b', signingPrivateKey }).forward('web--alpha-1a2b--workspace--test-srv.gssh.dev');
+  try {
+    const response = await fetch(`${forward.url}/site.css`, { headers: { ...forward.headers, 'accept-encoding': 'gzip' }, decompress: false });
+    expect(response.headers.get('content-encoding')).toBe('gzip');
+    expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await response.arrayBuffer())))).toBe(page);
+  } finally { await forward.close(); await relay.stop(true); }
+}, 15_000);

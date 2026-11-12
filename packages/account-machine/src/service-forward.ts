@@ -71,7 +71,8 @@ export function createServiceAccessClient(input: Omit<SignedCloudRequestOptions,
     headers.set('x-gitspace-machine', options.machineId);
     const send = (timestamp: number) => {
       headers.set('authorization', createRelayAuthorization(options.signingPrivateKey, `${method}\n${url.pathname}${url.search}`, timestamp));
-      return fetch(new Request(url, { method, headers, body: request?.body, redirect: 'manual', signal: request?.signal }));
+      // `decompress: false`: the local client gets the bytes it negotiated, labelled with their Content-Encoding.
+      return fetch(new Request(url, { method, headers, body: request?.body, redirect: 'manual', signal: request?.signal }), { decompress: false });
     };
     // A streamed body is consumed by the first attempt and cannot be re-signed.
     return request?.body ? send(options.clock.now()) : sendSigned(options.clock, send);
